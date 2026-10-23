@@ -1745,6 +1745,43 @@ def find_unusable_addon_envs(expansion_dir: Optional[Path] = None) -> Dict[str, 
     return found
 
 
+def find_addon_envs_left_part_way(expansion_dir: Optional[Path] = None) -> Dict[str, List[str]]:
+    """``{addon_id: [やりかけの記録が残っている専用の環境の名前, ...]}`` (副作用なし)。
+
+    起動時の画面のバナー (``saiverse/environment_alerts.py``) が使う。記録が残っている
+    環境は、作り直しが途中で止まったか失敗したもので、アドオンはその環境を今のままでは
+    使えない (``_ensure_addon_env``)。対象はアドオンのフォルダ (``expansion_data/<id>/``)
+    があるものだけ。保存された答え (無い質問は既定値) と OS で選ばれる step のどれも
+    使わない環境は含めない — アドオンはその環境を使わず、setup も触らないので、記録が
+    残っていても害が無い。manifest や答えが読めないアドオンは、記録のある環境を全部
+    含める。導入の途中のアドオン (``_installed_manifest`` が断る) は含めない。
+    """
+    expansion = expansion_dir or EXPANSION_DATA_DIR
+    found: Dict[str, List[str]] = {}
+    if not expansion.is_dir():
+        return found
+    for addon_dir in sorted(p for p in expansion.iterdir() if p.is_dir()):
+        try:
+            pending = _envs_with_rebuild_pending(addon_dir.name)
+        except ValueError:  # アドオンの id として不正なフォルダ名
+            continue
+        if not pending:
+            continue
+        try:
+            _, manifest = _installed_manifest(addon_dir.name, expansion)
+            answers = fill_defaults(manifest, _saved_or_empty(manifest, addon_dir.name))
+            used = {_step_env(s) for s in select_steps(manifest.setup_steps, answers)}
+        except AddonStateError:
+            continue
+        except Exception:  # noqa: BLE001 - 読めないなら、記録のある環境を全部知らせる
+            LOGGER.warning("installer: could not read the steps of %s", addon_dir.name, exc_info=True)
+            used = set(pending)
+        envs = [name for name in pending if name in used]
+        if envs:
+            found[addon_dir.name] = envs
+    return found
+
+
 def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> SetupPlan:
     """保存された答えのまま、使えない専用の環境を作り直す計画 (副作用なし)。
 
@@ -2138,6 +2175,7 @@ __all__ = [
     "ENV_REBUILD_FAILURES_PATH",
     "EnvRebuildResult",
     "find_unusable_addon_envs",
+    "find_addon_envs_left_part_way",
     "plan_env_rebuild",
     "rebuild_unusable_addon_envs",
     "record_env_rebuild_failures",

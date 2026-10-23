@@ -35,7 +35,23 @@ $rawSettings = if ($env:SEARXNG_SETTINGS_PATH) { $env:SEARXNG_SETTINGS_PATH } el
 $SETTINGS_PATH = Get-AbsPath $rawSettings
 
 $venvPython = "$VENV_DIR\Scripts\python.exe"
-$bootstrapPython = if (Test-Path $venvPython) { $venvPython } else { "python" }
+# A SearXNG setup that stopped part-way leaves .setup_in_progress\searxng-venv.json
+# (scripts/setup_in_progress.py); the SearXNG venv may then have no python, or
+# only a half-made one. The installer is standard library only, so it runs with
+# SAIVerse's own .venv python then - the series setup.bat makes the SearXNG venv
+# with - and not with whatever "python" is first on PATH (start.bat does not
+# activate .venv). See docs/intent/dependency_management.md section 2-7.
+$saiversePython = Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"
+$setupStopped = Test-Path (Join-Path $WorkspaceRoot ".setup_in_progress\searxng-venv.json")
+if ((Test-Path $venvPython) -and -not $setupStopped) {
+    $bootstrapPython = $venvPython
+} elseif (Test-Path $saiversePython) {
+    $bootstrapPython = $saiversePython
+} elseif (Test-Path $venvPython) {
+    $bootstrapPython = $venvPython
+} else {
+    $bootstrapPython = "python"
+}
 $installer = Join-Path $ScriptRoot "searxng_install.py"
 $SRC_DIR = & $bootstrapPython $installer source
 if ($LASTEXITCODE -ne 0) { throw "Invalid SearXNG source configuration" }

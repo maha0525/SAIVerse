@@ -715,7 +715,12 @@ def check_update_complete(project_dir: Path) -> int:
     frontend packages are missing too, and also when the record matches but a
     failure record is there (the reinstall's own npm ci failed half-way): only
     a matching marker and record with no failure behind them send missing
-    frontend packages to the full update.
+    frontend packages to the full update. A SearXNG setup that stopped
+    part-way (``searxng_setup_stopped``) goes to the same reinstall even when
+    the record matches, so its ``refresh_searxng`` finishes it. Without a
+    usable marker it is left to run_searxng_server.ps1 / .sh, which start.bat
+    (start.sh with SAIVERSE_SEARXNG=1) run for it and which finish it with
+    SAIVerse's python (a new install is not reinstalled, section 2 promise 3).
     """
     fingerprint = completion_fingerprint(project_dir)
     if fingerprint is None:
@@ -747,10 +752,22 @@ def check_update_complete(project_dir: Path) -> int:
             # reinstall, never the full update: ``--manual`` would fetch a newer
             # release, and starting must not move the version
             # (docs/intent/update_completes_with_new_code.md section 2).
-            unfinished = read_dependencies_record(project_dir) != fingerprint or (
-                bool(missing_frontend) and read_dependencies_failure(project_dir) is not None
+            # A SearXNG setup stopped part-way (``searxng_setup_stopped``) is
+            # unfinished too, whatever the record says: the dependency step's
+            # ``refresh_searxng`` is what finishes it with SAIVerse's python,
+            # and nothing else before the backend does (the SearXNG venv may
+            # have no python left).
+            unfinished = (
+                read_dependencies_record(project_dir) != fingerprint
+                or (bool(missing_frontend) and read_dependencies_failure(project_dir) is not None)
+                or searxng_setup_stopped(project_dir)
             )
             if unfinished:
+                if searxng_setup_stopped(project_dir):
+                    LOGGER.warning(
+                        "A SearXNG setup stopped before it finished (%s is left)",
+                        SEARXNG_SETUP_IN_PROGRESS_RECORD,
+                    )
                 if missing_frontend:
                     _log_missing_frontend_packages(missing_frontend)
                 return reinstall_dependencies_once(project_dir)
@@ -1918,7 +1935,7 @@ def update_dependencies(
         # Lifecycle scripts run ``node`` by name; it must be npm's own.
         env=_env_with_npm_on_path(npm),
     )
-    searxng_failure = refresh_searxng(project_dir)
+    searxng_failure = refresh_searxng(project_dir, python)
     if searxng_failure is not None:
         failures.append(searxng_failure)
     return failures
@@ -2167,9 +2184,26 @@ def _searxng_venv_python(project_dir: Path) -> Path:
     return venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
 
 
+# The record scripts/searxng_install.py writes in the checkout before it sets
+# the SearXNG venv aside, and removes once the new venv is installed or the
+# set-aside one is back (``SET_ASIDE_ENTRY`` in scripts/setup_in_progress.py,
+# docs/intent/dependency_management.md section 2-7). While it is there, a
+# SearXNG setup stopped part-way: the venv may have no python at all, and the
+# next ``searxng_install.py setup`` finishes it. Spelled out here because this
+# engine imports nothing from the checkout; a test keeps the two equal.
+SEARXNG_SETUP_IN_PROGRESS_RECORD = Path(".setup_in_progress") / "searxng-venv.json"
+
+
+def searxng_setup_stopped(project_dir: Path) -> bool:
+    """Whether a SearXNG setup stopped part-way here (its record is left)."""
+    return (project_dir / SEARXNG_SETUP_IN_PROGRESS_RECORD).is_file()
+
+
 def searxng_installed(project_dir: Path) -> bool:
-    """Whether setup installed SearXNG into this checkout (its venv has a python)."""
-    return _searxng_venv_python(project_dir).is_file()
+    """Whether setup installed SearXNG into this checkout: its venv has a
+    python, or a setup of it stopped part-way (``searxng_setup_stopped``) and
+    must be finished -- the venv set aside then may be all that is left."""
+    return _searxng_venv_python(project_dir).is_file() or searxng_setup_stopped(project_dir)
 
 
 def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure | None:
@@ -2197,7 +2231,7 @@ def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure |
     )
 
 
-def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
+def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> DependencyStepFailure | None:
     """Reinstall SearXNG when it does not match the release the code pins.
 
     Runs ``searxng_install.py check`` with the SearXNG venv's python, and
@@ -2205,6 +2239,15 @@ def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
     run_searxng_server.ps1 / .sh do before starting the server, done here so
     the update, not the next start, brings in a new pin. Nothing happens
     without a SearXNG venv.
+
+    When a SearXNG setup stopped part-way (``searxng_setup_stopped``), the
+    check is skipped (it fails while the record is there) and the setup runs
+    with SAIVerse's own python (``saiverse_python``, else ``sys.executable``):
+    the SearXNG venv may have no python left, or only the half-made one. The
+    installer is standard library only and makes the venv with the python
+    that runs it, the series setup.bat / setup.sh make it with. The setup
+    reads the record, installs the venv again and puts the set-aside venv back
+    when that fails (scripts/searxng_install.py).
 
     Never raises, for the same reason ``refresh_portable_node`` does not:
     SearXNG is an optional search server, and failing the whole update over
@@ -2229,19 +2272,29 @@ def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
             "update.bat (Mac / Linux は update.sh) で SAIVerse のファイルを直してください。",
             retry=False,
         )
-    python = str(_searxng_venv_python(project_dir))
-    try:
-        check = _run(
-            [python, str(installer), "check"],
-            cwd=project_dir,
-            label="check SearXNG",
-            timeout=SEARXNG_CHECK_TIMEOUT_SECONDS,
-            check=False,
-            encoding="utf-8",
+    stopped = searxng_setup_stopped(project_dir)
+    if stopped:
+        python = saiverse_python or sys.executable
+        LOGGER.warning(
+            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it "
+            "with SAIVerse's python",
+            SEARXNG_SETUP_IN_PROGRESS_RECORD,
         )
-        if check.returncode == 0:
-            LOGGER.info("[searxng] SearXNG matches the pinned release")
-            return None
+    else:
+        python = str(_searxng_venv_python(project_dir))
+    try:
+        if not stopped:
+            check = _run(
+                [python, str(installer), "check"],
+                cwd=project_dir,
+                label="check SearXNG",
+                timeout=SEARXNG_CHECK_TIMEOUT_SECONDS,
+                check=False,
+                encoding="utf-8",
+            )
+            if check.returncode == 0:
+                LOGGER.info("[searxng] SearXNG matches the pinned release")
+                return None
         # Only the Update button's update stops SearXNG first. update.bat, the
         # reinstall before start, and an update run by an engine from before
         # SearXNG was stopped reach here with SearXNG possibly running, and the

@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -399,6 +402,68 @@ def test_an_installer_that_cannot_start_does_not_fail_the_update(tmp_path: Path,
     assert "could not run" in failure.error
 
 
+def _searxng_setup_stopped_here(project: Path) -> None:
+    """What a SearXNG setup stopped right after setting the venv aside leaves:
+    the record and the set-aside venv, and no venv python."""
+    record = project / update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("{}\n", encoding="utf-8")
+
+
+def test_the_record_name_is_the_one_the_installer_writes() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import searxng_install
+        import setup_in_progress
+    finally:
+        sys.path.remove(str(REPO_ROOT / "scripts"))
+    assert update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD == setup_in_progress.entry_path(
+        Path(), searxng_install.SET_ASIDE_ENTRY
+    )
+
+
+def test_a_stopped_setup_without_a_venv_python_is_finished_with_saiverse_python(tmp_path: Path) -> None:
+    """The venv python is gone after the set-aside, so it is not 'not
+    installed': the setup runs with SAIVerse's python, without the check."""
+    project = tmp_path
+    (project / "scripts").mkdir()
+    (project / "scripts" / "searxng_install.py").write_text("# stand-in\n", encoding="utf-8")
+    _searxng_setup_stopped_here(project)
+    assert update_engine.searxng_installed(project)
+    fake_run, calls = _answering_run(check_code=1)
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ):
+        assert update_engine.refresh_searxng(project, r"C:\SAIVerse\.venv\Scripts\python.exe") is None
+    installer = str(project / "scripts" / "searxng_install.py")
+    assert calls == [[r"C:\SAIVerse\.venv\Scripts\python.exe", installer, "setup"]]
+
+
+def test_a_stopped_setup_defaults_to_this_interpreter_even_with_a_venv_python(tmp_path: Path) -> None:
+    """The venv python may be the half-made one; SAIVerse's python runs the setup."""
+    project = _checkout_for_refresh(tmp_path)
+    _searxng_setup_stopped_here(project)
+    fake_run, calls = _answering_run(check_code=0)
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine, "find_searxng_servers", return_value=[]):
+        assert update_engine.refresh_searxng(project) is None
+    assert [command[0] for command in calls] == [update_engine.sys.executable]
+    assert calls[0][-1] == "setup"
+
+
+def test_a_failed_finish_of_a_stopped_setup_is_returned(tmp_path: Path) -> None:
+    project = _checkout_for_refresh(tmp_path)
+    _searxng_setup_stopped_here(project)
+    fake_run, _ = _answering_run(check_code=0, setup_code=1)
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine, "find_searxng_servers", return_value=[]):
+        failure = update_engine.refresh_searxng(project)
+    assert failure is not None and failure.step == update_engine.DEPENDENCY_STEP_SEARXNG
+    assert failure.retry
+
+
 def test_without_searxng_the_dependency_step_does_nothing_for_it(tmp_path: Path) -> None:
     with patch.object(update_engine, "_run") as run:
         update_engine.refresh_searxng(tmp_path)
@@ -444,3 +509,105 @@ def test_the_dependency_step_returns_the_steps_that_failed(tmp_path: Path) -> No
     assert run_dependency_step(node, searxng) == [node, searxng]
     assert run_dependency_step(None, searxng) == [searxng]
     assert run_dependency_step(None, None) == []
+
+
+# --- the launchers, for a SearXNG setup that stopped part-way ------------------------------
+#
+# The SearXNG venv may have no python left (stopped right after the set-aside), so
+# "installed" is not only "the venv has a python": start.bat / start-dev.bat open
+# the SearXNG window for the record too, and run_searxng_server.ps1 / .sh run the
+# installer with SAIVerse's .venv python while the record is there.
+
+_CMD = shutil.which("cmd")
+_POWERSHELL = shutil.which("powershell")
+_SEARXNG_VENV_PYTHON = Path("scripts") / ".searxng-venv" / "Scripts" / "python.exe"
+
+
+def _searxng_block(launcher: str) -> str:
+    text = (REPO_ROOT / launcher).read_text(encoding="ascii").replace("\r\n", "\n")
+    start = text.index("REM Start SearXNG if installed")
+    end = text.index("\n:searxng_done", start) + len("\n:searxng_done")
+    lines = []
+    for line in text[start:end].split("\n"):
+        if line.startswith('start "SearXNG"'):
+            assert "run_searxng_server.ps1" in line
+            line = "echo STARTED_SEARXNG_WINDOW"
+        elif line.startswith("timeout "):
+            line = "rem " + line
+        lines.append(line)
+    return "\r\n".join(["@echo off", "setlocal", *lines, "exit /b 0"]) + "\r\n"
+
+
+@pytest.mark.skipif(sys.platform != "win32" or _CMD is None, reason="runs the launcher's block with cmd.exe")
+@pytest.mark.parametrize("launcher", ["start.bat", "start-dev.bat"])
+@pytest.mark.parametrize(
+    ("files", "started", "says_stopped"),
+    [
+        ([], False, False),
+        ([_SEARXNG_VENV_PYTHON], True, False),
+        ([update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD], True, True),
+        ([update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD, _SEARXNG_VENV_PYTHON], True, True),
+    ],
+)
+def test_the_launchers_open_searxng_for_a_stopped_setup(
+    tmp_path: Path, launcher: str, files: list[Path], started: bool, says_stopped: bool
+) -> None:
+    script = tmp_path / "block.bat"
+    script.write_bytes(_searxng_block(launcher).encode("ascii"))
+    work = tmp_path / "checkout"
+    work.mkdir()
+    for name in files:
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_bytes(b"")
+    result = subprocess.run([_CMD, "/c", str(script)], cwd=work, capture_output=True, timeout=60, check=True)
+    out = result.stdout.decode("ascii", "replace")
+    assert ("STARTED_SEARXNG_WINDOW" in out) is started
+    assert ("SearXNG not installed" in out) is (not started)
+    assert ("setup stopped before it finished" in out) is says_stopped
+
+
+@pytest.mark.skipif(sys.platform != "win32" or _POWERSHELL is None, reason="runs the script's lines with PowerShell")
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ([], "python"),
+        (["sx/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
+        (["sx/Scripts/python.exe", ".venv/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
+        # A stopped setup: SAIVerse's python, also over a half-made venv python.
+        ([".setup_in_progress/searxng-venv.json", ".venv/Scripts/python.exe"], r"<root>\.venv\Scripts\python.exe"),
+        (
+            [".setup_in_progress/searxng-venv.json", "sx/Scripts/python.exe", ".venv/Scripts/python.exe"],
+            r"<root>\.venv\Scripts\python.exe",
+        ),
+        # Without SAIVerse's python, the venv's own python is still tried.
+        ([".setup_in_progress/searxng-venv.json", "sx/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
+    ],
+)
+def test_the_searxng_launcher_runs_a_stopped_setup_with_saiverse_python(
+    tmp_path: Path, files: list[str], expected: str
+) -> None:
+    lines = (REPO_ROOT / "scripts" / "run_searxng_server.ps1").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("$venvPython = "))
+    end = next(i for i in range(start, len(lines)) if lines[i].startswith("$installer = "))
+    work = tmp_path / "checkout"
+    work.mkdir()
+    for name in files:
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_bytes(b"")
+    script = tmp_path / "select.ps1"
+    script.write_text("\r\n".join([
+        f"$WorkspaceRoot = '{work}'", f"$VENV_DIR = '{work / 'sx'}'", *lines[start:end],
+        "Write-Output $bootstrapPython.Replace($WorkspaceRoot, '<root>')",
+    ]) + "\r\n", encoding="utf-8")
+    result = subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True, timeout=60, check=True,
+    )
+    assert result.stdout.decode("utf-8", "replace").strip() == expected
+
+
+def test_the_posix_searxng_launcher_names_the_same_record_and_python() -> None:
+    text = (REPO_ROOT / "scripts" / "run_searxng_server.sh").read_text(encoding="utf-8")
+    assert '"${WORKSPACE_ROOT}/.setup_in_progress/searxng-venv.json"' in text
+    assert 'saiverse_python="${WORKSPACE_ROOT}/.venv/bin/python"' in text
+    assert update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD.as_posix() == ".setup_in_progress/searxng-venv.json"

@@ -14,7 +14,7 @@
 
 正典は `scripts/searxng_pin.json`。取得は Git の有無によらず、完全な SHA を指定した公式 ZIP に一本化した。初回採用コミットは `ff8f5ddcc9f2c58d8b0276ec030f6a3adfa17525`、追加する tzdata は本体と同じ `2025.3`。上流の requirements.txt を使い、Windows 用の pwd と URL パス区切りの互換処理を施す。全推移依存を固定した lockfile を新設したものではない。
 
-既存のソースは破棄・上書きせず、コミット別の管理ディレクトリを使う。既存 venv の導入先が違う場合は、セットアップで固定版へ切り替える。ユーザーの設定・エンジン選択は従来の保存先を使い続ける。起動時は完了記録と実際の依存を確認し、不足時はセットアップを実行する。SAIVerse の更新のときも、`update_engine.py` の `update_dependencies` が同じ確認とセットアップを行う。画面の「Update」ボタンの更新では、その前に SearXNG のサーバーを止め、終わったら起動し直す (2026-10-23、[update_completes_with_new_code.md](update_completes_with_new_code.md))。別の Python の系列で作られた venv は退避して作り直し、失敗したら退避した venv を元に戻す。セットアップの失敗は SAIVerse のフォルダの `.searxng_setup_failed.json` に書き、本体の画面のバナーに出す (次の成功で消える。[dependency_management.md](dependency_management.md) §2-7)。
+既存のソースは破棄・上書きせず、コミット別の管理ディレクトリを使う。既存 venv の導入先が違う場合は、セットアップで固定版へ切り替える。ユーザーの設定・エンジン選択は従来の保存先を使い続ける。起動時は完了記録と実際の依存を確認し、不足時はセットアップを実行する。SAIVerse の更新のときも、`update_engine.py` の `update_dependencies` が同じ確認とセットアップを行う。画面の「Update」ボタンの更新では、その前に SearXNG のサーバーを止め、終わったら起動し直す (2026-10-23、[update_completes_with_new_code.md](update_completes_with_new_code.md))。別の Python の系列で作られた venv は退避して作り直し、失敗したら退避した venv を元に戻す。セットアップの失敗は SAIVerse のフォルダの `.searxng_setup_failed.json` に書き、本体の画面のバナーに出す (次の成功で消える。[dependency_management.md](dependency_management.md) §2-7)。退避の直後に窓を閉じるなどで止まり、退避先の記録 (`.setup_in_progress/searxng-venv.json`) だけが残ったときも、起動時のバナーに出し、次の更新・start.bat での起動が本体の Python で入れ直しを引き継ぐ (2026-10-23)。
 
 ### 依存の下限の上書き (2026-10-22)
 

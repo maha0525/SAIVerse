@@ -81,14 +81,23 @@ echo [WARN] Could not verify the update state. Starting anyway.
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"
 
-REM Start SearXNG if installed
-if exist "scripts\.searxng-venv\Scripts\python.exe" (
-    echo [INFO] Starting SearXNG server...
-    start "SearXNG" cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"
-    timeout /t 3 /nobreak >nul
-) else (
-    echo [INFO] SearXNG not installed, skipping. Run setup.bat to install.
-)
+REM Start SearXNG if installed. A SearXNG setup that stopped part-way
+REM leaves .setup_in_progress\searxng-venv.json, and the SearXNG venv may
+REM have no python left; SearXNG is started then too, and
+REM run_searxng_server.ps1 finishes that setup with the python of .venv
+REM first. See docs/intent/dependency_management.md section 2-7.
+set "SEARXNG_START="
+if exist "scripts\.searxng-venv\Scripts\python.exe" set "SEARXNG_START=1"
+if exist ".setup_in_progress\searxng-venv.json" set "SEARXNG_START=1"
+if not defined SEARXNG_START goto :searxng_not_installed
+if exist ".setup_in_progress\searxng-venv.json" echo [INFO] A SearXNG setup stopped before it finished; the SearXNG window finishes it first.
+echo [INFO] Starting SearXNG server...
+start "SearXNG" cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"
+timeout /t 3 /nobreak >nul
+goto :searxng_done
+:searxng_not_installed
+echo [INFO] SearXNG not installed, skipping. Run setup.bat to install.
+:searxng_done
 
 REM Start Backend
 echo [INFO] Starting backend...

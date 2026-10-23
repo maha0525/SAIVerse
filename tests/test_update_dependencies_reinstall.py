@@ -814,3 +814,144 @@ def test_update_bat_still_goes_on_when_the_frontend_cannot_be_checked(tmp_path: 
         update_engine.refuse_while_frontend_runs(tmp_path)  # must not raise
         with pytest.raises(update_engine.UpdateError, match="could not be checked"):
             update_engine.refuse_while_frontend_runs(tmp_path, refuse_when_unchecked=True)
+
+
+# --- a SearXNG setup that stopped right after setting its venv aside --------------------
+#
+# docs/intent/dependency_management.md section 2-7: before scripts/searxng_install.py
+# renames a SearXNG venv of another Python series, it writes
+# .setup_in_progress/searxng-venv.json. Stopped right after the rename (the window
+# closed), only that record and the set-aside venv are left: no venv python. The next
+# start must reach the installer's own recovery even though the marker and the
+# dependency record both match. The installer below is the real one, run in this
+# process; only its source download and its pip / venv commands are replaced.
+
+
+def _searxng_installer(project: Path, monkeypatch):  # type: ignore[no-untyped-def]
+    sys.path.insert(0, str(Path(update_engine.__file__).resolve().parent))
+    try:
+        import searxng_install
+    finally:
+        sys.path.pop(0)
+    monkeypatch.setattr(searxng_install, "WORKSPACE_ROOT", project)
+    monkeypatch.setenv("SEARXNG_VENV_DIR", str(project / update_engine.SEARXNG_DEFAULT_VENV))
+    monkeypatch.setenv("SEARXNG_SRC_DIR", str(project / "searxng-src"))
+    monkeypatch.delenv("SEARXNG_REF", raising=False)
+    for step in ("prepare_source", "prepare_compatibility", "prepare_requirements"):
+        monkeypatch.setattr(searxng_install, step, lambda: None)
+    return searxng_install
+
+
+def _stopped_after_the_set_aside(project: Path, installer) -> Path:  # type: ignore[no-untyped-def]
+    venv = installer.venv_directory()
+    aside = venv.with_name(f"{venv.name}.old-20261023-093000")
+    aside.mkdir(parents=True)
+    (aside / "pyvenv.cfg").write_text("version = 3.12.10\n", encoding="utf-8")
+    (aside / "the-old-venv.txt").write_text("", encoding="utf-8")
+    from scripts import setup_in_progress
+
+    setup_in_progress.write_entry(project, installer.SET_ASIDE_ENTRY, {"venv": str(venv), "aside": str(aside)})
+    return aside
+
+
+class _SearxngMachine(_Machine):
+    """``_Machine`` whose SearXNG setup is the real installer's ``main``; its
+    install into the venv makes the venv python, or fails half-way."""
+
+    def __init__(self, project: Path, installer, *, install_fails: bool = False) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(project)
+        self.installer = installer
+        self.install_fails = install_fails
+        self.setup_pythons: list[str] = []
+
+    def run(self, command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        if label != _SEARXNG_SETUP_LABEL:
+            return super().run(command, cwd=cwd, label=label, timeout=timeout, check=check, encoding=encoding, env=env)
+        self.labels.append(label)
+        self.setup_pythons.append(command[0])
+        installer = self.installer
+
+        def install_into_venv():  # type: ignore[no-untyped-def]
+            python = installer.venv_python()
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_bytes(b"")
+            if self.install_fails:
+                raise update_engine.subprocess.CalledProcessError(1, ["pip", "install"])
+
+        with patch.object(installer, "install_into_venv", side_effect=install_into_venv), patch.dict(
+            os.environ, env or {}
+        ), patch.object(sys, "argv", ["searxng_install.py", "setup"]):
+            code = installer.main()
+        return MagicMock(returncode=code, stdout="", stderr="" if code == 0 else "[ERROR] SearXNG: pip failed")
+
+
+def _finished_checkout(tmp_path: Path) -> Path:
+    """Marker and dependency record both match: only the SearXNG record is left."""
+    project = _make_project(tmp_path)
+    (project / update_engine.SEARXNG_INSTALLER).write_text("# stand-in\n", encoding="utf-8")
+    update_engine.write_completion_marker(project)
+    assert update_engine.write_dependencies_record(project)
+    return project
+
+
+def test_a_searxng_setup_stopped_after_the_set_aside_is_finished_at_the_next_start(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    project = _finished_checkout(tmp_path)
+    installer = _searxng_installer(project, monkeypatch)
+    aside = _stopped_after_the_set_aside(project, installer)
+    assert not installer.venv_python().exists()
+
+    machine = _SearxngMachine(project, installer)
+    assert machine.check() == update_engine.CHECK_READY
+
+    assert machine.children == 1
+    # Run with SAIVerse's python (the child's), since the SearXNG venv had none.
+    assert machine.setup_pythons == [update_engine.sys.executable]
+    assert installer.venv_python().is_file()
+    assert not aside.exists()
+    assert not update_engine.searxng_setup_stopped(project)
+    assert update_engine.read_dependencies_failure(project) is None
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    # The start after that does nothing.
+    again = _SearxngMachine(project, installer)
+    assert again.check() == update_engine.CHECK_READY
+    assert again.children == 0
+
+
+def test_a_failed_finish_puts_the_set_aside_venv_back_and_is_shown(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from saiverse import environment_alerts
+
+    project = _finished_checkout(tmp_path)
+    installer = _searxng_installer(project, monkeypatch)
+    venv = installer.venv_directory()
+    _stopped_after_the_set_aside(project, installer)
+
+    machine = _SearxngMachine(project, installer, install_fails=True)
+    assert machine.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+
+    # The installer removed the half-made venv and gave the old one its name back.
+    assert (venv / "the-old-venv.txt").is_file()
+    assert not update_engine.searxng_setup_stopped(project)
+    # The failure is the dependency step's, for the banner; the installer's own
+    # record is not written (the update asked it not to), so there is one alert.
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and failure["steps"] == [update_engine.DEPENDENCY_STEP_SEARXNG]
+    assert not (project / installer.SETUP_FAILURE_RECORD).exists()
+    assert [alert["id"] for alert in update_dependencies_alerts(project)] == [ALERT_ID]
+    assert environment_alerts.searxng_setup_alerts(project) == []
+    assert update_engine.read_dependencies_record(project) is None
+
+
+def test_a_searxng_record_alone_on_a_new_install_is_left_to_the_searxng_window(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """No marker: a new install is never reinstalled (section 2 promise 3); the
+    record is finished by run_searxng_server.ps1 / .sh, which start.bat /
+    start.sh start for it."""
+    project = _make_project(tmp_path)
+    (project / update_engine.SEARXNG_INSTALLER).write_text("# stand-in\n", encoding="utf-8")
+    installer = _searxng_installer(project, monkeypatch)
+    _stopped_after_the_set_aside(project, installer)
+    child = _Child(project)
+    assert child.check() == update_engine.CHECK_READY
+    assert child.installs == 0
+    assert update_engine.searxng_setup_stopped(project)

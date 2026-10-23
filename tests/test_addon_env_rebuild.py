@@ -613,3 +613,68 @@ def test_the_failure_record_alone_no_longer_names_envs_to_rebuild(home, expansio
         "failures": [{"addon_id": "a-addon", "envs": ["eng"], "core_venv": False}],
     }), encoding="utf-8")
     assert addon_installer.find_unusable_addon_envs(expansion) == {}
+
+
+# --- the banner for an env left part-way (saiverse/environment_alerts.py) ------------------
+
+
+@pytest.fixture
+def banner_paths(expansion, monkeypatch):  # type: ignore[no-untyped-def]
+    """The banner reads the display name from expansion_data; use the test's."""
+    from saiverse import data_paths
+
+    monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", expansion)
+    monkeypatch.setattr(addon_installer, "EXPANSION_DATA_DIR", expansion)
+
+
+@pytest.mark.usefixtures("banner_paths")
+def test_an_env_removed_by_a_stopped_rebuild_is_on_the_banner_once(home, expansion, monkeypatch, tmp_path) -> None:
+    """Stopped right after the old env was removed: setup never reached the
+    failure record, and only the in-progress record names the addon."""
+    from saiverse import environment_alerts
+
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
+    monkeypatch.setattr(
+        addon_installer, "_run_subprocess", _stopping_at([], lambda args, label: args[1:3] == ["-m", "venv"]))
+    with pytest.raises(_Stop):
+        addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert not (tmp_path / ".addon_env_rebuild_failures.json").exists()
+    assert addon_installer.find_addon_envs_left_part_way(expansion) == {"a-addon": ["eng"]}
+
+    alerts = environment_alerts.environment_alerts(tmp_path)
+    assert [alert["id"] for alert in alerts] == [environment_alerts.ADDON_ENV_STOPPED_ALERT_ID]
+    assert "X (a-addon)" in alerts[0]["message"]
+    assert "setup.bat" in alerts[0]["message"] and "アドオン管理" in alerts[0]["message"]
+    assert alerts[0]["details"] == {"reason": ["a-addon"], "envs": ["a-addon: eng"]}
+
+    # The same addon in the failure record (a rebuild that failed and wrote it):
+    # only the failure alert names it.
+    addon_installer.record_env_rebuild_failures([addon_installer.EnvRebuildResult(
+        addon_id="a-addon", envs=["eng"], steps=["cloud-pkgs"], error="pip failed")])
+    alerts = environment_alerts.environment_alerts(tmp_path)
+    assert [alert["id"] for alert in alerts] == [environment_alerts.ADDON_ENV_REBUILD_ALERT_ID]
+
+    # The next rebuild finishes: no record, no failure, no banner.
+    addon_installer.record_env_rebuild_failures([])
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run([]))
+    addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert environment_alerts.environment_alerts(tmp_path) == []
+
+
+def test_a_record_of_an_env_no_selected_step_uses_is_not_shown(home, expansion) -> None:
+    """Setup leaves such an env alone, so its record is harmless and the user
+    could not clear it: not on the banner."""
+    from scripts import setup_in_progress
+
+    _install(expansion, "a-addon", {"engines": []}, None)
+    setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-eng", {})
+    assert addon_installer.find_addon_envs_left_part_way(expansion) == {}
+
+
+def test_an_addon_with_an_unreadable_manifest_shows_every_recorded_env(home, expansion) -> None:
+    from scripts import setup_in_progress
+
+    addon_dir = _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
+    (addon_dir / "addon.json").write_text("{not json", encoding="utf-8")
+    setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-eng", {})
+    assert addon_installer.find_addon_envs_left_part_way(expansion) == {"a-addon": ["eng"]}
