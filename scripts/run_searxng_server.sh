@@ -12,8 +12,20 @@ BIND_ADDRESS=${SEARXNG_BIND_ADDRESS:-0.0.0.0}
 VENV_DIR=${SEARXNG_VENV_DIR:-${SCRIPT_DIR}/.searxng-venv}
 SETTINGS_PATH=${SEARXNG_SETTINGS_PATH:-${SCRIPT_DIR}/searxng_settings.yml}
 
+# A SearXNG setup that stopped part-way leaves .setup_in_progress/searxng-venv.json
+# (scripts/setup_in_progress.py); the SearXNG venv may then have no python, or
+# only a half-made one. The installer is standard library only, so it runs with
+# SAIVerse's own .venv python then - the series setup.sh makes the SearXNG venv
+# with. Same as run_searxng_server.ps1; see docs/intent/dependency_management.md
+# section 2-7.
+WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+saiverse_python="${WORKSPACE_ROOT}/.venv/bin/python"
 bootstrap_python=python
-if [[ -x "${VENV_DIR}/bin/python" ]]; then
+if [[ -x "${VENV_DIR}/bin/python" && ! -f "${WORKSPACE_ROOT}/.setup_in_progress/searxng-venv.json" ]]; then
+    bootstrap_python="${VENV_DIR}/bin/python"
+elif [[ -x "${saiverse_python}" ]]; then
+    bootstrap_python="${saiverse_python}"
+elif [[ -x "${VENV_DIR}/bin/python" ]]; then
     bootstrap_python="${VENV_DIR}/bin/python"
 fi
 SRC_DIR="$("${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" source)"

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -42,6 +43,46 @@ LOGGER = logging.getLogger("saiverse.update")
 # together -- so a launcher can tell a finished update from one that died
 # half-way. See docs/issues/v0229_update_bat_truncates_after_git_pull.md.
 UPDATE_COMPLETE_MARKER = ".update_complete"
+
+# Written by the ``--install-dependencies`` child once ``update_dependencies``
+# of the engine on disk has finished, holding the ``completion_fingerprint`` of
+# the code it installed for. Kept apart from ``UPDATE_COMPLETE_MARKER`` because
+# that marker is rewritten at the end of every update by the *parent* updater,
+# which can be an engine from before this record existed and would drop any
+# field this engine added to it. ``check_update_complete`` reads the pair: a
+# marker that matches the code without this record means an older updater
+# finished the update with its own, older dependency step
+# (docs/intent/update_completes_with_new_code.md section 3).
+DEPENDENCIES_RECORD = ".update_dependencies_complete"
+
+# Written when the dependency step did not fully finish: by ``--check-complete``
+# when installing the packages once more (``reinstall_dependencies_once``)
+# failed, and by the ``--install-dependencies`` child when a step that does not
+# stop the update (``DEPENDENCY_STEP_PORTABLE_NODE`` / ``DEPENDENCY_STEP_SEARXNG``)
+# failed. The backend reads it at startup and shows it in the alert banner
+# (``saiverse/update_dependencies_alert.py``); the next fully successful
+# ``--install-dependencies`` run removes it.
+DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
+
+# Steps of ``update_dependencies`` whose failure does not stop the update. They
+# are reported back as ``DependencyStepFailure`` and written to
+# ``DEPENDENCIES_FAILURE_RECORD`` under ``"steps"``; the alert names them.
+DEPENDENCY_STEP_PORTABLE_NODE = "portable_node"
+DEPENDENCY_STEP_SEARXNG = "searxng"
+
+
+class DependencyStepFailure(NamedTuple):
+    """A step of ``update_dependencies`` that failed without stopping the update.
+
+    ``retry`` False: running the step again cannot help (a file the checkout
+    itself lacks), so the dependency record is still written -- the next start
+    does not reinstall every package again -- but the failure stays on screen
+    until a later run of the child finishes without failures.
+    """
+
+    step: str
+    error: str
+    retry: bool = True
 
 # The pinned, verified package set. Every install path (setup.bat / setup.sh,
 # this engine, addon installs as constraints) reads this file, never
@@ -74,6 +115,9 @@ RETIRED_CORE_PACKAGES: tuple[str, ...] = ("fastembed",)
 CHECK_READY = 0
 CHECK_NEEDS_FINISH = 10
 CHECK_INCONCLUSIVE = 11
+# The packages had to be installed once more and that failed. The launchers
+# start SAIVerse anyway; the failure is in ``DEPENDENCIES_FAILURE_RECORD``.
+CHECK_DEPENDENCIES_FAILED = 12
 
 # Release channels (docs/intent/early_access_release.md §3-1). The branch the
 # checkout is on is the *only* place that decides which releases it receives
@@ -205,14 +249,8 @@ def write_completion_marker(project_dir: Path) -> None:
         LOGGER.warning("VERSION is unreadable; update completion was not recorded")
         return
     target = marker_path(project_dir)
-    # Same prefix as the marker so .gitignore's `.update_complete*` covers it:
-    # a leftover temp file must never make the working tree dirty, because the
-    # updater refuses to run on a dirty tree.
-    temporary = target.with_name(f"{target.name}.tmp{os.getpid()}")
     try:
-        payload = json.dumps(fingerprint, indent=2, sort_keys=True) + "\n"
-        temporary.write_text(payload, encoding="utf-8")
-        os.replace(temporary, target)
+        _write_json_atomically(target, fingerprint)
     except OSError:
         LOGGER.warning(
             "Could not write %s. The update itself succeeded; the next start will most "
@@ -220,10 +258,139 @@ def write_completion_marker(project_dir: Path) -> None:
             target,
             exc_info=True,
         )
+
+
+def _write_json_atomically(target: Path, document: Any) -> None:
+    """Write ``document`` to ``target`` through a temporary file and ``os.replace``.
+
+    The temporary file starts with the target's name, so the .gitignore entry
+    for the target covers it too: a leftover temp file must never make the
+    working tree dirty, because the updater refuses to run on a dirty tree. On
+    failure the temporary file is removed and the ``OSError`` is raised.
+    """
+    temporary = target.with_name(f"{target.name}.tmp{os.getpid()}")
+    try:
+        payload = json.dumps(document, indent=2, sort_keys=True) + "\n"
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
         try:
             temporary.unlink()
         except OSError:
             pass
+        raise
+
+
+def _remove_file(target: Path, *, purpose: str) -> None:
+    """Remove ``target`` if it exists; a failure is logged, never raised."""
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        LOGGER.warning("Could not remove %s (%s)", target, purpose, exc_info=True)
+
+
+def _read_json_object(target: Path) -> dict[str, Any] | None:
+    """The JSON object in ``target``; None when it is absent, {} when it is
+    present but empty, damaged, or not an object."""
+    try:
+        text = target.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {}
+    if not text:
+        return {}
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def dependencies_record_path(project_dir: Path) -> Path:
+    return project_dir / DEPENDENCIES_RECORD
+
+
+def read_dependencies_record(project_dir: Path) -> dict[str, Any] | None:
+    """The fingerprint ``DEPENDENCIES_RECORD`` holds, or None when there is no
+    usable record (absent, damaged, or not an object)."""
+    recorded = _read_json_object(dependencies_record_path(project_dir))
+    return recorded or None
+
+
+def write_dependencies_record(project_dir: Path) -> bool:
+    """Record that ``update_dependencies`` of this engine finished for the code
+    on disk. Returns whether the record was written. Never raises: a write
+    failure only means the next start installs the packages once more, unless
+    the caller holds back the completion marker too (``check_update_complete``
+    for a new install)."""
+    fingerprint = completion_fingerprint(project_dir)
+    if fingerprint is None:
+        LOGGER.warning("VERSION is unreadable; the finished dependency step was not recorded")
+        return False
+    target = dependencies_record_path(project_dir)
+    try:
+        _write_json_atomically(target, fingerprint)
+    except OSError:
+        LOGGER.warning(
+            "Could not write %s; the next start will install the packages once more.",
+            target,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def invalidate_dependencies_record(project_dir: Path) -> None:
+    """Drop ``DEPENDENCIES_RECORD`` when the code moves, for the same reason as
+    ``invalidate_completion_marker``: until the dependency step of the new code
+    has finished, the record would describe something that no longer holds."""
+    _remove_file(dependencies_record_path(project_dir), purpose="before updating packages")
+
+
+def dependencies_failure_path(project_dir: Path) -> Path:
+    return project_dir / DEPENDENCIES_FAILURE_RECORD
+
+
+def read_dependencies_failure(project_dir: Path) -> dict[str, Any] | None:
+    """What the last unfinished dependency step recorded; None when nothing
+    failed. A file that is present but unreadable reads as {} -- something
+    failed, without details."""
+    return _read_json_object(dependencies_failure_path(project_dir))
+
+
+def write_dependencies_failure(
+    project_dir: Path, error: str, *, steps: list[str] | None = None
+) -> None:
+    """Record an unfinished dependency step for the backend to show. Never raises.
+
+    ``steps`` names the steps that failed without stopping the update
+    (``DEPENDENCY_STEP_*``). It is left out when the dependency step as a
+    whole failed (``reinstall_dependencies_once``), where ``error`` says what
+    stopped it.
+    """
+    document: dict[str, Any] = {
+        "version": read_version(project_dir),
+        "error": error.strip()[-2000:],
+        "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    if steps:
+        document["steps"] = list(steps)
+    target = dependencies_failure_path(project_dir)
+    try:
+        _write_json_atomically(target, document)
+    except OSError:
+        LOGGER.error(
+            "Could not write %s, so the SAIVerse screen will not show this failure",
+            target,
+            exc_info=True,
+        )
+
+
+def clear_dependencies_failure(project_dir: Path) -> None:
+    _remove_file(dependencies_failure_path(project_dir), purpose="a resolved package install failure")
 
 
 def invalidate_completion_marker(project_dir: Path) -> None:
@@ -532,9 +699,28 @@ def _log_missing_frontend_packages(missing: list[str]) -> None:
 def check_update_complete(project_dir: Path) -> int:
     """Decide whether this checkout is safe to start.
 
-    Returns one of CHECK_READY / CHECK_NEEDS_FINISH / CHECK_INCONCLUSIVE. When
-    the checkout is verified complete the marker is (re)written, so the cheap
-    comparison answers every later start.
+    Returns one of CHECK_READY / CHECK_NEEDS_FINISH / CHECK_INCONCLUSIVE /
+    CHECK_DEPENDENCIES_FAILED. When the checkout is verified complete the
+    marker is (re)written, so the cheap comparison answers every later start.
+
+    A marker that matches the code while ``DEPENDENCIES_RECORD`` does not
+    means an older updater finished the update with its own dependency step,
+    so a step added since (upgrading pip, removing a retired package, the
+    portable Node.js, SearXNG) never ran -- or that this engine's dependency
+    step ran but the portable Node.js or SearXNG step failed, which leaves the
+    record unwritten on purpose. Either case installs the packages once with
+    this engine (``reinstall_dependencies_once``) instead of starting the full
+    update, which would fetch a newer release
+    (docs/intent/update_completes_with_new_code.md section 2). That holds when
+    frontend packages are missing too, and also when the record matches but a
+    failure record is there (the reinstall's own npm ci failed half-way): only
+    a matching marker and record with no failure behind them send missing
+    frontend packages to the full update. A SearXNG setup that stopped
+    part-way (``searxng_setup_stopped``) goes to the same reinstall even when
+    the record matches, so its ``refresh_searxng`` finishes it. Without a
+    usable marker it is left to run_searxng_server.ps1 / .sh, which start.bat
+    (start.sh with SAIVERSE_SEARXNG=1) run for it and which finish it with
+    SAIVerse's python (a new install is not reinstalled, section 2 promise 3).
     """
     fingerprint = completion_fingerprint(project_dir)
     if fingerprint is None:
@@ -558,6 +744,33 @@ def check_update_complete(project_dir: Path) -> int:
             # too, for instance. The package check is cheap, so it runs even
             # here. None (cannot tell) keeps trusting the marker.
             missing_frontend = missing_frontend_packages(project_dir)
+            # The dependency step of this code has not finished here: an older
+            # updater skipped part of it, or this engine's step (an update's,
+            # or the reinstall before start) failed. Missing frontend packages
+            # are then most likely what that failure left (npm ci empties
+            # node_modules before it fails), and the way back is the same
+            # reinstall, never the full update: ``--manual`` would fetch a newer
+            # release, and starting must not move the version
+            # (docs/intent/update_completes_with_new_code.md section 2).
+            # A SearXNG setup stopped part-way (``searxng_setup_stopped``) is
+            # unfinished too, whatever the record says: the dependency step's
+            # ``refresh_searxng`` is what finishes it with SAIVerse's python,
+            # and nothing else before the backend does (the SearXNG venv may
+            # have no python left).
+            unfinished = (
+                read_dependencies_record(project_dir) != fingerprint
+                or (bool(missing_frontend) and read_dependencies_failure(project_dir) is not None)
+                or searxng_setup_stopped(project_dir)
+            )
+            if unfinished:
+                if searxng_setup_stopped(project_dir):
+                    LOGGER.warning(
+                        "A SearXNG setup stopped before it finished (%s is left)",
+                        SEARXNG_SETUP_IN_PROGRESS_RECORD,
+                    )
+                if missing_frontend:
+                    _log_missing_frontend_packages(missing_frontend)
+                return reinstall_dependencies_once(project_dir)
             if missing_frontend:
                 _log_missing_frontend_packages(missing_frontend)
                 return CHECK_NEEDS_FINISH
@@ -620,7 +833,243 @@ def check_update_complete(project_dir: Path) -> int:
             "unreadable frontend/package.json); starting without recording a version"
         )
         return CHECK_INCONCLUSIVE
+    # No marker means no update ran here that could have skipped a step (a new
+    # install, or one from before the marker); what is installed was just
+    # verified, so the packages are not installed again -- only recorded. The
+    # dependency record comes first and the marker only once it is written: a
+    # marker without the record is exactly how a checkout finished by an older
+    # updater looks, and the next start would install every package again.
+    if read_dependencies_record(project_dir) != fingerprint and not write_dependencies_record(project_dir):
+        LOGGER.warning(
+            "The installed packages were verified, but the record could not be written; "
+            "the completion marker is not written either, so the next start verifies again"
+        )
+        return CHECK_READY
     write_completion_marker(project_dir)
+    return CHECK_READY
+
+
+# Variables of .env that move where SAIVerse keeps its data (and so its
+# runtime markers); main.py loads .env before it resolves them.
+_DOTENV_HOME_VARIABLES = ("SAIVERSE_HOME", "SAIVERSE_USER_DATA_DIR")
+
+
+_DOTENV_DISABLED_VALUES = frozenset({"1", "true", "t", "yes", "y"})
+
+
+class DotenvUnavailable(RuntimeError):
+    """The checkout has a .env, but python-dotenv cannot be imported here."""
+
+
+def find_dotenv_path(project_dir: Path) -> Path | None:
+    """The .env main.py's ``load_dotenv()`` reads, or None when there is none.
+
+    ``load_dotenv()`` without a path calls python-dotenv's ``find_dotenv``,
+    which starts in the folder of the calling file (main.py, so the SAIVerse
+    folder) and goes up one folder at a time to the top, taking the first
+    ``.env`` that is a file or a FIFO (``dotenv.main._walk_to_root`` and
+    ``_is_file_or_fifo``). So a .env in a parent folder is used when the
+    SAIVerse folder has none. ``scripts/setup_venv.py`` has the same function
+    for the standard library; the tests compare both with python-dotenv.
+    """
+    current = os.path.abspath(project_dir)
+    last = None
+    while last != current:
+        candidate = os.path.join(current, ".env")
+        if os.path.isfile(candidate):
+            return Path(candidate)
+        try:
+            if stat.S_ISFIFO(os.stat(candidate).st_mode):
+                return Path(candidate)
+        except OSError:
+            pass
+        last, current = current, os.path.abspath(os.path.join(current, os.path.pardir))
+    return None
+
+
+def _apply_dotenv_home(project_dir: Path) -> None:
+    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the .env main.py loads
+    (``find_dotenv_path``) exactly as main.py's ``load_dotenv()`` resolves them,
+    unless they are already set. Only these: the rest of .env (API keys and the
+    like) has no business in this process or its children.
+
+    ``load_dotenv`` (override=False) expands ``${NAME}`` with the variables
+    already in the environment winning over those of .env; ``dotenv_values``
+    lets .env win, so ``SAIVERSE_HOME=${BASE}/saiverse`` resolved to another
+    folder than main.py's when BASE was set in both. ``DotEnv`` with
+    ``override=False`` is the object ``load_dotenv`` builds, read with the same
+    encoding; ``PYTHON_DOTENV_DISABLED`` is honoured as ``load_dotenv`` does.
+
+    Raises when .env exists but cannot be read that way: ``DotenvUnavailable``
+    without python-dotenv, the reading error otherwise. Callers count that as
+    "cannot tell where SAIVerse keeps its data".
+    """
+    if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in _DOTENV_DISABLED_VALUES:
+        return  # main.py's load_dotenv loads nothing either
+    dotenv_path = find_dotenv_path(project_dir)
+    if dotenv_path is None:
+        return
+    try:
+        from dotenv.main import DotEnv
+    except ImportError as exc:
+        raise DotenvUnavailable(f"{dotenv_path} exists, but python-dotenv is not installed") from exc
+    values = DotEnv(dotenv_path, interpolate=True, override=False, encoding="utf-8").dict()
+    for name in _DOTENV_HOME_VARIABLES:
+        value = values.get(name)
+        # load_dotenv skips names already set and sets every other non-None value.
+        if value is not None and name not in os.environ:
+            os.environ[name] = value
+
+
+def _saiverse_may_be_running(project_dir: Path) -> str | None:
+    """Why the reinstall before start must wait, or None when SAIVerse is stopped.
+
+    The frontend check alone does not cover a backend left running (the
+    frontend window closed, or ``python main.py`` started by hand); pip would
+    then replace packages the backend has loaded. ``saiverse.runtime_marker``
+    is the record a running backend keeps; not being able to read it counts as
+    running, so the reinstall waits for the next start instead of guessing.
+    """
+    root = str(project_dir)
+    added = root not in sys.path
+    try:
+        _apply_dotenv_home(project_dir)
+        if added:
+            sys.path.insert(0, root)
+        try:
+            from saiverse.runtime_marker import marker_status
+        finally:
+            if added:
+                sys.path.remove(root)
+        state, reason = marker_status()
+    except Exception as exc:  # cannot tell -> treat as running
+        return f"whether SAIVerse is running could not be checked ({exc})"
+    if state == "stopped":
+        return None
+    return f"SAIVerse may be running ({reason})"
+
+
+CHECK_STOPPED_OPTION = "--check-stopped"
+# Exit codes of ``--check-stopped`` (``check_stopped_for_setup``). setup.bat /
+# setup.sh do not read them: ``scripts/setup_venv.py check-stopped`` runs this
+# with the existing .venv's python and decides from them.
+STOPPED_NOTHING_RUNNING = 0
+STOPPED_MAY_BE_RUNNING = 20
+# SAIVerse itself is stopped, but psutil is unusable here, so the frontend and
+# SearXNG servers could not be listed.
+STOPPED_PROCESSES_UNCHECKED = 21
+# This .venv lacks what the check needs (python-dotenv for the .env, or
+# saiverse.runtime_marker): the caller checks with what it has instead.
+STOPPED_CHECK_UNAVAILABLE = 22
+
+
+def check_stopped_for_setup(project_dir: Path) -> int:
+    """``--check-stopped``: whether setup may change this checkout's environments.
+
+    setup replaces ``.venv``, the frontend packages and SearXNG, so it must
+    not start while SAIVerse (the runtime markers, read with SAIVERSE_HOME
+    resolved as main.py resolves it), this checkout's frontend server or its
+    SearXNG server runs -- on Linux / macOS a folder in use can be renamed,
+    so the rename of ``.venv`` failing is not a check. Prints why on stdout.
+    """
+    try:
+        _apply_dotenv_home(project_dir)
+    except DotenvUnavailable as exc:
+        print(f"[check-stopped] {exc}", flush=True)
+        return STOPPED_CHECK_UNAVAILABLE
+    except Exception as exc:  # .env exists but cannot be read: cannot tell
+        print(f"[check-stopped] .env could not be read ({exc}); cannot tell whether SAIVerse is running", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    root = str(project_dir)
+    added = root not in sys.path
+    if added:
+        sys.path.insert(0, root)
+    try:
+        from saiverse.runtime_marker import marker_status
+    except Exception as exc:
+        print(f"[check-stopped] saiverse.runtime_marker could not be loaded ({exc})", flush=True)
+        return STOPPED_CHECK_UNAVAILABLE
+    finally:
+        if added:
+            sys.path.remove(root)
+    try:
+        state, reason = marker_status()
+    except Exception as exc:
+        state, reason = "unknown", f"the runtime markers could not be read ({exc})"
+    if state != "stopped":
+        print(f"[check-stopped] SAIVerse may be running ({reason})", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    try:
+        running = find_frontend_servers(project_dir).processes + find_searxng_servers(project_dir)
+    except FrontendCheckUnavailable as exc:
+        print(f"[check-stopped] the frontend and SearXNG servers could not be listed ({exc})", flush=True)
+        return STOPPED_PROCESSES_UNCHECKED
+    if running:
+        print(f"[check-stopped] still running: {_describe_processes(running)}", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    return STOPPED_NOTHING_RUNNING
+
+
+def reinstall_dependencies_once(project_dir: Path) -> int:
+    """Run ``update_dependencies`` of this engine once, for the code as it is.
+
+    No code is fetched and VERSION does not move: only the
+    ``INSTALL_DEPENDENCIES_OPTION`` child runs, the same step an update runs
+    after its code phase. The child writes ``DEPENDENCIES_RECORD`` and removes
+    ``DEPENDENCIES_FAILURE_RECORD`` when it succeeds, so the next start does
+    not run this again.
+
+    A failure does not stop the start: it is written to
+    ``DEPENDENCIES_FAILURE_RECORD`` for the backend to show, the record stays
+    missing, and the next start tries again. That includes a child that exits
+    0 after the portable Node.js or SearXNG step failed: it wrote the failure
+    record itself and no ``DEPENDENCIES_RECORD``. Returns CHECK_READY or
+    CHECK_DEPENDENCIES_FAILED.
+    """
+    LOGGER.warning(
+        "The package installation of version %s has not finished: an older updater "
+        "skipped part of it, or a step of it failed last time. Installing the packages "
+        "once more with this version's procedure; SAIVerse itself is not updated. This "
+        "can take several minutes.",
+        read_version(project_dir) or "(unknown)",
+    )
+    running = _saiverse_may_be_running(project_dir)
+    if running is not None:
+        LOGGER.error("Installing the packages once more is postponed: %s", running)
+        write_dependencies_failure(
+            project_dir,
+            f"{running}. The packages were not installed once more, so nothing running is "
+            "changed under it. Close every SAIVerse window, then run start.bat (start.sh on "
+            "macOS / Linux) again.\nSAIVerse が動いている (か確かめられない) ため、パッケージの"
+            "入れ直しを次の起動へ延ばしました。SAIVerse の窓をすべて閉じてから、start.bat "
+            "(Mac / Linux は start.sh) をもう一度実行してください。",
+        )
+        return CHECK_DEPENDENCIES_FAILED
+    try:
+        # npm ci beside a running frontend would empty node_modules on Windows;
+        # not being able to check postpones the reinstall as well.
+        refuse_while_frontend_runs(project_dir, refuse_when_unchecked=True)
+        _run_dependencies_from_disk(project_dir, sys.executable)
+    except UpdateError as exc:
+        LOGGER.error(
+            "Installing the packages once more failed; SAIVerse starts anyway and the "
+            "screen shows the failure: %s",
+            exc,
+        )
+        write_dependencies_failure(project_dir, str(exc))
+        return CHECK_DEPENDENCIES_FAILED
+    failure = read_dependencies_failure(project_dir)
+    if failure is not None:
+        # The child finished but a step that does not stop it failed; it wrote
+        # the failure record and left DEPENDENCIES_RECORD unwritten, so the next
+        # start tries again.
+        LOGGER.error(
+            "Installing the packages once more did not fully finish; SAIVerse starts anyway "
+            "and the screen shows the failure: %s",
+            failure.get("error") or "(no details recorded)",
+        )
+        return CHECK_DEPENDENCIES_FAILED
+    LOGGER.info("The packages of version %s are installed", read_version(project_dir) or "(unknown)")
     return CHECK_READY
 
 
@@ -1423,8 +1872,19 @@ def update_dependencies(
     project_dir: Path,
     python: str,
     requirements_file: str | None = None,
-) -> None:
-    """Install the Python packages and the frontend packages.
+    *,
+    replace_portable_node: bool = True,
+) -> list[DependencyStepFailure]:
+    """Install everything the code on disk needs besides itself: the portable
+    Node.js, the Python packages, the frontend packages and SearXNG.
+
+    Returns the steps that failed without stopping the update (the portable
+    Node.js and SearXNG, see ``refresh_portable_node`` / ``refresh_searxng``);
+    an empty list means everything finished. Any other failure raises
+    ``UpdateError``. ``install_dependencies_main`` turns a non-empty list into
+    ``DEPENDENCIES_FAILURE_RECORD`` and leaves ``DEPENDENCIES_RECORD``
+    unwritten, so the failure is shown on the screen and the next start tries
+    again.
 
     ``requirements_file`` defaults to the lock and is *not* chosen by looking at
     the working tree: a checkout that has no lock is a broken update target, and
@@ -1435,10 +1895,21 @@ def update_dependencies(
     The update sequence does not call this directly: it runs it through
     ``_run_dependencies_from_disk``, which starts the engine file on disk with
     ``INSTALL_DEPENDENCIES_OPTION`` (``main`` -> ``install_dependencies_main``).
+    Every replacement an update needs belongs in here, because this is the one
+    step that runs with the procedure of the code just fetched
+    (docs/intent/update_completes_with_new_code.md section 4).
 
-    Order: upgrade pip, install the requirements file, remove
-    ``RETIRED_CORE_PACKAGES``, ``pip check``, then npm.
+    Order: replace the portable Node.js (before npm ci, so the packages are
+    installed with the Node.js the code pins; skipped with
+    ``replace_portable_node=False``, which the rollback passes), upgrade pip,
+    install the requirements file, remove ``RETIRED_CORE_PACKAGES``, ``pip
+    check``, npm, then SearXNG.
     """
+    failures: list[DependencyStepFailure] = []
+    if replace_portable_node:
+        node_failure = refresh_portable_node(project_dir)
+        if node_failure is not None:
+            failures.append(node_failure)
     _upgrade_pip(project_dir, python)
     requirements = requirements_file or REQUIREMENTS_LOCK
     _run(
@@ -1464,6 +1935,10 @@ def update_dependencies(
         # Lifecycle scripts run ``node`` by name; it must be npm's own.
         env=_env_with_npm_on_path(npm),
     )
+    searxng_failure = refresh_searxng(project_dir, python)
+    if searxng_failure is not None:
+        failures.append(searxng_failure)
+    return failures
 
 
 # This engine as it is on disk, and the option of ``main`` that runs only
@@ -1471,25 +1946,34 @@ def update_dependencies(
 # this path with this option.
 ENGINE_SCRIPT = Path("scripts") / "update_engine.py"
 INSTALL_DEPENDENCIES_OPTION = "--install-dependencies"
+# With INSTALL_DEPENDENCIES_OPTION: leave the portable Node.js as it is. Passed
+# by the rollback only. It was added together with moving
+# ``refresh_portable_node`` into ``update_dependencies``, so an engine on disk
+# that does not have it never replaces the portable Node.js in that step and
+# needs nothing passed.
+KEEP_PORTABLE_NODE_OPTION = "--keep-portable-node"
 
 
-def _engine_on_disk_installs_dependencies(script: Path) -> bool:
-    """Whether the engine file on disk has ``INSTALL_DEPENDENCIES_OPTION``.
+def _engine_on_disk_text(script: Path) -> str:
+    """The engine file on disk, for telling which options it has.
 
-    Revisions from before the option have an engine without it (or, for the
-    oldest ones, no engine file at all); started with the option, such a file
-    would exit with an argparse usage error.
+    Revisions from before ``INSTALL_DEPENDENCIES_OPTION`` have an engine
+    without it (or, for the oldest ones, no engine file at all: ""); started
+    with an option it lacks, such a file would exit with an argparse usage
+    error.
     """
     try:
-        return INSTALL_DEPENDENCIES_OPTION in script.read_text(encoding="utf-8", errors="replace")
+        return script.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return ""
 
 
 def _run_dependencies_from_disk(
     project_dir: Path,
     python: str,
     requirements_file: str | None = None,
+    *,
+    keep_portable_node: bool = False,
 ) -> None:
     """Run ``update_dependencies`` of the engine file on disk, in a child process.
 
@@ -1506,28 +1990,41 @@ def _run_dependencies_from_disk(
     ``INSTALL_DEPENDENCIES_OPTION`` (a revision from before it), this
     process's own ``update_dependencies`` runs instead, which is what every
     update did before the option existed.
+
+    ``keep_portable_node`` (the rollback) leaves the portable Node.js as it is
+    (``KEEP_PORTABLE_NODE_OPTION``; see ``refresh_portable_node`` for why).
     """
     script = project_dir / ENGINE_SCRIPT
-    if not _engine_on_disk_installs_dependencies(script):
+    engine_text = _engine_on_disk_text(script)
+    if INSTALL_DEPENDENCIES_OPTION not in engine_text:
         LOGGER.warning(
             "[deps] %s on disk has no %s; installing the packages with the running updater's procedure",
             ENGINE_SCRIPT,
             INSTALL_DEPENDENCIES_OPTION,
         )
-        update_dependencies(project_dir, python, requirements_file)
+        # The failures it returns are already in the update log. They are not
+        # written to DEPENDENCIES_FAILURE_RECORD: the code on disk predates the
+        # option, so it has no backend that reads that file, and its
+        # ``--check-complete`` does not retry.
+        update_dependencies(
+            project_dir, python, requirements_file, replace_portable_node=not keep_portable_node
+        )
         return
     command = [python, str(script), INSTALL_DEPENDENCIES_OPTION]
     if requirements_file is not None:
         command.append(requirements_file)
+    if keep_portable_node and KEEP_PORTABLE_NODE_OPTION in engine_text:
+        command.append(KEEP_PORTABLE_NODE_OPTION)
     result = _run(
         command,
         cwd=project_dir,
         label=f"install dependencies with {ENGINE_SCRIPT} on disk",
-        # The child runs pip and npm with their own timeouts (900 s each, 300 s
-        # for pip check), so one child process takes up to their sum. 5400 s
-        # is above that sum and covers the lock install plus npm ci on a slow
-        # connection; the inner timeouts fire first.
-        timeout=5400,
+        # The child runs each phase with its own timeout: the portable Node.js
+        # 600 s; the pip upgrade, the lock install, the retired-package removal
+        # and npm 900 s each; pip check 300 s; SearXNG 300 s to check and
+        # 1200 s to reinstall. 7200 s is above their sum (6000 s), so the inner
+        # timeouts fire first.
+        timeout=7200,
         check=False,
         # The child writes its log as UTF-8 (``install_dependencies_main``),
         # and npm output is part of it.
@@ -1568,32 +2065,47 @@ def _find_npm(project_dir: Path) -> str:
 PORTABLE_NODE_INSTALLER = Path("scripts") / "install_node_portable.ps1"
 
 
-def refresh_portable_node(project_dir: Path) -> None:
+def refresh_portable_node(project_dir: Path) -> DependencyStepFailure | None:
     """Replace ``.node`` when its Node.js is not the version the updated code pins.
 
     Only a Windows checkout that has a ``.node`` (setup.bat installed it
     because there was no system Node.js) is touched; a system Node.js is the
     user's to update, and macOS / Linux have no portable install. Runs the
     ``install_node_portable.ps1`` the update just brought in, so a new pin
-    reaches existing users with the same update that ships it.
+    reaches existing users with the same update that ships it. Called from
+    ``update_dependencies``, so it runs with the procedure of the code on disk
+    too, before npm ci. Not in the rollback: the previous code runs on the
+    newer Node.js too, and putting the old one back would bring back the
+    version this replaced (docs/intent/dependency_management.md section 2-6).
 
     Never raises. The script swaps by renaming and leaves the previous
     ``.node`` intact when it fails (download, checksum, archive, or a ``.node``
     still in use), so the update goes on with the Node.js it had -- a working
-    one -- and the next update tries again. Failing the update over it would
-    hold back the code, and the fixes it carries, on nodejs.org being
-    reachable.
+    one. Failing the update over it would hold back the code, and the fixes it
+    carries, on nodejs.org being reachable. A failure is returned instead, and
+    ``install_dependencies_main`` shows it on the screen and leaves the
+    dependency record unwritten, so the next start.bat tries again. Returns
+    None when nothing failed (or there was nothing to do).
     """
     if not _is_windows():
-        return
+        return None
     # ``.node.old`` alone is a replacement that died between its two renames;
     # the script puts it back before anything else.
     if not any((project_dir / name / "node.exe").is_file() for name in (".node", ".node.old")):
-        return
+        return None
     script = project_dir / PORTABLE_NODE_INSTALLER
     if not script.is_file():
+        # A checkout without its own installer cannot be fixed by retrying at
+        # the next start: shown on screen, not retried.
         LOGGER.warning("[node] %s is missing; the portable Node.js was left as it is", PORTABLE_NODE_INSTALLER)
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE,
+            f"{PORTABLE_NODE_INSTALLER} is missing from this SAIVerse folder. "
+            "Run update.bat (update.sh on macOS / Linux) to restore the files of SAIVerse.\n"
+            f"SAIVerse のフォルダから {PORTABLE_NODE_INSTALLER} が欠けています。"
+            "update.bat (Mac / Linux は update.sh) で SAIVerse のファイルを直してください。",
+            retry=False,
+        )
     try:
         result = _run(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
@@ -1602,12 +2114,14 @@ def refresh_portable_node(project_dir: Path) -> None:
             timeout=600,
             check=False,
         )
-    except UpdateError:
+    except UpdateError as exc:
         LOGGER.warning(
             "[node] The portable Node.js could not be checked; the update continues with the existing .node",
             exc_info=True,
         )
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE, f"The portable Node.js could not be checked: {exc}"
+        )
     for line in (result.stdout or "").splitlines():
         if line.strip():
             LOGGER.info("[node] %s", line.strip())
@@ -1615,10 +2129,218 @@ def refresh_portable_node(project_dir: Path) -> None:
         detail = (result.stderr or "").strip()[-2000:]
         LOGGER.warning(
             "[node] The portable Node.js could not be replaced (exit %d); the update continues with "
-            "the existing .node, and the next update tries again.%s",
+            "the existing .node, and the next start.bat tries again.%s",
             result.returncode,
             f" {detail}" if detail else "",
         )
+        # The installer reports its errors as ``[ERROR] ...`` lines on stdout.
+        reason = (detail or (result.stdout or "").strip()[-2000:]).strip()
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE,
+            f"The portable Node.js could not be replaced (exit {result.returncode})"
+            + (f": {reason}" if reason else ""),
+        )
+    return None
+
+
+# --- SearXNG --------------------------------------------------------------------
+#
+# setup.bat / setup.sh install SearXNG (the local web search server) into its
+# own venv, ``scripts/.searxng-venv`` unless SEARXNG_VENV_DIR names another
+# folder (relative to the checkout, as scripts/searxng_config.py resolves it).
+# The SearXNG release is pinned in scripts/searxng_pin.json; whether the
+# installed one matches and how to reinstall it is scripts/searxng_install.py
+# (``check`` / ``setup``), the same steps run_searxng_server.ps1 / .sh run
+# before starting the server. A checkout without that venv has no SearXNG and
+# is left alone.
+
+SEARXNG_DEFAULT_VENV = Path("scripts") / ".searxng-venv"
+SEARXNG_INSTALLER = Path("scripts") / "searxng_install.py"
+SEARXNG_LAUNCHER_SH = Path("scripts") / "run_searxng_server.sh"
+# start.bat / start-dev.bat open SearXNG with exactly this in
+# ``cmd /k "..."``; ``start_searxng`` opens the same window again.
+SEARXNG_WINDOW_COMMAND = (
+    "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\\run_searxng_server.ps1"
+)
+SEARXNG_WINDOW_SIGNATURE = "title SearXNG"
+SEARXNG_LAUNCHER_PS1_NAME = "run_searxng_server.ps1"
+_SEARXNG_MODULE = "searx.webapp"
+_POWERSHELL_NAMES = frozenset({"powershell.exe", "pwsh.exe"})
+# Set for ``searxng_install.py setup`` run by ``refresh_searxng``: the installer
+# then does not write its own failure record (scripts/searxng_install.py).
+SEARXNG_SKIP_FAILURE_RECORD_ENV = "SAIVERSE_SEARXNG_SKIP_FAILURE_RECORD"
+SEARXNG_CHECK_TIMEOUT_SECONDS = 300
+SEARXNG_SETUP_TIMEOUT_SECONDS = 1200
+
+
+def _searxng_venv_dir(project_dir: Path) -> Path:
+    configured = os.environ.get("SEARXNG_VENV_DIR")
+    path = Path(configured) if configured else SEARXNG_DEFAULT_VENV
+    return path if path.is_absolute() else project_dir / path
+
+
+def _searxng_venv_python(project_dir: Path) -> Path:
+    venv = _searxng_venv_dir(project_dir)
+    return venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
+
+
+# The record scripts/searxng_install.py writes in the checkout before it sets
+# the SearXNG venv aside, and removes once the new venv is installed or the
+# set-aside one is back (``SET_ASIDE_ENTRY`` in scripts/setup_in_progress.py,
+# docs/intent/dependency_management.md section 2-7). While it is there, a
+# SearXNG setup stopped part-way: the venv may have no python at all, and the
+# next ``searxng_install.py setup`` finishes it. Spelled out here because this
+# engine imports nothing from the checkout; a test keeps the two equal.
+SEARXNG_SETUP_IN_PROGRESS_RECORD = Path(".setup_in_progress") / "searxng-venv.json"
+
+
+def searxng_setup_stopped(project_dir: Path) -> bool:
+    """Whether a SearXNG setup stopped part-way here (its record is left)."""
+    return (project_dir / SEARXNG_SETUP_IN_PROGRESS_RECORD).is_file()
+
+
+def searxng_installed(project_dir: Path) -> bool:
+    """Whether setup installed SearXNG into this checkout: its venv has a
+    python, or a setup of it stopped part-way (``searxng_setup_stopped``) and
+    must be finished -- the venv set aside then may be all that is left."""
+    return _searxng_venv_python(project_dir).is_file() or searxng_setup_stopped(project_dir)
+
+
+def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure | None:
+    """A retryable failure when this checkout's SearXNG may be running, else None.
+
+    Not knowing (the process list cannot be read) counts as running: the
+    reinstall is then tried again at the next start instead of risking a
+    venv replaced under a running server.
+    """
+    try:
+        running = find_searxng_servers(project_dir)
+    except FrontendCheckUnavailable as exc:
+        detail = f"whether SearXNG is running could not be checked ({exc})"
+    else:
+        if not running:
+            return None
+        detail = "SearXNG is running (" + _describe_processes(running) + ")"
+    LOGGER.warning("[searxng] %s; SearXNG was not reinstalled", detail)
+    return DependencyStepFailure(
+        DEPENDENCY_STEP_SEARXNG,
+        f"SearXNG needs to be reinstalled, but {detail}. Close the SearXNG window and run "
+        "start.bat (start.sh on macOS / Linux) again.\n"
+        "SearXNG の入れ直しが必要ですが、SearXNG が動いているため入れ直していません。"
+        "SearXNG の窓を閉じてから、start.bat (Mac / Linux は start.sh) をもう一度実行してください。",
+    )
+
+
+def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> DependencyStepFailure | None:
+    """Reinstall SearXNG when it does not match the release the code pins.
+
+    Runs ``searxng_install.py check`` with the SearXNG venv's python, and
+    ``searxng_install.py setup`` when the check fails -- what
+    run_searxng_server.ps1 / .sh do before starting the server, done here so
+    the update, not the next start, brings in a new pin. Nothing happens
+    without a SearXNG venv.
+
+    When a SearXNG setup stopped part-way (``searxng_setup_stopped``), the
+    check is skipped (it fails while the record is there) and the setup runs
+    with SAIVerse's own python (``saiverse_python``, else ``sys.executable``):
+    the SearXNG venv may have no python left, or only the half-made one. The
+    installer is standard library only and makes the venv with the python
+    that runs it, the series setup.bat / setup.sh make it with. The setup
+    reads the record, installs the venv again and puts the set-aside venv back
+    when that fails (scripts/searxng_install.py).
+
+    Never raises, for the same reason ``refresh_portable_node`` does not:
+    SearXNG is an optional search server, and failing the whole update over
+    it (GitHub unreachable, for instance) would hold back the code. The
+    failure is logged and returned, like ``refresh_portable_node``'s: it is
+    shown on the screen and the next start.bat / start.sh tries again
+    (run_searxng_server.ps1 / .sh also try the same setup when SearXNG is next
+    started). Returns None when nothing failed (or there was nothing to do).
+    """
+    if not searxng_installed(project_dir):
+        return None
+    installer = project_dir / SEARXNG_INSTALLER
+    if not installer.is_file():
+        # As in ``refresh_portable_node``: retrying at the next start cannot
+        # bring back a file the checkout lacks, so this is shown, not retried.
+        LOGGER.warning("[searxng] %s is missing; SearXNG was left as it is", SEARXNG_INSTALLER)
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG,
+            f"{SEARXNG_INSTALLER} is missing from this SAIVerse folder. "
+            "Run update.bat (update.sh on macOS / Linux) to restore the files of SAIVerse.\n"
+            f"SAIVerse のフォルダから {SEARXNG_INSTALLER} が欠けています。"
+            "update.bat (Mac / Linux は update.sh) で SAIVerse のファイルを直してください。",
+            retry=False,
+        )
+    stopped = searxng_setup_stopped(project_dir)
+    if stopped:
+        python = saiverse_python or sys.executable
+        LOGGER.warning(
+            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it "
+            "with SAIVerse's python",
+            SEARXNG_SETUP_IN_PROGRESS_RECORD,
+        )
+    else:
+        python = str(_searxng_venv_python(project_dir))
+    try:
+        if not stopped:
+            check = _run(
+                [python, str(installer), "check"],
+                cwd=project_dir,
+                label="check SearXNG",
+                timeout=SEARXNG_CHECK_TIMEOUT_SECONDS,
+                check=False,
+                encoding="utf-8",
+            )
+            if check.returncode == 0:
+                LOGGER.info("[searxng] SearXNG matches the pinned release")
+                return None
+        # Only the Update button's update stops SearXNG first. update.bat, the
+        # reinstall before start, and an update run by an engine from before
+        # SearXNG was stopped reach here with SearXNG possibly running, and the
+        # setup would replace the packages of the venv it is running from.
+        running = _searxng_running_for_reinstall(project_dir)
+        if running is not None:
+            return running
+        result = _run(
+            [python, str(installer), "setup"],
+            cwd=project_dir,
+            label="reinstall SearXNG",
+            timeout=SEARXNG_SETUP_TIMEOUT_SECONDS,
+            check=False,
+            encoding="utf-8",
+            # The failure is returned and written to DEPENDENCIES_FAILURE_RECORD;
+            # the installer's own record would show it in a second banner.
+            # An installer that predates the variable ignores it.
+            env={**os.environ, SEARXNG_SKIP_FAILURE_RECORD_ENV: "1"},
+        )
+    except UpdateError as exc:
+        LOGGER.warning(
+            "[searxng] SearXNG could not be checked or reinstalled; the update continues, "
+            "and SearXNG tries again when it is next started",
+            exc_info=True,
+        )
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG, f"SearXNG could not be checked or reinstalled: {exc}"
+        )
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("[searxng] %s", line.strip())
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()[-2000:]
+        LOGGER.warning(
+            "[searxng] SearXNG could not be reinstalled (exit %d); the update continues, and "
+            "SearXNG tries again when it is next started.%s",
+            result.returncode,
+            f" {detail}" if detail else "",
+        )
+        reason = (detail or (result.stdout or "").strip()[-2000:]).strip()
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG,
+            f"SearXNG could not be reinstalled (exit {result.returncode})"
+            + (f": {reason}" if reason else ""),
+        )
+    return None
 
 
 def build_frontend(project_dir: Path) -> None:
@@ -1684,8 +2406,9 @@ def _rollback_code_and_dependencies(
         requirements_file = LEGACY_REQUIREMENTS
     try:
         # The previous revision's own procedure, from the file the reset just
-        # put back (see ``_run_dependencies_from_disk``).
-        _run_dependencies_from_disk(project_dir, python, requirements_file)
+        # put back (see ``_run_dependencies_from_disk``), with the portable
+        # Node.js left as the update replaced it (``refresh_portable_node``).
+        _run_dependencies_from_disk(project_dir, python, requirements_file, keep_portable_node=True)
     except UpdateError:
         LOGGER.exception("Dependency repair for the previous revision also failed")
 
@@ -1816,7 +2539,7 @@ FRONTEND_STOP_TIMEOUT_SECONDS = 15.0
 
 
 class FrontendCheckUnavailable(UpdateError):
-    """psutil is missing or broken, so running frontend servers cannot be listed."""
+    """psutil is missing or broken, so running frontend / SearXNG servers cannot be listed."""
 
 
 class FrontendServers(NamedTuple):
@@ -1846,16 +2569,17 @@ def _normalized_absolute(value: str) -> str | None:
         return None
 
 
-def _frontend_roots(frontend: Path) -> set[str]:
-    """The ways this checkout's frontend directory can be spelled.
+def _directory_spellings(directory: Path) -> set[str]:
+    """The ways a directory of this checkout (its frontend, the SearXNG venv)
+    can be spelled.
 
     Both the path as given and its resolved form, so a checkout reached
     through a junction or symlink is still recognised.
     """
     roots: set[str] = set()
-    candidates = [str(frontend)]
+    candidates = [str(directory)]
     try:
-        candidates.append(os.path.realpath(frontend))
+        candidates.append(os.path.realpath(directory))
     except (OSError, ValueError):
         pass
     for candidate in candidates:
@@ -1949,7 +2673,7 @@ def find_frontend_servers(
     if not frontend.is_dir():
         return FrontendServers([], None)
     psutil = _import_psutil()
-    roots = _frontend_roots(frontend)
+    roots = _directory_spellings(frontend)
     if processes is None:
         try:
             processes = list(psutil.process_iter())
@@ -2023,7 +2747,7 @@ def _terminate_processes(processes: list[Any], psutil: Any, timeout: float) -> l
     _, alive = psutil.wait_procs(processes, timeout=timeout)
     if not alive:
         return []
-    LOGGER.warning("Frontend process(es) did not stop in time; killing: %s", _describe_processes(alive))
+    LOGGER.warning("Process(es) did not stop in time; killing: %s", _describe_processes(alive))
     for process in alive:
         try:
             process.kill()
@@ -2076,7 +2800,7 @@ def stop_frontend_servers(
     return found
 
 
-def refuse_while_frontend_runs(project_dir: Path) -> None:
+def refuse_while_frontend_runs(project_dir: Path, *, refuse_when_unchecked: bool = False) -> None:
     """The manual-update entrance: refuse while this checkout's frontend runs.
 
     A manual update (update.bat / update.sh / the start-time finishing pass)
@@ -2084,10 +2808,30 @@ def refuse_while_frontend_runs(project_dir: Path) -> None:
     changed and tells them what to close. When psutil cannot be used the check
     is skipped with a warning rather than blocking update.bat, which is the
     path that installs psutil in the first place.
+
+    ``refuse_when_unchecked`` is for the reinstall before start
+    (``reinstall_dependencies_once``): there, not being able to check the
+    frontend and SearXNG servers (both are listed with psutil) refuses too, so
+    the reinstall is postponed to the next start and shown, instead of running
+    ``npm ci`` beside a frontend that may be running. update.bat keeps the
+    warning: it is how a broken psutil gets installed again.
     """
     try:
+        if refuse_when_unchecked:
+            _import_psutil()  # find_frontend_servers skips psutil without a frontend folder
         found = find_frontend_servers(project_dir)
     except FrontendCheckUnavailable as exc:
+        if refuse_when_unchecked:
+            raise UpdateError(
+                f"Whether the SAIVerse frontend or SearXNG of this folder is running could not be "
+                f"checked ({exc}). Nothing was changed. Close every SAIVerse window, then run "
+                "start.bat (start.sh on macOS / Linux) again. If this stays, run update.bat "
+                "(update.sh) to install the packages again.\n"
+                "このフォルダの SAIVerse の画面のサーバーや SearXNG が動いているかを確かめられないため、"
+                "何も変更していません。SAIVerse の窓をすべて閉じてから、start.bat (Mac / Linux は "
+                "start.sh) をもう一度実行してください。この表示が続くときは、update.bat (update.sh) で"
+                "パッケージを入れ直してください。"
+            ) from exc
         LOGGER.warning("Could not check whether the SAIVerse frontend is running: %s", exc)
         return
     if not found.processes:
@@ -2182,6 +2926,207 @@ def _restart_frontend(project_dir: Path, mode: str | None) -> None:
     LOGGER.info("Frontend server started again (mode=%s, PID %s)", mode, process.pid)
 
 
+# --- The SearXNG server ---------------------------------------------------------
+#
+# start.bat / start-dev.bat open SearXNG as ``cmd /k "title SearXNG &&
+# powershell ... -File scripts\run_searxng_server.ps1"``; the script ends in
+# ``<SearXNG venv python> -m searx.webapp``. start.sh (with SAIVERSE_SEARXNG=1)
+# runs run_searxng_server.sh, which ``exec``s the same command. A detached
+# update stops it before anything changes, so ``refresh_searxng`` can replace
+# the packages of its venv (on Windows a running python holds them open), and
+# starts it again at the end, as it does for the frontend.
+#
+# A process is this checkout's SearXNG server when it is python, its command
+# line runs ``-m searx.webapp``, and the python it runs is the one in this
+# checkout's SearXNG venv (checked on ``cmdline[0]`` and on ``exe()``, on path
+# boundaries). On Windows the venv's python.exe is a launcher that starts the
+# base interpreter as a child with the same command line, so both are found.
+# Of their ancestors only the start.bat window (``SEARXNG_WINDOW_SIGNATURE`` in
+# a cmd.exe command line) and the PowerShell running run_searxng_server.ps1 are
+# included, so the window closes instead of being left at a prompt. Any other
+# process -- another checkout's SearXNG, a python the user started -- is never
+# touched.
+
+
+def _runs_searxng_webapp(cmdline: list[str]) -> bool:
+    return any(
+        cmdline[index] == "-m" and cmdline[index + 1] == _SEARXNG_MODULE
+        for index in range(len(cmdline) - 1)
+    )
+
+
+def _searxng_launchers(process: Any, psutil: Any) -> list[Any]:
+    """The start.bat window and the PowerShell of run_searxng_server.ps1 among
+    ``process``'s ancestors."""
+    try:
+        parents = process.parents()
+    except (psutil.Error, OSError):
+        return []
+    signature = SEARXNG_WINDOW_SIGNATURE.lower()
+    script = SEARXNG_LAUNCHER_PS1_NAME.lower()
+    launchers: list[Any] = []
+    for parent in parents:
+        try:
+            name = (parent.name() or "").lower()
+            if name not in _WINDOW_SHELL_NAMES and name not in _POWERSHELL_NAMES:
+                continue
+            text = " ".join(parent.cmdline() or []).lower()
+        except (psutil.Error, OSError):
+            continue
+        if (name in _WINDOW_SHELL_NAMES and signature in text) or (
+            name in _POWERSHELL_NAMES and script in text
+        ):
+            launchers.append(parent)
+    return launchers
+
+
+def find_searxng_servers(project_dir: Path, *, processes: Any | None = None) -> list[Any]:
+    """This checkout's running SearXNG server processes (see the section
+    comment for what counts). Empty without a SearXNG venv, without listing
+    any process. ``processes`` replaces ``psutil.process_iter()`` in tests."""
+    venv = _searxng_venv_dir(project_dir)
+    if not venv.is_dir():
+        return []
+    psutil = _import_psutil()
+    roots = _directory_spellings(venv)
+    if processes is None:
+        try:
+            processes = list(psutil.process_iter())
+        except Exception as exc:
+            raise FrontendCheckUnavailable(f"running processes could not be listed ({exc})") from exc
+
+    matched: dict[int, Any] = {}
+    for process in processes:
+        try:
+            if not (process.name() or "").lower().startswith("python"):
+                continue
+            cmdline = list(process.cmdline() or [])
+            try:
+                exe = process.exe() or ""
+            except psutil.AccessDenied:
+                exe = ""
+            pid = process.pid
+        except (psutil.Error, OSError):
+            continue  # gone, a zombie, or not ours to inspect
+        if not _runs_searxng_webapp(cmdline):
+            continue
+        if not ((cmdline and _is_within(cmdline[0], roots)) or (exe and _is_within(exe, roots))):
+            continue
+        matched[pid] = process
+        for launcher in _searxng_launchers(process, psutil):
+            try:
+                matched[launcher.pid] = launcher
+            except (psutil.Error, OSError):
+                continue
+    return list(matched.values())
+
+
+def stop_searxng_servers(
+    project_dir: Path,
+    *,
+    timeout: float = FRONTEND_STOP_TIMEOUT_SECONDS,
+) -> bool:
+    """Stop this checkout's SearXNG server; return whether one was running.
+
+    Same handling as ``stop_frontend_servers``: terminate, kill what is left,
+    look once more, and raise UpdateError when a process survives -- callers
+    run this before anything is changed.
+    """
+    found = find_searxng_servers(project_dir)
+    if not found:
+        LOGGER.info("No SearXNG server of this checkout is running")
+        return False
+    psutil = _import_psutil()
+    LOGGER.info("Stopping the SearXNG server: %s", _describe_processes(found))
+    survivors = _terminate_processes(found, psutil, timeout)
+    if not survivors:
+        survivors = find_searxng_servers(project_dir)
+        if survivors:
+            survivors = _terminate_processes(survivors, psutil, timeout)
+    if survivors:
+        raise UpdateError(
+            "The SearXNG server could not be stopped (" + _describe_processes(survivors) + "). "
+            "Nothing was changed. Close the SearXNG window and run the update again.\n"
+            "SearXNG のサーバーを止められませんでした。何も変更していません。"
+            "SearXNG の窓を閉じてから、もう一度更新してください。"
+        )
+    return True
+
+
+def start_searxng(project_dir: Path) -> subprocess.Popen[Any]:
+    """Start the SearXNG server again, the way the start scripts do.
+
+    Windows: a new visible window with ``SEARXNG_WINDOW_COMMAND``, the window
+    start.bat opens, in the checkout folder (the command names the script by a
+    relative path). macOS / Linux: run_searxng_server.sh in a new session.
+    The script checks the installed release and reinstalls it if needed
+    before it starts the server.
+    """
+    kwargs: dict[str, Any] = {"cwd": str(project_dir), "close_fds": True}
+    if _is_windows():
+        shell = os.environ.get("COMSPEC") or "cmd.exe"
+        command = [shell, "/k", SEARXNG_WINDOW_COMMAND]
+        kwargs["creationflags"] = _CREATE_NEW_CONSOLE
+    else:
+        command = ["bash", str(project_dir / SEARXNG_LAUNCHER_SH)]
+        kwargs["start_new_session"] = True
+    LOGGER.info("Starting the SearXNG server again")
+    try:
+        return subprocess.Popen(command, **kwargs)
+    except OSError as exc:
+        raise UpdateError(f"Could not start the SearXNG server: {exc}") from exc
+
+
+# Written by ``_restart_searxng`` when the SearXNG server the Update button's
+# update stopped could not be started again. It is written before the backend
+# starts, and the backend reads it at startup, shows it in the alert banner and
+# removes it (``saiverse/environment_alerts.py``): it reports what happened in
+# that restart, not a state a later step would clear.
+SEARXNG_RESTART_FAILURE_RECORD = ".searxng_restart_failed.json"
+
+
+def searxng_restart_failure_path(project_dir: Path) -> Path:
+    return project_dir / SEARXNG_RESTART_FAILURE_RECORD
+
+
+def _restart_searxng(project_dir: Path, was_running: bool) -> bool:
+    """Start the stopped SearXNG again; return whether it was started. Never
+    raises (the update's outcome does not depend on it).
+
+    Called before the backend is started, so that a failure written to
+    ``SEARXNG_RESTART_FAILURE_RECORD`` is there when the backend starts and
+    collects the alerts. Only the start itself is checked: a SearXNG that
+    exits right after starting shows its error in its own window.
+    """
+    if not was_running:
+        return False
+    try:
+        process = start_searxng(project_dir)
+    except Exception as exc:
+        LOGGER.exception(
+            "The SearXNG server could not be started again; start SAIVerse with start.bat / "
+            "start.sh to bring web search back"
+        )
+        document = {
+            "version": read_version(project_dir),
+            "error": str(exc).strip()[-2000:],
+            "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        target = searxng_restart_failure_path(project_dir)
+        try:
+            _write_json_atomically(target, document)
+        except OSError:
+            LOGGER.error(
+                "Could not write %s, so the SAIVerse screen will not show this failure",
+                target,
+                exc_info=True,
+            )
+        return False
+    _remove_file(searxng_restart_failure_path(project_dir), purpose="a SearXNG server started again")
+    LOGGER.info("SearXNG server started again (PID %s)", process.pid)
+    return True
+
+
 # --- The update sequence ----------------------------------------------------
 
 
@@ -2210,7 +3155,8 @@ def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _Upda
     ``RETIRED_CORE_PACKAGES``) would not run that step on the update that
     ships it -- while still writing the completion marker. The Codex review of
     PR #414 found this, and PR #413 met the same kind of gap with the portable
-    Node.js replacement.
+    Node.js replacement, which is why that replacement now runs inside the
+    child too (``update_dependencies``).
     """
     progress.code_phase_started = True
     if progress.plan is None:
@@ -2226,11 +3172,7 @@ def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _Upda
     # this checkout is finished. Both the manual and the detached run reach
     # the final write through this same function.
     invalidate_completion_marker(project_dir)
-    # Before npm ci, so the packages are installed with the Node.js the new
-    # code pins. Not in the rollback: the previous code runs on the newer
-    # Node.js too, and putting the old one back would bring back the version
-    # this replaced (docs/intent/dependency_management.md section 2-6).
-    refresh_portable_node(project_dir)
+    invalidate_dependencies_record(project_dir)
     _run_dependencies_from_disk(project_dir, python)
 
 
@@ -2291,14 +3233,19 @@ def _restore_previous_version(
     python: str,
     progress: _UpdateProgress,
     frontend_mode: str | None,
+    searxng_was_running: bool = False,
 ) -> None:
     """After a failure with the backend stopped: bring the previous version back.
 
-    Rolls back when the checkout moved, restarts the previous backend and
-    checks its health, then starts the stopped frontend again -- rebuilt first
-    when it is a production server and the code was rolled back, since the
-    build on disk may be the new version's or half-written. Never raises: the
-    caller re-raises the original failure afterwards.
+    Rolls back when the checkout moved, starts the stopped SearXNG again
+    (before the backend, as the update does, so a failure to start it is in
+    ``SEARXNG_RESTART_FAILURE_RECORD`` when the backend collects its alerts),
+    restarts the previous backend and checks its health, then the stopped
+    frontend -- rebuilt first when it is a production server and the code was
+    rolled back, since the build on disk may be the new version's or
+    half-written. Never raises: the caller re-raises the original failure
+    afterwards. ``searxng_was_running`` is False when the update already
+    started SearXNG again before it failed.
 
     When the code itself cannot be rolled back, nothing is started: the
     checkout is in an unknown state, and starting it could migrate the world
@@ -2324,6 +3271,7 @@ def _restore_previous_version(
             return
         rolled_back = True
 
+    _restart_searxng(project_dir, searxng_was_running)
     try:
         backend = restart_application(config)
         wait_for_healthy_restart(backend, config)
@@ -2411,6 +3359,7 @@ def _run_detached_update(
     )
     progress = _UpdateProgress()
     stopped_frontend_mode: str | None = None
+    searxng_was_running = False
     try:
         # The preflight runs *after* the old backend has fully exited:
         # everything the dying process (or the user, in that window) still
@@ -2418,9 +3367,11 @@ def _run_detached_update(
         # API-side one that ran before shutdown (adversarial review
         # 2026-09-25, TOCTOU finding). Nothing has been mutated yet.
         _preflight(project_dir, switch_channel, progress)
-        # The frontend holds node_modules open on Windows; stop it before
-        # anything changes. A failure here also leaves everything untouched.
+        # The frontend holds node_modules open on Windows, and SearXNG the
+        # packages of its venv; stop both before anything changes. A failure
+        # here also leaves everything untouched.
         stopped_frontend_mode = stop_frontend_servers(project_dir).mode
+        searxng_was_running = stop_searxng_servers(project_dir)
         _snapshot(project_dir, python, progress)
         _apply_code_and_dependencies(project_dir, python, progress)
         if stopped_frontend_mode == FRONTEND_MODE_START:
@@ -2428,17 +3379,30 @@ def _run_detached_update(
     except Exception:
         # Not only UpdateError: whatever stops the update here, the backend is
         # already gone and must come back.
-        _restore_previous_version(config, project_dir, python, progress, stopped_frontend_mode)
+        _restore_previous_version(
+            config, project_dir, python, progress, stopped_frontend_mode, searxng_was_running
+        )
         raise
 
     process: subprocess.Popen[Any] | None = None
+    # SearXNG before the backend: a failure to start it is written to
+    # SEARXNG_RESTART_FAILURE_RECORD, and the backend shows it in the banner
+    # only if the record is there when it starts.
+    searxng_started = _restart_searxng(project_dir, searxng_was_running)
     try:
         process = restart_application(config)
         payload = wait_for_healthy_restart(process, config)
     except Exception:
         if process is not None:
             _terminate_spawned(process)
-        _restore_previous_version(config, project_dir, python, progress, stopped_frontend_mode)
+        _restore_previous_version(
+            config,
+            project_dir,
+            python,
+            progress,
+            stopped_frontend_mode,
+            searxng_was_running and not searxng_started,
+        )
         raise
     write_completion_marker(project_dir)
     LOGGER.info(
@@ -2476,7 +3440,12 @@ def _config_switch_channel(config: dict[str, Any] | None) -> str | None:
     return str(channel)
 
 
-def install_dependencies_main(project_dir: Path, requirements_file: str | None) -> int:
+def install_dependencies_main(
+    project_dir: Path,
+    requirements_file: str | None,
+    *,
+    replace_portable_node: bool = True,
+) -> int:
     """``INSTALL_DEPENDENCIES_OPTION``: run ``update_dependencies`` with this
     interpreter and return the exit code.
 
@@ -2486,6 +3455,18 @@ def install_dependencies_main(project_dir: Path, requirements_file: str | None) 
     streams are switched to UTF-8 so the parent's ``encoding="utf-8"`` decodes
     them whatever the console code page is; only this process's streams
     change, not those of the pip / npm it starts.
+
+    On success the failure left by an earlier run is removed and
+    ``DEPENDENCIES_RECORD`` is written, in that order: a crash between the two
+    leaves neither, and the next start simply installs once more, rather than
+    a record without a failure to clear and a banner that never goes away.
+
+    When a step that does not stop the update failed (the portable Node.js or
+    SearXNG, returned by ``update_dependencies``), the exit code stays 0 --
+    the update itself goes on -- but the failure is written to
+    ``DEPENDENCIES_FAILURE_RECORD`` for the screen and ``DEPENDENCIES_RECORD``
+    is not written, so the next start.bat / start.sh ``--check-complete``
+    runs the dependency step once more (``reinstall_dependencies_once``).
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -2496,10 +3477,44 @@ def install_dependencies_main(project_dir: Path, requirements_file: str | None) 
                 pass
     setup_logging(project_dir, to_file=False)
     try:
-        update_dependencies(project_dir, sys.executable, requirements_file)
+        failures = update_dependencies(
+            project_dir,
+            sys.executable,
+            requirements_file,
+            replace_portable_node=replace_portable_node,
+        )
     except UpdateError as exc:
         print(f"UpdateError: {exc}", file=sys.stderr)
         return 1
+    if failures:
+        write_dependencies_failure(
+            project_dir,
+            "\n".join(failure.error for failure in failures),
+            steps=[failure.step for failure in failures],
+        )
+        if any(failure.retry for failure in failures):
+            # No record may claim a finished step. Usually there is none that
+            # matches (the update drops it when the code moves, and the
+            # reinstall at start runs only when it does not match); this makes sure.
+            _remove_file(dependencies_record_path(project_dir), purpose="a dependency step that did not finish")
+            LOGGER.warning(
+                "[deps] Finished, but %s failed; the screen shows it, and the next start.bat / "
+                "start.sh installs the packages once more",
+                ", ".join(failure.step for failure in failures),
+            )
+        else:
+            # Retrying cannot help: record the packages as installed so the
+            # next start does not reinstall them all, and keep the failure on
+            # screen until a later child run finishes without failures.
+            write_dependencies_record(project_dir)
+            LOGGER.warning(
+                "[deps] Finished, but %s could not run (a file of SAIVerse is missing); "
+                "the screen shows it",
+                ", ".join(failure.step for failure in failures),
+            )
+        return 0
+    clear_dependencies_failure(project_dir)
+    write_dependencies_record(project_dir)
     return 0
 
 
@@ -2511,9 +3526,13 @@ def main(argv: list[str] | None = None) -> int:
         "--check-complete",
         action="store_true",
         help=(
-            "Report whether the last update finished, without changing code or packages. "
+            "Report whether the last update finished, without changing the code. When an "
+            "older updater skipped part of the package installation, install the packages "
+            "once more for the code as it is. "
             f"Exit {CHECK_READY}: ready to start. Exit {CHECK_NEEDS_FINISH}: run --manual first. "
-            f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway."
+            f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway. "
+            f"Exit {CHECK_DEPENDENCIES_FAILED}: installing the packages once more failed, "
+            f"start anyway (the failure is in {DEPENDENCIES_FAILURE_RECORD})."
         ),
     )
     parser.add_argument(
@@ -2525,7 +3544,25 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Internal, started by the updater after the code changed: run only the dependency "
             f"step with this file's procedure, from REQUIREMENTS_FILE (default {REQUIREMENTS_LOCK}). "
-            "Logs to stdout. Exit 0 on success, 1 on failure."
+            "Logs to stdout. Exit 0 when the step finished, 1 on failure. A failed portable "
+            f"Node.js or SearXNG step keeps exit 0 and is written to {DEPENDENCIES_FAILURE_RECORD}."
+        ),
+    )
+    parser.add_argument(
+        KEEP_PORTABLE_NODE_OPTION,
+        action="store_true",
+        help=f"Internal, with {INSTALL_DEPENDENCIES_OPTION}: leave the portable Node.js as it is (rollback).",
+    )
+    parser.add_argument(
+        CHECK_STOPPED_OPTION,
+        action="store_true",
+        help=(
+            "Internal, run by scripts/setup_venv.py check-stopped: report whether SAIVerse, this "
+            "folder's frontend server or its SearXNG server may be running. Changes nothing. "
+            f"Exit {STOPPED_NOTHING_RUNNING}: nothing runs. Exit {STOPPED_MAY_BE_RUNNING}: something "
+            f"runs or cannot be ruled out. Exit {STOPPED_PROCESSES_UNCHECKED}: SAIVerse is stopped, but "
+            f"the servers could not be listed. Exit {STOPPED_CHECK_UNAVAILABLE}: this .venv cannot run "
+            "the check."
         ),
     )
     parser.add_argument(
@@ -2542,7 +3579,13 @@ def main(argv: list[str] | None = None) -> int:
 
     project_dir = Path(__file__).resolve().parent.parent
     if args.install_dependencies is not None:
-        return install_dependencies_main(project_dir, args.install_dependencies or None)
+        return install_dependencies_main(
+            project_dir,
+            args.install_dependencies or None,
+            replace_portable_node=not args.keep_portable_node,
+        )
+    if args.check_stopped:
+        return check_stopped_for_setup(project_dir)
     if args.check_complete:
         setup_logging(project_dir, to_file=False)
         return check_update_complete(project_dir)

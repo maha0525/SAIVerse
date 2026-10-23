@@ -15,33 +15,35 @@ if not exist ".venv\Scripts\activate.bat" (
 )
 
 REM ---------------------------------------------------------------
-REM Bring the portable Node.js to the version install_node_portable.ps1
-REM pins. An update from a version without this step runs the previous
-REM update engine, which never replaces .node; this start does. When .node
-REM is already current this only reads its version. On failure the
-REM existing .node is kept and SAIVerse starts with it. A .node.old alone
-REM is a replacement that died half-way; the script puts it back first.
-REM See docs/intent/dependency_management.md section 2-6.
+REM A portable Node.js replacement that died between its two renames
+REM leaves .node.old and no .node. Put it back before anything uses
+REM .node. The replacement itself runs during updates only - see
+REM docs/intent/dependency_management.md section 2-6.
 REM ---------------------------------------------------------------
-set "PORTABLE_NODE="
-if exist ".node\node.exe" set "PORTABLE_NODE=1"
-if exist ".node.old\node.exe" set "PORTABLE_NODE=1"
-if not defined PORTABLE_NODE goto :portable_node_done
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
-if errorlevel 1 echo [WARN] Could not update the portable Node.js. Starting with the existing one.
-:portable_node_done
+if exist ".node\" goto :portable_node_ready
+if not exist ".node.old\node.exe" goto :portable_node_ready
+echo [INFO] Putting back the portable Node.js left aside by an interrupted replacement...
+ren ".node.old" ".node"
+if errorlevel 1 echo [WARN] Could not rename .node.old back to .node.
+:portable_node_ready
 
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"
 
-REM Start SearXNG if installed
-if exist "scripts\.searxng-venv\Scripts\python.exe" (
-    echo [INFO] Starting SearXNG server...
-    start "SearXNG" cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"
-    timeout /t 3 /nobreak >nul
-) else (
-    echo [INFO] SearXNG not installed, skipping. Run setup.bat to install.
-)
+REM Start SearXNG if installed. A SearXNG setup that stopped part-way
+REM leaves .setup_in_progress\searxng-venv.json - the same as start.bat.
+set "SEARXNG_START="
+if exist "scripts\.searxng-venv\Scripts\python.exe" set "SEARXNG_START=1"
+if exist ".setup_in_progress\searxng-venv.json" set "SEARXNG_START=1"
+if not defined SEARXNG_START goto :searxng_not_installed
+if exist ".setup_in_progress\searxng-venv.json" echo [INFO] A SearXNG setup stopped before it finished; the SearXNG window finishes it first.
+echo [INFO] Starting SearXNG server...
+start "SearXNG" cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"
+timeout /t 3 /nobreak >nul
+goto :searxng_done
+:searxng_not_installed
+echo [INFO] SearXNG not installed, skipping. Run setup.bat to install.
+:searxng_done
 
 REM Start Backend
 echo [INFO] Starting backend...

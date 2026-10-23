@@ -278,7 +278,8 @@ def test_rollback_to_a_lock_revision_reinstalls_from_the_lock(tmp_path: Path, ca
     with caplog.at_level("WARNING", logger="saiverse.update"):
         deps = _rollback_with_reset(tmp_path, lock_after_reset=True)
 
-    deps.assert_called_once_with(tmp_path, "python", None)
+    # The portable Node.js stays as the update replaced it (refresh_portable_node).
+    deps.assert_called_once_with(tmp_path, "python", None, keep_portable_node=True)
     assert not any("predates" in record.getMessage() for record in caplog.records)
 
 
@@ -291,7 +292,9 @@ def test_rollback_to_a_pre_lock_revision_reinstalls_from_its_requirements_txt(tm
     with caplog.at_level("WARNING", logger="saiverse.update"):
         deps = _rollback_with_reset(tmp_path, lock_after_reset=False)
 
-    deps.assert_called_once_with(tmp_path, "python", update_engine.LEGACY_REQUIREMENTS)
+    deps.assert_called_once_with(
+        tmp_path, "python", update_engine.LEGACY_REQUIREMENTS, keep_portable_node=True
+    )
     assert update_engine.LEGACY_REQUIREMENTS == "requirements.txt"
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("old-head predates requirements.lock" in m and "requirements.txt" in m for m in warnings)

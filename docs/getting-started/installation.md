@@ -6,6 +6,8 @@ SAIVerseの環境構築手順を説明します。
 
 - **Python 3.13 推奨**（動作確認は 3.13 系だけ。3.11 / 3.12 は非推奨 — Python 側でこの二つの系列のインストーラーの配布が終わり、セキュリティ修正を普通の手順では入れられないため。3.14 以降は非対応）([ダウンロード](https://www.python.org/downloads/release/python-31317/) — 3.13.17)
   - インストール時に「Add python.exe to PATH」にチェックを入れること
+  - `setup.bat` / `setup.sh` は Python 3.13 を名指しで探す（`setup.bat` は Windows のレジストリに記録された 3.13 のインストール先、`setup.sh` は `python3.13` コマンド）。PATH の先頭にある `python` が別の版でも 3.13 を使う。3.13 が見つからないと `.venv` に触らずに止まり、入れ方を表示する。どうしてもいまの Python で進めたい場合は環境変数 `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` を設定して実行する（動作は保証しない。[環境変数](../reference/environment-vars.md)）
+  - **3.11 / 3.12 から移る場合**: Python 3.13.17 を入れ（古い Python は消さなくてよい）、SAIVerse を更新してから `setup.bat` / `setup.sh` をもう一度実行する。3.13 以外で作られた `.venv` は、古いものを `.venv.old-<日時>` に改名してから 3.13 で作り直され、パッケージが入ったら古いものは消される。SAIVerse の窓が開いていると改名できないので、先にすべて閉じておく。アドオン専用の Python 環境も、導入時の答えのまま 3.13 で作り直される。データ (`~/.saiverse`) とデータベースはそのまま
 - **Node.js 24.22.1以上**（22 系なら 22.23.4 以上。どちらも 2026-10-21 のセキュリティ修正版） ([ダウンロード](https://nodejs.org/))（未導入の場合 `setup.bat` が自動導入）
 - **Git**
   - **Windows は `setup.bat` が自動導入する**（winget、無理ならポータブル版）ので事前準備は不要
@@ -66,6 +68,8 @@ cd SAIVerse
 ```
 
 ### 2. Python仮想環境の作成
+
+`.venv` は作ったときの Python の系列に固定されるので、Python 3.13 で作ります（`python --version` が 3.13 でなければ、3.13 の python を名指しして実行します。Mac / Linux なら `python3.13 -m venv .venv`）。
 
 ```bash
 python -m venv .venv

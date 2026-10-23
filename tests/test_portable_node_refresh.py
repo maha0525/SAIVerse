@@ -3,8 +3,10 @@
 docs/intent/dependency_management.md section 2-6. Two halves:
 
 * the update engine calls the installer only for a Windows checkout that has
-  a .node, after the code moved and before npm ci, never in a rollback, and a
-  failed replacement does not fail the update;
+  a .node, inside the dependency step (the child running the engine on disk)
+  before npm ci, never in a rollback, and a failed replacement does not fail
+  the update; the launchers only put back a .node.old left by an interrupted
+  replacement;
 * the installer itself (run for real through Windows PowerShell, with a local
   archive built from the system node.exe standing in for the download) leaves
   a matching .node alone, replaces a differing one, and keeps the previous
@@ -31,6 +33,14 @@ INSTALLER = REPO_ROOT / "scripts" / "install_node_portable.ps1"
 
 
 # --- the update engine ---------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _saiverse_stopped():  # type: ignore[no-untyped-def]
+    """The reinstall waits while SAIVerse may be running; answer "stopped"
+    instead of reading this machine's runtime markers."""
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value=None):
+        yield
 
 
 def _checkout_with_portable_node(tmp_path: Path) -> Path:
@@ -71,7 +81,7 @@ def test_refresh_runs_the_installer_the_update_brought_in(tmp_path: Path) -> Non
     with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
         update_engine, "_run", return_value=MagicMock(returncode=0, stdout="[OK] done\n", stderr="")
     ) as run:
-        update_engine.refresh_portable_node(project)
+        assert update_engine.refresh_portable_node(project) is None
     args, kwargs = run.call_args
     command = args[0]
     assert command[0] == "powershell"
@@ -90,8 +100,13 @@ def test_a_failed_replacement_does_not_fail_the_update(tmp_path: Path, caplog) -
         "_run",
         return_value=MagicMock(returncode=1, stdout="[ERROR] download failed\n", stderr=""),
     ):
-        update_engine.refresh_portable_node(project)  # must not raise
+        failure = update_engine.refresh_portable_node(project)  # must not raise
     assert "could not be replaced (exit 1)" in caplog.text
+    # Returned, so the dependency step shows it and leaves its record unwritten.
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_PORTABLE_NODE
+    assert "could not be replaced (exit 1)" in failure.error
+    assert "download failed" in failure.error
 
 
 def test_powershell_that_cannot_start_does_not_fail_the_update(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -99,11 +114,18 @@ def test_powershell_that_cannot_start_does_not_fail_the_update(tmp_path: Path, c
     with caplog.at_level(logging.WARNING, logger="saiverse.update"), patch.object(
         update_engine, "_is_windows", return_value=True
     ), patch.object(update_engine, "_run", side_effect=update_engine.UpdateError("could not run")):
-        update_engine.refresh_portable_node(project)  # must not raise
+        failure = update_engine.refresh_portable_node(project)  # must not raise
     assert "could not be checked" in caplog.text
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_PORTABLE_NODE
+    assert "could not run" in failure.error
 
 
-def test_refresh_runs_after_the_code_moved_and_before_npm_ci(tmp_path: Path) -> None:
+def test_the_update_replaces_the_portable_node_only_inside_the_dependency_step(tmp_path: Path) -> None:
+    """The running updater was loaded before the code moved, so it must not
+    replace the portable Node.js itself: the dependency step (the child that
+    runs the engine on disk) does it with the fetched code's procedure
+    (docs/intent/update_completes_with_new_code.md section 3)."""
     order: list[str] = []
     with patch.object(update_engine, "update_code", side_effect=lambda *_: order.append("code")), patch.object(
         update_engine, "invalidate_completion_marker", side_effect=lambda *_: order.append("marker dropped")
@@ -111,18 +133,41 @@ def test_refresh_runs_after_the_code_moved_and_before_npm_ci(tmp_path: Path) -> 
         update_engine, "refresh_portable_node", side_effect=lambda *_: order.append("node")
     ), patch.object(update_engine, "_run_dependencies_from_disk", side_effect=lambda *_: order.append("deps")):
         update_engine._apply_code_and_dependencies(tmp_path, "python", update_engine._UpdateProgress())
-    assert order == ["code", "marker dropped", "node", "deps"]
+    assert order == ["code", "marker dropped", "deps"]
+
+
+def _record_dependency_phases(project: Path, **kwargs) -> list[str]:  # type: ignore[no-untyped-def]
+    (project / "frontend").mkdir(exist_ok=True)
+    order: list[str] = []
+
+    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        order.append(label)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=fake_run), patch.object(
+        update_engine, "refresh_portable_node", side_effect=lambda *_: order.append("node")
+    ), patch.object(update_engine, "_report_addon_conflicts"), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        update_engine.update_dependencies(project, "python", **kwargs)
+    return order
+
+
+def test_the_dependency_step_replaces_the_portable_node_before_pip_and_npm_ci(tmp_path: Path) -> None:
+    """Before npm ci, so the packages are installed with the Node.js the code pins."""
+    order = _record_dependency_phases(tmp_path)
+    assert order[0] == "node"
+    assert order.index("node") < order.index("npm install")
 
 
 def test_rollback_leaves_the_portable_node_alone(tmp_path: Path) -> None:
     """The previous code runs on the newer Node.js; the replaced version is
-    the one the pin moved away from and must not come back."""
-    (tmp_path / "requirements.lock").write_text("", encoding="utf-8")
-    with patch.object(update_engine, "_run"), patch.object(update_engine, "_run_dependencies_from_disk"), patch.object(
-        update_engine, "refresh_portable_node"
-    ) as refresh:
-        update_engine._rollback_code_and_dependencies(tmp_path, "python", "old-head")
-    refresh.assert_not_called()
+    the one the pin moved away from and must not come back. The rollback asks
+    the dependency step to keep it (test_update_engine_safety checks that the
+    rollback passes the request)."""
+    order = _record_dependency_phases(tmp_path, replace_portable_node=False)
+    assert "node" not in order
+    assert "npm install" in order
 
 
 def _portable_npm(project: Path) -> Path:
@@ -184,21 +229,61 @@ def test_npm_dir_is_moved_ahead_of_a_system_node_already_on_path(tmp_path: Path)
 
 
 @pytest.mark.parametrize("launcher", ["start.bat", "start-dev.bat"])
-def test_launchers_refresh_the_portable_node_before_using_it(launcher: str) -> None:
-    """An update from a version without refresh_portable_node runs the old
-    engine, which never replaces .node; the next start must (Codex review on
-    PR #413). The step has to come before .node is put on PATH and before
-    anything is started from it, or the folder is in use and cannot be
-    swapped. The update-finishing pass, which may change the pin, comes first."""
+def test_launchers_no_longer_compare_the_node_version_on_every_start(launcher: str) -> None:
+    """The replacement runs in the dependency step of every update and of the
+    one-time reinstall at start (--check-complete); the launchers no longer
+    start PowerShell to compare versions on each start
+    (docs/intent/update_completes_with_new_code.md section 3)."""
     text = (REPO_ROOT / launcher).read_text(encoding="ascii")
-    refresh = text.index("-File scripts\\install_node_portable.ps1")
+    assert "install_node_portable.ps1" not in text
+
+
+@pytest.mark.parametrize("launcher", ["start.bat", "start-dev.bat"])
+def test_launchers_put_back_a_node_old_left_by_an_interrupted_replacement(launcher: str) -> None:
+    """A replacement that died between its two renames leaves only .node.old;
+    without putting it back, nothing finds Node.js until the next update. It
+    has to happen before .node is put on PATH, before anything is started,
+    and in start.bat before the update check, whose reinstall runs npm."""
+    text = (REPO_ROOT / launcher).read_text(encoding="ascii")
+    restore = text.index('ren ".node.old" ".node"')
     on_path = text.index('set "PATH=%CD%\\.node;%PATH%"')
     first_start = text.index('start "')
-    assert refresh < on_path < first_start
+    assert restore < on_path < first_start
     if "--check-complete" in text:
-        assert text.index("--check-complete") < refresh
-    # Also when only .node.old is left (a replacement that died half-way).
-    assert 'if exist ".node.old\\node.exe" set "PORTABLE_NODE=1"' in text
+        assert restore < text.index("--check-complete")
+    # Only when there is no .node: an existing .node is never replaced here.
+    assert 'if exist ".node\\" goto :portable_node_ready' in text
+    assert 'if not exist ".node.old\\node.exe" goto :portable_node_ready' in text
+
+
+_CMD = shutil.which("cmd")
+
+
+@pytest.mark.skipif(sys.platform != "win32" or _CMD is None, reason="runs the launcher's block with cmd.exe")
+@pytest.mark.parametrize(
+    ("folders", "expected"),
+    [
+        ([".node.old"], [".node"]),  # put back
+        ([".node", ".node.old"], [".node", ".node.old"]),  # .node exists: untouched
+        ([], []),  # no portable Node.js at all
+    ],
+)
+def test_the_put_back_block_runs_in_cmd(tmp_path: Path, folders: list[str], expected: list[str]) -> None:
+    """The block from start.bat, run for real by cmd.exe in a scratch folder."""
+    text = (REPO_ROOT / "start.bat").read_text(encoding="ascii")
+    start = text.index('if exist ".node\\" goto :portable_node_ready')
+    end = text.index("\n:portable_node_ready", start) + len("\n:portable_node_ready")
+    script = tmp_path / "block.bat"
+    body = "@echo off\n" + text[start:end] + "\n"
+    # read_text gave "\n" line ends; cmd.exe needs CRLF and nothing else.
+    script.write_bytes(body.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii"))
+    work = tmp_path / "checkout"
+    work.mkdir()
+    for name in folders:
+        (work / name).mkdir()
+        (work / name / "node.exe").write_bytes(b"")
+    subprocess.run([_CMD, "/c", str(script)], cwd=work, check=True, capture_output=True, timeout=60)
+    assert sorted(path.name for path in work.iterdir()) == expected
 
 
 # --- the installer, run for real -------------------------------------------------

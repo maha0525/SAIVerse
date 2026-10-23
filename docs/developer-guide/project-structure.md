@@ -103,6 +103,8 @@ saiverse/
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
+├── update_dependencies_alert.py # 起動前のパッケージの入れ直し（update_engine --check-complete）が失敗した
+│                           #   記録を読み、画面のバナー（startup_alerts）に載せる警告にする
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
 │                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
 ├── buildings.py            # Building モデルヘルパ
@@ -164,9 +166,11 @@ api/
 
 ### scripts/
 
-SearXNG のセットアップは `setup_searxng.ps1` / `.sh` から共通の `searxng_install.py` を呼ぶ。`searxng_pin.json` が採用コミットの正典、`searxng_config.py` が取得・設定マージ・起動の参照先を揃える。固定版の公式 ZIP を `.searxng-src/<commit>/` へ取得し、依存は専用 `.searxng-venv/` へ導入する（[intent](../intent/searxng_installation.md)）。
+SearXNG のセットアップは `setup_searxng.ps1` / `.sh` から共通の `searxng_install.py` を呼ぶ。`searxng_pin.json` が採用コミットの正典、`searxng_config.py` が取得・設定マージ・起動の参照先を揃える。固定版の公式 ZIP を `.searxng-src/<commit>/` へ取得し、依存は専用 `.searxng-venv/` へ導入する（[intent](../intent/searxng_installation.md)）。更新のときは `update_engine.py` の `update_dependencies`（パッケージを入れ直す関数）も同じ `searxng_install.py check` / `setup` を呼ぶ（[intent](../intent/update_completes_with_new_code.md)）。
 
-保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。
+`setup.bat` / `setup.sh` は Python 3.13 を名指しで探し、`.venv` の確かめ・作り直し・後片付けを `setup_venv.py` に、アドオンのパッケージの入れ直し (新しい `.venv` を作った回の、本体の `.venv` に入れる step の走らせ直しと、アドオン専用の Python 環境の作り直し) を `rebuild_addon_envs.py` に任せる。setup.bat が表示する日本語と英語の文は `setup_messages/` にある。`.venv`・アドオン専用の環境・SearXNG の venv を消す・改名する前に書き、全部終わってから消す「やりかけの記録」(`.setup_in_progress/` の中の、一つにつき一つのファイル) の読み書きは `setup_in_progress.py` (標準ライブラリだけ) にある（[intent §2-7](../intent/dependency_management.md)）。
+
+保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。古い更新処理で更新されて `update_dependencies` の一部が行われていない環境では、同じ検査が新しいリリースを取らずに `update_dependencies` だけを一度やり直す（[intent](../intent/update_completes_with_new_code.md)）。
 
 ```
 scripts/

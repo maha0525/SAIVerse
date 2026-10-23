@@ -39,6 +39,26 @@ from scripts import update_engine
 # --- fakes --------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _saiverse_stopped():  # type: ignore[no-untyped-def]
+    """The reinstall waits while SAIVerse may be running; answer "stopped"
+    instead of reading this machine's runtime markers."""
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value=None):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dependency_step():  # type: ignore[no-untyped-def]
+    """A check that reaches the reinstall would run pip / npm with this test's
+    interpreter (the tmp checkout has no engine file, so the step runs in this
+    process). Fail instead."""
+    def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("the real dependency step was reached")
+
+    with patch.object(update_engine, "update_dependencies", side_effect=refuse):
+        yield
+
+
 class FakeProcess:
     """Just enough of psutil.Process for the frontend search and stop."""
 
@@ -426,6 +446,10 @@ def test_missing_dev_dependencies_are_not_counted(tmp_path: Path) -> None:
 def test_a_matching_marker_does_not_hide_missing_packages(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
     project = _project_with_frontend(tmp_path, installed=["react"])
     update_engine.write_completion_marker(project)
+    # The dependency step finished too: nothing but the full update can explain
+    # the missing packages (without the record it is the reinstall's case,
+    # tests/test_update_dependencies_reinstall.py).
+    update_engine.write_dependencies_record(project)
     with caplog.at_level(logging.WARNING, logger="saiverse.update"):
         assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
     message = " ".join(record.getMessage() for record in caplog.records)
@@ -435,6 +459,7 @@ def test_a_matching_marker_does_not_hide_missing_packages(tmp_path: Path, caplog
 def test_a_matching_marker_with_every_package_is_ready(tmp_path: Path) -> None:
     project = _project_with_frontend(tmp_path, installed=_ALL)
     update_engine.write_completion_marker(project)
+    update_engine.write_dependencies_record(project)
     assert update_engine.frontend_packages_installed(project) is True
     assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
 
@@ -445,6 +470,7 @@ def test_the_log_names_at_most_five_missing_packages(tmp_path: Path, caplog) -> 
         json.dumps({"dependencies": {f"pkg{i}": "1" for i in range(8)}}), encoding="utf-8"
     )
     update_engine.write_completion_marker(project)
+    update_engine.write_dependencies_record(project)
     with caplog.at_level(logging.WARNING, logger="saiverse.update"):
         assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
     message = " ".join(record.getMessage() for record in caplog.records)
@@ -464,6 +490,7 @@ def test_unreadable_package_json_cannot_be_judged(tmp_path: Path, content: str |
     assert update_engine.frontend_packages_installed(project) is None
     # With a matching marker the marker is trusted, as before.
     update_engine.write_completion_marker(project)
+    update_engine.write_dependencies_record(project)
     assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
 
 
@@ -492,6 +519,7 @@ class _Recorder:
         fail: str | None = None,
         switch: bool = False,
         fail_every_time: bool = False,
+        searxng_running: bool = False,
     ) -> None:
         # ``fail`` fails the named phase the first time only (a rebuild in the
         # recovery then succeeds), or every time with ``fail_every_time``.
@@ -501,6 +529,7 @@ class _Recorder:
         self.frontend_mode = frontend_mode
         self.fail = fail
         self.switch = switch
+        self.searxng_running = searxng_running
 
     def step(self, name: str, result=None):  # type: ignore[no-untyped-def]
         def run(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -518,6 +547,16 @@ class _Recorder:
             raise update_engine.UpdateError("stop frontend failed")
         processes = [FakeProcess(1, "node.exe")] if self.frontend_mode else []
         return update_engine.FrontendServers(processes, self.frontend_mode)
+
+    def stop_searxng(self, project_dir):  # type: ignore[no-untyped-def]
+        self.order.append("stop searxng")
+        if self.fail == "stop searxng":
+            raise update_engine.UpdateError("stop searxng failed")
+        return self.searxng_running
+
+    def start_searxng(self, project_dir):  # type: ignore[no-untyped-def]
+        self.order.append("start searxng")
+        return MagicMock(pid=300)
 
     def restart(self, config):  # type: ignore[no-untyped-def]
         # The first restart is the new version, a later one the previous version.
@@ -544,6 +583,8 @@ class _Recorder:
         ), patch.object(
             update_engine, "preflight_switch", side_effect=self.step("preflight", plan)
         ), patch.object(update_engine, "stop_frontend_servers", side_effect=self.stop_frontend), patch.object(
+            update_engine, "stop_searxng_servers", side_effect=self.stop_searxng
+        ), patch.object(update_engine, "start_searxng", side_effect=self.start_searxng), patch.object(
             update_engine, "create_pre_update_snapshot", side_effect=self.step("snapshot", "snap")
         ), patch.object(update_engine, "update_code", side_effect=self.step("code")), patch.object(
             update_engine, "prepare_switch_branch", side_effect=self.step("prepare branch")
@@ -570,6 +611,7 @@ def test_production_frontend_is_stopped_first_built_and_started_after_the_backen
         "wait",
         "preflight",
         "stop frontend",
+        "stop searxng",
         "snapshot",
         "code",
         "dependencies (npm ci)",
@@ -681,8 +723,135 @@ def test_a_failed_rollback_starts_nothing(tmp_path: Path) -> None:
 
 def test_a_switch_that_fails_after_moving_is_rolled_back_to_its_branch_and_restarted(tmp_path: Path) -> None:
     order = _failing_run(tmp_path, "dependencies (npm ci)", switch=True)
-    assert order[:5] == ["wait", "preflight", "stop frontend", "snapshot", "prepare branch"]
+    assert order[:6] == ["wait", "preflight", "stop frontend", "stop searxng", "snapshot", "prepare branch"]
     assert order[-5:] == ["rollback", "restart backend", "health", "build", "start frontend start"]
+
+
+# --- SearXNG in the detached update (docs/intent/update_completes_with_new_code.md §3) --
+
+
+def test_a_running_searxng_is_stopped_with_the_frontend_and_started_before_the_backend(
+    tmp_path: Path,
+) -> None:
+    """Before the backend: a failure to start SearXNG is recorded for the banner,
+    and the backend collects its alerts when it starts."""
+    recorder = _Recorder(update_engine.FRONTEND_MODE_START, searxng_running=True)
+    recorder.run(tmp_path)
+    assert recorder.order == [
+        "wait",
+        "preflight",
+        "stop frontend",
+        "stop searxng",
+        "snapshot",
+        "code",
+        "dependencies (npm ci)",
+        "build",
+        "start searxng",
+        "restart backend",
+        "health",
+        "marker",
+        "start frontend start",
+    ]
+
+
+def test_a_backend_failure_after_searxng_started_does_not_start_a_second_one(tmp_path: Path) -> None:
+    recorder = _Recorder("start", fail="health", searxng_running=True)
+    with pytest.raises(update_engine.UpdateError, match="health failed"):
+        recorder.run(tmp_path)
+    assert recorder.order.count("start searxng") == 1
+    assert recorder.order.index("start searxng") < recorder.order.index("restart backend")
+
+
+def test_a_searxng_that_cannot_be_started_is_recorded_before_the_backend_starts(tmp_path: Path) -> None:
+    """The backend reads the record at startup and shows it in the banner
+    (saiverse/environment_alerts.py), so the record is there before it starts."""
+    from saiverse.environment_alerts import SEARXNG_RESTART_ALERT_ID, searxng_restart_alerts
+
+    recorder = _Recorder("start", searxng_running=True)
+    record = update_engine.searxng_restart_failure_path(tmp_path)
+    seen_at_backend_start: list[bool] = []
+    original_restart = recorder.restart
+
+    def restart(config):  # type: ignore[no-untyped-def]
+        seen_at_backend_start.append(record.is_file())
+        return original_restart(config)
+
+    def cannot_start(project_dir):  # type: ignore[no-untyped-def]
+        recorder.order.append("start searxng")
+        raise update_engine.UpdateError("Could not start the SearXNG server: no cmd.exe")
+
+    recorder.restart = restart  # type: ignore[method-assign]
+    recorder.start_searxng = cannot_start  # type: ignore[method-assign]
+    recorder.run(tmp_path)  # the update itself succeeds
+
+    assert seen_at_backend_start == [True]
+    assert "no cmd.exe" in json.loads(record.read_text(encoding="utf-8"))["error"]
+    alerts = searxng_restart_alerts(tmp_path)
+    assert [a["id"] for a in alerts] == [SEARXNG_RESTART_ALERT_ID]
+    assert "no cmd.exe" in alerts[0]["details"]["error"]
+    # It reports that restart, so the backend shows it once.
+    assert not record.exists()
+    assert searxng_restart_alerts(tmp_path) == []
+
+
+def test_a_searxng_started_again_removes_an_old_restart_failure(tmp_path: Path) -> None:
+    record = update_engine.searxng_restart_failure_path(tmp_path)
+    record.write_text('{"error": "old"}', encoding="utf-8")
+    _Recorder("start", searxng_running=True).run(tmp_path)
+    assert not record.exists()
+
+
+def test_the_searxng_restart_record_name_matches_the_banner() -> None:
+    from saiverse import environment_alerts
+
+    assert environment_alerts.SEARXNG_RESTART_FAILURE_RECORD == update_engine.SEARXNG_RESTART_FAILURE_RECORD
+
+
+def test_a_searxng_that_was_not_running_is_not_started(tmp_path: Path) -> None:
+    recorder = _Recorder(update_engine.FRONTEND_MODE_START, searxng_running=False)
+    recorder.run(tmp_path)
+    assert "stop searxng" in recorder.order
+    assert "start searxng" not in recorder.order
+
+
+def test_a_failure_after_the_code_moved_starts_searxng_again_with_the_previous_version(
+    tmp_path: Path,
+) -> None:
+    recorder = _Recorder("start", fail="dependencies (npm ci)", searxng_running=True)
+    with pytest.raises(update_engine.UpdateError):
+        recorder.run(tmp_path)
+    tail = recorder.order[recorder.order.index("dependencies (npm ci)") + 1:]
+    assert tail == ["rollback", "start searxng", "restart backend", "health", "build", "start frontend start"]
+
+
+def test_failure_to_stop_searxng_changes_nothing_and_restarts_the_rest(tmp_path: Path) -> None:
+    recorder = _Recorder("start", fail="stop searxng", searxng_running=True)
+    with pytest.raises(update_engine.UpdateError, match="stop searxng failed"):
+        recorder.run(tmp_path)
+    assert "snapshot" not in recorder.order
+    # The frontend was already stopped, so it comes back; SearXNG was not
+    # confirmed stopped, so no second one is started beside it.
+    assert recorder.order[-3:] == ["restart backend", "health", "start frontend start"]
+    assert "start searxng" not in recorder.order
+
+
+def test_a_failed_rollback_does_not_start_searxng_either(tmp_path: Path) -> None:
+    recorder = _Recorder("start", fail="dependencies (npm ci)", searxng_running=True)
+    original_step = recorder.step
+
+    def step(name, result=None):  # type: ignore[no-untyped-def]
+        if name == "rollback":
+            def broken(*args, **kwargs):  # type: ignore[no-untyped-def]
+                recorder.order.append("rollback")
+                raise update_engine.UpdateError("git reset failed")
+
+            return broken
+        return original_step(name, result)
+
+    recorder.step = step  # type: ignore[method-assign]
+    with pytest.raises(update_engine.UpdateError):
+        recorder.run(tmp_path)
+    assert recorder.order[-1] == "rollback"
 
 
 def test_rollback_of_a_switch_returns_to_the_recorded_branch(tmp_path: Path) -> None:
