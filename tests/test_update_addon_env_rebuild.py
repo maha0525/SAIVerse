@@ -15,8 +15,10 @@ def _checkout_with_rebuild_script(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_the_update_runs_the_rebuild_script_with_saiverse_python(tmp_path: Path) -> None:
+def test_the_update_runs_the_rebuild_script_with_saiverse_python(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     project = _checkout_with_rebuild_script(tmp_path)
+    # A parent that waits long enough: the rebuild gets its own full timeout.
+    monkeypatch.setenv(update_engine.DEPENDENCIES_DEADLINE_ENV, str(update_engine.time.time() + 10 * 60 * 60))
     calls: list[dict] = []
 
     def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
@@ -32,6 +34,43 @@ def test_the_update_runs_the_rebuild_script_with_saiverse_python(tmp_path: Path)
     assert call["check"] is False
     assert call["timeout"] == update_engine.ADDON_ENV_REBUILD_TIMEOUT_SECONDS
     assert call["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_the_rebuild_ends_before_the_parent_stops_waiting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    project = _checkout_with_rebuild_script(tmp_path)
+    timeouts: list[int] = []
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        timeouts.append(kwargs["timeout"])
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(update_engine.time, "time", lambda: 10_000.0)
+    monkeypatch.setenv(update_engine.DEPENDENCIES_DEADLINE_ENV, str(10_000.0 + 1_000))
+    with patch.object(update_engine, "_run", side_effect=fake_run):
+        assert update_engine.rebuild_addon_envs(project, "venv-python") is None
+    assert timeouts == [1_000 - update_engine._DEADLINE_MARGIN_SECONDS]
+
+
+def test_without_a_deadline_the_older_parents_timeout_counts(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The update from v0.3.25 is run by an engine that passes no deadline and
+    stops waiting 7200 s after it started the child."""
+    monkeypatch.delenv(update_engine.DEPENDENCIES_DEADLINE_ENV, raising=False)
+    monkeypatch.setattr(update_engine, "_ENGINE_LOADED_AT", 10_000.0)
+    monkeypatch.setattr(update_engine.time, "time", lambda: 10_000.0 + 6_000)
+    assert update_engine._addon_rebuild_timeout() == (
+        update_engine._LEGACY_CHILD_TIMEOUT_SECONDS - 6_000 - update_engine._DEADLINE_MARGIN_SECONDS
+    )
+
+
+def test_no_time_left_is_a_failure_and_the_script_is_not_started(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    project = _checkout_with_rebuild_script(tmp_path)
+    monkeypatch.setattr(update_engine.time, "time", lambda: 10_000.0)
+    monkeypatch.setenv(update_engine.DEPENDENCIES_DEADLINE_ENV, str(10_000.0 + 100))
+    with patch.object(update_engine, "_run") as run:
+        failure = update_engine.rebuild_addon_envs(project, "venv-python")
+    run.assert_not_called()
+    assert failure is not None and failure.step == update_engine.DEPENDENCY_STEP_ADDON_ENVS
+    assert failure.retry
 
 
 def test_a_failed_rebuild_is_left_to_the_scripts_own_record(tmp_path: Path) -> None:

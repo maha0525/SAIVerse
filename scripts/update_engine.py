@@ -1951,6 +1951,20 @@ def update_dependencies(
 # this path with this option.
 ENGINE_SCRIPT = Path("scripts") / "update_engine.py"
 INSTALL_DEPENDENCIES_OPTION = "--install-dependencies"
+# How long ``_run_dependencies_from_disk`` lets the child run. Each phase of the
+# child has its own timeout: the portable Node.js 600 s; the pip upgrade, the
+# lock install, the retired-package removal and npm 900 s each; pip check
+# 300 s; SearXNG 300 s to check and 1200 s to reinstall (6000 s together, under
+# the 7200 s every engine gave the child before the addon rebuild), then the
+# addon rebuild (``ADDON_ENV_REBUILD_TIMEOUT_SECONDS``).
+DEPENDENCIES_CHILD_TIMEOUT_SECONDS = 7200 + 2 * 60 * 60
+# The time (seconds since the epoch) by which the parent stops waiting for the
+# child, passed to the child by ``_run_dependencies_from_disk``. An engine from
+# before this variable passes none and stops waiting after
+# ``_LEGACY_CHILD_TIMEOUT_SECONDS``: the update from v0.3.25 to v0.3.26 is run
+# by such an engine, so the child cannot count on more time than that.
+DEPENDENCIES_DEADLINE_ENV = "SAIVERSE_DEPENDENCIES_DEADLINE"
+_LEGACY_CHILD_TIMEOUT_SECONDS = 7200
 # With INSTALL_DEPENDENCIES_OPTION: leave the portable Node.js as it is. Passed
 # by the rollback only. It was added together with moving
 # ``refresh_portable_node`` into ``update_dependencies``, so an engine on disk
@@ -2024,16 +2038,17 @@ def _run_dependencies_from_disk(
         command,
         cwd=project_dir,
         label=f"install dependencies with {ENGINE_SCRIPT} on disk",
-        # The child runs each phase with its own timeout: the portable Node.js
-        # 600 s; the pip upgrade, the lock install, the retired-package removal
-        # and npm 900 s each; pip check 300 s; SearXNG 300 s to check and
-        # 1200 s to reinstall. 7200 s is above their sum (6000 s), so the inner
-        # timeouts fire first.
-        timeout=7200,
+        timeout=DEPENDENCIES_CHILD_TIMEOUT_SECONDS,
         check=False,
         # The child writes its log as UTF-8 (``install_dependencies_main``),
         # and npm output is part of it.
         encoding="utf-8",
+        # The child cuts the addon rebuild short of this process's timeout
+        # (``_addon_rebuild_timeout``).
+        env={
+            **os.environ,
+            DEPENDENCIES_DEADLINE_ENV: str(time.time() + DEPENDENCIES_CHILD_TIMEOUT_SECONDS),
+        },
     )
     # The child logs to stdout only; this process puts it into the update log.
     for line in (result.stdout or "").splitlines():
@@ -2194,6 +2209,37 @@ ADDON_ENV_REBUILD_FAILURES_RECORD = ".addon_env_rebuild_failures.json"
 # A rebuilt environment downloads its packages again (voice-tts: torch, and the
 # Irodori-TTS weights kept inside its environment).
 ADDON_ENV_REBUILD_TIMEOUT_SECONDS = 2 * 60 * 60
+# When this module was loaded: the start of the child, for a parent that passed
+# no ``DEPENDENCIES_DEADLINE_ENV``.
+_ENGINE_LOADED_AT = time.time()
+# Left between the end of the addon rebuild and the parent's deadline, for the
+# child to write its records and exit.
+_DEADLINE_MARGIN_SECONDS = 120
+# Below this, the rebuild is not started at all.
+_MIN_ADDON_REBUILD_SECONDS = 60
+
+
+def _addon_rebuild_timeout() -> int:
+    """Seconds the addon rebuild may take, so that it ends before the parent
+    stops waiting for this child.
+
+    The parent kills a child that runs past its timeout and the update then
+    fails and rolls back, a much worse outcome than a rebuild cut short (which
+    leaves its in-progress record, is shown on the banner, and is finished by
+    the next start). So the rebuild gets what is left before the parent's
+    deadline, at most ``ADDON_ENV_REBUILD_TIMEOUT_SECONDS``.
+    """
+    deadline = None
+    raw = os.environ.get(DEPENDENCIES_DEADLINE_ENV)
+    if raw:
+        try:
+            deadline = float(raw)
+        except ValueError:
+            LOGGER.warning("[addons] %s=%r is not a time; assuming an older engine", DEPENDENCIES_DEADLINE_ENV, raw)
+    if deadline is None:
+        deadline = _ENGINE_LOADED_AT + _LEGACY_CHILD_TIMEOUT_SECONDS
+    left = int(deadline - time.time() - _DEADLINE_MARGIN_SECONDS)
+    return min(ADDON_ENV_REBUILD_TIMEOUT_SECONDS, left)
 
 
 def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure | None:
@@ -2219,18 +2265,32 @@ def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure 
 
     A checkout without the script (an older revision, run by the rollback) has
     no such step, and nothing happens.
+
+    The rebuild ends before the parent of this child stops waiting
+    (``_addon_rebuild_timeout``). Cut short, it is returned as a failure: the
+    banner shows it, the next start runs this step again, and the
+    in-progress record of the environment it was making lets that run finish
+    it.
     """
     script = project_dir / ADDON_ENV_REBUILD_SCRIPT
     if not script.is_file():
         LOGGER.info("[addons] %s is not in this checkout; addon environments were not checked",
                     ADDON_ENV_REBUILD_SCRIPT)
         return None
+    timeout = _addon_rebuild_timeout()
+    if timeout < _MIN_ADDON_REBUILD_SECONDS:
+        LOGGER.warning("[addons] no time is left in this update for the addon environments")
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_ADDON_ENVS,
+            "The update used up its time before the addon environments were checked; "
+            "they are checked again at the next start.",
+        )
     try:
         result = _run(
             [python, str(script)],
             cwd=project_dir,
             label="rebuild addon environments",
-            timeout=ADDON_ENV_REBUILD_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
             encoding="utf-8",
             # The script prints Japanese; make it write UTF-8 whatever the
