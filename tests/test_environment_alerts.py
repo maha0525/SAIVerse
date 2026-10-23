@@ -22,6 +22,9 @@ def _no_real_addons_or_data(tmp_path: Path, monkeypatch):  # type: ignore[no-unt
     monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", tmp_path / "expansion_data")
     monkeypatch.setattr(
         addon_installer, "ENV_REBUILD_FAILURES_PATH", tmp_path / ".addon_env_rebuild_failures.json")
+    # The test interpreter may be of another series than the recommended one;
+    # the tests of that banner below remove this.
+    monkeypatch.setenv(environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV, "1")
 
 
 def _write_entry(base: Path, record: Path) -> None:
@@ -214,3 +217,37 @@ def test_an_unreadable_addon_record_does_not_stop_the_start(tmp_path: Path, monk
 def test_no_records_mean_no_setup_alert(tmp_path: Path) -> None:
     assert environment_alerts.setup_stopped_alerts(tmp_path) == []
     assert environment_alerts.searxng_setup_alerts(tmp_path) == []
+
+
+def test_the_recommended_series_is_the_one_setup_names() -> None:
+    series = "%d.%d" % environment_alerts.RECOMMENDED_PYTHON_SERIES
+    assert f"PythonCore\{series}\InstallPath" in (REPO_ROOT / "setup.bat").read_text(encoding="utf-8")
+    setup_sh = (REPO_ROOT / "setup.sh").read_text(encoding="utf-8")
+    assert f"--expect-series {series}" in setup_sh and f"python{series}" in setup_sh
+
+
+def test_python_of_another_series_reaches_the_banner(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A .venv made with 3.12 keeps running 3.12 after updates; only setup makes
+    it again, so the start tells the user."""
+    monkeypatch.delenv(environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV)
+    monkeypatch.setattr(environment_alerts.sys, "version_info", (3, 12, 9, "final", 0))
+    alerts = environment_alerts.environment_alerts(tmp_path)
+    assert [alert["id"] for alert in alerts] == [environment_alerts.PYTHON_SERIES_ALERT_ID]
+    (alert,) = alerts
+    assert "3.12" in alert["title"]
+    assert "3.13" in alert["message"] and "setup.bat" in alert["message"]
+    assert environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV in alert["message"]
+    assert alert["details"]["python"] == "3.12" and alert["details"]["recommended"] == "3.13"
+
+
+@pytest.mark.parametrize("version_info", [(3, 13, 2, "final", 0), (3, 13, 17, "final", 0)])
+def test_any_patch_of_the_recommended_series_is_quiet(monkeypatch, version_info) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv(environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV)
+    assert environment_alerts.python_series_alerts(version_info) == []
+
+
+@pytest.mark.parametrize("value, shown", [("1", False), ("0", True), ("", True)])
+def test_only_the_allow_setting_hides_the_python_banner(monkeypatch, value, shown) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv(environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV, value)
+    alerts = environment_alerts.python_series_alerts((3, 11, 9, "final", 0))
+    assert bool(alerts) is shown

@@ -117,19 +117,44 @@ def test_failed_pip_does_not_leave_completion_marker(installation, monkeypatch):
     assert not marker.exists()
 
 
-def test_marker_alone_does_not_hide_failed_runtime_import(installation, monkeypatch):
+def _installed_venv(series: str) -> None:
+    """A SearXNG install whose markers match, in a venv made with Python ``series``."""
     source = config.source_directory()
     source.mkdir()
     (source / installer.SOURCE_MARKER).write_text(json.dumps(config.pinned_release()), encoding="utf-8")
     config.venv_python().parent.mkdir(parents=True)
     config.venv_python().touch()
+    (config.venv_directory() / "pyvenv.cfg").write_text(f"version = {series}.0\n", encoding="utf-8")
     (config.venv_directory() / installer.INSTALL_MARKER).write_text(
         json.dumps(installer.install_identity()), encoding="utf-8",
     )
+
+
+_THIS_SERIES = f"{sys.version_info[0]}.{sys.version_info[1]}"
+
+
+def test_marker_alone_does_not_hide_failed_runtime_import(installation, monkeypatch):
+    _installed_venv(_THIS_SERIES)
     monkeypatch.setattr(installer.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(
         a, 1, stdout="", stderr="ModuleNotFoundError: No module named 'tzdata'",
     ))
     assert installer.ready() is False
+
+
+def test_a_matching_install_of_this_python_series_is_ready(installation, monkeypatch):
+    _installed_venv(_THIS_SERIES)
+    monkeypatch.setattr(installer.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0))
+    assert installer.ready() is True
+
+
+def test_an_install_of_another_python_series_is_not_ready(installation, monkeypatch, capsys):
+    """Run with SAIVerse's python (setup, the update, the launchers), the check
+    fails for a SearXNG venv left on the series SAIVerse ran before, so setup
+    makes it again (an update alone otherwise kept it until the next setup)."""
+    _installed_venv("3.12" if _THIS_SERIES != "3.12" else "3.11")
+    monkeypatch.setattr(installer.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0))
+    assert installer.ready() is False
+    assert f"SAIVerse runs Python {_THIS_SERIES}" in capsys.readouterr().out
 
 
 UPSTREAM_REQUIREMENTS = """certifi==2025.11.12

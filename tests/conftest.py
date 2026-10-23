@@ -68,14 +68,16 @@ def _refuse_pip_changes_to_the_test_interpreter(monkeypatch):
     the dependency step in a temporary checkout and ran ``pip install --upgrade pip``
     with this interpreter while SAIVerse was running). Fail such a call instead.
 
-    Only ``subprocess.run`` with this exact interpreter and ``-m pip install`` /
+    Only a process started with this exact interpreter and ``-m pip install`` /
     ``uninstall`` is refused; pip check / list and other interpreters are untouched.
+    The check is on ``subprocess.Popen``, which ``subprocess.run`` and the update
+    engine's ``_run`` both start processes with.
     """
     import subprocess
 
-    real_run = subprocess.run
+    real_popen = subprocess.Popen
 
-    def guarded_run(args, *rest, **kwargs):
+    def refuse_pip_changes(args) -> None:  # type: ignore[no-untyped-def]
         command = [str(part) for part in args] if isinstance(args, (list, tuple)) else []
         if (
             len(command) >= 4
@@ -87,9 +89,13 @@ def _refuse_pip_changes_to_the_test_interpreter(monkeypatch):
                 "a test ran pip " + command[3] + " with the test interpreter, which changes "
                 "the real .venv: " + " ".join(command)
             )
-        return real_run(args, *rest, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", guarded_run)
+    class GuardedPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, args, *rest, **kwargs):  # type: ignore[no-untyped-def]
+            refuse_pip_changes(args)
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
 
 
 @pytest.fixture(autouse=True)

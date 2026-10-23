@@ -69,6 +69,7 @@ DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
 # ``DEPENDENCIES_FAILURE_RECORD`` under ``"steps"``; the alert names them.
 DEPENDENCY_STEP_PORTABLE_NODE = "portable_node"
 DEPENDENCY_STEP_SEARXNG = "searxng"
+DEPENDENCY_STEP_ADDON_ENVS = "addon_envs"
 
 
 class DependencyStepFailure(NamedTuple):
@@ -1089,21 +1090,48 @@ def _run(
     locale default for commands whose output is known to be UTF-8 regardless of
     the console code page (git with ``-z``); undecodable bytes are replaced
     rather than crashing the phase. ``env`` replaces the inherited environment
-    (None inherits it)."""
+    (None inherits it).
+
+    Past ``timeout``, the command and every process it started are stopped
+    (``_stop_process_tree``) before ``UpdateError`` is raised. Stopping only
+    the command, as ``subprocess.run`` does, left what it had started running:
+    pip under ``scripts/rebuild_addon_envs.py`` or ``searxng_install.py``, the
+    phases of the ``--install-dependencies`` child. They went on changing the
+    environment after the update had moved on, and the next try raced them
+    (PR #419, Codex). ``subprocess.run`` also waits for the output pipes after
+    the kill, which such a process holds open."""
     LOGGER.info("Phase: %s", label)
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding=encoding,
             errors="replace" if encoding else None,
-            timeout=timeout,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        left = _stop_process_tree(process)
+        try:
+            process.communicate(timeout=30)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        detail = f"; still running: {left}" if left else ""
+        raise UpdateError(
+            f"{label} could not run: timed out after {timeout} s and was stopped{detail}"
+        ) from None
+    except BaseException:
+        # Ctrl+C, or the update process itself being stopped: do not leave
+        # the command running behind it.
+        _stop_process_tree(process)
+        raise
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise UpdateError(f"{label} failed with exit {result.returncode}: {detail}")
@@ -1117,6 +1145,34 @@ def _process_create_time(pid: int) -> float | None:
         return float(psutil.Process(pid).create_time())
     except Exception:
         return None
+
+
+def _stop_process_tree(process: subprocess.Popen[Any]) -> str:
+    """Stop ``process`` and every process it started, and wait for them.
+
+    The descendants are listed before anything is stopped: once ``process``
+    is gone, its children no longer list under it. Returns the processes that
+    survived being killed, described for the error (empty when none did).
+    Without psutil only ``process`` itself can be stopped, as before.
+    """
+    try:
+        import psutil
+    except ImportError:
+        LOGGER.warning("psutil is not available; only PID %s is stopped, not what it started", process.pid)
+        process.kill()
+        return ""
+    try:
+        parent = psutil.Process(process.pid)
+        tree = [*parent.children(recursive=True), parent]
+    except psutil.NoSuchProcess:
+        return ""
+    except (psutil.Error, OSError) as exc:
+        LOGGER.warning("Could not list what PID %s started (%s); stopping PID %s only", process.pid, exc, process.pid)
+        process.kill()
+        return ""
+    LOGGER.warning("Stopping %s and the processes it started: %s", process.pid, _describe_processes(tree))
+    left = _terminate_processes(tree, psutil, timeout=10)
+    return _describe_processes(left) if left else ""
 
 
 def _process_alive(pid: int) -> bool:
@@ -1903,7 +1959,8 @@ def update_dependencies(
     installed with the Node.js the code pins; skipped with
     ``replace_portable_node=False``, which the rollback passes), upgrade pip,
     install the requirements file, remove ``RETIRED_CORE_PACKAGES``, ``pip
-    check``, npm, then SearXNG.
+    check``, npm, SearXNG, then the addon environments
+    (``rebuild_addon_envs``, last because it can take long).
     """
     failures: list[DependencyStepFailure] = []
     if replace_portable_node:
@@ -1938,6 +1995,9 @@ def update_dependencies(
     searxng_failure = refresh_searxng(project_dir, python)
     if searxng_failure is not None:
         failures.append(searxng_failure)
+    addon_failure = rebuild_addon_envs(project_dir, python)
+    if addon_failure is not None:
+        failures.append(addon_failure)
     return failures
 
 
@@ -1946,6 +2006,20 @@ def update_dependencies(
 # this path with this option.
 ENGINE_SCRIPT = Path("scripts") / "update_engine.py"
 INSTALL_DEPENDENCIES_OPTION = "--install-dependencies"
+# How long ``_run_dependencies_from_disk`` lets the child run. Each phase of the
+# child has its own timeout: the portable Node.js 600 s; the pip upgrade, the
+# lock install, the retired-package removal and npm 900 s each; pip check
+# 300 s; SearXNG 300 s to check and 1200 s to reinstall (6000 s together, under
+# the 7200 s every engine gave the child before the addon rebuild), then the
+# addon rebuild (``ADDON_ENV_REBUILD_TIMEOUT_SECONDS``).
+DEPENDENCIES_CHILD_TIMEOUT_SECONDS = 7200 + 2 * 60 * 60
+# The time (seconds since the epoch) by which the parent stops waiting for the
+# child, passed to the child by ``_run_dependencies_from_disk``. An engine from
+# before this variable passes none and stops waiting after
+# ``_LEGACY_CHILD_TIMEOUT_SECONDS``: the update from v0.3.25 to v0.3.26 is run
+# by such an engine, so the child cannot count on more time than that.
+DEPENDENCIES_DEADLINE_ENV = "SAIVERSE_DEPENDENCIES_DEADLINE"
+_LEGACY_CHILD_TIMEOUT_SECONDS = 7200
 # With INSTALL_DEPENDENCIES_OPTION: leave the portable Node.js as it is. Passed
 # by the rollback only. It was added together with moving
 # ``refresh_portable_node`` into ``update_dependencies``, so an engine on disk
@@ -2019,16 +2093,17 @@ def _run_dependencies_from_disk(
         command,
         cwd=project_dir,
         label=f"install dependencies with {ENGINE_SCRIPT} on disk",
-        # The child runs each phase with its own timeout: the portable Node.js
-        # 600 s; the pip upgrade, the lock install, the retired-package removal
-        # and npm 900 s each; pip check 300 s; SearXNG 300 s to check and
-        # 1200 s to reinstall. 7200 s is above their sum (6000 s), so the inner
-        # timeouts fire first.
-        timeout=7200,
+        timeout=DEPENDENCIES_CHILD_TIMEOUT_SECONDS,
         check=False,
         # The child writes its log as UTF-8 (``install_dependencies_main``),
         # and npm output is part of it.
         encoding="utf-8",
+        # The child cuts the addon rebuild short of this process's timeout
+        # (``_addon_rebuild_timeout``).
+        env={
+            **os.environ,
+            DEPENDENCIES_DEADLINE_ENV: str(time.time() + DEPENDENCIES_CHILD_TIMEOUT_SECONDS),
+        },
     )
     # The child logs to stdout only; this process puts it into the update log.
     for line in (result.stdout or "").splitlines():
@@ -2179,6 +2254,126 @@ def _searxng_venv_dir(project_dir: Path) -> Path:
     return path if path.is_absolute() else project_dir / path
 
 
+# Rebuilds the addon environments the current Python cannot use, and installs
+# again the addon packages of the main .venv whose earlier reinstall failed
+# (scripts/rebuild_addon_envs.py, what setup.bat / setup.sh run after .venv).
+ADDON_ENV_REBUILD_SCRIPT = Path("scripts") / "rebuild_addon_envs.py"
+# The record that script writes in the SAIVerse folder
+# (saiverse.addon_installer.ENV_REBUILD_FAILURES_PATH; a test checks the name).
+ADDON_ENV_REBUILD_FAILURES_RECORD = ".addon_env_rebuild_failures.json"
+# A rebuilt environment downloads its packages again (voice-tts: torch, and the
+# Irodori-TTS weights kept inside its environment).
+ADDON_ENV_REBUILD_TIMEOUT_SECONDS = 2 * 60 * 60
+# When this module was loaded: the start of the child, for a parent that passed
+# no ``DEPENDENCIES_DEADLINE_ENV``.
+_ENGINE_LOADED_AT = time.time()
+# Left between the end of the addon rebuild and the parent's deadline, for the
+# child to write its records and exit.
+_DEADLINE_MARGIN_SECONDS = 120
+# Below this, the rebuild is not started at all.
+_MIN_ADDON_REBUILD_SECONDS = 60
+
+
+def _addon_rebuild_timeout() -> int:
+    """Seconds the addon rebuild may take, so that it ends before the parent
+    stops waiting for this child.
+
+    The parent kills a child that runs past its timeout and the update then
+    fails and rolls back, a much worse outcome than a rebuild cut short (which
+    leaves its in-progress record, is shown on the banner, and is finished by
+    the next start). So the rebuild gets what is left before the parent's
+    deadline, at most ``ADDON_ENV_REBUILD_TIMEOUT_SECONDS``.
+    """
+    deadline = None
+    raw = os.environ.get(DEPENDENCIES_DEADLINE_ENV)
+    if raw:
+        try:
+            deadline = float(raw)
+        except ValueError:
+            LOGGER.warning("[addons] %s=%r is not a time; assuming an older engine", DEPENDENCIES_DEADLINE_ENV, raw)
+    if deadline is None:
+        deadline = _ENGINE_LOADED_AT + _LEGACY_CHILD_TIMEOUT_SECONDS
+    left = int(deadline - time.time() - _DEADLINE_MARGIN_SECONDS)
+    return min(ADDON_ENV_REBUILD_TIMEOUT_SECONDS, left)
+
+
+def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure | None:
+    """Rebuild the addon environments that the Python of ``.venv`` cannot use.
+
+    An addon's own Python environment is made with the Python of ``.venv`` and
+    is unusable once ``.venv`` runs another Python series
+    (``saiverse.addon_paths.get_addon_env_python`` refuses it). setup rebuilds
+    them when it makes ``.venv`` again, but a ``.venv`` made again before setup
+    did that (a setup from before v0.3.26, or by hand) left them on the old
+    series, and only another setup fixed them. Running the same script here
+    lets the update fix them too.
+
+    The script touches only environments it finds unusable (another series, no
+    record of how it was made, or a rebuild that stopped part-way): an addon
+    whose environments are usable is not touched, its manifest not even read.
+    It records what failed in ``.addon_env_rebuild_failures.json``, which the
+    banner shows (``saiverse.environment_alerts.addon_env_rebuild_alerts``), and
+    removes that file when nothing failed; it also records its own crash there.
+    So a failure is returned here only when the script could not be started,
+    or exited with an error without leaving that record (it stopped before
+    its crash handler, for instance on an import).
+
+    A checkout without the script (an older revision, run by the rollback) has
+    no such step, and nothing happens.
+
+    The rebuild ends before the parent of this child stops waiting
+    (``_addon_rebuild_timeout``). Cut short, it is returned as a failure: the
+    banner shows it, the next start runs this step again, and the
+    in-progress record of the environment it was making lets that run finish
+    it.
+    """
+    script = project_dir / ADDON_ENV_REBUILD_SCRIPT
+    if not script.is_file():
+        LOGGER.info("[addons] %s is not in this checkout; addon environments were not checked",
+                    ADDON_ENV_REBUILD_SCRIPT)
+        return None
+    timeout = _addon_rebuild_timeout()
+    if timeout < _MIN_ADDON_REBUILD_SECONDS:
+        LOGGER.warning("[addons] no time is left in this update for the addon environments")
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_ADDON_ENVS,
+            "The update used up its time before the addon environments were checked; "
+            "they are checked again at the next start.",
+        )
+    try:
+        result = _run(
+            [python, str(script)],
+            cwd=project_dir,
+            label="rebuild addon environments",
+            timeout=timeout,
+            check=False,
+            encoding="utf-8",
+            # The script prints Japanese; make it write UTF-8 whatever the
+            # console code page is.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[addons] the addon environments could not be checked", exc_info=True)
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_ADDON_ENVS, f"The addon environments could not be checked: {exc}"
+        )
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("[addons] %s", line.strip())
+    if result.returncode == 0:
+        return None
+    detail = (result.stderr or "").strip()[-2000:]
+    LOGGER.warning(
+        "[addons] %s exited with %s: %s", ADDON_ENV_REBUILD_SCRIPT, result.returncode, detail
+    )
+    if (project_dir / ADDON_ENV_REBUILD_FAILURES_RECORD).is_file():
+        return None
+    return DependencyStepFailure(
+        DEPENDENCY_STEP_ADDON_ENVS,
+        f"{ADDON_ENV_REBUILD_SCRIPT} stopped with exit {result.returncode}: {detail}",
+    )
+
+
 def _searxng_venv_python(project_dir: Path) -> Path:
     venv = _searxng_venv_dir(project_dir)
     return venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
@@ -2234,20 +2429,25 @@ def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure |
 def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> DependencyStepFailure | None:
     """Reinstall SearXNG when it does not match the release the code pins.
 
-    Runs ``searxng_install.py check`` with the SearXNG venv's python, and
-    ``searxng_install.py setup`` when the check fails -- what
-    run_searxng_server.ps1 / .sh do before starting the server, done here so
-    the update, not the next start, brings in a new pin. Nothing happens
-    without a SearXNG venv.
+    Runs ``searxng_install.py check``, and ``searxng_install.py setup`` when
+    the check fails -- what run_searxng_server.ps1 / .sh do before starting
+    the server, done here so the update, not the next start, brings in a new
+    pin. Nothing happens without a SearXNG venv.
+
+    Both run with SAIVerse's own python (``saiverse_python``, else
+    ``sys.executable``), as setup.bat / setup.sh run them: the installer is
+    standard library only, the check then fails when the SearXNG venv was made
+    with another Python series than SAIVerse runs (a .venv made again with 3.13
+    by a setup from before the installer set such a venv aside), and the setup
+    makes the venv with the python that runs it. Run with the SearXNG venv's
+    own python, the check compared that venv with itself and an old series
+    stayed until the next setup.
 
     When a SearXNG setup stopped part-way (``searxng_setup_stopped``), the
-    check is skipped (it fails while the record is there) and the setup runs
-    with SAIVerse's own python (``saiverse_python``, else ``sys.executable``):
-    the SearXNG venv may have no python left, or only the half-made one. The
-    installer is standard library only and makes the venv with the python
-    that runs it, the series setup.bat / setup.sh make it with. The setup
-    reads the record, installs the venv again and puts the set-aside venv back
-    when that fails (scripts/searxng_install.py).
+    check is skipped (it fails while the record is there): the SearXNG venv
+    may have no python left, or only the half-made one. The setup reads the
+    record, installs the venv again and puts the set-aside venv back when that
+    fails (scripts/searxng_install.py).
 
     Never raises, for the same reason ``refresh_portable_node`` does not:
     SearXNG is an optional search server, and failing the whole update over
@@ -2273,15 +2473,12 @@ def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> De
             retry=False,
         )
     stopped = searxng_setup_stopped(project_dir)
+    python = saiverse_python or sys.executable
     if stopped:
-        python = saiverse_python or sys.executable
         LOGGER.warning(
-            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it "
-            "with SAIVerse's python",
+            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it",
             SEARXNG_SETUP_IN_PROGRESS_RECORD,
         )
-    else:
-        python = str(_searxng_venv_python(project_dir))
     try:
         if not stopped:
             check = _run(

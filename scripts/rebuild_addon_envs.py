@@ -1,4 +1,8 @@
-"""setup.bat / setup.sh が呼ぶ: アドオンのパッケージを、いまの ``.venv`` と Python で入れ直す。
+"""setup.bat / setup.sh と更新が呼ぶ: アドオンのパッケージを、いまの ``.venv`` と Python で入れ直す。
+
+更新 (``scripts/update_engine.py`` の ``rebuild_addon_envs``、``--core-venv-recreated`` なし) が
+呼ぶのは、v0.3.26 より前の setup や手で ``.venv`` を作り直した環境で、古い系列のまま残った
+専用の環境を、setup を待たずに作り直すため。使える環境には触らない。
 
 二つのことをこの順にする。設計: ``docs/intent/dependency_management.md`` §2-7。
 

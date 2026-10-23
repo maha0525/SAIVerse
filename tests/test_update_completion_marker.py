@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from importlib import metadata
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -896,7 +897,8 @@ def _put_engine_on_disk(project: Path) -> Path:
 def _recording_child_run(calls: list[dict], *, returncode: int = 0, stdout: str = "", stderr: str = ""):  # type: ignore[no-untyped-def]
     def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
         calls.append(
-            {"command": list(command), "cwd": cwd, "timeout": timeout, "check": check, "encoding": encoding}
+            {"command": list(command), "cwd": cwd, "timeout": timeout, "check": check, "encoding": encoding,
+             "env": env}
         )
         if check and returncode != 0:
             raise update_engine.UpdateError(f"{label} failed with exit {returncode}: {stderr or stdout}")
@@ -922,7 +924,10 @@ def test_the_update_installs_dependencies_with_the_engine_it_just_fetched(tmp_pa
         ["venv-python", str(project / "scripts" / "update_engine.py"), "--install-dependencies"],
     ]
     assert calls[0]["cwd"] == project
-    assert calls[0]["timeout"] == 7200
+    assert calls[0]["timeout"] == update_engine.DEPENDENCIES_CHILD_TIMEOUT_SECONDS
+    # The child is told when this process stops waiting for it.
+    deadline = float(calls[0]["env"][update_engine.DEPENDENCIES_DEADLINE_ENV])
+    assert 0 < deadline - time.time() <= update_engine.DEPENDENCIES_CHILD_TIMEOUT_SECONDS
     assert calls[0]["encoding"] == "utf-8"
 
 
