@@ -94,6 +94,16 @@ if ! "$PYTHON_BIN" scripts/setup_venv.py check-stopped; then
     exit 1
 fi
 
+# --- 1c. .env ---
+# データのパス (SAIVERSE_HOME) を読む処理より前に決める: このあとの手順も SAIVerse 本体と
+# 同じく、このフォルダから上へ探して最初に見つかった .env を読む。setup_venv.py
+# ensure-dotenv は、どこにも .env が無いときだけ .env.example を .env に写す (上の
+# フォルダの .env が世界を選んでいるなら、それを隠さない)。setup.bat と同じ手順。
+if ! "$PYTHON_BIN" scripts/setup_venv.py ensure-dotenv; then
+    echo "[ERROR] .env を作れませんでした。"
+    exit 1
+fi
+
 # --- 2. Node.js check ---
 if ! command -v node &>/dev/null; then
     echo "[ERROR] Node.js が見つかりません。"
@@ -263,19 +273,7 @@ else
     echo "  Git をインストール後、setup.sh を再実行してください。"
 fi
 
-# --- 10. Create .env from example if not exists ---
-if [ ! -f ".env" ]; then
-    echo ""
-    echo "[SETUP] .env ファイルを作成中..."
-    cp .env.example .env
-    chmod 600 .env
-    echo "[OK] .env を作成しました (権限: 600)"
-    echo "  APIキーの設定は初回起動時のチュートリアルで行えます。"
-else
-    # 既存の .env も安全な権限に修正
-    chmod 600 .env
-    echo "[OK] .env は既に存在します"
-fi
+# --- 10. .env: 手順 1c で、データのパスを読む処理より前に用意した ---
 
 # --- 11. SearXNG setup ---
 echo ""

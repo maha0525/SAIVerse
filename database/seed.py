@@ -32,14 +32,15 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def import_initial_playbooks() -> None:
-    """Import all playbooks from builtin_data/playbooks/public/ directory."""
+def import_initial_playbooks(db_path: Path | None = None) -> None:
+    """Import all playbooks from builtin_data/playbooks/public/ directory into
+    ``db_path`` (default: ``default_db_path()``)."""
     playbooks_dir = Path(__file__).parent.parent / "builtin_data" / "playbooks" / "public"
     if not playbooks_dir.exists():
         logging.warning(f"Playbooks directory not found: {playbooks_dir}")
         return
 
-    db_path = default_db_path()
+    db_path = db_path or default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")
     Session = sessionmaker(bind=engine)
 
@@ -327,6 +328,16 @@ def seed_database(force: bool = False):
         logging.warning(f"Deleting existing database: {DB_PATH}")
         os.remove(DB_PATH)
 
+    populate_database(DB_PATH)
+
+
+def populate_database(DB_PATH: Path) -> bool:
+    """Create the tables in ``DB_PATH`` and fill in the initial world and
+    playbooks. Never removes or replaces anything; the caller decides that the
+    file may be written (``seed_database`` after its backup, or
+    ``seed_database_if_missing`` after creating the file itself). Returns
+    whether the world was committed (a failure is logged, as it always was).
+    """
     # --- 2. Load seed data ---
     seed_data = _load_seed_data()
     username = seed_data["user"]["username"]
@@ -389,22 +400,27 @@ def seed_database(force: bool = False):
 
         db.commit()
         logging.info("Database seeding completed successfully.")
+        committed = True
 
     except Exception as e:
         db.rollback()
         logging.error(f"An error occurred during database seeding: {e}", exc_info=True)
+        committed = False
     finally:
         db.close()
+        engine.dispose()
 
     # Import initial playbooks after DB seeding
     try:
-        import_initial_playbooks()
+        import_initial_playbooks(DB_PATH)
     except Exception as e:
         logging.error(f"An error occurred during playbook import: {e}", exc_info=True)
+    return committed
 
 DB_MISSING = "missing"
 DB_READY = "ready"
-DB_WITHOUT_CITY = "without_city"
+DB_EMPTY = "empty"
+DB_INCOMPLETE = "incomplete"
 DB_UNREADABLE = "unreadable"
 
 
@@ -412,10 +428,13 @@ def database_state(db_path: Path) -> tuple[str, str]:
     """What ``seed_database_if_missing`` finds at ``db_path``, and why.
 
     Opened read-only, so the check itself never creates or changes the file.
-    ``DB_WITHOUT_CITY``: a SQLite database without the ``city`` table (an empty
-    file, or one a failed first setup left). ``DB_UNREADABLE``: anything that
-    cannot be read as SQLite (damaged, not a database, no permission) -- it may
-    still hold the user's world, so it is never replaced.
+    ``DB_READY``: has a ``city`` table (SQLite table names are matched without
+    regard to case, as SQLite itself does). ``DB_EMPTY``: a SQLite file with no
+    table at all (a 0-byte file, or one a first setup left before it made the
+    tables). ``DB_INCOMPLETE``: has tables but no ``city`` table (a partial
+    restore, for instance) -- the other tables may hold the user's world.
+    ``DB_UNREADABLE``: cannot be read as SQLite (damaged, not a database, no
+    permission) -- it may still hold the user's world too.
     """
     import sqlite3
 
@@ -424,50 +443,101 @@ def database_state(db_path: Path) -> tuple[str, str]:
     try:
         conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
         try:
-            row = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='city'"
-            ).fetchone()
+            tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return DB_UNREADABLE, f"{db_path} cannot be read as a SQLite database ({exc})"
-    if row is None:
-        return DB_WITHOUT_CITY, f"{db_path} has no city table"
-    return DB_READY, f"{db_path} is in place"
+    if any(str(name).lower() == "city" for name in tables):
+        return DB_READY, f"{db_path} is in place"
+    if not tables:
+        return DB_EMPTY, f"{db_path} has no tables"
+    return DB_INCOMPLETE, f"{db_path} has tables ({', '.join(sorted(map(str, tables))[:10])}) but no city table"
+
+
+def _set_aside(db_path: Path, label: str) -> Path:
+    """Rename ``db_path`` to ``<name>.<label>-<time>`` beside it (never deleted)."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    aside = db_path.with_name(f"{db_path.name}.{label}-{stamp}")
+    n = 2
+    while aside.exists():
+        aside = db_path.with_name(f"{db_path.name}.{label}-{stamp}-{n}")
+        n += 1
+    os.replace(db_path, aside)
+    return aside
+
+
+def _stop(db_path: Path, detail: str) -> int:
+    print(f"[ERROR] {detail}.", flush=True)
+    print("[ERROR] The database was left as it is. Check the file (or move it away to start "
+          "a new world), then run setup again.", flush=True)
+    print(f"[ERROR] データベース {db_path} はそのままにしてあります。ファイルを確かめるか "
+          "(新しい世界で始めるならファイルを別の場所へ移してから)、setup をもう一度実行してください。",
+          flush=True)
+    return 2
+
+
+def _city_count(db_path: Path) -> int:
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM city").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
 
 
 def seed_database_if_missing() -> int:
     """What setup.bat / setup.sh run: create the database SAIVerse uses only when
-    there is none. Returns the exit code.
+    there is none, without ever removing or replacing a database that is there.
+    Returns the exit code.
 
     The database is the one main.py uses (``default_db_path`` after the same
-    .env), not a fixed path: setup used to look at
-    ``%USERPROFILE%\\.saiverse\\user_data\\database\\saiverse.db`` and so missed a
-    SAIVERSE_HOME set elsewhere -- no database was created for it, and a
-    leftover one under ~/.saiverse was taken for it.
+    .env), resolved once: the same path is checked, created and filled in.
+    setup used to look at a fixed ``~/.saiverse`` path and so missed a
+    SAIVERSE_HOME set elsewhere.
 
-    In place -> nothing is changed. Missing, or a SQLite file without the city
-    table -> ``seed_database(force=True)`` (which backs an existing file up
-    before it replaces it). Unreadable -> nothing is changed and 2 is returned,
-    so setup stops instead of replacing a file that may hold the user's world.
+    - In place (a ``city`` table) -> nothing is changed.
+    - Missing -> the file is created only if it still does not exist
+      (``O_EXCL``; one that appeared since the check is left as it is and 2 is
+      returned), then filled in (``populate_database``).
+    - Empty (no tables) -> renamed to ``<name>.empty-<time>`` beside it, then
+      created as above.
+    - Incomplete or unreadable -> nothing is changed and 2 is returned, so
+      setup stops instead of replacing a file that may hold the user's world.
+
+    When filling in fails, the half-made file -- which this run created -- is
+    renamed to ``<name>.failed-<time>`` (so the next setup does not take it for
+    a world) and 1 is returned.
     """
     db_path = default_db_path()
+    ensure_data_dir()
     state, detail = database_state(db_path)
     if state == DB_READY:
         print(f"[OK] Database already exists: {db_path}", flush=True)
         return 0
-    if state == DB_UNREADABLE:
-        print(f"[ERROR] {detail}.", flush=True)
-        print("[ERROR] The database was left as it is. Check the file (or move it away to start "
-              "a new world), then run setup again.", flush=True)
-        print(f"[ERROR] データベース {db_path} を読めないため、そのままにしてあります。ファイルを確かめるか "
-              "(新しい世界で始めるならファイルを別の場所へ移してから)、setup をもう一度実行してください。",
-              flush=True)
-        return 2
-    if state == DB_WITHOUT_CITY:
-        print(f"[WARN] {detail}; initializing it again (the file is backed up first)", flush=True)
+    if state in (DB_INCOMPLETE, DB_UNREADABLE):
+        return _stop(db_path, detail)
+    if state == DB_EMPTY:
+        aside = _set_aside(db_path, "empty")
+        print(f"[WARN] {detail}; moved it to {aside.name} and creating the database again", flush=True)
+    try:
+        fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return _stop(db_path, f"{db_path} appeared while setup was checking it")
+    os.close(fd)
     print(f"[SETUP] Initializing database: {db_path}", flush=True)
-    seed_database(force=True)
+    committed = populate_database(db_path)
+    if not committed or database_state(db_path)[0] != DB_READY or _city_count(db_path) == 0:
+        aside = _set_aside(db_path, "failed")
+        print(f"[ERROR] The database could not be initialized (see above); the half-made file was "
+              f"moved to {aside.name}. Run setup again.", flush=True)
+        print(f"[ERROR] データベースを作れませんでした (上の表示を見てください)。作りかけのファイルは "
+              f"{aside.name} に移しました。setup をもう一度実行してください。", flush=True)
+        return 1
     print(f"[OK] Database initialized: {db_path}", flush=True)
     return 0
 

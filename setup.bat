@@ -95,6 +95,18 @@ REM ask in. A first install has nothing running and goes on. Same as setup.sh.
 "%PYTHON_EXE%" scripts\setup_venv.py check-stopped
 if errorlevel 1 goto :saiverse_running
 
+REM --- 1c. .env ---
+REM Before anything reads the data paths (SAIVERSE_HOME): every later step,
+REM like SAIVerse itself, reads the first .env from this folder upward.
+REM setup_venv.py ensure-dotenv copies .env.example to .env only when there is
+REM none, so a .env above this folder keeps choosing the world. Same as setup.sh.
+"%PYTHON_EXE%" scripts\setup_venv.py ensure-dotenv
+if errorlevel 1 (
+    echo [ERROR] .env could not be created.
+    pause
+    exit /b 1
+)
+
 REM --- 2. Node.js check & auto-install ---
 REM A portable install from a previous setup comes first, as in start.bat.
 REM Bring it to the version install_node_portable.ps1 pins; if that fails the
@@ -380,16 +392,7 @@ python scripts\init_git_repo.py
 
 :git_skip
 
-REM --- 10. Create .env from example if not exists ---
-if not exist ".env" (
-    echo.
-    echo [SETUP] Creating .env file...
-    copy .env.example .env >nul
-    echo [OK] Created .env
-    echo   API keys can be configured in the first-run tutorial.
-) else (
-    echo [OK] .env already exists
-)
+REM --- 10. .env: created in step 1c, before anything read the data paths ---
 
 REM --- 11. SearXNG setup ---
 echo.
