@@ -528,7 +528,14 @@ def _publish_without_overwriting(source: Path, target: Path) -> None:
 
 def _copy_into_new_file(source: Path, target: Path) -> None:
     """Create ``target`` (``FileExistsError`` if it exists) and copy ``source``
-    into it through the new file's own descriptor."""
+    into it through the new file's own descriptor.
+
+    When the copy fails, ``target`` is not removed: by then another process
+    may have put a database at that name (a restore renames over it), and
+    removing by name would remove that one. The partial copy left behind is
+    an empty or incomplete database file, which the next setup stops at
+    (``database_state``) and asks the user to check.
+    """
     fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         with open(source, "rb") as src, os.fdopen(fd, "wb", closefd=False) as dst:
@@ -541,11 +548,12 @@ def _copy_into_new_file(source: Path, target: Path) -> None:
             os.fsync(fd)
     except BaseException:
         os.close(fd)
-        # The file is this run's (created above): remove the partial copy.
-        try:
-            target.unlink()
-        except OSError:
-            pass
+        print(f"[ERROR] Copying the new database to {target} failed. If {target} is the partial copy "
+              "this setup made (and not a database you put there), delete it, then run setup again.",
+              flush=True)
+        print(f"[ERROR] 新しいデータベースを {target} へ写す途中で失敗しました。{target} がこの setup の"
+              "写しかけ (自分で置いたデータベースではない) なら、消してから setup をもう一度実行してください。",
+              flush=True)
         raise
     os.close(fd)
 

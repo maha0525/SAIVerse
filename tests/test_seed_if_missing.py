@@ -219,6 +219,30 @@ def test_without_hard_links_the_copy_never_overwrites(tmp_path: Path, monkeypatc
         assert not source.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot rename over an open file; the race is Mac / Linux only")
+def test_a_failed_copy_never_removes_what_is_at_the_name(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The copy fails after another process put a database at the name (a
+    restore renames over it): that database stays."""
+    monkeypatch.setattr(seed.os, "name", "posix")
+    monkeypatch.setattr(seed.os, "link", lambda src, dst: (_ for _ in ()).throw(OSError(1, "no links")))
+    source = tmp_path / "new.db"
+    source.write_bytes(b"new world" * 1000)
+    target = tmp_path / "saiverse.db"
+    real_fsync = os.fsync
+
+    def restored_then_fails(fd):  # type: ignore[no-untyped-def]
+        real_fsync(fd)
+        replacement = tmp_path / "restore.tmp"
+        replacement.write_bytes(b"restored world")
+        os.replace(replacement, target)
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(seed.os, "fsync", restored_then_fails)
+    with pytest.raises(OSError):
+        seed._publish_without_overwriting(source, target)
+    assert target.read_bytes() == b"restored world"
+
+
 def test_publishing_never_overwrites(tmp_path: Path) -> None:
     source = tmp_path / "new.db"
     source.write_text("new", encoding="utf-8")
