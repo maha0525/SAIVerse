@@ -1,6 +1,6 @@
 """起動前・setup で起きた環境の失敗を、画面のバナー (startup_alerts) に出す。
 
-本体の起動時に main.py から一度だけ呼ぶ。集めるのは次の五つ:
+本体の起動時に main.py から一度だけ呼ぶ。集めるのは次の六つ:
 
 - 更新・起動前のパッケージの入れ直しの失敗 (``saiverse/update_dependencies_alert.py``)
 - setup.bat / setup.sh でのアドオンのパッケージの入れ直しの失敗 (本体の ``.venv`` に
@@ -17,6 +17,10 @@
 - 画面の「Update」ボタンの更新で止めた SearXNG のサーバーを起動し直せなかったこと。
   ``update_engine`` がバックエンドを起動する前に ``SEARXNG_RESTART_FAILURE_RECORD``
   に書く。その起動し直しで起きた出来事の知らせなので、ここで読んだら消す
+- SAIVerse を動かしている Python (``.venv`` の Python) が、動作を確認している系列
+  (``RECOMMENDED_PYTHON_SERIES``) でないこと。``.venv`` は作ったときの Python の系列の
+  まま動き続け、Update ボタンの更新では作り直されない。作り直すのは setup だけなので、
+  setup を打たない人はここでしか気づけない
 
 どれも起動を止めないため、例外は出さない。
 """
@@ -24,6 +28,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -326,6 +332,48 @@ def setup_stopped_alerts(
     }]
 
 
+# setup.bat (レジストリの ``PythonCore\3.13``) と setup.sh (``python3.13``、
+# ``--expect-series 3.13``) が名指しする系列 (一致はテストが確かめる)。
+RECOMMENDED_PYTHON_SERIES = (3, 13)
+# setup.bat / setup.sh で推奨外の Python のまま進めることを選んだ、という設定
+# (docs/reference/environment-vars.md)。
+ALLOW_NON_RECOMMENDED_PYTHON_ENV = "SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON"
+PYTHON_SERIES_ALERT_ID = "python_not_recommended"
+
+
+def python_series_alerts(version_info: Any = None) -> List[Dict[str, Any]]:
+    """SAIVerse を動かしている Python が推奨の系列でなければ、警告を 1 件返す。
+
+    ``SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1`` (.env でもよい) のときは出さない。
+    利用者が推奨外の Python を自分で選んだという設定なので。
+    """
+    if os.environ.get(ALLOW_NON_RECOMMENDED_PYTHON_ENV) == "1":
+        return []
+    info = version_info or sys.version_info
+    current = (int(info[0]), int(info[1]))
+    if current == RECOMMENDED_PYTHON_SERIES:
+        return []
+    running = f"{current[0]}.{current[1]}"
+    recommended = f"{RECOMMENDED_PYTHON_SERIES[0]}.{RECOMMENDED_PYTHON_SERIES[1]}"
+    LOGGER.warning("SAIVerse は推奨外の Python %s で動いています (推奨は %s 系)", running, recommended)
+    return [{
+        "id": PYTHON_SERIES_ALERT_ID,
+        "level": "warning",
+        "title": f"SAIVerse は Python {running} で動いています",
+        "message": (
+            f"SAIVerse の動作を確認しているのは Python {recommended} 系だけです。"
+            f"python.org から Python {recommended} の最新のものを入れてから、SAIVerse を閉じて "
+            "setup.bat (Mac / Linux では setup.sh) をもう一度実行してください。"
+            f"SAIVerse の .venv とアドオンの専用の Python 環境が Python {recommended} で"
+            "作り直されます (会話やペルソナのデータ、アドオンのデータはそのまま残ります)。"
+            f"いまの Python のまま使い続ける場合は、SAIVerse のフォルダの .env に "
+            f"{ALLOW_NON_RECOMMENDED_PYTHON_ENV}=1 "
+            "と書くとこの表示は出なくなります (動作は保証しません)。"
+        ),
+        "details": {"python": running, "recommended": recommended, "executable": sys.executable},
+    }]
+
+
 def environment_alerts(project_dir: Path) -> List[Dict[str, Any]]:
     """起動時に startup_alerts へ積む、環境の失敗の警告を全部返す。"""
     alerts: List[Dict[str, Any]] = []
@@ -335,6 +383,7 @@ def environment_alerts(project_dir: Path) -> List[Dict[str, Any]]:
         lambda: setup_stopped_alerts(project_dir),
         lambda: searxng_setup_alerts(project_dir),
         lambda: searxng_restart_alerts(project_dir),
+        python_series_alerts,
     ):
         try:
             alerts.extend(collect())

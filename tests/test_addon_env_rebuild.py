@@ -633,6 +633,8 @@ def test_an_env_removed_by_a_stopped_rebuild_is_on_the_banner_once(home, expansi
     failure record, and only the in-progress record names the addon."""
     from saiverse import environment_alerts
 
+    # The test interpreter may be of another series than the recommended one.
+    monkeypatch.setenv(environment_alerts.ALLOW_NON_RECOMMENDED_PYTHON_ENV, "1")
     _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
     monkeypatch.setattr(
         addon_installer, "_run_subprocess", _stopping_at([], lambda args, label: args[1:3] == ["-m", "venv"]))

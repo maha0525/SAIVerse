@@ -41,7 +41,7 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON` | 未設定 | `1` のとき、Python 3.13 が見つからなくても止まらず、PATH の `python` (setup.sh は `python3`) で `.venv` を作って進める (警告を出す。動作は保証しない)。3.13 が見つかればそれを使う。この設定のあいだは、既存の `.venv` をその Python の系列を理由に作り直さない (壊れた `.venv` は作り直す)。`1` 以外の値は未設定と同じ。設定の仕方: Windows のコマンドプロンプトでは同じ窓で `set SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` を打ってから `setup.bat`、Mac / Linux では `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 ./setup.sh`。[intent](../intent/dependency_management.md) §2-7 |
+| `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON` | 未設定 | `1` のとき、Python 3.13 が見つからなくても止まらず、PATH の `python` (setup.sh は `python3`) で `.venv` を作って進める (警告を出す。動作は保証しない)。3.13 が見つかればそれを使う。この設定のあいだは、既存の `.venv` をその Python の系列を理由に作り直さない (壊れた `.venv` は作り直す)。起動時の画面のバナー「SAIVerse は Python 3.x で動いています」も、この値が `1` のときは出ない (バナーを消すだけなら `.env` に書けばよい。setup はこの値を `.env` からは読まず、その窓の環境変数からだけ読む)。`1` 以外の値は未設定と同じ。設定の仕方: Windows のコマンドプロンプトでは同じ窓で `set SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` を打ってから `setup.bat`、Mac / Linux では `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 ./setup.sh`。[intent](../intent/dependency_management.md) §2-7 |
 
 ## LLM API キー / 接続
 
