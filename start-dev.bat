@@ -27,6 +27,57 @@ ren ".node.old" ".node"
 if errorlevel 1 echo [WARN] Could not rename .node.old back to .node.
 :portable_node_ready
 
+REM ---------------------------------------------------------------
+REM Finish an interrupted update before starting.
+REM update_engine.py --check-complete exits 10 when the code is newer
+REM than the installed packages, 11 when it cannot tell, 12 when it had
+REM to install the packages once more and that failed, 0 when ready.
+REM On 12 SAIVerse starts anyway and its screen shows the failure.
+REM Any other code means the check itself failed, so we warn and start
+REM anyway - same meaning as start.sh.
+REM Keep this block flat and free of parentheses inside echo text:
+REM the v0.2.29 update.bat died because "(" in an echo argument broke
+REM the enclosing if-block. See
+REM docs/issues/v0229_update_bat_truncates_after_git_pull.md
+REM ---------------------------------------------------------------
+if not exist ".venv\Scripts\python.exe" goto :update_check_done
+".venv\Scripts\python.exe" "scripts\update_engine.py" --check-complete
+if errorlevel 13 goto :update_check_skipped
+if errorlevel 12 goto :dependencies_failed
+if errorlevel 11 goto :update_check_skipped
+if errorlevel 10 goto :finish_update
+if errorlevel 1 goto :update_check_skipped
+goto :update_check_done
+
+:dependencies_failed
+echo.
+echo [WARN] The packages for this version could not be installed once more.
+echo [WARN] Starting anyway. The SAIVerse screen shows what happened and what to do.
+echo [WARN] If the SAIVerse screen does not open, its packages are missing too: check the
+echo [WARN] internet connection, close every SAIVerse window, then run start.bat again.
+goto :update_check_done
+
+:finish_update
+echo.
+echo [INFO] Update was interrupted; finishing it now...
+".venv\Scripts\python.exe" "scripts\update_engine.py" --manual
+if errorlevel 1 goto :finish_update_failed
+echo [OK] Update finished.
+goto :update_check_done
+
+:finish_update_failed
+echo.
+echo [ERROR] The interrupted update could not be finished.
+echo [ERROR] SAIVerse was NOT started, because the code and the installed
+echo [ERROR] packages do not match. See self_update.log for details.
+pause
+exit /b 1
+
+:update_check_skipped
+echo [WARN] Could not verify the update state. Starting anyway.
+
+:update_check_done
+
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"
 
