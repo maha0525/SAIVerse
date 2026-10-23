@@ -1090,21 +1090,48 @@ def _run(
     locale default for commands whose output is known to be UTF-8 regardless of
     the console code page (git with ``-z``); undecodable bytes are replaced
     rather than crashing the phase. ``env`` replaces the inherited environment
-    (None inherits it)."""
+    (None inherits it).
+
+    Past ``timeout``, the command and every process it started are stopped
+    (``_stop_process_tree``) before ``UpdateError`` is raised. Stopping only
+    the command, as ``subprocess.run`` does, left what it had started running:
+    pip under ``scripts/rebuild_addon_envs.py`` or ``searxng_install.py``, the
+    phases of the ``--install-dependencies`` child. They went on changing the
+    environment after the update had moved on, and the next try raced them
+    (PR #419, Codex). ``subprocess.run`` also waits for the output pipes after
+    the kill, which such a process holds open."""
     LOGGER.info("Phase: %s", label)
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding=encoding,
             errors="replace" if encoding else None,
-            timeout=timeout,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        left = _stop_process_tree(process)
+        try:
+            process.communicate(timeout=30)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        detail = f"; still running: {left}" if left else ""
+        raise UpdateError(
+            f"{label} could not run: timed out after {timeout} s and was stopped{detail}"
+        ) from None
+    except BaseException:
+        # Ctrl+C, or the update process itself being stopped: do not leave
+        # the command running behind it.
+        _stop_process_tree(process)
+        raise
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise UpdateError(f"{label} failed with exit {result.returncode}: {detail}")
@@ -1118,6 +1145,34 @@ def _process_create_time(pid: int) -> float | None:
         return float(psutil.Process(pid).create_time())
     except Exception:
         return None
+
+
+def _stop_process_tree(process: subprocess.Popen[Any]) -> str:
+    """Stop ``process`` and every process it started, and wait for them.
+
+    The descendants are listed before anything is stopped: once ``process``
+    is gone, its children no longer list under it. Returns the processes that
+    survived being killed, described for the error (empty when none did).
+    Without psutil only ``process`` itself can be stopped, as before.
+    """
+    try:
+        import psutil
+    except ImportError:
+        LOGGER.warning("psutil is not available; only PID %s is stopped, not what it started", process.pid)
+        process.kill()
+        return ""
+    try:
+        parent = psutil.Process(process.pid)
+        tree = [*parent.children(recursive=True), parent]
+    except psutil.NoSuchProcess:
+        return ""
+    except (psutil.Error, OSError) as exc:
+        LOGGER.warning("Could not list what PID %s started (%s); stopping PID %s only", process.pid, exc, process.pid)
+        process.kill()
+        return ""
+    LOGGER.warning("Stopping %s and the processes it started: %s", process.pid, _describe_processes(tree))
+    left = _terminate_processes(tree, psutil, timeout=10)
+    return _describe_processes(left) if left else ""
 
 
 def _process_alive(pid: int) -> bool:
