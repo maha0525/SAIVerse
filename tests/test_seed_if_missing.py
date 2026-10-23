@@ -33,9 +33,11 @@ def _sqlite(path: Path, *tables: str, rows: bool = False) -> Path:
 
 def test_the_states_of_a_database(tmp_path: Path) -> None:
     assert seed.database_state(tmp_path / "none.db")[0] == seed.DB_MISSING
-    assert seed.database_state(_sqlite(tmp_path / "world.db", "city", "ai"))[0] == seed.DB_READY
+    assert seed.database_state(_sqlite(tmp_path / "world.db", "city", "ai", rows=True))[0] == seed.DB_READY
     # SQLite matches table names without regard to case, and so does the check.
-    assert seed.database_state(_sqlite(tmp_path / "Upper.db", "City"))[0] == seed.DB_READY
+    assert seed.database_state(_sqlite(tmp_path / "Upper.db", "City", rows=True))[0] == seed.DB_READY
+    # A city table without a city: a setup that stopped while it filled the file.
+    assert seed.database_state(_sqlite(tmp_path / "unfilled.db", "city", "ai"))[0] == seed.DB_INCOMPLETE
     assert seed.database_state(_sqlite(tmp_path / "empty.db"))[0] == seed.DB_EMPTY
     zero = tmp_path / "zero.db"
     zero.write_bytes(b"")
@@ -92,19 +94,16 @@ def test_a_missing_database_is_created_at_the_checked_path(at: Path, monkeypatch
     assert seed.database_state(at)[0] == seed.DB_READY
 
 
-def test_an_empty_file_is_kept_aside_and_the_database_created(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    at.write_bytes(b"")
-    calls: list[Path] = []
-    monkeypatch.setattr(seed, "populate_database", _fake_populate(calls))
-    assert seed.seed_database_if_missing() == 0
-    assert calls == [at]
-    assert len(list(at.parent.glob("saiverse.db.empty-*"))) == 1
-
-
-@pytest.mark.parametrize("kind", ["incomplete", "unreadable"])
+@pytest.mark.parametrize("kind", ["empty", "no city table", "no city", "unreadable"])
 def test_a_file_that_may_hold_a_world_is_left_and_setup_stops(at: Path, monkeypatch, capsys, kind) -> None:  # type: ignore[no-untyped-def]
-    if kind == "incomplete":
+    """Nothing but a missing file lets setup create one: an empty file may be
+    the one another setup is filling right now, the others may hold a world."""
+    if kind == "empty":
+        at.write_bytes(b"")
+    elif kind == "no city table":
         _sqlite(at, "ai", "building", rows=True)
+    elif kind == "no city":
+        _sqlite(at, "city", "ai")
     else:
         at.write_bytes(b"damaged" * 1000)
     before = at.read_bytes()
@@ -134,15 +133,39 @@ def test_a_database_that_appears_after_the_check_is_left(at: Path, monkeypatch) 
     conn.close()
 
 
-def test_a_failed_fill_moves_the_half_made_file_away(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize("how", ["returned", "raised"])
+def test_a_failed_fill_moves_the_half_made_file_away(at: Path, monkeypatch, how) -> None:  # type: ignore[no-untyped-def]
     def half(path: Path) -> bool:
         _sqlite(path, "city")  # tables made, world not committed
+        if how == "raised":
+            raise OSError("disk full")
         return False
 
     monkeypatch.setattr(seed, "populate_database", half)
     assert seed.seed_database_if_missing() == 1
     assert not at.exists()
     assert len(list(at.parent.glob("saiverse.db.failed-*"))) == 1
+
+
+def test_a_failure_while_making_the_tables_closes_the_file_and_moves_it_away(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The real populate_database, failing in create_all after the city table:
+    the file is closed (Windows cannot rename an open file), moved away, and
+    the next setup creates the database again instead of taking it for one."""
+    real_create_all = seed.Base.metadata.create_all
+
+    def fails_after_city(engine, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seed.Base.metadata.tables["city"].create(engine)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(seed.Base.metadata, "create_all", fails_after_city)
+    monkeypatch.setattr(seed, "import_initial_playbooks", lambda db_path=None: None)
+    assert seed.seed_database_if_missing() == 1
+    assert not at.exists()
+    assert len(list(at.parent.glob("saiverse.db.failed-*"))) == 1
+
+    monkeypatch.setattr(seed.Base.metadata, "create_all", real_create_all)
+    assert seed.seed_database_if_missing() == 0
+    assert seed.database_state(at)[0] == seed.DB_READY
 
 
 def test_setup_creates_the_database_in_saiverse_home(tmp_path: Path) -> None:

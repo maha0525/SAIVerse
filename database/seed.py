@@ -344,9 +344,14 @@ def populate_database(DB_PATH: Path) -> bool:
 
     # --- 3. Create new DB and tables ---
     engine = create_engine(f"sqlite:///{DB_PATH}")
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    db = SessionLocal()
+    try:
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        db = SessionLocal()
+    except Exception:
+        # The file must not stay open: seed_database_if_missing moves it away.
+        engine.dispose()
+        raise
 
     try:
         # --- 4. Populate User ---
@@ -428,13 +433,16 @@ def database_state(db_path: Path) -> tuple[str, str]:
     """What ``seed_database_if_missing`` finds at ``db_path``, and why.
 
     Opened read-only, so the check itself never creates or changes the file.
-    ``DB_READY``: has a ``city`` table (SQLite table names are matched without
-    regard to case, as SQLite itself does). ``DB_EMPTY``: a SQLite file with no
-    table at all (a 0-byte file, or one a first setup left before it made the
-    tables). ``DB_INCOMPLETE``: has tables but no ``city`` table (a partial
-    restore, for instance) -- the other tables may hold the user's world.
+    ``DB_READY``: has a ``city`` table with at least one city (SQLite table
+    names are matched without regard to case, as SQLite itself does).
+    ``DB_EMPTY``: a SQLite file with no table at all (a 0-byte file) -- a setup
+    that stopped right after creating it, or one creating it right now.
+    ``DB_INCOMPLETE``: has tables but no city (no ``city`` table, as after a
+    partial restore, or an empty one, as after a setup that stopped while it
+    filled the file) -- the other tables may hold the user's world.
     ``DB_UNREADABLE``: cannot be read as SQLite (damaged, not a database, no
-    permission) -- it may still hold the user's world too.
+    permission) -- it may still hold the user's world too. Only ``DB_MISSING``
+    lets setup create a database; every other state but ``DB_READY`` stops it.
     """
     import sqlite3
 
@@ -444,14 +452,24 @@ def database_state(db_path: Path) -> tuple[str, str]:
         conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
         try:
             tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            city_table = next((str(name) for name in tables if str(name).lower() == "city"), None)
+            cities = (
+                conn.execute(f'SELECT COUNT(*) FROM "{city_table}"').fetchone()[0]
+                if city_table is not None else 0
+            )
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return DB_UNREADABLE, f"{db_path} cannot be read as a SQLite database ({exc})"
-    if any(str(name).lower() == "city" for name in tables):
+    if city_table is not None and cities > 0:
         return DB_READY, f"{db_path} is in place"
     if not tables:
-        return DB_EMPTY, f"{db_path} has no tables"
+        return DB_EMPTY, (
+            f"{db_path} is an empty database file (a setup that stopped right after creating it, "
+            "or one running now)"
+        )
+    if city_table is not None:
+        return DB_INCOMPLETE, f"{db_path} has a city table without any city (a setup that stopped part-way)"
     return DB_INCOMPLETE, f"{db_path} has tables ({', '.join(sorted(map(str, tables))[:10])}) but no city table"
 
 
@@ -477,19 +495,6 @@ def _stop(db_path: Path, detail: str) -> int:
     return 2
 
 
-def _city_count(db_path: Path) -> int:
-    import sqlite3
-
-    try:
-        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
-        try:
-            return int(conn.execute("SELECT COUNT(*) FROM city").fetchone()[0])
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return 0
-
-
 def seed_database_if_missing() -> int:
     """What setup.bat / setup.sh run: create the database SAIVerse uses only when
     there is none, without ever removing or replacing a database that is there.
@@ -500,18 +505,19 @@ def seed_database_if_missing() -> int:
     setup used to look at a fixed ``~/.saiverse`` path and so missed a
     SAIVERSE_HOME set elsewhere.
 
-    - In place (a ``city`` table) -> nothing is changed.
+    - In place (a city) -> nothing is changed.
     - Missing -> the file is created only if it still does not exist
-      (``O_EXCL``; one that appeared since the check is left as it is and 2 is
-      returned), then filled in (``populate_database``).
-    - Empty (no tables) -> renamed to ``<name>.empty-<time>`` beside it, then
-      created as above.
-    - Incomplete or unreadable -> nothing is changed and 2 is returned, so
-      setup stops instead of replacing a file that may hold the user's world.
+      (``O_EXCL``; one that appeared since the check -- another setup, a
+      restore -- is left as it is and 2 is returned), then filled in
+      (``populate_database``).
+    - Empty, incomplete or unreadable -> nothing is changed and 2 is returned,
+      so setup stops instead of moving or replacing a file that another setup
+      may be filling right now, or that may hold the user's world. The message
+      asks the user to check it (or move it away to start a new world).
 
-    When filling in fails, the half-made file -- which this run created -- is
-    renamed to ``<name>.failed-<time>`` (so the next setup does not take it for
-    a world) and 1 is returned.
+    When filling in fails -- returned or raised -- the half-made file, which
+    this run created, is renamed to ``<name>.failed-<time>`` (so the next setup
+    does not take it for a world) and 1 is returned.
     """
     db_path = default_db_path()
     ensure_data_dir()
@@ -519,20 +525,28 @@ def seed_database_if_missing() -> int:
     if state == DB_READY:
         print(f"[OK] Database already exists: {db_path}", flush=True)
         return 0
-    if state in (DB_INCOMPLETE, DB_UNREADABLE):
+    if state != DB_MISSING:
         return _stop(db_path, detail)
-    if state == DB_EMPTY:
-        aside = _set_aside(db_path, "empty")
-        print(f"[WARN] {detail}; moved it to {aside.name} and creating the database again", flush=True)
     try:
         fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return _stop(db_path, f"{db_path} appeared while setup was checking it")
     os.close(fd)
     print(f"[SETUP] Initializing database: {db_path}", flush=True)
-    committed = populate_database(db_path)
-    if not committed or database_state(db_path)[0] != DB_READY or _city_count(db_path) == 0:
-        aside = _set_aside(db_path, "failed")
+    try:
+        committed = populate_database(db_path)
+    except Exception:
+        logging.exception("The database could not be initialized")
+        committed = False
+    if not committed or database_state(db_path)[0] != DB_READY:
+        try:
+            aside = _set_aside(db_path, "failed")
+        except OSError as exc:
+            print(f"[ERROR] The database could not be initialized (see above), and the half-made file "
+                  f"{db_path} could not be moved away ({exc}). Delete it, then run setup again.", flush=True)
+            print(f"[ERROR] データベースを作れず、作りかけのファイル {db_path} も移せませんでした。"
+                  "そのファイルを消してから、setup をもう一度実行してください。", flush=True)
+            return 1
         print(f"[ERROR] The database could not be initialized (see above); the half-made file was "
               f"moved to {aside.name}. Run setup again.", flush=True)
         print(f"[ERROR] データベースを作れませんでした (上の表示を見てください)。作りかけのファイルは "
