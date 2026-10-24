@@ -1,6 +1,7 @@
 """Shared pytest fixtures and helpers for SAIVerse test suite."""
 
 import ipaddress
+import os
 import socket
 import sys
 from pathlib import Path
@@ -55,6 +56,46 @@ def mock_provider_network(monkeypatch):
         monkeypatch.setattr(provider_security, "socket", SimpleNamespace(getaddrinfo=getaddrinfo))
 
     return install
+
+
+_TEST_INTERPRETER = os.path.normcase(os.path.abspath(sys.executable))
+
+
+@pytest.fixture(autouse=True)
+def _refuse_pip_changes_to_the_test_interpreter(monkeypatch):
+    """pip install / uninstall with the interpreter running the tests changes the
+    real ``.venv`` of this checkout (2026-10-23: a test of the update engine reached
+    the dependency step in a temporary checkout and ran ``pip install --upgrade pip``
+    with this interpreter while SAIVerse was running). Fail such a call instead.
+
+    Only a process started with this exact interpreter and ``-m pip install`` /
+    ``uninstall`` is refused; pip check / list and other interpreters are untouched.
+    The check is on ``subprocess.Popen``, which ``subprocess.run`` and the update
+    engine's ``_run`` both start processes with.
+    """
+    import subprocess
+
+    real_popen = subprocess.Popen
+
+    def refuse_pip_changes(args) -> None:  # type: ignore[no-untyped-def]
+        command = [str(part) for part in args] if isinstance(args, (list, tuple)) else []
+        if (
+            len(command) >= 4
+            and os.path.normcase(os.path.abspath(command[0])) == _TEST_INTERPRETER
+            and command[1:3] == ["-m", "pip"]
+            and command[3] in ("install", "uninstall")
+        ):
+            raise AssertionError(
+                "a test ran pip " + command[3] + " with the test interpreter, which changes "
+                "the real .venv: " + " ".join(command)
+            )
+
+    class GuardedPopen(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, args, *rest, **kwargs):  # type: ignore[no-untyped-def]
+            refuse_pip_changes(args)
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
 
 
 @pytest.fixture(autouse=True)

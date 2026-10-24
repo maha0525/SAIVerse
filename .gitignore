@@ -50,6 +50,25 @@ self_update.log
 # Must stay ignored: the updater refuses to run when tracked files are modified,
 # and a marker that had ever been committed would trip that check.
 .update_complete*
+# Per-checkout record of the finished dependency step and of a failed package
+# reinstall at start (update_engine.DEPENDENCIES_RECORD /
+# DEPENDENCIES_FAILURE_RECORD), plus their temporary files. Ignored for the
+# same reason.
+.update_dependencies_*
+# setup keeps the previous .venv under this name while it builds a new one
+# and renames it to .venv.deleting-* to delete it (scripts/setup_venv.py),
+# records addon environments it could not rebuild (scripts/rebuild_addon_envs.py),
+# and records a .venv or SearXNG venv replacement that has not finished
+# (.setup_in_progress/, scripts/setup_in_progress.py). Ignored for the same reason.
+.venv.old-*/
+.venv.deleting-*/
+.addon_env_rebuild_failures.json
+.setup_in_progress/
+# A failed SearXNG setup (scripts/searxng_install.py SETUP_FAILURE_RECORD) and a
+# SearXNG server the Update button's update could not start again
+# (update_engine.SEARXNG_RESTART_FAILURE_RECORD), plus their temporary files.
+# The backend shows them in the alert banner. Ignored for the same reason.
+.searxng_*_failed.json*
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1
@@ -98,6 +117,10 @@ __*.*
 tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
+# A SearXNG venv of another Python series, set aside by setup until the new one is installed,
+# and renamed to .deleting-* to delete it.
+scripts/.searxng-venv.old-*/
+scripts/.searxng-venv.deleting-*/
 scripts/searxng_settings.yml
 scripts/searxng_settings.yml.bak
 scripts/searxng_user_engines.yml

@@ -247,8 +247,13 @@ def test_env_is_created_and_rebuilt_on_python_version_change(home, monkeypatch) 
     monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
     progress = lambda _e: None  # noqa: E731
 
-    env_dir = addon_installer._ensure_addon_env(ADDON_ID, "gpt", progress)
+    new_envs: set = set()
+    env_dir = addon_installer._ensure_addon_env(ADDON_ID, "gpt", progress, new_envs)
     assert env_dir == home / "addon_install" / ADDON_ID / "envs" / "gpt"
+    # The record waits for the steps that use the env (_execute_steps writes it).
+    assert new_envs == {env_dir}
+    assert addon_paths.read_addon_env_record(env_dir) is None
+    addon_installer._write_env_records(new_envs)
     record = addon_paths.read_addon_env_record(env_dir)
     assert record["python_version"] == addon_paths.current_python_version()
     assert sum(1 for r in recorded if r["args"][1:3] == ["-m", "venv"]) == 1
@@ -265,9 +270,11 @@ def test_env_is_created_and_rebuilt_on_python_version_change(home, monkeypatch) 
     with pytest.raises(addon_paths.AddonEnvError, match="9.9.9"):
         addon_paths.get_addon_env_python(ADDON_ID, "gpt")
     monkeypatch.setattr(addon_installer, "current_python_version", lambda: "9.9.9")
-    addon_installer._ensure_addon_env(ADDON_ID, "gpt", progress)
+    rebuilt: set = set()
+    addon_installer._ensure_addon_env(ADDON_ID, "gpt", progress, rebuilt)
     assert sum(1 for r in recorded if r["args"][1:3] == ["-m", "venv"]) == 2
     assert not stale_marker.exists()
+    addon_installer._write_env_records(rebuilt)
     assert addon_paths.read_addon_env_record(env_dir)["python_version"] == "9.9.9"
 
 
@@ -389,11 +396,75 @@ def test_ensure_addon_env_upgrades_pip_right_after_creating_the_env(home, monkey
     recorded: list = []
     monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
 
-    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None)
-    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None)
+    # Two steps of one run: the second uses the env the first made, before its record exists.
+    new_envs: set = set()
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None, new_envs)
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None, new_envs)
 
     kinds = ["venv" if r["args"][1:3] == ["-m", "venv"] else "pip-upgrade" for r in recorded]
     assert kinds == ["venv", "pip-upgrade"]
+
+
+def _env_steps_manifest_addon(tmp_path: Path) -> tuple[Path, list]:
+    """An addon dir with two pip_install steps into the env "tts"."""
+    addon_dir = tmp_path / "addon"
+    addon_dir.mkdir()
+    (addon_dir / "a.txt").write_text("numpy\n", encoding="utf-8")
+    (addon_dir / "b.txt").write_text("torch\n", encoding="utf-8")
+    steps = [
+        PipInstallStep(type="pip_install", name="first", requirements="a.txt", env="tts"),
+        PipInstallStep(type="pip_install", name="second", requirements="b.txt", env="tts"),
+    ]
+    return addon_dir, steps
+
+
+def _fake_run_failing_at(recorded: list, failing_label: str | None, exc: BaseException | None = None):
+    creating = _fake_run_creating_venv(recorded)
+
+    def fake_run(args, cwd, progress, label, env=None):  # type: ignore[no-untyped-def]
+        creating(args, cwd, progress, label, env)
+        if label == failing_label:
+            raise exc or addon_installer.AddonInstallError(f"{label}: 終了コード 1 で失敗")
+
+    return fake_run
+
+
+def test_a_new_env_is_recorded_only_after_every_step_succeeded(home, tmp_path, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_failing_at(recorded, None))
+    addon_dir, steps = _env_steps_manifest_addon(tmp_path)
+
+    addon_installer._execute_steps(steps, ADDON_ID, addon_dir, tmp_path / "data", lambda _e: None)
+
+    env_dir = addon_paths.get_addon_env_dir(ADDON_ID, "tts")
+    assert addon_paths.read_addon_env_record(env_dir)["python_version"] == addon_paths.current_python_version()
+    assert sum(1 for r in recorded if r["args"][1:3] == ["-m", "venv"]) == 1
+    assert addon_paths.get_addon_env_python(ADDON_ID, "tts") == addon_paths.addon_env_python_path(env_dir)
+
+
+@pytest.mark.parametrize("exc", [None, KeyboardInterrupt()], ids=["failure", "interrupted"])
+def test_a_new_env_whose_step_fails_or_is_interrupted_is_left_without_a_record(
+    home, tmp_path, monkeypatch, exc
+) -> None:
+    """A venv with the record but without its packages would pass get_addon_env_python."""
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_failing_at(recorded, "second", exc))
+    addon_dir, steps = _env_steps_manifest_addon(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt if exc else addon_installer.AddonInstallError):
+        addon_installer._execute_steps(steps, ADDON_ID, addon_dir, tmp_path / "data", lambda _e: None)
+
+    env_dir = addon_paths.get_addon_env_dir(ADDON_ID, "tts")
+    assert addon_paths.addon_env_python_path(env_dir).exists()
+    assert addon_paths.read_addon_env_record(env_dir) is None
+    with pytest.raises(addon_paths.AddonEnvError):
+        addon_paths.get_addon_env_python(ADDON_ID, "tts")
+    # The next setup rebuilds it (find_unusable_addon_envs needs the addon folder).
+    monkeypatch.setattr(addon_installer, "ENV_REBUILD_FAILURES_PATH", tmp_path / "no-record.json")
+    expansion = tmp_path / "expansion_data"
+    (expansion / ADDON_ID).mkdir(parents=True)
+    assert addon_installer.find_unusable_addon_envs(expansion) == {ADDON_ID: ["tts"]}
+    assert addon_installer._env_needs_full_run(ADDON_ID, "tts") is True
 
 
 def test_failed_env_pip_upgrade_continues_and_is_not_retried(home, monkeypatch) -> None:
@@ -891,6 +962,21 @@ def test_options_reapply_with_unchanged_answers_repairs_a_missing_env(home, expa
     plan = addon_installer.plan_options_apply(
         ADDON_ID, {"engines": ["cloud", "gpt"]}, expansion_dir=expansion)
     assert plan.steps == []
+
+
+def test_the_options_apply_records_the_env_it_made(home, expansion, monkeypatch) -> None:
+    """The addon manager's paths (install / update / options) run their steps
+    through _execute_steps, which writes the record once they all succeeded."""
+    _installed_with_env_manifest(expansion)
+    addon_installer.save_answers(ADDON_ID, {"engines": ["cloud"]})
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
+
+    apply_installed_options(ADDON_ID, {"engines": ["cloud", "gpt"]}, expansion_dir=expansion)
+
+    env_dir = addon_paths.get_addon_env_dir(ADDON_ID, "eng")
+    assert addon_paths.read_addon_env_record(env_dir)["python_version"] == addon_paths.current_python_version()
+    assert [r["args"][1:3] for r in recorded].count(["-m", "venv"]) == 1
 
 
 def test_broken_pending_record_is_treated_as_absent(home, expansion) -> None:

@@ -7,14 +7,102 @@ echo "========================================"
 echo ""
 
 # --- 1. Python check ---
-if ! command -v python3 &>/dev/null; then
-    echo "[ERROR] Python3 が見つかりません。"
-    echo "  macOS:  brew install python3"
-    echo "  Ubuntu: sudo apt install python3 python3-venv"
+# SAIVerse の動作確認は Python 3.13 系だけで行っている。.venv は作ったときの Python の
+# 系列に固定されるので、PATH の python3 ではなく python3.13 を名指しして使う。3.13 が
+# 無ければ .venv に触らずに止める。SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 のときは、
+# 3.13 が無ければ PATH の python3 で進める。PYTHON_BIN は選んだ python の場所で、
+# .venv を有効にする前の処理はこれを使う。setup.bat はレジストリで 3.13 を探す。
+# 設計: docs/intent/dependency_management.md §2-7。
+ALLOW_OTHER_PYTHON=false
+if [ "${SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON:-}" = "1" ]; then
+    ALLOW_OTHER_PYTHON=true
+fi
+PYTHON_BIN=""
+if command -v python3.13 &>/dev/null \
+    && python3.13 -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 13) else 1)' &>/dev/null; then
+    PYTHON_BIN="$(command -v python3.13)"
+elif [ "$ALLOW_OTHER_PYTHON" = true ]; then
+    if ! command -v python3 &>/dev/null; then
+        echo "[ERROR] Python3 が見つかりません。 / Python3 was not found."
+        echo "  Python 3.13.17: https://www.python.org/downloads/release/python-31317/"
+        exit 1
+    fi
+    PYTHON_BIN="$(command -v python3)"
+    echo ""
+    echo "[WARN] Python 3.13 が見つからないため、推奨外の Python で進めます (SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1)。"
+    echo "       動作は保証しません。推奨の Python 3.13.17 はこちらです:"
+    echo "         https://www.python.org/downloads/release/python-31317/"
+    echo "       この設定のあいだは、既存の .venv をその Python の系列を理由に作り直しません。"
+    echo "[WARN] Python 3.13 was not found; continuing with a Python that is not recommended"
+    echo "       (SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1). SAIVerse is not guaranteed to work."
+    echo "       The recommended Python 3.13.17 is here:"
+    echo "         https://www.python.org/downloads/release/python-31317/"
+    echo "       While this is set, setup does not rebuild an existing .venv because of its Python series."
+    echo ""
+else
+    cat <<'EOF'
+[ERROR] Python 3.13 (python3.13 コマンド) が見つかりません。 / Python 3.13 (the python3.13 command) was not found.
+
+SAIVerse の動作確認は Python 3.13 系だけで行っています (3.11 / 3.12 は非推奨、3.14 以降は非対応です)。
+setup はここで止まりました。.venv には何も変更していません。
+
+1. Python 3.13.17 を入れてください。
+     https://www.python.org/downloads/release/python-31317/
+   macOS はページを下にスクロールして「macOS installer」をダウンロードします。
+   Linux はディストリビューションのパッケージなどで python3.13 を入れてください
+   (Debian / Ubuntu では python3.13-venv も要ります)。
+   3.12 や 3.14 が入っていても、消さずに並べて入れられます。
+   入れ終わったら、./setup.sh をもう一度実行してください。
+
+2. いまの Python のままで進めたい場合は、環境変数 SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 を
+   設定してから setup をもう一度実行してください。ただし、その場合の動作は保証しません。
+     SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 ./setup.sh
+
+----------------------------------------------------------------
+
+SAIVerse is tested on Python 3.13 only (3.11 / 3.12 are not recommended,
+3.14 and later are not supported). Setup stopped here. Nothing in .venv was changed.
+
+1. Install Python 3.13.17:
+     https://www.python.org/downloads/release/python-31317/
+   On macOS, scroll down the page and download "macOS installer".
+   On Linux, install python3.13 from your distribution's packages or similar
+   (Debian / Ubuntu also need python3.13-venv).
+   You can install it next to Python 3.12 or 3.14; you do not have to remove them.
+   Then run ./setup.sh again.
+
+2. To continue with the Python you have now, set the environment variable
+   SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 and run setup again. SAIVerse is not
+   guaranteed to work in that case:
+     SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 ./setup.sh
+EOF
     exit 1
 fi
-PY_VERSION=$(python3 --version)
-echo "[OK] $PY_VERSION"
+PY_VERSION=$("$PYTHON_BIN" --version)
+echo "[OK] $PY_VERSION ($PYTHON_BIN)"
+
+# --- 1b. Stop while SAIVerse runs ---
+# 何かを変える前に確かめる: .venv・画面のパッケージ・SearXNG を、動いている SAIVerse の
+# 下で入れ替えない。Linux / macOS は使用中のフォルダも改名できるので、.venv の改名の
+# 失敗は確かめの代わりにならない。scripts/setup_venv.py check-stopped が、SAIVerse の
+# データのフォルダの runtime marker と、このフォルダの画面のサーバー・SearXNG の
+# サーバーを確かめ、動いているときはどうすればよいかを表示して 1 で終わる。サーバーを
+# 自動で確かめられなかったときは、SAIVerse の窓をすべて閉じたら Enter を押すよう頼んで
+# 待つ (Ctrl+C と、端末で実行されていないときは 1 で終わる)。初めての導入 (何も無い) は
+# 聞かずに進む。setup.bat と同じ手順。
+if ! "$PYTHON_BIN" scripts/setup_venv.py check-stopped; then
+    exit 1
+fi
+
+# --- 1c. .env ---
+# データのパス (SAIVERSE_HOME) を読む処理より前に決める: このあとの手順も SAIVerse 本体と
+# 同じく、このフォルダから上へ探して最初に見つかった .env を読む。setup_venv.py
+# ensure-dotenv は、どこにも .env が無いときだけ .env.example を .env に写す (上の
+# フォルダの .env が世界を選んでいるなら、それを隠さない)。setup.bat と同じ手順。
+if ! "$PYTHON_BIN" scripts/setup_venv.py ensure-dotenv; then
+    echo "[ERROR] .env を作れませんでした。"
+    exit 1
+fi
 
 # --- 2. Node.js check ---
 if ! command -v node &>/dev/null; then
@@ -25,15 +113,72 @@ fi
 NODE_VERSION=$(node --version)
 echo "[OK] Node.js $NODE_VERSION"
 
-# --- 3. Create venv if not exists ---
-if [ ! -d ".venv" ]; then
-    echo ""
-    echo "[SETUP] Python仮想環境を作成中..."
-    python3 -m venv .venv
-    echo "[OK] .venv を作成しました"
+# --- 3. Create or rebuild .venv ---
+# scripts/setup_venv.py prepare を、上で選んだ python で実行する。結果は一行で
+# keep / create / renamed <古い名前> / resume [<古い名前>] / locked / error。3.13 以外の
+# 系列で作られた .venv と壊れた .venv は消さずに .venv.old-<日時> へ改名し、新しい .venv に
+# パッケージが入り、アドオンのパッケージを入れ直してから消す。新しい .venv が失敗したら
+# 古いものを戻す。prepare は改名・作成の前に .setup_in_progress/venv.json を書き、
+# finish (か戻したとき) に消す。これが残っていれば次の setup は止まった回の続きを行う。
+# resume は、その回が作った .venv をそのまま使い、残りは renamed と同じに行うという意味。
+# SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 のときは既存の .venv の系列を見ない。
+# setup.bat と同じ手順。
+if [ "$ALLOW_OTHER_PYTHON" = true ]; then
+    echo "[INFO] SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1: 既存の .venv の Python の系列は確かめません。"
+    VENV_RESULT="$("$PYTHON_BIN" scripts/setup_venv.py prepare)" || VENV_RESULT=""
 else
-    echo "[OK] .venv は既に存在します"
+    VENV_RESULT="$("$PYTHON_BIN" scripts/setup_venv.py prepare --expect-series 3.13)" || VENV_RESULT=""
 fi
+VENV_ACTION="${VENV_RESULT%% *}"
+VENV_OLD=""
+ADDON_REBUILD_ARGS=""
+if [ "$VENV_ACTION" = "renamed" ] || [ "$VENV_ACTION" = "resume" ]; then
+    # resume は古い名前が付かないこともある (戻す先が無い)
+    case "$VENV_RESULT" in
+        *" "*) VENV_OLD="${VENV_RESULT#* }" ;;
+    esac
+fi
+
+restore_old_venv() {
+    if [ -n "$VENV_OLD" ]; then
+        "$PYTHON_BIN" scripts/setup_venv.py rollback "$VENV_OLD" || true
+    fi
+}
+
+case "$VENV_ACTION" in
+    keep)
+        echo "[OK] .venv は既に存在します"
+        ;;
+    create|renamed)
+        echo ""
+        echo "[SETUP] Python仮想環境を作成中..."
+        if ! "$PYTHON_BIN" -m venv .venv || [ ! -f ".venv/bin/activate" ]; then
+            echo "[ERROR] Python仮想環境を作れませんでした。 / Failed to create the virtual environment."
+            echo "  Debian / Ubuntu では python3.13-venv (推奨外の Python で進めている場合は python3-venv) が要ります。"
+            echo "  Debian / Ubuntu need python3.13-venv (python3-venv when you continue with another Python)."
+            if [ -n "$VENV_OLD" ]; then
+                restore_old_venv
+            else
+                rm -rf .venv
+            fi
+            exit 1
+        fi
+        echo "[OK] .venv を作成しました"
+        ADDON_REBUILD_ARGS="--core-venv-recreated"
+        ;;
+    resume)
+        echo "[OK] 前の回の setup が作った .venv で続けます / Continuing with the .venv made by the previous setup"
+        ADDON_REBUILD_ARGS="--core-venv-recreated"
+        ;;
+    locked)
+        exit 1
+        ;;
+    *)
+        echo "[ERROR] 既存の .venv を確かめられませんでした。上のメッセージを見てください。"
+        echo "[ERROR] Could not check the existing .venv folder. See the messages above."
+        exit 1
+        ;;
+esac
 
 # --- 4. Activate venv ---
 source .venv/bin/activate
@@ -41,9 +186,34 @@ source .venv/bin/activate
 # --- 5. pip install ---
 echo ""
 echo "[SETUP] Pythonパッケージをインストール中..."
-python -m pip install --upgrade pip >/dev/null 2>&1
-python -m pip install -r requirements.lock
+# pip 自身の更新の失敗では止めない (setup.bat と同じ)。set -e のまま失敗すると、
+# 下の restore_old_venv に届かず、パッケージの無い .venv が残る。
+python -m pip install --upgrade pip >/dev/null 2>&1 || echo "[WARN] pip 自身の更新に失敗しました。今の pip のまま続けます。 / Could not upgrade pip; continuing with the current pip."
+if ! python -m pip install -r requirements.lock; then
+    echo "[ERROR] Pythonパッケージのインストールに失敗しました。 / pip install failed."
+    restore_old_venv
+    exit 1
+fi
 echo "[OK] Pythonパッケージのインストール完了"
+
+# --- 5b. Reinstall addon packages, then delete the old .venv ---
+# この回に新しい .venv を作った (create / renamed / resume) ときは --core-venv-recreated を
+# 付け、アドオンの setup の step のうち本体の .venv にパッケージを入れるもの (env の無い
+# pip_install) を、保存された答えのまま先に走らせ直す。続けて、別の Python の系列で
+# 作られたアドオン専用の環境を、保存された答えのまま作り直す。失敗では setup を止めない
+# (SAIVerse 本体は動く)。スクリプトがどうすればよいかを表示し、失敗を
+# .addon_env_rebuild_failures.json に書き残す (次の setup が読む)。スクリプトが最後まで
+# 走ったときだけ、finish が .setup_in_progress/venv.json を消して .venv.old-<日時> を消す。
+# ここより前で止まった setup や、落ちた・止められたスクリプトは両方を残すので、次の
+# setup が残りをやり直す。setup.bat と同じ手順。
+if python scripts/rebuild_addon_envs.py ${ADDON_REBUILD_ARGS:+"$ADDON_REBUILD_ARGS"}; then
+    "$PYTHON_BIN" scripts/setup_venv.py finish || true
+else
+    echo "[WARN] アドオンのパッケージを確かめられませんでした。SAIVerse 本体は動きます。上のメッセージを見てください。"
+    echo "  この setup が新しい .venv を作っていた場合は、次の setup がパッケージとアドオンのパッケージを入れ直します。"
+    echo "[WARN] Could not check the addon packages. SAIVerse itself works; see the messages above."
+    echo "  If this setup made a new .venv, the next setup installs the packages and the addon packages again."
+fi
 
 # --- 6. npm install ---
 echo ""
@@ -51,33 +221,14 @@ echo "[SETUP] フロントエンドパッケージをインストール中..."
 (cd frontend && npm install)
 echo "[OK] フロントエンドパッケージのインストール完了"
 
-# --- 7. Database seed (only if not exists or core tables missing) ---
-SAIVERSE_DB="$HOME/.saiverse/user_data/database/saiverse.db"
-SAIVERSE_DB_LEGACY="database/data/saiverse.db"
-NEED_SEED=true
-
-if [ -f "$SAIVERSE_DB" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-if [ "$NEED_SEED" = true ] && [ -f "$SAIVERSE_DB_LEGACY" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB_LEGACY" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-
-if [ "$NEED_SEED" = true ]; then
-    if [ -f "$SAIVERSE_DB" ]; then
-        echo ""
-        echo "[WARN] データベースファイルは存在しますが、コアテーブルがありません。再初期化します..."
-    fi
-    echo ""
-    echo "[SETUP] データベースを初期化中..."
-    python database/seed.py --force
-    echo "[OK] データベースの初期化完了"
-else
-    echo "[OK] データベースは既に存在します"
+# --- 7. Database seed (only when there is none) ---
+# database/seed.py --if-missing はデータベースを main.py と同じ規則 (SAIVERSE_HOME、
+# .env のものも) で見つけ、無いか city の表が無いときだけ作る。読めないものは
+# そのままにして setup を止める。
+echo ""
+if ! python database/seed.py --if-missing; then
+    echo "[ERROR] Database initialization failed."
+    exit 1
 fi
 
 # --- 7b. Import/update playbooks ---
@@ -122,19 +273,7 @@ else
     echo "  Git をインストール後、setup.sh を再実行してください。"
 fi
 
-# --- 10. Create .env from example if not exists ---
-if [ ! -f ".env" ]; then
-    echo ""
-    echo "[SETUP] .env ファイルを作成中..."
-    cp .env.example .env
-    chmod 600 .env
-    echo "[OK] .env を作成しました (権限: 600)"
-    echo "  APIキーの設定は初回起動時のチュートリアルで行えます。"
-else
-    # 既存の .env も安全な権限に修正
-    chmod 600 .env
-    echo "[OK] .env は既に存在します"
-fi
+# --- 10. .env: 手順 1c で、データのパスを読む処理より前に用意した ---
 
 # --- 11. SearXNG setup ---
 echo ""

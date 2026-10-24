@@ -25,7 +25,7 @@ git checkout -b feature/your-feature-name
 
 ### Python
 
-- Python 3.13 推奨（3.11〜3.13 で動作、3.14 以降は非対応）を対象
+- Python 3.13 を対象 (動作確認は 3.13 系だけ。3.11 / 3.12 は 2026-10-23 から非推奨だが、requirements.lock は引き続き 3.11〜3.13 を覆う。3.14 以降は非対応)
 - 型ヒントを積極的に使用
 - docstring は日本語でOK
 

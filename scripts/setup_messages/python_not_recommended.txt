@@ -1,0 +1,9 @@
+[WARN] Python 3.13 が見つからないため、推奨外の Python で進めます (SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1)。
+       動作は保証しません。推奨の Python 3.13.17 はこちらです:
+         https://www.python.org/downloads/release/python-31317/
+       この設定のあいだは、既存の .venv をその Python の系列を理由に作り直しません。
+[WARN] Python 3.13 was not found; continuing with a Python that is not recommended
+       (SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1). SAIVerse is not guaranteed to work.
+       The recommended Python 3.13.17 is here:
+         https://www.python.org/downloads/release/python-31317/
+       While this is set, setup does not rebuild an existing .venv because of its Python series.

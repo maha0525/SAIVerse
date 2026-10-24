@@ -8,6 +8,8 @@
 
 更新エンジン (`scripts/update_engine.py`) には排他がなく、`update.bat` / API の detached 更新 / 起動時自己回復 (`start.bat` / `start.sh` の `--check-complete` → `--manual`) が同時に git pull・pip・npm ci・完了印の書き込みを実行しうる。
 
+起動前の依存の入れ直し (`reinstall_dependencies_once`) も同じ入口に加わった (2026-10-23、PR #417 の Codex 四巡目)。
+
 ## 直し方の方向
 
 全入口が共有するロックファイル (取得失敗 = 「別の更新が進行中です」で明確に停止。Windows の stale lock の回収込み) を update_engine 内に置き、check〜manual 完了を一つの所有者に限定する。ローカルレビューのラッパー (`local-claude.sh` の mkdir ロック + 先客待ち) が同型の先例。

@@ -196,7 +196,7 @@ def test_failure_after_the_switch_returns_to_the_recorded_branch(install: Path, 
     before = _head(install)
     calls: list[tuple] = []
 
-    def deps(project_dir, python, requirements_file=None):  # type: ignore[no-untyped-def]
+    def deps(project_dir, python, requirements_file=None, *, keep_portable_node=False):  # type: ignore[no-untyped-def]
         calls.append((project_dir, requirements_file))
         if len(calls) == 1:
             raise update_engine.UpdateError("pip failed")

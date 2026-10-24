@@ -441,6 +441,10 @@ def main():
     app_state.set_city_name(args.city_name)
     app_state.set_project_dir(str(Path(__file__).parent.resolve()))
 
+    # Failures of the package reinstall before this start and of setup's addon env rebuild are shown in the banner.
+    from saiverse.environment_alerts import environment_alerts
+    manager.startup_alerts.extend(environment_alerts(Path(__file__).parent.resolve()))
+
     # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
     # Performs diff-based update: new files are imported, changed files are updated,
     # unchanged files are skipped. DB-only playbooks (created via save_playbook tool)
