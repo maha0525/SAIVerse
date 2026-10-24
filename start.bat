@@ -116,16 +116,21 @@ start "SAIVerse Frontend" cmd /k "title SAIVerse Frontend && cd frontend && npm 
 REM Wait for frontend to initialize
 timeout /t 3 /nobreak >nul
 
+REM The frontend listens on PORT when it is set (next start / next dev read it),
+REM else on 3000: open the browser on the same port.
+set "UI_PORT=3000"
+if defined PORT set "UI_PORT=%PORT%"
+
 REM Open browser
 echo [INFO] Opening browser...
-start http://localhost:3000
+start http://localhost:%UI_PORT%
 
 echo.
 echo ========================================
 echo   SAIVerse is running
 echo ========================================
 echo.
-echo   Web UI: http://localhost:3000
+echo   Web UI: http://localhost:%UI_PORT%
 echo.
 echo   Additional windows should be open:
 echo     [SearXNG]           - Web search server (if installed)

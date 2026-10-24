@@ -959,3 +959,30 @@ def test_a_searxng_record_alone_on_a_new_install_is_left_to_the_searxng_window(t
     assert child.check() == update_engine.CHECK_READY
     assert child.installs == 0
     assert update_engine.searxng_setup_stopped(project)
+
+
+def _block(text: str, start: str, end: str) -> str:
+    return text[text.index(start):text.index(end)]
+
+
+def test_the_dev_launchers_run_the_same_check_before_starting() -> None:
+    """start-dev.bat / start-dev.sh use the same folder as start.bat / start.sh:
+    the check that finishes an interrupted update and installs the packages once
+    more after an older updater is the same, word for word (PR #420)."""
+    root = Path(update_engine.__file__).resolve().parent.parent
+    bat_start, bat_end = "REM Finish an interrupted update before starting.", "\n:update_check_done"
+    bat_block = _block((root / "start.bat").read_text(encoding="ascii"), bat_start, bat_end)
+    # The whole block, to its last label (a "goto :update_check_done" comes earlier).
+    assert ":finish_update_failed" in bat_block and ":update_check_skipped" in bat_block
+    assert _block((root / "start-dev.bat").read_text(encoding="ascii"), bat_start, bat_end) == bat_block
+    sh_start, sh_end = "# 中断された更新を仕上げてから起動する", "# SearXNG (optional"
+    sh_block = _block((root / "start.sh").read_text(encoding="utf-8"), sh_start, sh_end)
+    assert '"$UPDATE_CHECK_RC" -eq 12' in sh_block and "--manual" in sh_block
+    assert _block((root / "start-dev.sh").read_text(encoding="utf-8"), sh_start, sh_end) == sh_block
+    # Before anything starts: the backend runs on the packages the check installs.
+    for name, check, first_start in (
+        ("start-dev.bat", "--check-complete", "start \"SAIVerse Backend\""),
+        ("start-dev.sh", "--check-complete", "python main.py"),
+    ):
+        text = (root / name).read_text(encoding="utf-8")
+        assert text.index(check) < text.index(first_start), name

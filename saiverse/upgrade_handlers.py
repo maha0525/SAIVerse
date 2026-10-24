@@ -1373,4 +1373,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.24 -> 0.3.25 (security dependency updates are handled by the update engine).",
     ),
+    # ---- v0.3.26 ----
+    # 更新の作業を新しいコードで最後まで行う変更と、setup の Python 3.13 の名指し。
+    # DB・データの変化は無く、SearXNG・portable Node.js・アドオンの専用の環境の
+    # 入れ替えはすべて update_engine.py と setup と起動時の処理が行うので、辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_26",
+        scope="city",
+        from_version="0.3.25",
+        to_version="0.3.26",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.25 -> 0.3.26 (environment replacements are handled by the update engine and setup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_26",
+        scope="ai",
+        from_version="0.3.25",
+        to_version="0.3.26",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.25 -> 0.3.26 (environment replacements are handled by the update engine and setup).",
+    ),
 ]

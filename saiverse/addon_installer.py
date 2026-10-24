@@ -1782,6 +1782,24 @@ def find_addon_envs_left_part_way(expansion_dir: Optional[Path] = None) -> Dict[
     return found
 
 
+def _without_skip_for_packages(steps: Iterable[SetupStep]) -> List[SetupStep]:
+    """``steps`` with ``skip_if_exists`` turned off for ``pip_install``.
+
+    For the plans that run steps again into an environment that was made anew
+    (``plan_env_rebuild``, ``plan_core_venv_reinstall``): the path
+    ``skip_if_exists`` names is in the addon's folder and survives, but the
+    packages it stood for were in the environment that is gone. Honouring it
+    would skip the install and report success with the packages missing.
+    Other steps (a model download into the addon's folder, say) keep it: what
+    they made is still there.
+    """
+    return [
+        s.model_copy(update={"skip_if_exists": None})
+        if s.type == "pip_install" and s.skip_if_exists else s
+        for s in steps
+    ]
+
+
 def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> SetupPlan:
     """保存された答えのまま、使えない専用の環境を作り直す計画 (副作用なし)。
 
@@ -1797,7 +1815,7 @@ def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> Set
     answers = fill_defaults(manifest, _saved_or_empty(manifest, addon_id))
     satisfied = select_steps(manifest.setup_steps, answers)
     unusable = set(_unusable_env_dirs(addon_id))
-    steps = [s for s in satisfied if _step_env(s) in unusable]
+    steps = _without_skip_for_packages(s for s in satisfied if _step_env(s) in unusable)
     return SetupPlan(
         kind="env_rebuild",
         addon_id=addon_id,
@@ -1980,7 +1998,9 @@ def plan_core_venv_reinstall(addon_id: str, expansion_dir: Optional[Path] = None
     """
     addon_dir, manifest = _installed_manifest(addon_id, expansion_dir)
     answers = fill_defaults(manifest, _saved_or_empty(manifest, addon_id))
-    steps = [s for s in select_steps(manifest.setup_steps, answers) if _installs_into_core_venv(s)]
+    steps = _without_skip_for_packages(
+        s for s in select_steps(manifest.setup_steps, answers) if _installs_into_core_venv(s)
+    )
     return SetupPlan(
         kind="core_venv_reinstall",
         addon_id=addon_id,

@@ -23,6 +23,11 @@ Python のまま進むとき、このスクリプトもその Python で動く)�
         頼んで待つ (標準入力が端末でないときは、頼めないので終了コード 1)。
         Linux / macOS は使用中のフォルダも改名できるので、.venv の改名の失敗は
         確かめの代わりにならない。確かめ方は ``check_stopped`` を見る。
+    python scripts/setup_venv.py ensure-dotenv
+        check-stopped のすぐ後、データのパス (SAIVERSE_HOME) を読む処理より前に呼ぶ。
+        このフォルダから上へ探して .env が一つも無いときだけ .env.example を .env に
+        写す (上のフォルダの .env が世界を選んでいるなら、それを隠さない)。写せな
+        かったら終了コード 1。``ensure_dotenv`` を見る。
     python scripts/setup_venv.py prepare [--expect-series 3.13]
         既存の .venv をそのまま使うか、作り直すかを決める。作り直すときは、
         .venv を消さずに .venv.old-<日時> へ改名する。改名・作成の前に、.venv を
@@ -781,10 +786,54 @@ def _ask_to_close_windows(stdin=None) -> bool:  # noqa: ANN001 - a text stream
     return True
 
 
+def ensure_dotenv(root: Path) -> bool:
+    """Make sure SAIVerse has a .env, without changing which one it reads.
+
+    main.py reads the first .env from the SAIVerse folder upward
+    (``find_dotenv_path``). When there is one -- in this folder or above it --
+    it is left as it is: a new .env here would hide one above and change the
+    SAIVERSE_HOME (the world) SAIVerse uses. Only when there is none is
+    ``.env.example`` copied to ``.env`` here. setup runs this right after it
+    checked that SAIVerse is stopped and before anything that reads data
+    paths, so every later step reads the .env SAIVerse will read. The .env here
+    is made readable by its owner only on Mac / Linux, as setup.sh did.
+    Returns False when .env.example could not be copied.
+    """
+    found = find_dotenv_path(root)
+    local = root / ".env"
+    if found is None:
+        # Created only if it still does not exist ("x"): a .env put here since
+        # the check (a restored setting, another setup) is kept, never
+        # replaced with the template.
+        try:
+            template = (root / ".env.example").read_bytes()
+            with open(local, "xb") as handle:
+                handle.write(template)
+        except FileExistsError:
+            print(f"[OK] Using the .env that appeared while setup checked: {local}", flush=True)
+        except OSError as exc:
+            print(f"[ERROR] Could not create .env from .env.example ({exc})", flush=True)
+            return False
+        else:
+            print("[OK] Created .env (API keys can be configured in the first-run tutorial)", flush=True)
+        found = local
+    elif found.resolve() == local.resolve():
+        print("[OK] .env already exists", flush=True)
+    else:
+        print(f"[OK] Using the .env SAIVerse reads: {found}", flush=True)
+    if os.name != "nt" and found.resolve() == local.resolve():
+        try:
+            os.chmod(local, 0o600)
+        except OSError:
+            pass
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check, rebuild and clean up SAIVerse's .venv for setup")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check-stopped")
+    sub.add_parser("ensure-dotenv")
     p_prepare = sub.add_parser("prepare")
     p_prepare.add_argument("--expect-series", default=None)
     sub.add_parser("finish")
@@ -795,6 +844,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.cwd()
     if args.command == "check-stopped":
         return 0 if check_stopped(root) else 1
+    if args.command == "ensure-dotenv":
+        return 0 if ensure_dotenv(root) else 1
     if args.command == "prepare":
         print(prepare(root, args.expect_series), flush=True)
         return 0

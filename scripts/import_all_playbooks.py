@@ -30,6 +30,12 @@ sys.path.insert(0, str(ROOT))
 
 import hashlib
 
+# The same .env main.py loads, before the database path is resolved: with a
+# SAIVERSE_HOME written there, the playbooks go into the database SAIVerse uses.
+from scripts.update_engine import load_saiverse_dotenv  # noqa: E402
+
+load_saiverse_dotenv(ROOT)
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path

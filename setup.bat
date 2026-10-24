@@ -95,6 +95,18 @@ REM ask in. A first install has nothing running and goes on. Same as setup.sh.
 "%PYTHON_EXE%" scripts\setup_venv.py check-stopped
 if errorlevel 1 goto :saiverse_running
 
+REM --- 1c. .env ---
+REM Before anything reads the data paths (SAIVERSE_HOME): every later step,
+REM like SAIVerse itself, reads the first .env from this folder upward.
+REM setup_venv.py ensure-dotenv copies .env.example to .env only when there is
+REM none, so a .env above this folder keeps choosing the world. Same as setup.sh.
+"%PYTHON_EXE%" scripts\setup_venv.py ensure-dotenv
+if errorlevel 1 (
+    echo [ERROR] .env could not be created.
+    pause
+    exit /b 1
+)
+
 REM --- 2. Node.js check & auto-install ---
 REM A portable install from a previous setup comes first, as in start.bat.
 REM Bring it to the version install_node_portable.ps1 pins; if that fails the
@@ -305,36 +317,16 @@ if %errorlevel% neq 0 (
 popd
 echo [OK] Frontend packages installed
 
-REM --- 7. Database seed (only if not exists or core tables missing) ---
-set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
-set SAIVERSE_DB_LEGACY=database\data\saiverse.db
-set NEED_SEED=1
-
-if exist "%SAIVERSE_DB%" (
-    python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "%SAIVERSE_DB%" >nul 2>nul
-    if !errorlevel! equ 0 set NEED_SEED=0
-)
-if "!NEED_SEED!"=="1" if exist "%SAIVERSE_DB_LEGACY%" (
-    python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "%SAIVERSE_DB_LEGACY%" >nul 2>nul
-    if !errorlevel! equ 0 set NEED_SEED=0
-)
-
-if "!NEED_SEED!"=="1" (
-    if exist "%SAIVERSE_DB%" (
-        echo.
-        echo [WARN] Database file exists but core tables are missing. Re-initializing...
-    )
-    echo.
-    echo [SETUP] Initializing database...
-    python database\seed.py --force
-    if !errorlevel! neq 0 (
-        echo [ERROR] Database initialization failed.
-        pause
-        exit /b 1
-    )
-    echo [OK] Database initialized
-) else (
-    echo [OK] Database already exists
+REM --- 7. Database seed (only when there is none) ---
+REM database\seed.py --if-missing finds the database the way main.py does
+REM (SAIVERSE_HOME, also from .env) and creates it only when it is missing or
+REM has no city table. One it cannot read is left as it is and setup stops.
+echo.
+python database\seed.py --if-missing
+if !errorlevel! neq 0 (
+    echo [ERROR] Database initialization failed.
+    pause
+    exit /b 1
 )
 
 REM --- 7b. Import/update playbooks ---
@@ -400,16 +392,7 @@ python scripts\init_git_repo.py
 
 :git_skip
 
-REM --- 10. Create .env from example if not exists ---
-if not exist ".env" (
-    echo.
-    echo [SETUP] Creating .env file...
-    copy .env.example .env >nul
-    echo [OK] Created .env
-    echo   API keys can be configured in the first-run tutorial.
-) else (
-    echo [OK] .env already exists
-)
+REM --- 10. .env: created in step 1c, before anything read the data paths ---
 
 REM --- 11. SearXNG setup ---
 echo.

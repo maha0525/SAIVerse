@@ -112,7 +112,7 @@ cp .env.example .env
 python database/seed.py
 ```
 
-これで初期のCity、Building、AIペルソナがセットアップされます。初期データは `builtin_data/seed_data.json` で定義されており、編集することでカスタマイズできます。
+これで初期のCity、Building、AIペルソナがセットアップされます。このコマンドは既にあるデータベースを消して作り直す (消す前に控えを取り、確認を求める) ので、無いときだけ作るなら `python database/seed.py --if-missing` を使う (`setup.bat` / `setup.sh` が使うもの)。どちらも、SAIVerse 本体と同じく `.env` の `SAIVERSE_HOME` を見て、本体が使うデータベースを扱う。初期データは `builtin_data/seed_data.json` で定義されており、編集することでカスタマイズできます。
 
 ## 次のステップ
 

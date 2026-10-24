@@ -49,19 +49,10 @@ if str(REPO_ROOT) not in sys.path:
 
 # The same .env main.py loads, before any saiverse path is resolved: a
 # SAIVERSE_HOME set there must point this script at the same saved answers and
-# addon environments as SAIVerse itself. main.py's load_dotenv() finds it from
-# the SAIVerse folder upward (find_dotenv_path); variables already set win, as
-# in main.py.
-from scripts.update_engine import find_dotenv_path  # noqa: E402
+# addon environments as SAIVerse itself (load_saiverse_dotenv).
+from scripts.update_engine import load_saiverse_dotenv  # noqa: E402
 
-try:
-    from dotenv import load_dotenv
-
-    _DOTENV_PATH = find_dotenv_path(REPO_ROOT)
-    if _DOTENV_PATH is not None:
-        load_dotenv(_DOTENV_PATH)
-except ImportError:  # python-dotenv is in requirements.lock; without it, the environment as is
-    pass
+load_saiverse_dotenv(REPO_ROOT)
 
 from saiverse.addon_installer import (  # noqa: E402
     SETUP_CRASH_ADDON_ID,

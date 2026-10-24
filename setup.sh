@@ -94,6 +94,16 @@ if ! "$PYTHON_BIN" scripts/setup_venv.py check-stopped; then
     exit 1
 fi
 
+# --- 1c. .env ---
+# データのパス (SAIVERSE_HOME) を読む処理より前に決める: このあとの手順も SAIVerse 本体と
+# 同じく、このフォルダから上へ探して最初に見つかった .env を読む。setup_venv.py
+# ensure-dotenv は、どこにも .env が無いときだけ .env.example を .env に写す (上の
+# フォルダの .env が世界を選んでいるなら、それを隠さない)。setup.bat と同じ手順。
+if ! "$PYTHON_BIN" scripts/setup_venv.py ensure-dotenv; then
+    echo "[ERROR] .env を作れませんでした。"
+    exit 1
+fi
+
 # --- 2. Node.js check ---
 if ! command -v node &>/dev/null; then
     echo "[ERROR] Node.js が見つかりません。"
@@ -211,33 +221,14 @@ echo "[SETUP] フロントエンドパッケージをインストール中..."
 (cd frontend && npm install)
 echo "[OK] フロントエンドパッケージのインストール完了"
 
-# --- 7. Database seed (only if not exists or core tables missing) ---
-SAIVERSE_DB="$HOME/.saiverse/user_data/database/saiverse.db"
-SAIVERSE_DB_LEGACY="database/data/saiverse.db"
-NEED_SEED=true
-
-if [ -f "$SAIVERSE_DB" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-if [ "$NEED_SEED" = true ] && [ -f "$SAIVERSE_DB_LEGACY" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB_LEGACY" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-
-if [ "$NEED_SEED" = true ]; then
-    if [ -f "$SAIVERSE_DB" ]; then
-        echo ""
-        echo "[WARN] データベースファイルは存在しますが、コアテーブルがありません。再初期化します..."
-    fi
-    echo ""
-    echo "[SETUP] データベースを初期化中..."
-    python database/seed.py --force
-    echo "[OK] データベースの初期化完了"
-else
-    echo "[OK] データベースは既に存在します"
+# --- 7. Database seed (only when there is none) ---
+# database/seed.py --if-missing はデータベースを main.py と同じ規則 (SAIVERSE_HOME、
+# .env のものも) で見つけ、無いか city の表が無いときだけ作る。読めないものは
+# そのままにして setup を止める。
+echo ""
+if ! python database/seed.py --if-missing; then
+    echo "[ERROR] Database initialization failed."
+    exit 1
 fi
 
 # --- 7b. Import/update playbooks ---
@@ -282,19 +273,7 @@ else
     echo "  Git をインストール後、setup.sh を再実行してください。"
 fi
 
-# --- 10. Create .env from example if not exists ---
-if [ ! -f ".env" ]; then
-    echo ""
-    echo "[SETUP] .env ファイルを作成中..."
-    cp .env.example .env
-    chmod 600 .env
-    echo "[OK] .env を作成しました (権限: 600)"
-    echo "  APIキーの設定は初回起動時のチュートリアルで行えます。"
-else
-    # 既存の .env も安全な権限に修正
-    chmod 600 .env
-    echo "[OK] .env は既に存在します"
-fi
+# --- 10. .env: 手順 1c で、データのパスを読む処理より前に用意した ---
 
 # --- 11. SearXNG setup ---
 echo ""
