@@ -10,10 +10,10 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from .exceptions import InvalidRequestError
 from .utils import (
     attachment_limit_is_off,
-    compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
     parse_attachment_limit,
+    select_embedded_attachment_keys,
 )
 
 
@@ -76,9 +76,11 @@ def _collect_attachment_state(
     messages: List[Dict[str, Any]],
     max_image_embeds: Optional[int] = None,
     attachment_limit_off: bool = False,
+    supports_images: bool = False,
+    max_image_bytes: Optional[int] = None,
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Optional[int], Optional[Set[Tuple[int, int]]]]:
     # Use caller-supplied value (from client config / session override) if provided,
-    # otherwise fall back to env var / default (DEFAULT_ATTACHMENT_LIMIT=4).
+    # otherwise fall back to env var (None = no count limit unless the env var is set).
     # リアルタイム情報と自動想起を残すモデルの列では上限を使わない (None = 無制限。
     # llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。印は system のメッセージに
     # 付いていることが多く、ここへ来る列からは system が抜かれているので、
@@ -91,6 +93,10 @@ def _collect_attachment_state(
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
+    # 画像を実際に埋め込むメッセージ (_build_anthropic_content_blocks と同じ判定:
+    # 画像対応のモデルの user。host は _prepare_anthropic_messages で user になる)。
+    # バイトの非常弁はこの画像だけを数える。
+    embeddable_indices: Set[int] = set()
 
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
@@ -104,8 +110,16 @@ def _collect_attachment_state(
         media_items = iter_image_media(metadata) if metadata else []
         if media_items:
             attachment_cache[idx] = list(media_items)
+            if supports_images and msg.get("role") in ("user", "host"):
+                embeddable_indices.add(idx)
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(attachment_cache, effective_limit, exempt_indices)
+    allowed_attachment_keys = select_embedded_attachment_keys(
+        attachment_cache, effective_limit, exempt_indices,
+        provider="ANTHROPIC",
+        messages=messages,
+        embeddable_indices=embeddable_indices,
+        max_image_bytes=max_image_bytes,
+    )
     return attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys
 
 
@@ -188,6 +202,8 @@ def _prepare_anthropic_messages(
     attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys = _collect_attachment_state(
         messages, max_image_embeds=max_image_embeds,
         attachment_limit_off=attachment_limit_off,
+        supports_images=supports_images,
+        max_image_bytes=max_image_bytes,
     )
     logging.debug(
         "[anthropic] attachment limit=%s, cached=%d msgs with images",

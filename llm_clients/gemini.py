@@ -1519,9 +1519,14 @@ class GeminiClient(LLMClient):
         boundary_msg_idx: Optional[int] = None
         content_starts: List[int] = []
         contents: List[types.Content] = []
-        from .utils import attachment_limit_is_off, parse_attachment_limit
+        from .utils import (
+            attachment_limit_is_off,
+            parse_attachment_limit,
+            select_embedded_attachment_keys,
+        )
         # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
-        # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。
+        # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。env を明示しない限り
+        # 枚数の上限は無い (None)。どちらでもバイトの非常弁は効く。
         max_image_embeds = (
             None if attachment_limit_is_off(msgs) else parse_attachment_limit("GEMINI")
         )
@@ -1535,6 +1540,9 @@ class GeminiClient(LLMClient):
         video_cache: Dict[int, List[Dict[str, Any]]] = {}
         # Track messages that are exempt from attachment limits (visual context)
         exempt_message_indices: Set[int] = set()
+        # 画像を実際に埋め込むメッセージ (下の変換と同じ判定: 画像対応のモデルで、
+        # system・tool・tool_calls 以外)。バイトの非常弁はこの画像だけを数える。
+        embeddable_message_indices: Set[int] = set()
         # Track messages where summary generation should be skipped per media type
         # (e.g. summary generation requests themselves, to prevent infinite recursion)
         skip_summary_indices: Set[int] = set()
@@ -1564,6 +1572,12 @@ class GeminiClient(LLMClient):
             media_items = iter_image_media(metadata)
             if media_items:
                 attachment_cache[idx] = media_items
+                if (
+                    self.supports_images
+                    and message.get("role") not in ("system", "tool")
+                    and "tool_calls" not in message
+                ):
+                    embeddable_message_indices.add(idx)
             # Audio / video are always cached; per-message loop decides whether to
             # send inline_data (supports_*=True) or inject summary text (False).
             audio_items = iter_audio_media(metadata)
@@ -1572,32 +1586,13 @@ class GeminiClient(LLMClient):
             video_items = iter_video_media(metadata)
             if video_items:
                 video_cache[idx] = video_items
-        allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = None
-        if max_image_embeds is not None and attachment_cache:
-            ordered: List[Tuple[int, int]] = []
-            for msg_idx in sorted(attachment_cache.keys(), reverse=True):
-                # Skip exempt (visual context) messages when counting towards limit
-                if msg_idx in exempt_message_indices:
-                    continue
-                items = attachment_cache[msg_idx]
-                for att_idx in range(len(items)):
-                    ordered.append((msg_idx, att_idx))
-            if max_image_embeds == 0:
-                allowed_attachment_keys = set()
-            else:
-                allowed_attachment_keys = set(ordered[:max_image_embeds])
-            # Always allow visual context attachments (exempt from limit)
-            for msg_idx in exempt_message_indices:
-                if msg_idx in attachment_cache:
-                    for att_idx in range(len(attachment_cache[msg_idx])):
-                        allowed_attachment_keys.add((msg_idx, att_idx))
-                    logging.debug(
-                        "[gemini] visual context at idx=%d exempted from attachment limit (%d images)",
-                        msg_idx,
-                        len(attachment_cache[msg_idx]),
-                    )
-        elif max_image_embeds is not None:
-            allowed_attachment_keys = set()
+        allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = select_embedded_attachment_keys(
+            attachment_cache, max_image_embeds, exempt_message_indices,
+            provider="GEMINI",
+            messages=msgs,
+            embeddable_indices=embeddable_message_indices,
+            max_image_bytes=self.max_image_bytes,
+        )
 
         for idx, message in enumerate(msgs):
             content_starts.append(len(contents))
@@ -1671,19 +1666,21 @@ class GeminiClient(LLMClient):
             if attachments and self.supports_images:
                 selected_attachments: List[Dict[str, Any]] = []
                 skipped_attachments: List[Dict[str, Any]] = []
-                attachment_records: List[Tuple[int, Dict[str, Any], Optional[str]]] = []
                 skip_summary = idx in skip_summary_indices
+
+                def _summary_for(attachment: Dict[str, Any]) -> Optional[str]:
+                    # 要約は文字で送る画像 (枚数の上限・非常弁の外、読めない画像)
+                    # にだけ作る。埋め込む画像にまで作ると、画像ごとに要約の生成
+                    # (軽量モデルの課金呼び出し) が走る。
+                    if skip_summary:
+                        return None
+                    return ensure_image_summary(attachment["path"], attachment["mime_type"])
+
                 for att_idx, attachment in enumerate(attachments):
-                    summary_text = (
-                        None if skip_summary
-                        else ensure_image_summary(attachment["path"], attachment["mime_type"])
-                    )
                     key = (idx, att_idx)
                     if allowed_attachment_keys is not None and key not in allowed_attachment_keys:
-                        attachment_records.append((att_idx, attachment, summary_text))
                         skipped_attachments.append(attachment)
                         continue
-                    attachment_records.append((att_idx, attachment, summary_text))
                     selected_attachments.append(attachment)
                 logging.debug(
                     "[gemini] embedding %d image attachment(s) for role=%s (skipped=%d)",
@@ -1691,13 +1688,10 @@ class GeminiClient(LLMClient):
                     role,
                     len(skipped_attachments),
                 )
-                if skipped_attachments:
-                    for att_idx, attachment, summary_text in attachment_records:
-                        if attachment not in skipped_attachments:
-                            continue
-                        summary = summary_text or "(要約を取得できませんでした)"
-                        note = f"[画像参照のみ: {attachment['uri']}] {summary}"
-                        text_content = f"{text_content}\n{note}" if text_content else note
+                for attachment in skipped_attachments:
+                    summary = _summary_for(attachment) or "(要約を取得できませんでした)"
+                    note = f"[画像参照のみ: {attachment['uri']}] {summary}"
+                    text_content = f"{text_content}\n{note}" if text_content else note
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
                         attachment["path"], attachment["mime_type"],
@@ -1709,10 +1703,7 @@ class GeminiClient(LLMClient):
                         )
                         # 読めなかった画像も黙って捨てず、説明の文で届ける
                         # (Anthropic・OpenAI 互換・xAI と同じ扱い)
-                        summary = next(
-                            (s for _i, att, s in attachment_records if att is attachment),
-                            None,
-                        ) or "(要約を取得できませんでした)"
+                        summary = _summary_for(attachment) or "(要約を取得できませんでした)"
                         note = f"[画像: {attachment['uri']}] {summary}"
                         text_content = f"{text_content}\n{note}" if text_content else note
                         continue
