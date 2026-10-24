@@ -2274,7 +2274,9 @@ def test_unusable_decisions_answers_are_unavailable_but_usage_is_recorded(
 ):
     """答えが不成立でも、届いた応答の使用量は答えを読む前に記帳される (既存の順序)。"""
     body = {**response, "usage": {"input_tokens": 50, "output_tokens": 0,
-                                  "total_tokens": 50, "input_tokens_details": {"cached_tokens": 0}}}
+                                  "total_tokens": 50, "input_tokens_details": {
+                                      "cached_tokens": 20, "cache_write_tokens": 10,
+                                  }}}
     with pytest.raises(ReflexJudgmentUnavailable):
         evaluate(STATE, QUESTIONS, timeout=2.5, persona_id="air_city_a",
                  transport=_transport(_capture({}, body)))
@@ -2283,6 +2285,8 @@ def test_unusable_decisions_answers_are_unavailable_but_usage_is_recorded(
     assert usage_calls[0]["model_id"] == MODEL_KEY
     assert usage_calls[0]["input_tokens"] == 50
     assert usage_calls[0]["output_tokens"] == 0
+    assert usage_calls[0]["cached_tokens"] == 20
+    assert usage_calls[0]["cache_write_tokens"] == 10
     assert usage_calls[0]["category"] == reflex_judgment.USAGE_CATEGORY
 
 
@@ -2308,11 +2312,14 @@ def test_decisions_usage_is_recorded_on_success(decisions_role, usage_calls):
 
 
 def test_an_abandoned_decisions_call_still_records_its_usage(decisions_role, usage_calls):
-    """締切で見切った呼び出しの使用量の記帳は、使用量の欄の位置が同じなので形を問わず効く。"""
+    """締切後もキャッシュ内訳を含めて一度だけ記帳し、答えは採用しない。"""
     def slow_handler(request):
         time.sleep(0.8)
         return httpx.Response(200, json={
-            **_predicates("m0", "m1"), "usage": {"input_tokens": 77, "output_tokens": 0},
+            **_predicates("m0", "m1"), "usage": {
+                "input_tokens": 77, "output_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 20},
+            },
         })
 
     with pytest.raises(ReflexJudgmentUnavailable):
@@ -2320,6 +2327,105 @@ def test_an_abandoned_decisions_call_still_records_its_usage(decisions_role, usa
     _join_workers()
     assert len(usage_calls) == 1
     assert usage_calls[0]["input_tokens"] == 77
+    assert usage_calls[0]["cached_tokens"] == 30
+    assert usage_calls[0]["cache_write_tokens"] == 20
+
+
+@pytest.mark.parametrize("input_tokens,cached,written,expected", [
+    (10000, 0, 0, .001),
+    (10000, 10000, 0, .0001),
+    (10000, 0, 10000, .00125),
+    (10000, 6000, 2000, .00051),
+    (272000, 200000, 50000, .01045),
+    (272001, 200000, 50000, .0209002),
+])
+def test_decisions_cache_usage_reaches_persisted_cost(
+    shipped_decisions, monkeypatch, input_tokens, cached, written, expected,
+):
+    """偽 HTTP → 方言変換 → 実 UsageTracker → 隔離 DB の費用まで確かめる。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from database.models import LLMUsageLog
+    from saiverse.usage_tracker import UsageTracker
+
+    engine = create_engine("sqlite:///:memory:")
+    LLMUsageLog.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+    tracker = object.__new__(UsageTracker)
+    tracker._initialized = False
+    tracker.__init__()
+    tracker.configure(factory)
+    monkeypatch.setattr("saiverse.usage_tracker.get_usage_tracker", lambda: tracker)
+    body = {**_predicates("m0", "m1"), "usage": {
+        "input_tokens": input_tokens, "output_tokens": 17,
+        "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written,
+                                 "untrusted": "do not log this"},
+    }}
+    try:
+        answers, usage = evaluate(STATE, QUESTIONS, backend=resolve_backend(DECISIONS_KEY), timeout=2.5,
+                                  transport=_transport(_capture({}, body)))
+        assert answers == {"m0": .5, "m1": .5}
+        assert usage == {"input_tokens": input_tokens, "output_tokens": 17,
+                         "cached_tokens": cached, "cache_write_tokens": written}
+        with factory() as session:
+            row = session.query(LLMUsageLog).one()
+            assert row.MODEL_ID == DECISIONS_KEY
+            assert row.INPUT_TOKENS == input_tokens  # 総数を二重加算・差引きしない
+            assert row.CACHED_TOKENS == cached
+            assert row.OUTPUT_TOKENS == 17  # 出力の単価はゼロのまま
+            assert row.COST_USD == pytest.approx(expected)
+            assert row.CATEGORY == reflex_judgment.USAGE_CATEGORY
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("bad", [None, True, "20", -1, 1.5, float("nan"), float("inf"), {}])
+@pytest.mark.parametrize("field", ["cached_tokens", "cache_write_tokens"])
+def test_decisions_bad_cache_count_keeps_other_valid_usage(
+    decisions_role, caplog, bad, field,
+):
+    # 呼び出し側の httpx JSON は NaN/inf を作れないので、受信した dict の境界で検査する。
+    details = {"cached_tokens": 20, "cache_write_tokens": 30, field: bad}
+    usage = reflex_judgment._usage_from_jev(
+        {"input_tokens": 100, "output_tokens": 0, "input_tokens_details": details},
+        resolve_backend(MODEL_KEY),
+    )
+    valid_field = "cache_write_tokens" if field == "cached_tokens" else "cached_tokens"
+    assert usage == {"input_tokens": 100, "output_tokens": 0, valid_field: details[valid_field]}
+    assert "cost is an estimate" in caplog.text
+
+
+@pytest.mark.parametrize("usage_raw,expected", [
+    (None, {}),
+    ({}, {}),
+    ({"input_tokens": 100}, {"input_tokens": 100}),
+    ({"input_tokens": 100, "input_tokens_details": []}, {"input_tokens": 100}),
+    ({"input_tokens": 100, "input_tokens_details": {}}, {"input_tokens": 100}),
+    ({"input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30}}, {}),
+    ({"input_tokens": 40, "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30}},
+     {"input_tokens": 40}),
+])
+def test_decisions_missing_or_inconsistent_cache_usage_preserves_answers(
+    decisions_role, usage_calls, usage_raw, expected,
+):
+    body = {**_predicates("m0", "m1"), "usage": usage_raw}
+    answers, usage = evaluate(STATE, QUESTIONS, timeout=2.5,
+                              transport=_transport(_capture({}, body)))
+    assert answers == {"m0": .5, "m1": .5}
+    assert usage == expected
+    assert len(usage_calls) == bool(expected)
+
+
+def test_system_one_does_not_interpret_decisions_cache_fields(usage_calls):
+    body = {"answers": {"m0": {"noul": .5}, "m1": {"noul": .5}}, "usage": {
+        "input_tokens": 100, "output_tokens": 2,
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+    }}
+    _answers, usage = evaluate(STATE, QUESTIONS, timeout=2.5,
+                               transport=_transport(_capture({}, body)))
+    assert usage == {"input_tokens": 100, "output_tokens": 2}
+    assert "cached_tokens" not in usage_calls[0]
 
 
 # --- 解決: request_shape の null・answer_fields の既定・保存の関所・宛先とキーの照合 ---
