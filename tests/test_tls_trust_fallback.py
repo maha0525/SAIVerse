@@ -92,6 +92,24 @@ class TlsTrustDecisionTests(_TrustStateMixin, unittest.TestCase):
             tls_trust.ensure_default_https_trust()
         self.assertEqual(os.environ["SSL_CERT_FILE"], "/somewhere/custom.pem")
 
+    def test_a_broken_bundled_store_does_not_raise_and_sets_nothing(self) -> None:
+        """certifi の束が壊れていても、呼び出し元を止めない。
+
+        searxng_install.py は HTTPS と無関係な action (``source`` など) の前にも
+        この関数を呼ぶので、ここで例外が外へ出ると SearXNG の起動まで失敗する。
+        壊れた束を SSL_CERT_FILE として子プロセスへ広げないことも確かめる。
+        """
+        import certifi
+        import urllib.request
+
+        os.environ.pop("SSL_CERT_FILE", None)
+        urllib.request._opener = None
+        missing = os.path.join(os.path.dirname(__file__), "no-such-cacert.pem")
+        with patch.object(tls_trust, "_os_trust_store_is_usable", return_value=False), \
+                patch.object(certifi, "where", return_value=missing):
+            self.assertIsNone(tls_trust.ensure_default_https_trust())
+        self.assertNotIn("SSL_CERT_FILE", os.environ)
+
 
 @unittest.skipUnless(HAVE_CRYPTOGRAPHY, "cryptography が無いので証明書を作れない")
 class TlsTrustReachesUrlopenTests(_TrustStateMixin, unittest.TestCase):

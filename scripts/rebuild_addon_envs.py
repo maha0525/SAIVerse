@@ -66,6 +66,7 @@ from saiverse.addon_installer import (  # noqa: E402
     reinstall_core_venv_steps,
 )
 from saiverse.data_paths import EXPANSION_DATA_DIR  # noqa: E402
+from saiverse.tls_trust import ensure_default_https_trust  # noqa: E402
 
 
 def _print_progress(event: ProgressEvent) -> None:
@@ -125,6 +126,14 @@ def main(expansion: Path | None = None, *, core_venv_recreated: bool = False) ->
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    # このスクリプトは setup / 更新から別プロセスで走り、main.py の呼び出しの外にあるので、
+    # ここで一度呼ぶ。このプロセスの urllib (saiverse/addon_installer.py の
+    # urllib.request.urlretrieve によるアドオンのダウンロード) と、SSL_CERT_FILE を継ぐ
+    # 子の pip の両方に効く。OS のストアが読める環境では何もしない。
+    cafile = ensure_default_https_trust()
+    if cafile:
+        print(f"[INFO] OS の証明書ストアが読めないため、HTTPS は同梱の証明書束を使います: {cafile}",
+              flush=True)
     expansion = expansion or EXPANSION_DATA_DIR
 
     run_core, core_ids = _core_venv_targets(core_venv_recreated)

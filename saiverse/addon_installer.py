@@ -159,6 +159,24 @@ def current_os() -> str:
     return "linux"
 
 
+# Homebrew の bin (Apple Silicon / Intel)。macOS の既定の PATH には無い。
+_HOMEBREW_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _path_with_homebrew_bins(path_value: str) -> str:
+    """PATH の値に、まだ項目に無く実在する ``_HOMEBREW_BIN_DIRS`` を末尾に足して返す。
+
+    末尾に足すのは、元の PATH の項目 (専用環境の bin や利用者のツール) を
+    同名の Homebrew のコマンドで上書きしないため。元の値はそのまま先頭に残す。
+    """
+    entries = path_value.split(os.pathsep) if path_value else []
+    additions = [
+        directory for directory in _HOMEBREW_BIN_DIRS
+        if directory not in entries and os.path.isdir(directory)
+    ]
+    return os.pathsep.join([path_value, *additions] if path_value else additions)
+
+
 def _run_subprocess(
     args: list[str],
     cwd: Path,
@@ -176,6 +194,10 @@ def _run_subprocess(
     effective_env = os.environ.copy()
     if env:
         effective_env.update(env)
+    if sys.platform == "darwin":
+        # Homebrew の bin は macOS の既定の PATH に無く、起動元の shell 次第で
+        # pip のソースビルドが mecab-config 等を見つけられないため。
+        effective_env["PATH"] = _path_with_homebrew_bins(effective_env.get("PATH", ""))
 
     try:
         proc = subprocess.Popen(

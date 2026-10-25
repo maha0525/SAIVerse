@@ -221,7 +221,7 @@ def test_no_records_mean_no_setup_alert(tmp_path: Path) -> None:
 
 def test_the_recommended_series_is_the_one_setup_names() -> None:
     series = "%d.%d" % environment_alerts.RECOMMENDED_PYTHON_SERIES
-    assert f"PythonCore\{series}\InstallPath" in (REPO_ROOT / "setup.bat").read_text(encoding="utf-8")
+    assert rf"PythonCore\{series}\InstallPath" in (REPO_ROOT / "setup.bat").read_text(encoding="utf-8")
     setup_sh = (REPO_ROOT / "setup.sh").read_text(encoding="utf-8")
     assert f"--expect-series {series}" in setup_sh and f"python{series}" in setup_sh
 
