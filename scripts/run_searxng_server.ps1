@@ -35,8 +35,9 @@ $rawSettings = if ($env:SEARXNG_SETTINGS_PATH) { $env:SEARXNG_SETTINGS_PATH } el
 $SETTINGS_PATH = Get-AbsPath $rawSettings
 
 $venvPython = "$VENV_DIR\Scripts\python.exe"
-# The installer is standard library only and runs with SAIVerse's own .venv
-# python, as setup.bat and the update run it: it then checks the SearXNG venv
+# The installer needs only this checkout and the standard library (certifi,
+# when present, serves HTTPS trust via saiverse.tls_trust) and runs with
+# SAIVerse's own .venv python, as setup.bat and the update run it: it then checks the SearXNG venv
 # against the Python series SAIVerse runs, and makes it again when SAIVerse
 # moved to another series. A SearXNG setup that stopped part-way
 # (.setup_in_progress\searxng-venv.json, scripts/setup_in_progress.py) may

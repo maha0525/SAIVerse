@@ -152,6 +152,18 @@ Python の部品と同じ問いが Node.js 本体にもある。Windows の setu
 | 系列違いのアドオン専用の環境は、答え・バージョン・データを変えずに作り直される。失敗は他のアドオンを止めず、記録が残る | `addon_installer.rebuild_unusable_addon_envs` / `record_env_rebuild_failures` |
 | 新しい `.venv` を作った setup のあと、アドオンの step のうち本体の `.venv` に入れるもの (`env` の無い `pip_install`) が、答え・バージョン・データを変えずに requirements.lock を constraints にして入れ直される。失敗は記録され、次の setup がやり直す | `addon_installer.reinstall_core_venv_steps` / `scripts/rebuild_addon_envs.py` (`--core-venv-recreated` は setup.bat / setup.sh が `create` / `renamed` の回にだけ付ける) |
 
+### 2-8. macOS の実行環境の補正 (2026-10-26 追加)
+
+macOS の利用者の v0.3.26 への更新で、起動時の再構築が二つ失敗した報告 ([../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md)) への対処。
+
+- **証明書**: `saiverse/tls_trust.py` の `ensure_default_https_trust()` (OS の証明書ストアが空のときだけ、urllib が標準で検証に使う証明書を同梱の certifi へ切り替える) は `main.py` でしか呼ばれていなかったため、setup / 更新から別プロセスで実行される `scripts/searxng_install.py` (SearXNG のソースの ZIP の取得) と `scripts/rebuild_addon_envs.py` (アドオンのダウンロード) には効いていなかった。この二つでも、それぞれの `main()` の先頭で同じ関数を呼ぶ。設定された `SSL_CERT_FILE` は、そのプロセスから起動される pip などの子プロセスにも引き継がれる。SearXNG のサーバー本体は `run_searxng_server.ps1` / `.sh` から直接起動されるため、インストーラーで設定した環境変数は引き継がれない (画面の Update ボタン経由の再起動が本体の `SSL_CERT_FILE` を引き継ぐのは、2026-09-02 からの変わらない挙動)。
+- **Homebrew の PATH**: Homebrew のコマンド置き場 (Apple Silicon は `/opt/homebrew/bin`) は macOS の標準の PATH に無い。`addon_installer._run_subprocess` では macOS の場合のみ、`/opt/homebrew/bin` と `/usr/local/bin` のうち PATH に無く実在するものを PATH の末尾に足してから子プロセスを起動する (`_path_with_homebrew_bins`)。pip でソースからビルドするときに、Homebrew で入れたツール (python_mecab_ko の `mecab-config` など) を見つけられるようにするため。末尾なので、専用の環境の bin や利用者のツールを上書きしない。
+
+| 不変条件 | 持ち主 |
+|---|---|
+| OS の証明書ストアが空の macOS でも、setup / 更新のダウンロード (SearXNG のソース、アドオン) が certifi で通る | `saiverse/tls_trust.py` と、各プロセスの `main()` での呼び出し (`main.py`、`scripts/searxng_install.py`、`scripts/rebuild_addon_envs.py`) |
+| macOS で、アドオンの導入・再構築の子プロセスから Homebrew のコマンドを参照できる。macOS 以外では PATH を変えない | `addon_installer._run_subprocess` (`_path_with_homebrew_bins`) |
+
 ---
 
 ## 3. 部品の仕分け (2026-09-02 時点の現物)

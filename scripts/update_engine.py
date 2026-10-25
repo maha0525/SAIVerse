@@ -2457,8 +2457,9 @@ def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> De
     pin. Nothing happens without a SearXNG venv.
 
     Both run with SAIVerse's own python (``saiverse_python``, else
-    ``sys.executable``), as setup.bat / setup.sh run them: the installer is
-    standard library only, the check then fails when the SearXNG venv was made
+    ``sys.executable``), as setup.bat / setup.sh run them: the installer needs
+    only the checkout and the standard library (certifi, when present, serves
+    HTTPS trust), the check then fails when the SearXNG venv was made
     with another Python series than SAIVerse runs (a .venv made again with 3.13
     by a setup from before the installer set such a venv aside), and the setup
     makes the venv with the python that runs it. Run with the SearXNG venv's

@@ -285,6 +285,18 @@ def test_a_crash_of_the_entry_still_leaves_a_record_for_the_banner(home, monkeyp
     assert data["failures"][0]["core_venv"] is False
 
 
+def test_the_entry_sets_up_the_https_trust_before_looking_at_addons(home, expansion, monkeypatch) -> None:
+    """このプロセスはアドオンを urllib でダウンロードし、pip を起動する。main.py の
+    ensure_default_https_trust の呼び出し (saiverse/tls_trust.py) は別プロセスには効かない。"""
+    calls: list[str] = []
+    entry = _load_entry()
+    monkeypatch.setattr(entry, "ensure_default_https_trust", lambda: calls.append("trust"))
+    monkeypatch.setattr(entry, "find_unusable_addon_envs", lambda _e: calls.append("find") or {})
+
+    assert entry.main(expansion) == 0
+    assert calls == ["trust", "find"]
+
+
 # ---------------------------------------------------------------------------
 # 本体の .venv を作り直した回の、本体の .venv に入れる step の入れ直し
 # ---------------------------------------------------------------------------

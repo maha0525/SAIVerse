@@ -24,6 +24,10 @@ from searxng_config import (
     venv_python,
 )
 
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+from saiverse.tls_trust import ensure_default_https_trust  # noqa: E402
+
 SOURCE_MARKER = ".saiverse-source.json"
 INSTALL_MARKER = ".saiverse-searxng.json"
 REQUIRED_FILES = ("requirements.txt", "requirements-dev.txt", "README.rst", "setup.py", "searx/settings.yml")
@@ -473,6 +477,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("setup", "check", "source", "python", "settings"))
     args = parser.parse_args()
+    # This script runs as its own process (setup.bat / setup.sh, the update's
+    # refresh_searxng, run_searxng_server), outside main.py's call, so it calls
+    # ensure_default_https_trust once here. It covers this process's urllib
+    # (download_searxng_source) and the child processes (pip etc.), which
+    # inherit SSL_CERT_FILE. Where the OS store is readable it does nothing.
+    # Printed to stderr: stdout of ``source`` / ``python`` / ``settings`` is
+    # captured by the launchers, and must stay a bare path.
+    cafile = ensure_default_https_trust()
+    if cafile:
+        print(f"[INFO] The OS certificate store is empty; HTTPS uses the bundled CA file {cafile}",
+              file=sys.stderr, flush=True)
     try:
         if args.action == "source":
             print(source_directory())

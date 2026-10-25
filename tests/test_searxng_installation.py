@@ -432,6 +432,16 @@ def _run_main(monkeypatch, action: str) -> int:
     return installer.main()
 
 
+def test_main_sets_up_the_https_trust_before_any_action(monkeypatch):
+    """This process downloads the SearXNG source with urllib and starts pip,
+    outside main.py's call of ensure_default_https_trust (saiverse/tls_trust.py)."""
+    calls: list[str] = []
+    monkeypatch.setattr(installer, "ensure_default_https_trust", lambda: calls.append("trust"))
+    monkeypatch.setattr(installer, "ready", lambda: calls.append("ready") or True)
+    assert _run_main(monkeypatch, "check") == 0
+    assert calls == ["trust", "ready"]
+
+
 def test_a_failed_setup_is_recorded_for_the_banner_and_cleared_by_the_next_success(tmp_path, monkeypatch):
     from saiverse.environment_alerts import SEARXNG_SETUP_ALERT_ID, searxng_setup_alerts
 
