@@ -18,6 +18,7 @@ API キーは monkeypatch で偽値を入れ、モデル設定は偽の MODEL_CO
 """
 
 import json
+import logging
 import threading
 import time
 from datetime import datetime
@@ -2380,20 +2381,53 @@ def test_decisions_cache_usage_reaches_persisted_cost(
         engine.dispose()
 
 
-@pytest.mark.parametrize("bad", [None, True, "20", -1, 1.5, float("nan"), float("inf"), {}])
+@pytest.mark.parametrize("bad", [True, "20", -1, float("nan"), float("inf"), {}])
 @pytest.mark.parametrize("field", ["cached_tokens", "cache_write_tokens"])
-def test_decisions_bad_cache_count_keeps_other_valid_usage(
+def test_decisions_bad_cache_count_drops_the_whole_breakdown(
     decisions_role, caplog, bad, field,
 ):
-    # 呼び出し側の httpx JSON は NaN/inf を作れないので、受信した dict の境界で検査する。
+    """欠落でない不正値は、壊れた内訳の残り半分を正確な記録のように残させない。
+
+    呼び出し側の httpx JSON は NaN/inf を作れないので、受信した dict の境界で検査する。
+    """
     details = {"cached_tokens": 20, "cache_write_tokens": 30, field: bad}
     usage = reflex_judgment._usage_from_jev(
         {"input_tokens": 100, "output_tokens": 0, "input_tokens_details": details},
         resolve_backend(MODEL_KEY),
     )
-    valid_field = "cache_write_tokens" if field == "cached_tokens" else "cached_tokens"
-    assert usage == {"input_tokens": 100, "output_tokens": 0, valid_field: details[valid_field]}
+    assert usage == {"input_tokens": 100, "output_tokens": 0}
     assert "cost is an estimate" in caplog.text
+
+
+def test_decisions_float_cache_counts_are_kept(decisions_role):
+    """整数を float で直列化する経路でも、総数と同じ規則で内訳を採る (割引を落とさない)。"""
+    usage = reflex_judgment._usage_from_jev(
+        {"input_tokens": 100.0, "output_tokens": 0,
+         "input_tokens_details": {"cached_tokens": 20.0, "cache_write_tokens": 10}},
+        resolve_backend(MODEL_KEY),
+    )
+    assert usage == {"input_tokens": 100.0, "output_tokens": 0,
+                     "cached_tokens": 20.0, "cache_write_tokens": 10}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    pytest.param({"input_tokens": 100, "output_tokens": 0},
+                 {"input_tokens": 100, "output_tokens": 0}, id="no_breakdown"),
+    pytest.param({"input_tokens": 100, "output_tokens": 0,
+                  "input_tokens_details": {"cached_tokens": 20}},
+                 {"input_tokens": 100, "output_tokens": 0, "cached_tokens": 20},
+                 id="zero_field_omitted"),
+    pytest.param({"input_tokens": 100, "output_tokens": 0,
+                  "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": 10}},
+                 {"input_tokens": 100, "output_tokens": 0, "cache_write_tokens": 10},
+                 id="explicit_null"),
+])
+def test_decisions_missing_breakdown_fields_are_silent(decisions_role, caplog, raw, expected):
+    """内訳や欄の欠落 (ゼロ省略・旧応答) は正常 — 毎ターンの警告で本物の会計警告を埋めない。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    usage = reflex_judgment._usage_from_jev(raw, resolve_backend(MODEL_KEY))
+    assert usage == expected
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 @pytest.mark.parametrize("usage_raw,expected", [

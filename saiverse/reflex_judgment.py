@@ -709,16 +709,26 @@ def _clean_usage(raw: Any, usage_fields: Mapping[str, str]) -> Dict[str, Any]:
     cleaned: Dict[str, Any] = {}
     for name, field_name in usage_fields.items():
         value = raw.get(field_name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        if not math.isfinite(value) or value < 0:
+        if _usable_token_count(value):
+            cleaned[name] = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
             LOGGER.warning(
                 "[reflex] usage field %r is not a usable token count: %r (dropping that field)",
                 field_name, value,
             )
-            continue
-        cleaned[name] = value
     return cleaned
+
+
+def _usable_token_count(value: Any) -> bool:
+    """トークン数として記帳してよい値か (bool を除く有限の非負数)。
+
+    総数 (:func:`_clean_usage`) とキャッシュ内訳 (:func:`_usage_from_jev`) の
+    両方がこの一つの規則で読む。別々に検査すると、整数を float で直列化する
+    経路 (プロキシ等) で総数だけが残り内訳が落ちて、割引が黙って消える。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
 
 
 def _usage_from_jev(raw: Any, backend: ReflexBackend) -> Dict[str, Any]:
@@ -726,27 +736,40 @@ def _usage_from_jev(raw: Any, backend: ReflexBackend) -> Dict[str, Any]:
 
     Decisions の input_tokens はキャッシュ読取・書込を含む総数。内訳だけを
     展開し、差し引きと単価の選択は既存の calculate_cost に任せる。
-    内訳が欠ける旧応答は従来どおり入力総数で概算する。壊れた内訳も判定の
-    成否は変えず、警告を残して使える欄だけを記帳する (実請求の確定値ではない)。
+    内訳や欄の欠落はゼロ省略・旧応答として正常に扱い、警告せず従来どおり
+    入力総数で概算する。欠落でない不正値が一つでもあれば内訳全体を捨てる —
+    壊れていると分かった内訳の残り半分を、正確な記録のように残さない。
+    どちらも判定の成否は変えない (費用は実請求の確定値ではない)。
     """
     usage = _clean_usage(raw, backend.usage_fields)
     if backend.request_shape != REQUEST_SHAPE_OPENAI_DECISIONS or not isinstance(raw, dict):
         return usage
 
     details = raw.get("input_tokens_details")
+    if details is None:
+        return usage
     if not isinstance(details, dict):
-        if usage:
-            LOGGER.warning("[reflex] Decisions cache usage is missing or invalid; cost is an estimate")
+        LOGGER.warning(
+            "[reflex] Decisions input_tokens_details is not an object; "
+            "ignoring it (cost is an estimate)",
+        )
         return usage
 
-    cache_usage: Dict[str, int] = {}
+    cache_usage: Dict[str, Any] = {}
     for name in ("cached_tokens", "cache_write_tokens"):
         value = details.get(name)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            cache_usage[name] = value
-        else:
-            # 未知の本文や不正値を INFO/WARNING に流さない。
-            LOGGER.warning("[reflex] Decisions %s is missing or invalid; cost is an estimate", name)
+        if value is None:
+            continue
+        if not _usable_token_count(value):
+            # 未知の本文や不正値そのものは INFO/WARNING に流さない。
+            LOGGER.warning(
+                "[reflex] Decisions %s is not a usable token count; "
+                "ignoring the whole cache breakdown (cost is an estimate)", name,
+            )
+            return usage
+        cache_usage[name] = value
+    if not cache_usage:
+        return usage
 
     input_tokens = usage.get("input_tokens")
     if input_tokens is None or sum(cache_usage.values()) > input_tokens:
