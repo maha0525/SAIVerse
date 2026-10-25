@@ -1158,8 +1158,15 @@ def _cap_image_long_edge_for_llm(
 # Decoding and re-encoding a large image costs ~0.3s, and the same images are
 # re-sent on every turn, so the capped copy is remembered per file version.
 # Only shrunk results are stored; images within the cap are cheap to re-check.
+# The cache is bounded by the total size of the stored bytes, not by an entry
+# count: with no default attachment count limit, how many shrunk images one
+# request embeds depends on their size (the byte valve keeps the embedded total
+# under its ceiling, ~12MB per request), and the cache must hold every image of
+# a request or the overflow is re-encoded on every turn.
 _LLM_IMAGE_CAP_CACHE: "OrderedDict[Tuple[str, int, int, str], Tuple[bytes, str]]" = OrderedDict()
-_LLM_IMAGE_CAP_CACHE_MAX = 32
+#: 縮小済み画像の控えの常駐メモリの上限 (控えの bytes の合計)。弁の天井 (~12MB/要求)
+#: の数要求ぶんを賄う。
+_LLM_IMAGE_CAP_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _LLM_IMAGE_CAP_CACHE_LOCK = threading.Lock()
 
 
@@ -1177,11 +1184,16 @@ def _cap_image_long_edge_cached(
             _LLM_IMAGE_CAP_CACHE.move_to_end(key)
             return hit
     result = _cap_image_long_edge_for_llm(data, mime_type, path)
-    if result[0] is not data:
+    if result[0] is not data and len(result[0]) <= _LLM_IMAGE_CAP_CACHE_MAX_BYTES:
         with _LLM_IMAGE_CAP_CACHE_LOCK:
             _LLM_IMAGE_CAP_CACHE[key] = result
-            while len(_LLM_IMAGE_CAP_CACHE) > _LLM_IMAGE_CAP_CACHE_MAX:
-                _LLM_IMAGE_CAP_CACHE.popitem(last=False)
+            _LLM_IMAGE_CAP_CACHE.move_to_end(key)
+            # 合計は挿入のたびに数え直す (控えは縮小のあと、高々数十〜数百件)。
+            # 件数を別に持たないので、テストが控えを空にしても合計がずれない。
+            total = sum(len(item[0]) for item in _LLM_IMAGE_CAP_CACHE.values())
+            while total > _LLM_IMAGE_CAP_CACHE_MAX_BYTES and _LLM_IMAGE_CAP_CACHE:
+                _old_key, (old_bytes, _old_mime) = _LLM_IMAGE_CAP_CACHE.popitem(last=False)
+                total -= len(old_bytes)
     return result
 
 

@@ -1644,12 +1644,12 @@
     "en": "(automatic: {p1})"
   },
   "components.ChatOptions.text054": {
-    "ja": "（デフォルト: 4）",
-    "en": "(default: 4)"
+    "ja": "（デフォルト: 上限なし）",
+    "en": "(default: no limit)"
   },
   "components.ChatOptions.text055": {
-    "ja": "LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄でデフォルト値（4枚）を使用。",
-    "en": "Maximum images sent to the LLM. Additional images become text summaries. Set 0 to use text for all images. Leave blank for the default (4)."
+    "ja": "LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄なら枚数の上限なし（環境変数で上限を設定していればその値）。なお、画像の合計サイズが大きすぎる送信では、枚数に関係なく古い画像がテキスト要約に置換されます。",
+    "en": "Maximum images sent to the LLM. Additional images become text summaries. Set 0 to use text for all images. Leave blank for no limit (or the limit set by environment variable, if any). When the images in one request are too large in total, older images become text summaries regardless of this setting."
   },
   "components.ChatOptions.text056": {
     "ja": "モデルパラメータ",

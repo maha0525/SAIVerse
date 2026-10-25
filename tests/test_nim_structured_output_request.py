@@ -383,12 +383,18 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
     # 無く、その定義ではクライアントを作る時点で TypeError になっていた。
 
     def _prepare_images(self):
-        # 画像の埋め込み上限は環境変数でも変わる。テストを走らせる機械の設定を持ち込まない。
+        # 画像の埋め込み上限とバイトの非常弁は環境変数でも変わる。テストを走らせる
+        # 機械の設定を持ち込まない。
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("SAIVERSE_OPENAI_ATTACHMENT_LIMIT", None)
-        os.environ.pop("SAIVERSE_ATTACHMENT_LIMIT", None)
+        for key in list(os.environ):
+            if key.startswith("SAIVERSE_") and (
+                key.endswith("ATTACHMENT_LIMIT")
+                or key.endswith("ATTACHMENT_BYTE_CEILING")
+                or key.endswith("ATTACHMENT_BYTE_FLOOR")
+            ):
+                os.environ.pop(key)
         # 埋め込まれなかった画像は文字の注記になり、要約ファイルが無いと LLM で要約を
         # 作りに行く。テストで実 API を呼ばないよう、要約を先に置き、生成が呼ばれたら落とす。
         summarize = patch("saiverse.media_summary._generate_image_summary")
@@ -418,8 +424,9 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
             {"role": "user", "content": "third", "metadata": self._image("c")},
         ]
 
-    def test_structured_output_embeds_images_under_the_default_limit(self):
-        """モデル定義に上限が無ければ既定の上限 (4 枚) で埋め込む。3 枚なら全部。"""
+    def test_structured_output_embeds_every_image_without_a_limit(self):
+        """モデル定義にも環境変数にも上限が無ければ、枚数では絞らず全部を埋め込む
+        (小さい画像なのでバイトの非常弁も開かない)。"""
         self._prepare_images()
         client = self._client("nim-image-probe", {
             "model": "vendor/image-probe",

@@ -31,11 +31,11 @@ from .exceptions import (
 )
 from .utils import (
     attachment_limit_is_off,
-    compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
     merge_reasoning_strings,
     parse_attachment_limit,
+    select_embedded_attachment_keys,
 )
 
 _log = logging.getLogger(__name__)
@@ -157,8 +157,20 @@ def _build_xai_messages(
         if media_items:
             attachment_cache[idx] = media_items
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(
+    # 画像を実際に埋め込むのは画像対応のモデルの user だけ (下の組み立てと同じ判定)。
+    # バイトの非常弁はこの画像だけを数える。
+    embeddable_indices = {
+        idx for idx in attachment_cache
+        if supports_images
+        and isinstance(messages[idx], dict)
+        and (messages[idx].get("role") or "").lower() == "user"
+    }
+    allowed_attachment_keys = select_embedded_attachment_keys(
         attachment_cache, max_image_embeds, exempt_indices,
+        provider="XAI",
+        messages=messages,
+        embeddable_indices=embeddable_indices,
+        max_image_bytes=max_image_bytes,
     )
 
     result: list = []

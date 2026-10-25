@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,6 +172,20 @@ def _no_image_summary_llm(monkeypatch):
 
     monkeypatch.setattr("saiverse.media_summary.ensure_image_summary", _summary)
     monkeypatch.setattr("llm_clients.gemini.ensure_image_summary", _summary)
+
+
+@pytest.fixture(autouse=True)
+def _clean_attachment_env(monkeypatch):
+    """実行環境の ``.env`` (llm_clients/__init__.py の load_dotenv が親フォルダの
+    ものも拾う) が画像の枚数の上限・非常弁を変えていても、既定 (枚数の上限なし、
+    非常弁は 12MB / 6MB) から始める。上限に頼るテストは、テストの中で明示する。"""
+    for key in list(os.environ):
+        if key.startswith("SAIVERSE_") and (
+            key.endswith("ATTACHMENT_LIMIT")
+            or key.endswith("ATTACHMENT_BYTE_CEILING")
+            or key.endswith("ATTACHMENT_BYTE_FLOOR")
+        ):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture
@@ -613,12 +628,14 @@ class TestPrefixInvariantOnTheRealPath:
         assert any(p.get("inline_data") for p in dumped_last[-1].get("parts") or [])
         assert len(_kept_rows(env)) == 2
 
-    def test_kept_spell_image_does_not_push_older_images_out(self, env):
-        """Codex 四巡目: 画像がすでに上限 (既定 4 枚) まである会話で、スペルの
-        繰り返しが画像を 1 枚返し、次の発言は文字だけ。ON のモデルで残した
+    def test_kept_spell_image_does_not_push_older_images_out(self, env, monkeypatch):
+        """Codex 四巡目: 画像がすでに上限 (環境変数で 4 枚を明示) まである会話で、
+        スペルの繰り返しが画像を 1 枚返し、次の発言は文字だけ。ON のモデルで残した
         スペルの結果の画像が上限の数に入ると、次のターンで一番古い画像が文字に
         置き換わり、Gemini の送信形式で前回の最初の呼び出しと先頭が一致しなく
-        なる。残した画像は上限の数に入れない (送るときも、復元したときも)。"""
+        なる。残した画像は上限の数に入れない (送るときも、復元したときも)。
+        上限は既定では無いので、明示しないと ON の印が壊れていても通ってしまう。"""
+        monkeypatch.setenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT", "4")
         for i in range(4):
             env.persona.history_manager.add_to_persona_only({
                 "role": "user", "content": f"写真{i}です。",
@@ -2317,9 +2334,12 @@ class TestAttachmentLimit:
         for i in range(n_images):
             path = tmp_path / f"img{i}.png"
             path.write_bytes(base64.b64decode(_PNG_B64))
+            # 要約の生成は autouse の _no_image_summary_llm が差し替える。
+            # ``__skip_image_summary__`` は使わない — 要約を作るための送信の印で、
+            # その画像は枚数の上限にも非常弁にも数えない (常に埋め込む) ため、
+            # 上限の効き方を比べるこのテストが成り立たなくなる。
             msgs.append({"role": "user", "content": f"写真{i}", "metadata": {
                 "media": [{"path": str(path), "mime_type": "image/png", "type": "image"}],
-                "__skip_image_summary__": True,
             }})
             msgs.append({"role": "assistant", "content": f"見たよ{i}"})
         if off:
@@ -2613,11 +2633,13 @@ def _images_in(messages: List[Dict[str, Any]]) -> int:
 class TestNoImageLimitOnTheRealPath:
     def test_perception_tool_and_spell_images_over_the_limit(self, env, monkeypatch):
         """ユーザーの画像を一枚も使わず、知覚の画像・ツールの画像 (MEMORIZE で
-        記録に残したもの)・リアルタイムスペルの画像だけで上限 (既定 4 枚) を
-        超える。ON のモデルでは、二ターン目の最初の呼び出しの先頭が一ターン目の
-        最初の呼び出しと Gemini の送信形式でも一致し、画像は一枚も文字に
-        置き換わらない。"""
+        記録に残したもの)・リアルタイムスペルの画像だけで上限 (環境変数で 4 枚を
+        明示) を超える。ON のモデルでは、二ターン目の最初の呼び出しの先頭が
+        一ターン目の最初の呼び出しと Gemini の送信形式でも一致し、画像は一枚も
+        文字に置き換わらない。"""
         from sai_memory.perception_buffer import push_perception
+
+        monkeypatch.setenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT", "4")
 
         _bind_realtime_spell(env)
         _register_camera(env, monkeypatch)
@@ -2651,9 +2673,11 @@ class TestNoImageLimitOnTheRealPath:
         assert notes2 == 0
         assert inline2 == _images_in(turn2[0])
 
-    def test_fifth_user_image(self, env):
-        """ユーザーの画像が 5 枚目に達しても、ON のモデルでは一番古い画像が
-        文字に置き換わらず、前回の最初の呼び出しと先頭が一致する。"""
+    def test_fifth_user_image(self, env, monkeypatch):
+        """ユーザーの画像が 5 枚目に達しても (上限は環境変数で 4 枚を明示)、ON の
+        モデルでは一番古い画像が文字に置き換わらず、前回の最初の呼び出しと先頭が
+        一致する。"""
+        monkeypatch.setenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT", "4")
         for i in range(4):
             env.persona.history_manager.add_to_persona_only({
                 "role": "user", "content": f"写真{i}です。",
@@ -2670,9 +2694,10 @@ class TestNoImageLimitOnTheRealPath:
         inline2, notes2 = _gemini_image_parts(turn2[0])
         assert (inline2, notes2) == (5, 0)
 
-    def test_off_model_keeps_the_limit(self, env):
-        """OFF のモデルは今までどおり: 5 枚目のユーザーの画像で一番古い画像が
-        文字に置き換わる (不変条件 2)。"""
+    def test_off_model_keeps_the_limit(self, env, monkeypatch):
+        """OFF のモデルは、上限を明示すれば今までどおり: 5 枚目のユーザーの画像で
+        一番古い画像が文字に置き換わる (不変条件 2)。上限は既定では無い。"""
+        monkeypatch.setenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT", "4")
         env.persona.model = OFF_MODEL
         env.persona.lightweight_model = OFF_MODEL
         for i in range(4):
@@ -2685,6 +2710,22 @@ class TestNoImageLimitOnTheRealPath:
             )
         turn = _run_turn(env, "これも見て。", user_metadata={"media": [_image(env)]})
         assert _gemini_image_parts(turn[0]) == (4, 1)
+
+    def test_off_model_without_an_explicit_limit_sends_every_image(self, env):
+        """上限を明示しなければ (既定)、OFF のモデルでも 5 枚目で画像は文字に
+        置き換わらない (小さい画像なのでバイトの非常弁も開かない)。"""
+        env.persona.model = OFF_MODEL
+        env.persona.lightweight_model = OFF_MODEL
+        for i in range(4):
+            env.persona.history_manager.add_to_persona_only({
+                "role": "user", "content": f"写真{i}です。",
+                "metadata": {"media": [_image(env)]},
+            })
+            env.persona.history_manager.add_to_persona_only(
+                {"role": "assistant", "content": f"写真{i}、見たよ。"},
+            )
+        turn = _run_turn(env, "これも見て。", user_metadata={"media": [_image(env)]})
+        assert _gemini_image_parts(turn[0]) == (5, 0)
 
 
 # ---------------------------------------------------------------------------

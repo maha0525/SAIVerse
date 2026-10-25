@@ -34,7 +34,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 
 from llm_clients.base import usage_event_time
 
@@ -352,9 +352,10 @@ _MAX_OUTPUT_TOKENS = 4096
 # スルースが飛ばされうるから。
 #
 # 画像・音声・動画は、LLM クライアントが実際に送る形で数える (:func:`_media_rules`)。
-# クライアントは画像を全部は埋め込まない — 直近の数枚だけを埋め込み、古い画像は
-# ``[画像: URI] 要約`` の注記に置き換える (llm_clients/utils.py の
-# compute_allowed_attachment_keys と image_summary_note)。埋め込む画像を全部数えると、
+# クライアントは画像を全部は埋め込まないことがある — 枚数の上限 (env・モデル設定で
+# 明示したときだけ) の外の画像と、バイトの非常弁が置き換えた古い画像は
+# ``[画像: URI] 要約`` の注記になる (llm_clients/utils.py の
+# select_embedded_attachment_keys と image_summary_note)。埋め込む画像を全部数えると、
 # 画像の多いペルソナでは普段の大きさの会話でもスルースが飛ばされ、「上限内の送信
 # では従来どおりスルースが走る」が崩れる。逆に注記を数えないと、実物より小さく
 # 数えて、判定を通ったスルースがプロバイダに拒まれる。
@@ -441,8 +442,8 @@ class _MediaRules(NamedTuple):
 
     #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
     #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
-    #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
-    #: 規則を持つ gemini.py の _convert_messages)。列が「上限を使わない」の印
+    #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys。全クライアントが
+    #: select_embedded_attachment_keys 経由で使う)。列が「上限を使わない」の印
     #: (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY) を持つときは、クライアントと
     #: 同じく枠そのものが無い (:func:`_estimate_input_tokens`)。
     image_limit: Optional[int]
@@ -456,6 +457,16 @@ class _MediaRules(NamedTuple):
     audio_note_roles: FrozenSet[str]
     #: 動画を注記に置き換える役割 (空 = 注記にしない)。
     video_note_roles: FrozenSet[str]
+    #: バイトの非常弁の天井と床を読む env の名前の部分 (``SAIVERSE_{名前}_
+    #: ATTACHMENT_BYTE_CEILING`` など。llm_clients/utils.parse_attachment_byte_bounds)。
+    byte_provider: str = "OPENAI"
+    #: クライアントが画像を埋め込む前に縮める上限 (``load_image_bytes_for_llm`` の
+    #: ``max_bytes``。None = 縮めない)。非常弁の見積もりに使う。
+    max_image_bytes: Optional[int] = None
+    #: 役割が ``tool`` のメッセージと ``tool_calls`` を持つメッセージのメディアを、
+    #: 埋め込みも注記もせずに捨てるか (枠は使う)。Gemini はこの二つを関数呼び出しの
+    #: 部品に組むので、画像・音声・動画が載らない (gemini.py の _convert_messages)。
+    drops_tool_message_media: bool = False
 
 
 def _role_class(role: Any) -> str:
@@ -484,8 +495,12 @@ def _media_rules(model: str) -> _MediaRules:
     クライアントと別の規則を持たないため。
 
     枚数の上限は ``SAIVERSE_<名前>_ATTACHMENT_LIMIT`` →
-    ``SAIVERSE_ATTACHMENT_LIMIT`` → 既定 4 (llm_clients/utils.py の
-    parse_attachment_limit)。各クライアントのコードで確かめた対応
+    ``SAIVERSE_ATTACHMENT_LIMIT`` → どちらも無ければ上限なし (None。llm_clients/
+    utils.py の parse_attachment_limit)。埋め込む画像には、どのクライアントでも
+    バイトの非常弁 (llm_clients/utils.select_embedded_attachment_keys) が効く —
+    天井と床の env の名前は上限と同じ ``<名前>`` (``byte_provider``)、画像の
+    見積もりはクライアントと同じ ``max_image_bytes`` で縮めた大きさ
+    (:func:`_estimate_input_tokens`)。各クライアントのコードで確かめた対応
     (2026-09-17。「注記」は ``[画像: URI] 要約`` などの文字に置き換えること、
     「送らない」は画像も注記も載らないこと):
 
@@ -514,6 +529,9 @@ def _media_rules(model: str) -> _MediaRules:
       役割によらず枠の内側を埋め込み、枠の外を注記。
       音声・動画は設定の ``supports_audio`` / ``supports_video`` が真なら埋め込み
       (その量はここでは数えない)、偽なら system 以外で注記。
+      例外として、役割が ``tool`` のメッセージと ``tool_calls`` を持つメッセージは
+      関数呼び出しの部品になり、画像・音声・動画を埋め込みも注記もしない (画像の
+      枠は使う。``drops_tool_message_media``)。
     - ``xai_native`` (xai.py の _build_xai_messages): 上限は XAI (設定の
       ``max_image_embeds`` は読まない)。全役割の画像が枠を使う。画像対応のモデル
       の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。画像非対応の
@@ -538,6 +556,13 @@ def _media_rules(model: str) -> _MediaRules:
     protocol = _resolve_protocol(provider, config)
     supports_images = _supports_images(provider, config)
     configured = config.get("max_image_embeds")
+    configured_bytes = config.get("max_image_bytes")
+    positive_bytes = (
+        configured_bytes
+        if isinstance(configured_bytes, int) and not isinstance(configured_bytes, bool)
+        and configured_bytes > 0
+        else None
+    )
 
     if protocol == "anthropic_native":
         return _MediaRules(
@@ -550,6 +575,9 @@ def _media_rules(model: str) -> _MediaRules:
             image_note_roles=_NON_SYSTEM_ROLES,
             audio_note_roles=_ALL_ROLES,
             video_note_roles=_ALL_ROLES,
+            byte_provider="ANTHROPIC",
+            # AnthropicClient: cfg.get("max_image_bytes", 5MB)
+            max_image_bytes=config.get("max_image_bytes", 5 * 1024 * 1024),
         )
     if protocol == "gemini_native":
         return _MediaRules(
@@ -563,6 +591,10 @@ def _media_rules(model: str) -> _MediaRules:
             video_note_roles=(
                 _NO_ROLES if config.get("supports_video") else _NON_SYSTEM_ROLES
             ),
+            byte_provider="GEMINI",
+            # GeminiClient: cfg.get("max_image_bytes")
+            max_image_bytes=config.get("max_image_bytes"),
+            drops_tool_message_media=True,
         )
     if protocol == "xai_native":
         # 画像の説明の文は、画像非対応のモデルにも user の発言へ足して送る
@@ -574,6 +606,9 @@ def _media_rules(model: str) -> _MediaRules:
             image_note_roles=_USER_ROLE_ONLY,
             audio_note_roles=_ALL_ROLES,
             video_note_roles=_ALL_ROLES,
+            byte_provider="XAI",
+            # factory: 画像対応の xAI には 5MB を渡す
+            max_image_bytes=5 * 1024 * 1024 if supports_images else None,
         )
     if protocol == "ollama_compat":
         return _MediaRules(
@@ -596,6 +631,16 @@ def _media_rules(model: str) -> _MediaRules:
         image_note_roles=_ALL_ROLES,
         audio_note_roles=_ALL_ROLES,
         video_note_roles=_ALL_ROLES,
+        byte_provider="OPENAI",
+        # factory: openai_compat は設定の正の値、無ければ画像対応なら 5MB。
+        # nvidia_nim は設定の正の値だけ。openai_codex は factory が渡さず、
+        # クライアントが 5MB を使う。
+        max_image_bytes=(
+            positive_bytes if protocol == "nvidia_nim"
+            else positive_bytes
+            if positive_bytes is not None and protocol == "openai_compat"
+            else 5 * 1024 * 1024
+        ),
     )
 
 
@@ -692,10 +737,16 @@ def _estimate_input_tokens(
 
     - 画像: 埋め込む画像は 1 枚を :func:`saiverse.token_estimator.estimate_image_tokens`
       (モデルの provider ごとの値) で数える。埋め込む枚数は、直近の上限枚数
-      (枠は新しいメッセージから順に埋まる) と、枠を使わない ``__visual_context__``
-      の画像。埋め込まない画像 (枠の外・画像非対応のモデル・クライアントによっては
-      user 以外のメッセージ) は、クライアントが注記に置き換えるなら注記 1 件
-      (:func:`_media_note_tokens`) で数え、送らないなら数えない。
+      (枠は新しいメッセージから順に埋まる。上限を明示していなければ全部) と、
+      枠を使わない ``__visual_context__``・``__skip_image_summary__`` の画像。そこから
+      クライアントと同じバイトの非常弁 (llm_clients/utils.attachment_positions_to_replace
+      — 古い順に並べた埋め込む画像の見積もりで、置き換える画像を決める。
+      ``__visual_context__``・``__skip_image_summary__``・``__realtime_context__`` の
+      画像は数えない) が置き換える画像は注記で数える。埋め込まない画像 (枠の外・
+      画像非対応のモデル・クライアントによっては user 以外のメッセージ、Gemini の
+      tool と tool_calls のメッセージ) は、クライアントが注記に
+      置き換えるなら注記 1 件 (:func:`_media_note_tokens`) で数え、送らないなら
+      数えない。
     - 音声・動画: 注記に置き換えるクライアントでは 1 件ごとに注記で数える。
       埋め込むクライアント (Gemini で設定が対応のとき) の音声・動画の量は数えない。
     - ``content`` の部品の列にすでに入っている画像部品: 全部数える。これは
@@ -722,8 +773,12 @@ def _estimate_input_tokens(
     # xAI) では、画像の項目を集めない — 枠がどう埋まっても数える量は 0。
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
     total = _response_schema_tokens(response_schema)
+    # 埋め込む画像は、非常弁が置き換えるかを全部見てから数える:
+    # (メッセージの番号, 画像の番号, 項目, 役割, 非常弁で数えるか)。
+    embedded: List[Tuple[int, int, Dict[str, Any], str, bool]] = []
     # 枠は新しいメッセージから順に埋まるので、末尾から数える。
-    for msg in reversed(messages):
+    for msg_pos in range(len(messages) - 1, -1, -1):
+        msg = messages[msg_pos]
         if not isinstance(msg, dict):
             continue
         total += _TOKENS_PER_MESSAGE
@@ -744,26 +799,70 @@ def _estimate_input_tokens(
         if not isinstance(metadata, dict):
             continue
         role = _role_class(msg.get("role"))
-        uses_slots = (
-            role in rules.image_limit_roles
-            and not metadata.get("__visual_context__")
+        # ``__visual_context__`` と ``__skip_image_summary__`` の画像は、クライアントと
+        # 同じく枠も非常弁も使わない (llm_clients/utils.select_embedded_attachment_keys)。
+        always_embedded = bool(
+            metadata.get("__visual_context__") or metadata.get("__skip_image_summary__")
         )
+        uses_slots = role in rules.image_limit_roles and not always_embedded
         images = _metadata_media_items(metadata, "image") if counts_images else []
-        for item in images:
+        valve_counts = not (always_embedded or metadata.get("__realtime_context__"))
+        # クライアントがメディアを載せないメッセージ (Gemini の tool と tool_calls)。
+        # 画像は枠だけ使い、埋め込みにも注記にも数えない。
+        sends_media = not (
+            rules.drops_tool_message_media
+            and (msg.get("role") == "tool" or "tool_calls" in msg)
+        )
+        for item_pos, item in enumerate(images):
             within_limit = True
             if uses_slots and remaining_slots is not None:
                 within_limit = remaining_slots > 0
                 remaining_slots = max(remaining_slots - 1, 0)
+            if not sends_media:
+                continue
             if within_limit and role in rules.image_embed_roles:
-                total += image_tokens
+                embedded.append((msg_pos, item_pos, item, role, valve_counts))
             elif role in rules.image_note_roles:
                 total += _media_note_tokens(item)
-        if role in rules.audio_note_roles:
+        if sends_media and role in rules.audio_note_roles:
             for item in _metadata_media_items(metadata, "audio"):
                 total += _media_note_tokens(item)
-        if role in rules.video_note_roles:
+        if sends_media and role in rules.video_note_roles:
             for item in _metadata_media_items(metadata, "video"):
                 total += _media_note_tokens(item)
+
+    # バイトの非常弁 (クライアントと同じ関数): 古い順に並べて、置き換える画像を決める。
+    from llm_clients.utils import (
+        attachment_positions_to_replace,
+        estimate_inline_image_bytes,
+        parse_attachment_byte_bounds,
+    )
+
+    valve_entries = sorted(
+        (entry for entry in embedded if entry[4]), key=lambda e: (e[0], e[1]),
+    )
+    replaced: Set[Tuple[int, int]] = set()
+    if valve_entries:
+        ceiling, floor = parse_attachment_byte_bounds(rules.byte_provider)
+        # 引数はクライアント (select_embedded_attachment_keys) と同じ形で渡す —
+        # 見積もりの控えのキーに mime_type が入るので、形が違うと同じ画像を
+        # 別のキーで測り直す。
+        sizes = [
+            estimate_inline_image_bytes(
+                entry[2]["path"], entry[2]["mime_type"],
+                max_bytes=rules.max_image_bytes,
+            )
+            for entry in valve_entries
+        ]
+        replaced = {
+            (valve_entries[pos][0], valve_entries[pos][1])
+            for pos in attachment_positions_to_replace(sizes, ceiling, floor)
+        }
+    for msg_pos, item_pos, item, role, _valve_counts in embedded:
+        if (msg_pos, item_pos) not in replaced:
+            total += image_tokens
+        elif role in rules.image_note_roles:
+            total += _media_note_tokens(item)
     return total
 
 

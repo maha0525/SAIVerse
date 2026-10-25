@@ -9,10 +9,10 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .utils import (
     attachment_limit_is_off,
-    compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
     parse_attachment_limit,
+    select_embedded_attachment_keys,
 )
 
 ALLOWED_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id"}
@@ -35,8 +35,18 @@ def is_empty_message(msg: Dict[str, Any]) -> bool:
 def scan_message_metadata(
     messages: List[Any],
     max_image_embeds_override: Optional[int] = None,
+    *,
+    supports_images: bool = False,
+    max_image_bytes: Optional[int] = None,
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Set[int], Optional[Set[Tuple[int, int]]]]:
-    """Build metadata-derived caches for attachment and summary handling."""
+    """Build metadata-derived caches for attachment and summary handling.
+
+    ``supports_images`` / ``max_image_bytes`` are the client's own values; the
+    byte valve (llm_clients/utils.select_embedded_attachment_keys) only counts
+    images that build_message_content_with_attachments actually embeds
+    (user messages of an image-capable model), so with ``supports_images=False``
+    nothing is measured.
+    """
     max_image_embeds = max_image_embeds_override if max_image_embeds_override is not None else parse_attachment_limit("OPENAI")
     # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
     # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY。モデル設定の上限より優先)。
@@ -45,6 +55,9 @@ def scan_message_metadata(
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
+    # 画像を実際に埋め込むメッセージ (build_message_content_with_attachments と
+    # 同じ判定: 画像対応のモデルの user。host は system になり埋め込まない)。
+    embeddable_indices: Set[int] = set()
 
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
@@ -58,9 +71,15 @@ def scan_message_metadata(
         media_items = iter_image_media(metadata)
         if media_items:
             attachment_cache[idx] = media_items
+            if supports_images and msg.get("role") == "user":
+                embeddable_indices.add(idx)
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(
+    allowed_attachment_keys = select_embedded_attachment_keys(
         attachment_cache, max_image_embeds, exempt_indices,
+        provider="OPENAI",
+        messages=messages,
+        embeddable_indices=embeddable_indices,
+        max_image_bytes=max_image_bytes,
     )
     logging.debug(
         "[openai] attachment limit=%s, cached=%d msgs with images",
@@ -188,6 +207,8 @@ def prepare_openai_messages(
     """
     attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
         messages, max_image_embeds_override=max_image_embeds,
+        supports_images=supports_images,
+        max_image_bytes=max_image_bytes,
     )
 
     prepared: List[Any] = []

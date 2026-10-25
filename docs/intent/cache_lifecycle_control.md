@@ -188,7 +188,7 @@ n+1 回目: … / AIの返事(n-1) / ユーザーの発言(n) / (知覚) / AIの
 境目より前でも、次のことが起きると中身が変わり、キャッシュと並びの先頭が一致しなくなる。
 
 - **人格の指示文 (head) の作り直し**: Metabolism のほか、`cached_head_architecture.md` §3.6 の `refresh_on_events` (部屋の移動・スペルの切り替え・モデルの変更・システムプロンプトの編集など) と、anchor の TTL 切れ (最後の LLM 呼び出しから Gemini は既定 1200 秒、何も呼ばれなかったとき) で起きる。
-- **画像の枚数上限**: 画像は新しい順に `DEFAULT_ATTACHMENT_LIMIT` 枚 (既定 4、`llm_clients/utils.py`) だけそのまま送り、それより古い画像は要約の文字に置き換える (`llm_clients/gemini.py` の `_convert_messages`)。新しい画像が会話に入るたびに、境目より前の古い画像が文字に変わる (`docs/issues/image_attachment_limit_breaks_cache_prefix.md`)。
+- **画像のバイトの非常弁**: 画像は既定では枚数で絞らず、すべて画像のまま送る。送る画像の合計 (base64 後の見積もり) が天井 (既定 12MB) を超える送信でだけ、古い画像を床 (既定 6MB) まで要約の文字にまとめて置き換える (`llm_clients/utils.py` の `select_embedded_attachment_keys`)。この回だけ境目より前の古い画像が文字に変わる。列の後ろに足すだけの間は、一度文字にした画像は以後も文字のままなので、弁が開かない回は前方一致が割れない (それ一枚で天井を超える画像は、他の画像を巻き込まずにその一枚だけが文字になる)。枚数の上限を env (`SAIVERSE_{PROVIDER}_ATTACHMENT_LIMIT` / `SAIVERSE_ATTACHMENT_LIMIT`) やモデル設定の `max_image_embeds` で明示した場合は、以前と同じく新しい画像が入るたびに一番古い画像が文字に変わる (`docs/issues/image_attachment_limit_breaks_cache_prefix.md`)。
 
 #### 一往復の流れ (n 回目の Pulse)
 
