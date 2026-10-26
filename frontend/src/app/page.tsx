@@ -7,7 +7,7 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
 
-import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback, useMemo, ReactNode } from 'react';
+import { useState, useRef, useEffect, ChangeEvent, useCallback, useMemo, memo, ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, Components } from 'react-markdown';
 import type { PluggableList } from 'unified';
 import remarkBreaks from 'remark-breaks';
@@ -17,6 +17,7 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
+import ChatInput, { type ChatInputHandle } from '@/components/ChatInput';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
@@ -99,6 +100,19 @@ const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkBreaks];
 const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeBodyEmote];
 const markdownUrlTransform = (url: string) =>
     url.startsWith('saiverse://') ? url : defaultUrlTransform(url);
+
+// Message body renderer. memo skips re-parsing Markdown when page.tsx re-renders
+// for unrelated state (content and the useMemo'd components map are unchanged).
+const MessageMarkdown = memo(function MessageMarkdown({ content, components }: { content: string; components: Components }) {
+    return (
+        <ReactMarkdown
+            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+            rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+            urlTransform={markdownUrlTransform}
+            components={components}
+        >{prepareMessageMarkdown(content)}</ReactMarkdown>
+    );
+});
 
 interface MessageImage {
     url: string;
@@ -364,7 +378,10 @@ export default function Home() {
 
     const [messages, setMessages] = useState<Message[]>([]);
     const { settings: movementNoticeSettings } = useMovementNoticeSettings();
-    const [inputValue, setInputValue] = useState('');
+    // Input text lives inside ChatInput (see components/ChatInput.tsx); page.tsx
+    // only tracks emptiness for the send button.
+    const chatInputRef = useRef<ChatInputHandle>(null);
+    const [isInputEmpty, setIsInputEmpty] = useState(true);
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     // metabolism 完了メッセージを 2 秒見せてから 'Thinking...' に戻す遅延タイマー。
     // ストリームが閉じる finally / cancelled でクリアしないと、後始末で
@@ -517,39 +534,6 @@ export default function Home() {
         return () => window.removeEventListener('resize', checkMobile);
     }, []);
 
-    // Auto-resize textarea based on content (max 10 lines)
-    const adjustTextareaHeight = useCallback(() => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
-
-        const lineHeight = 24; // px (1.5 * ~16px font-size)
-        const maxLines = 10;
-        const maxHeight = lineHeight * maxLines;
-
-        // Temporarily override styles for accurate scrollHeight measurement
-        // - min-height: 0 prevents CSS min-height from inflating scrollHeight
-        // - overflow: hidden prevents scrollbar from affecting measurement
-        // - height: 0 collapses textarea to measure true content height
-        const prevMinHeight = textarea.style.minHeight;
-        const prevOverflow = textarea.style.overflow;
-        textarea.style.minHeight = '0';
-        textarea.style.overflow = 'hidden';
-        textarea.style.height = '0';
-
-        const scrollH = textarea.scrollHeight;
-
-        // Restore
-        textarea.style.minHeight = prevMinHeight;
-        textarea.style.overflow = prevOverflow;
-
-        const newHeight = Math.max(lineHeight, Math.min(scrollH, maxHeight));
-        textarea.style.height = `${newHeight}px`;
-    }, []);
-
-    // Adjust height when input value changes
-    useEffect(() => {
-        adjustTextareaHeight();
-    }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
@@ -560,7 +544,6 @@ export default function Home() {
     const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
     const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [showPlusMenu, setShowPlusMenu] = useState(false);
     const [showContextPreview, setShowContextPreview] = useState(false);
     const [contextPreviewData, setContextPreviewData] = useState<ContextPreviewData | null>(null);
@@ -2933,9 +2916,7 @@ export default function Home() {
                                 // 発言はサーバーに残っていない — 出口 4 と同じ形で
                                 // 手元へ返す (吹き出しを引っ込めて、本文を入力欄へ)。
                                 setMessages(prev => prev.filter(m => m.id !== sendContext.tempId));
-                                setInputValue(prev => (
-                                    prev.trim() ? `${prev}\n${sendContext.content}` : sendContext.content
-                                ));
+                                chatInputRef.current?.restoreText(sendContext.content);
                                 // 添付も一緒に戻す (出口 4 と同じ理由)。送っている間に
                                 // 足した下書きの添付と、戻ってきた元の添付は**両方残す**
                                 // — 片方を優先すると、もう片方が黙って消える (Codex #7)。
@@ -2948,7 +2929,6 @@ export default function Home() {
                                         return [...prev, ...restored];
                                     });
                                 }
-                                requestAnimationFrame(() => adjustTextareaHeight());
                                 setMessages(prev => [...prev, {
                                     role: 'system',
                                     content: uiText("app.page.text012"),
@@ -2996,7 +2976,8 @@ export default function Home() {
     };
 
     const handleSendMessage = async () => {
-        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
+        const text = chatInputRef.current?.getValue() ?? '';
+        if ((!text.trim() && attachments.length === 0) || loadingStatus) return;
         clearTransientNotices();
         // Block send while a video is still uploading, or if any attachment errored.
         const pendingUpload = attachments.find(a => a.uploading);
@@ -3018,7 +2999,7 @@ export default function Home() {
         // Temporary ID for key prop until refreshed
         const tempId = `temp-${Date.now()}`;
         const userMsg: Message = {
-            id: tempId, role: 'user', content: inputValue,
+            id: tempId, role: 'user', content: text,
             sender: userDisplayNameRef.current || undefined,
             avatar: userAvatarRef.current || undefined,
             images: attachments
@@ -3035,7 +3016,7 @@ export default function Home() {
                 .map(a => ({ url: a.previewUrl as string, mime_type: a.mimeType })),
         };
         setMessages(prev => [...prev, userMsg]);
-        setInputValue('');
+        chatInputRef.current?.clear();
         setLoadingStatus('Thinking...');
 
         const currentAttachments = attachments;
@@ -3136,9 +3117,7 @@ export default function Home() {
                 // 手で打ち直すしか手が残らない。③ の「取り消す」と同じ形で
                 // 手元へ返す — 吹き出しを引っ込めて、本文を入力欄に戻す。
                 setMessages(prev => prev.filter(m => m.id !== tempId));
-                setInputValue(prev => (
-                    prev.trim() ? `${prev}\n${userMsg.content}` : userMsg.content
-                ));
+                chatInputRef.current?.restoreText(userMsg.content);
                 // 添付も一緒に戻す。本文だけ返しても、画像や音声や動画は消えた
                 // ままなので「同じものをもう一度送る」ができない。動画はサーバー側に
                 // 再送用のファイルが残るので、URI を手放すと参照できない置き土産に
@@ -3149,7 +3128,6 @@ export default function Home() {
                 if (currentAttachments.length > 0) {
                     setAttachments(prev => (prev.length > 0 ? prev : currentAttachments));
                 }
-                requestAnimationFrame(() => adjustTextareaHeight());
                 setMessages(prev => [...prev, {
                     role: 'system',
                     content: conflictMsg,
@@ -3344,10 +3322,7 @@ export default function Home() {
             const data = await res.json();
             if (data.withdrawn) {
                 setMessages(prev => prev.filter(m => m.id !== messageId));
-                setInputValue(prev => (
-                    prev.trim() ? `${prev}\n${data.content || ''}` : (data.content || '')
-                ));
-                requestAnimationFrame(() => adjustTextareaHeight());
+                chatInputRef.current?.restoreText(data.content || '');
             } else {
                 // 取り消せなかった = 何も起きていない。ここで needsRetry を
                 // 下ろすと「再送」まで消え、**まさに再送が要る場面**
@@ -3386,17 +3361,6 @@ export default function Home() {
             await apiFetch('/api/chat/stop', { method: 'POST' });
         } catch (e) {
             console.error('Failed to send stop request:', e);
-        }
-    };
-
-    const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-        // Ctrl+Enter (or Cmd+Enter) sends the message on any device.
-        // Regular Enter always inserts a newline.
-        // No isMobile gate needed: actual mobile devices have no Ctrl key,
-        // while touch-screen laptops do need Ctrl+Enter to work.
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            handleSendMessage();
         }
     };
 
@@ -3526,7 +3490,7 @@ export default function Home() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    message: inputValue || '(empty)',
+                    message: chatInputRef.current?.getValue() || '(empty)',
                     building_id: currentBuildingIdRef.current,
                     meta_playbook: previewMetaPlaybook,
                     attachment_count: attachments.length,
@@ -3839,12 +3803,7 @@ export default function Home() {
                                         </div>
                                     ) : (
                                         <div className={styles.systemNoticeInner}>
-                                            <ReactMarkdown
-                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-                                                urlTransform={markdownUrlTransform}
-                                                components={markdownComponents}
-                                            >{prepareMessageMarkdown(msg.content)}</ReactMarkdown>
+                                            <MessageMarkdown content={msg.content} components={markdownComponents} />
                                         </div>
                                     )}
                                     {msg.timestamp && (
@@ -4072,12 +4031,7 @@ export default function Home() {
                                                     </div>
                                                 </details>
                                             )}
-                                            <ReactMarkdown
-                                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                                                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-                                                urlTransform={markdownUrlTransform}
-                                                components={markdownComponents}
-                                            >{prepareMessageMarkdown(msg.content)}</ReactMarkdown>
+                                            <MessageMarkdown content={msg.content} components={markdownComponents} />
                                         </>
                                     )}
                                 </div>
@@ -4317,11 +4271,10 @@ export default function Home() {
                             multiple
                             accept="image/*,audio/*,video/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
-                        <textarea data-i18n="app.page.text083 app.page.text084 app.page.text097"
-                            ref={textareaRef}
-                            value={inputValue}
-                            onChange={(e) => setInputValue(e.target.value)}
-                            onKeyDown={handleKeyDown}
+                        <ChatInput
+                            ref={chatInputRef}
+                            onSend={handleSendMessage}
+                            onEmptyChange={setIsInputEmpty}
                             // ゲーム外でのセッションログ閲覧は read-only (発言は通常
                             // チャットか、復帰してゲーム内で行う)。表示中の建物が
                             // 削除されて表示先を失ったときも、選び直すまで発言先が無い
@@ -4331,7 +4284,6 @@ export default function Home() {
                                 : sessionLogReadOnly
                                     ? uiText("app.page.text083")
                                     : uiText("app.page.text084")}
-                            rows={1}
                         />
                         {loadingStatus ? (
                             <button data-i18n="app.page.text085"
@@ -4345,7 +4297,7 @@ export default function Home() {
                             <button
                                 className={styles.sendBtn}
                                 onClick={handleSendMessage}
-                                disabled={(!inputValue.trim() && attachments.length === 0) || sessionLogReadOnly || lostBuildingNotice !== null}
+                                disabled={(isInputEmpty && attachments.length === 0) || sessionLogReadOnly || lostBuildingNotice !== null}
                             >
                                 <Send size={20} />
                             </button>
