@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 入力欄の分離と本文表示の作り直し抑制を実装し、検収・テスト・ビルド・検証環境での動作確認まで済ませた。修正はブランチ feature/chat-input-rerender にあり、まだ develop に入っていない。次 = develop への PR をまはーが確認して取り込み、リリース後に報告者へ経過と切り分けの質問を送る。 | まはー (PR 確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
+| 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
 | 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正はブランチ feature/mac-setup-tls-and-brew-path にあり、まだ develop に入っていない。次 = レビューの消し込みと検収を経て develop に入れ、次のリリースを Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | 私 (レビューと検収) → リリース → Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-10-26 |
 | 🟣 検証待ち | 画像の枚数上限の既定を廃止し、バイトの非常弁で要求サイズ上限を避ける | 実装はブランチ feature/image-attachment-unlimited にあり、まだ develop に入っていない。次 = 検収とレビューを経て develop に入れ、画像の多い Gemini の会話で、全部の画像が画像のまま送られ、新しい画像の回もキャッシュが当たることをログで見る。 | 私 (検収とレビュー) → まはー (実機確認) | [issue](../issues/image_attachment_limit_breaks_cache_prefix.md) | 2026-10-25 |
 | 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 再レビューで指摘された既読記録の蓄積を回収し、同秒の本文編集も通知する修正の確認待ち。次 = PR #406 の修正差分を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (修正差分の確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
