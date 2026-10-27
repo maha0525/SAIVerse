@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -303,3 +304,139 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
         counts["imported"], counts["updated"], counts["skipped"], counts["pruned"], counts["errors"],
     )
     return counts
+
+
+# ---------------------------------------------------------------------------
+# 利用者の手で直す必要がある Playbook の警告 (自動では書き換えない)
+# ---------------------------------------------------------------------------
+
+#: 本文に書かれた旧形式のシステム通知のタグ (``<system>`` / ``</system>`` /
+#: ``<system pass=...>``)。``<system_prompt>`` のような別の語には当てない。
+_LEGACY_SYSTEM_TAG_RE = re.compile(r"</?system(?:\s|>)", re.IGNORECASE)
+#: テンプレートの差し込み (``{name}`` / ``{name.key}``) の先頭の名前。
+_TEMPLATE_ROOT_RE = re.compile(r"\{([A-Za-z_]\w*)")
+
+
+def _iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+def _tool_result_keys(nodes: List[Any]) -> set:
+    """TOOL / TOOL_CALL ノードの結果が入る state の名前 (``last`` を含む)。"""
+    keys = {"last"}
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") not in ("tool", "tool_call"):
+            continue
+        for key in (node.get("output_key"), node.get("id")):
+            if isinstance(key, str) and key:
+                keys.add(key)
+        for key in node.get("output_keys") or []:
+            if isinstance(key, str) and key:
+                keys.add(key)
+    return keys
+
+
+def _creates_legacy_system_notice(nodes: List[Any]) -> bool:
+    """旧形式のシステム通知を作る Playbook か。
+
+    docs/intent/system_notice_delivery.md: システム通知は role=system・タグ無しの
+    本文で記録する。旧形式は (1) 本文に ``<system>`` タグを書く、(2) MEMORIZE が
+    ツールの結果を role=user のまま保存する (タグ無しの機構の文がユーザーの発言
+    として残る)、のどちらか。
+    """
+    if any(_LEGACY_SYSTEM_TAG_RE.search(s) for s in _iter_strings(nodes)):
+        return True
+    tool_keys = _tool_result_keys(nodes)
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "memorize":
+            continue
+        if str(node.get("role") or "").lower() != "user":
+            continue
+        action = node.get("action")
+        if not isinstance(action, str):
+            continue
+        if tool_keys & set(_TEMPLATE_ROOT_RE.findall(action)):
+            return True
+    return False
+
+
+def playbook_compat_alerts(session_factory=None) -> List[Dict[str, Any]]:
+    """有効な Playbook (DB の行) のうち、利用者の手で更新が要るものを startup_alerts の形で返す。
+
+    - 旧形式のシステム通知を作る Playbook (:func:`_creates_legacy_system_notice`)。
+    - TOOL ノードが、いま登録されていないツールを参照している Playbook (実行時と
+      同じ ``canonicalize_tool_name`` で引く。削除したツールに限らない一般の検査)。
+
+    どちらも**自動では書き換えない** — 利用者が世界編集や上位層 (user_data /
+    expansion_data) で作った・変えた Playbook を勝手に変えないため。画面に出して
+    編集画面での更新を促すだけ。検査は起動ごと。ツールの一覧が出そろってから
+    (MCP の接続の後で) 呼ぶ。
+    """
+    from database.models import Playbook
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
+
+    if session_factory is None:
+        from database.session import SessionLocal
+        session_factory = SessionLocal
+
+    db = session_factory()
+    try:
+        rows = db.query(Playbook.name, Playbook.nodes_json).all()
+    finally:
+        db.close()
+
+    legacy: List[str] = []
+    missing: List[Tuple[str, str]] = []
+    for name, raw in rows:
+        try:
+            data = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            continue
+        nodes = data.get("nodes") if isinstance(data, dict) else None
+        if not isinstance(nodes, list):
+            continue
+        if _creates_legacy_system_notice(nodes):
+            legacy.append(name)
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("type") != "tool":
+                continue
+            tool = node.get("action")
+            if isinstance(tool, str) and tool and canonicalize_tool_name(tool) not in TOOL_REGISTRY:
+                missing.append((name, tool))
+
+    alerts: List[Dict[str, Any]] = []
+    if legacy:
+        LOGGER.warning("playbook_sync: playbooks that create legacy system notices: %s", legacy)
+        alerts.append({
+            "id": "playbook_legacy_system_notice",
+            "level": "warning",
+            "title": "旧形式のシステム通知を作る Playbook があります",
+            "message": (
+                "次の Playbook は、システム通知を古い形 (本文を system のタグで囲む形、または"
+                "ツールの結果をユーザーの発言として記録する形) で作ります。自動では"
+                "書き換えていません。Playbook の編集画面で更新してください: "
+                + ", ".join(sorted(legacy))
+            ),
+            "details": {"playbooks": sorted(legacy)},
+        })
+    if missing:
+        LOGGER.warning("playbook_sync: playbooks referencing unregistered tools: %s", missing)
+        alerts.append({
+            "id": "playbook_missing_tool",
+            "level": "warning",
+            "title": "存在しないツールを参照している Playbook があります",
+            "message": (
+                "次の Playbook は、いま登録されていないツールを呼びます (そのノードは実行時に"
+                "失敗します)。Playbook の編集画面で更新してください: "
+                + ", ".join(f"{name} → {tool}" for name, tool in sorted(missing))
+            ),
+            "details": {"references": [{"playbook": n, "tool": t} for n, t in sorted(missing)]},
+        })
+    return alerts

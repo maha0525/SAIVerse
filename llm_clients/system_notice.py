@@ -12,9 +12,11 @@ SAIVerse 層が組んだ messages 列には、head (プロンプト先頭部) �
 - head より後ろの role=system (と ``host``): 途中の system を受け取れるモデル
   (:func:`accepts_mid_conversation_system`) へはそのまま、受け取れないモデルへは
   元の位置で ``<system pass="合言葉">本文</system>`` の role=user に変える
-  (画像などの metadata.media は引き継ぐ)。
-- それ以外のメッセージ: 本文に現れた合言葉を伏せる (モデルが合言葉を復唱して
-  記録に残った場合の再利用を防ぐ)。
+  (画像などの metadata.media は引き継ぎ、写しの metadata に通知の印
+  ``SYSTEM_NOTICE_KEY`` を必ず付ける)。
+- それ以外のメッセージ: 本文と ``tool_calls`` の引数に現れた合言葉を伏せる
+  (モデルが合言葉を復唱して記録に残った場合の再利用を防ぐ)。本文が部品の並び
+  なら、部品をまたいで連結した文字列で伏せる。
 
 head の印を持つメッセージが一つも無い列 (head を組まない要約・判定などの呼び出し)
 は何も変えずに返す — その列の先頭の system は呼び出し側の指示で、各クライアントの
@@ -31,11 +33,13 @@ import re
 import secrets
 import string
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set
 
 from sai_memory.memory.storage import (
     HEAD_MESSAGE_KEY,
+    SYSTEM_NOTICE_KEY,
     SYSTEM_NOTICE_PASSPHRASE_KEY,
     SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER,
 )
@@ -152,26 +156,37 @@ def redact_passphrase(text: str, passphrase: str) -> str:
     return text.replace(passphrase, "*" * len(passphrase))
 
 
-#: このプロセスで送る形に差し込んだ合言葉 (新しいものほど後ろ)。ログの書き出し
+#: このプロセスで送る形に差し込んだ合言葉と、最後に差し込んだ時刻
+#: (``time.monotonic()``。最後に使ったものほど後ろ)。ログの書き出し
 #: (saiverse/logging_config.py のハンドラの filter) が、どのクライアントのどの
 #: ログ行 (送る形・応答・例外の文) からもこれを伏せる — 応答に復唱された合言葉は
-#: 応答を書く側では見分けられないため (不変条件 3)。上限を超えたら古いものから
-#: 忘れる (head の作り直しで合言葉は入れ替わる)。
-_KNOWN_PASSPHRASES: "OrderedDict[str, None]" = OrderedDict()
+#: 応答を書く側では見分けられないため (不変条件 3)。件数が上限を超えたら、最後の
+#: 使用が古いものから忘れる (head の作り直しで合言葉は入れ替わる)。ただし最後の
+#: 使用から :data:`_KNOWN_PASSPHRASES_KEEP_SECONDS` 以内のものは上限を超えても
+#: 忘れない — 長いリクエストの応答を待つ間に他の合言葉が上限まで回っても、
+#: 応答待ちの合言葉が保護から外れないように。
+_KNOWN_PASSPHRASES: "OrderedDict[str, float]" = OrderedDict()
 # 同時に生きる head ((persona_id, model_key) ごとに一つ) の数を大きく超える余裕を
 # 取る。1 件 12 文字なので、この数でも記憶量は無視できる。
 _KNOWN_PASSPHRASES_LIMIT = 4096
+_KNOWN_PASSPHRASES_KEEP_SECONDS = 3600.0
 _KNOWN_PASSPHRASES_LOCK = threading.Lock()
 
 
 def _remember_passphrase(passphrase: str) -> None:
     if not passphrase:
         return
+    now = time.monotonic()
     with _KNOWN_PASSPHRASES_LOCK:
-        _KNOWN_PASSPHRASES[passphrase] = None
+        _KNOWN_PASSPHRASES[passphrase] = now
         _KNOWN_PASSPHRASES.move_to_end(passphrase)
         while len(_KNOWN_PASSPHRASES) > _KNOWN_PASSPHRASES_LIMIT:
-            _KNOWN_PASSPHRASES.popitem(last=False)
+            oldest, last_used = next(iter(_KNOWN_PASSPHRASES.items()))
+            # 先頭が最後の使用の最も古いもの。それが保持の期間内なら、残りも全部
+            # 期間内なので、上限を超えたままにする。
+            if now - last_used < _KNOWN_PASSPHRASES_KEEP_SECONDS:
+                break
+            del _KNOWN_PASSPHRASES[oldest]
 
 
 def redact_known_passphrases(text: str) -> str:
@@ -203,6 +218,57 @@ def _map_text(content: Any, fn) -> Any:
             out.append(part)
         return out
     return content
+
+
+def _text_part_key(part: Any) -> Optional[str]:
+    """部品の並びの中で文字を持つ欄の名前 (llm_clients/utils.content_to_text と同じ読み方)。"""
+    if not isinstance(part, dict):
+        return None
+    for key in ("text", "content"):
+        value = part.get(key)
+        if isinstance(value, str) and value:
+            return key
+    return None
+
+
+def _map_joined_text(content: Any, fn) -> Any:
+    """本文の文字の部分を、部品をまたいで連結した一続きの文字列として ``fn`` に通した写し。
+
+    ``fn`` は文字数を変えない置換 (伏せ字・``<`` の全角化) に限る。本文が部品の
+    並びのとき、各クライアントは文字の部品を連結して送る (content_to_text は
+    画像などをまたいでも連結する)。部品ごとに置換すると、合言葉や ``<system`` を
+    二つの部品に割った本文が素通りし、連結で元に戻る。連結した文字列で置換し、
+    同じ長さで元の部品へ切り戻すので、部品の数・順序と文字以外の部品は変わらない。
+    """
+    if not isinstance(content, list):
+        return _map_text(content, fn)
+    slots = [(idx, key) for idx, part in enumerate(content) if (key := _text_part_key(part))]
+    if not slots:
+        return list(content)
+    joined = "".join(content[idx][key] for idx, key in slots)
+    mapped = fn(joined)
+    if len(mapped) != len(joined):
+        raise ValueError("_map_joined_text needs a length-preserving replacement")
+    out = list(content)
+    pos = 0
+    for idx, key in slots:
+        length = len(content[idx][key])
+        out[idx] = {**content[idx], key: mapped[pos:pos + length]}
+        pos += length
+    return out
+
+
+def _redact_tool_call_arguments(tool_calls: Any, passphrase: str) -> Any:
+    """OpenAI 形式の ``tool_calls`` の各 ``function.arguments`` (文字列) から合言葉を伏せた写し。"""
+    if not isinstance(tool_calls, list):
+        return tool_calls
+    out = []
+    for call in tool_calls:
+        fn = call.get("function") if isinstance(call, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            call = {**call, "function": {**fn, "arguments": redact_passphrase(fn["arguments"], passphrase)}}
+        out.append(call)
+    return out
 
 
 def _content_text(content: Any) -> str:
@@ -245,27 +311,120 @@ def _stored_image_summary(att: Dict[str, Any], metadata: Any) -> str:
 
 
 def system_notice_image_note(att: Dict[str, Any], metadata: Any) -> str:
-    """system のまま届ける通知の画像を置き換える説明の文 (決定的)。
+    """システム通知の画像を文字で届けるときの説明の文 (決定的)。
 
-    ``att`` は saiverse/media_utils.iter_image_media の項目。system メッセージは
-    文字しか持てないので、画像は説明の文になる。記録の metadata に保存済みの
+    ``att`` は saiverse/media_utils.iter_image_media の項目か、
+    :func:`system_notice_image_entries` の項目。system のまま届ける通知は文字しか
+    持てず、タグ化した通知でも画像を埋め込めない (画像非対応のモデル・枚数の上限の
+    外・ファイルが読めない) ときは説明の文になる。記録の metadata に保存済みの
     要約があればそれを使い、無ければ ``[画像: <uri>]`` だけにする — その場で
     要約を生成する llm_clients/utils.image_summary_note を使うと、生成の成否で
     同じ記録から組む送信本文が変わる (不変条件 6)。
+
+    この文は合言葉の変換 (:func:`present_system_notices`) の後で本文へ足される
+    ので、要約の文に現れた合言葉はここで伏せ、``<system`` も無害化する。
     """
     uri = att.get("uri") or str(att.get("path") or "unknown")
     summary = _stored_image_summary(att, metadata)
+    if summary:
+        summary = redact_known_passphrases(_neutralize_system_tags(summary))
     return f"[画像: {uri}] {summary}" if summary else f"[画像: {uri}]"
 
 
-def with_system_notice_image_notes(
-    text: str, attachments: List[Dict[str, Any]], metadata: Any,
-) -> str:
-    """通知の本文 ``text`` の後ろに、各画像の :func:`system_notice_image_note` を一行ずつ足す。"""
-    for att in attachments:
+def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
+    """記録の metadata にある画像の項目を、ファイルの有無を問わず並べる (``uri`` と ``path``)。
+
+    読み方は saiverse/media_utils.iter_image_media と同じ (``media`` は種類で絞り、
+    ``images`` は全部画像とみなす) だが、ファイルを探さない。iter_image_media は
+    読めない画像を返さないので、それだけを頼ると画像だけの通知が本文の空な
+    通知として消える。``images`` の項目が ``media`` の項目と同じ URI・パスなら
+    重ねて返さない。
+    """
+    if not isinstance(metadata, dict):
+        return []
+    candidates: List[Any] = []
+    media = metadata.get("media")
+    if isinstance(media, list):
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").lower()
+            item_mime = str(item.get("mime_type") or "").lower()
+            if item_type:
+                if item_type != "image":
+                    continue
+            elif not item_mime.startswith("image/"):
+                continue
+            candidates.append(item)
+    images = metadata.get("images")
+    if isinstance(images, list):
+        candidates.extend(item for item in images if isinstance(item, dict))
+    from pathlib import Path
+
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        uri = item.get("uri") if isinstance(item.get("uri"), str) else None
+        path = item.get("path")
+        # iter_image_media の項目の path (Path) と同じ書き方に揃える
+        path_s = str(Path(path)) if isinstance(path, (str, Path)) and str(path) else ""
+        if not uri and not path_s:
+            continue
+        key = _image_entry_key({"uri": uri, "path": path_s})
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"uri": uri, "path": path_s})
+    return out
+
+
+def _image_entry_key(att: Dict[str, Any]) -> str:
+    """画像の項目を同定する文字列 (iter_image_media の項目の ``uri`` 欄と同じ作り方)。"""
+    from pathlib import Path
+
+    uri = att.get("uri")
+    if uri:
+        return str(uri)
+    path = att.get("path")
+    return str(Path(path)) if path else ""
+
+
+def unresolved_system_notice_images(
+    metadata: Any, attachments: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """metadata の画像のうち、iter_image_media の結果 ``attachments`` に無いもの (ファイルが読めない画像)。"""
+    resolved = {_image_entry_key(att) for att in attachments}
+    return [
+        entry for entry in system_notice_image_entries(metadata)
+        if _image_entry_key(entry) not in resolved
+    ]
+
+
+def with_system_notice_image_notes(text: str, metadata: Any) -> str:
+    """system のまま届ける通知の本文 ``text`` の後ろに、metadata の各画像の説明を一行ずつ足す。
+
+    画像はファイルの有無を問わず metadata から並べる (:func:`system_notice_image_entries`)
+    — system メッセージは画像を持てないので、どの画像も説明の文になり、ファイルが
+    消えていても通知ごと落ちない。
+    """
+    for att in system_notice_image_entries(metadata):
         note = system_notice_image_note(att, metadata)
         text = f"{text}\n{note}" if text else note
     return text
+
+
+def is_presented_system_notice(msg: Any) -> bool:
+    """:func:`present_system_notices` を通した列の、会話の途中のシステム通知か。
+
+    タグ化した通知は role=user になるので、role ではなく metadata の
+    ``SYSTEM_NOTICE_KEY`` で見分ける (:func:`present_system_notices` が通知の
+    写しに必ず付ける)。画像を文字に落とす分岐で、通知には生成した要約ではなく
+    :func:`system_notice_image_note` を使うための判定。
+    """
+    if not isinstance(msg, dict):
+        return False
+    meta = _metadata(msg)
+    return bool(meta and meta.get(SYSTEM_NOTICE_KEY) and not meta.get(HEAD_MESSAGE_KEY))
 
 
 def tag_system_notice(body: str, passphrase: str) -> str:
@@ -317,9 +476,14 @@ def present_system_notices(
             continue
         if idx in notices:
             new_msg = _without_passphrase(msg)
+            # 通知の写しには必ず通知の印を付ける (タグ化すると role では見分けられ
+            # ない。is_presented_system_notice)。記録には保存されない写し。
+            notice_meta = dict(_metadata(new_msg) or {})
+            notice_meta.setdefault(SYSTEM_NOTICE_KEY, str(msg.get("role")).lower())
+            new_msg["metadata"] = notice_meta
             if accepts_mid_system:
                 new_msg["role"] = "system"
-                new_msg["content"] = _map_text(
+                new_msg["content"] = _map_joined_text(
                     msg.get("content"), lambda t: redact_passphrase(t, passphrase),
                 )
             else:
@@ -331,9 +495,12 @@ def present_system_notices(
             continue
         new_msg = _without_passphrase(msg)
         if passphrase and "content" in msg:
-            new_msg["content"] = _map_text(
+            # 部品をまたいで連結した文字列で伏せる (_map_joined_text)
+            new_msg["content"] = _map_joined_text(
                 msg.get("content"), lambda t: redact_passphrase(t, passphrase),
             )
+        if passphrase and "tool_calls" in msg:
+            new_msg["tool_calls"] = _redact_tool_call_arguments(msg.get("tool_calls"), passphrase)
         out.append(new_msg)
     return out
 
@@ -343,13 +510,16 @@ __all__ = [
     "accepts_mid_conversation_system",
     "generate_passphrase",
     "is_head_system_message",
+    "is_presented_system_notice",
     "model_accepts_mid_conversation_system",
     "present_system_notices",
     "redact_known_passphrases",
     "redact_passphrase",
+    "system_notice_image_entries",
     "system_notice_image_note",
     "system_notice_indices",
     "system_notice_passphrase",
     "tag_system_notice",
+    "unresolved_system_notice_images",
     "with_system_notice_image_notes",
 ]

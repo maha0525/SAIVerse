@@ -487,6 +487,14 @@ def main():
     except Exception:
         logging.warning("Composite actions initialization failed (non-fatal)", exc_info=True)
 
+    # Playbooks the user must update by hand (legacy system notices, tools that are
+    # not registered). Checked after MCP / addon tools are registered; never rewritten.
+    try:
+        from saiverse.playbook_sync import playbook_compat_alerts
+        manager.startup_alerts.extend(playbook_compat_alerts(manager.SessionLocal))
+    except Exception:
+        logging.warning("Playbook compatibility check failed (non-fatal)", exc_info=True)
+
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,
         Path(__file__).parent / "database" / "api_server.py",

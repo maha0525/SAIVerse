@@ -252,3 +252,81 @@ def test_hash_change_updates_content(session_factory, tmp_path, monkeypatch):
         assert pb.source_file == str(new_src)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 利用者の手で更新が要る Playbook の警告 (docs/intent/system_notice_delivery.md)
+# ---------------------------------------------------------------------------
+
+
+def _add_rows(session_factory, playbooks):
+    db = session_factory()
+    try:
+        for name, nodes in playbooks.items():
+            db.add(Playbook(
+                name=name, scope="public",
+                schema_json=json.dumps({"name": name}),
+                nodes_json=json.dumps({"name": name, "start_node": "n1", "nodes": nodes}),
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_compat_alerts_flag_legacy_notices_and_missing_tools(session_factory, monkeypatch):
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools
+
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "known_tool", lambda: None)
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "myaddon__addon_tool", lambda: None)
+    _add_rows(session_factory, {
+        "tagged_memorize": [
+            {"id": "n1", "type": "memorize", "action": "<system>{last}</system>", "role": "user"},
+        ],
+        "user_role_tool_result": [
+            {"id": "n1", "type": "tool", "action": "known_tool", "output_key": "found"},
+            {"id": "n2", "type": "memorize", "action": "結果: {found.title}", "role": "user"},
+        ],
+        "missing_tool": [
+            {"id": "n1", "type": "tool", "action": "get_situation_snapshot"},
+            {"id": "n2", "type": "tool", "action": "addon_tool"},  # 素名でアドオンのツールに解決
+        ],
+        "new_form": [
+            {"id": "n1", "type": "tool", "action": "known_tool"},
+            {"id": "n2", "type": "memorize", "action": "{last}", "role": "system"},
+            # ユーザーの入力を user で記録するのは旧形式ではない
+            {"id": "n3", "type": "memorize", "action": "{input}", "role": "user"},
+            {"id": "n4", "type": "llm", "action": "<system_prompt> は別の語"},
+        ],
+    })
+    before = {
+        pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()
+    }
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_legacy_system_notice"]["details"]["playbooks"] == [
+        "tagged_memorize", "user_role_tool_result",
+    ]
+    assert alerts["playbook_missing_tool"]["details"]["references"] == [
+        {"playbook": "missing_tool", "tool": "get_situation_snapshot"},
+    ]
+    assert "missing_tool → get_situation_snapshot" in alerts["playbook_missing_tool"]["message"]
+    # 自動では書き換えない
+    assert {pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()} == before
+
+
+def test_compat_alerts_are_quiet_for_the_builtin_playbooks(session_factory):
+    """同梱の public Playbook は、旧形式も存在しないツールの参照も持たない。"""
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
+
+    builtin = Path(__file__).resolve().parent.parent / "builtin_data" / "playbooks" / "public"
+    for path in sorted(builtin.glob("*.json")):
+        nodes = json.loads(path.read_text(encoding="utf-8")).get("nodes") or []
+        assert not _creates_legacy_system_notice(nodes), path.name
+        for node in nodes:
+            if node.get("type") == "tool":
+                assert canonicalize_tool_name(node["action"]) in TOOL_REGISTRY, (
+                    path.name, node["action"],
+                )

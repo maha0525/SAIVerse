@@ -119,10 +119,36 @@ def build_message_content_with_attachments(
     skip_summary: bool,
     allowed_attachment_keys: Optional[Set[Tuple[int, int]]],
     message_index: int,
+    notice_metadata: Any = None,
+    unresolved_notice_images: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
-    """Build content with image embedding or textual summaries."""
-    if not attachments:
+    """Build content with image embedding or textual summaries.
+
+    ``notice_metadata`` is set (to the message metadata) for a system notice
+    tagged into a user message (llm_clients/system_notice.is_presented_system_notice).
+    Its images that are not embedded become
+    :func:`llm_clients.system_notice.system_notice_image_note` (stored summary
+    or URI only, never generated on the spot), and ``unresolved_notice_images``
+    (images whose file cannot be read) are described the same way instead of
+    disappearing.
+    """
+    unresolved = list(unresolved_notice_images or [])
+    if not attachments and not unresolved:
         return original_content
+
+    is_notice = notice_metadata is not None
+    if is_notice:
+        from .system_notice import system_notice_image_note
+
+    def _note_for(att: Dict[str, Any]) -> str:
+        if is_notice:
+            return system_notice_image_note(att, notice_metadata)
+        return image_summary_note(
+            att["path"],
+            att["mime_type"],
+            att.get("uri", att.get("path", "unknown")),
+            skip_summary=skip_summary,
+        )
 
     text = content_to_text(original_content)
     if supports_images and role == "user":
@@ -162,26 +188,18 @@ def build_message_content_with_attachments(
                     "Image file not found or unreadable, skipping attachment: %s",
                     att.get("uri") or att.get("path"),
                 )
-            note = image_summary_note(
-                att["path"],
-                att["mime_type"],
-                att.get("uri", att.get("path", "unknown")),
-                skip_summary=skip_summary,
-            )
-            parts.append({"type": "text", "text": note})
+            parts.append({"type": "text", "text": _note_for(att)})
+        for entry in unresolved:
+            parts.append({"type": "text", "text": _note_for(entry)})
         return parts if parts else text
 
     note_lines: List[str] = []
     if text:
         note_lines.append(text)
     for att in attachments:
-        note = image_summary_note(
-            att["path"],
-            att["mime_type"],
-            att.get("uri", att.get("path", "unknown")),
-            skip_summary=skip_summary,
-        )
-        note_lines.append(note)
+        note_lines.append(_note_for(att))
+    for entry in unresolved:
+        note_lines.append(_note_for(entry))
     return "\n".join(note_lines)
 
 
@@ -226,8 +244,11 @@ def prepare_openai_messages(
     """
     from .system_notice import (
         is_head_system_message,
+        is_presented_system_notice,
         present_system_notices,
+        system_notice_image_entries,
         system_notice_indices,
+        unresolved_system_notice_images,
         with_system_notice_image_notes,
     )
 
@@ -262,24 +283,34 @@ def prepare_openai_messages(
             continue
 
         attachments = attachment_cache.get(idx, [])
-        if idx in direct_notice_indices and attachments:
-            # system のまま送る通知は文字しか持てない。画像は空判定より前に
-            # 説明の文として本文へ足す — 本文が空で画像だけの通知も落とさない。
-            # 説明は保存済みの要約か URI だけで、その場では生成しない (生成の
-            # 成否で送信本文が揺れないように — llm_clients/system_notice.py の
-            # system_notice_image_note)。
-            msg = {
-                **msg,
-                "content": with_system_notice_image_notes(
-                    content_to_text(msg.get("content") or ""),
-                    attachments, msg.get("metadata"),
-                ),
-            }
+        # タグ化した通知の画像のうち、ファイルが読めないもの (下で説明の文にする)
+        unresolved_notice_images: List[Dict[str, Any]] = []
+        notice_metadata: Any = None
+        if idx in direct_notice_indices:
+            if system_notice_image_entries(msg.get("metadata")):
+                # system のまま送る通知は文字しか持てない。画像は空判定より前に
+                # 説明の文として本文へ足す — 本文が空で画像だけの通知も、画像の
+                # ファイルが消えた通知も落とさない。説明は保存済みの要約か URI
+                # だけで、その場では生成しない (生成の成否で送信本文が揺れない
+                # ように — llm_clients/system_notice.py の system_notice_image_note)。
+                msg = {
+                    **msg,
+                    "content": with_system_notice_image_notes(
+                        content_to_text(msg.get("content") or ""), msg.get("metadata"),
+                    ),
+                }
             attachments = []
+        elif is_presented_system_notice(msg):
+            notice_metadata = msg.get("metadata")
+            unresolved_notice_images = unresolved_system_notice_images(
+                notice_metadata, attachments,
+            )
 
         # 本文の空の user でも、画像を持っていれば画像だけの発言として残す
         # (画像か画像の説明が下の build_message_content_with_attachments で入る)
-        keeps_images = msg.get("role") == "user" and bool(attachments)
+        keeps_images = msg.get("role") == "user" and bool(
+            attachments or unresolved_notice_images
+        )
 
         if is_empty_message(msg) and not keeps_images:
             logging.debug("Skipping empty message with role=%s", msg.get("role"))
@@ -327,7 +358,7 @@ def prepare_openai_messages(
         if role != "system":
             seen_non_system = True
 
-        if not attachments:
+        if not attachments and not unresolved_notice_images:
             prepared.append(clean_msg)
             continue
 
@@ -340,6 +371,8 @@ def prepare_openai_messages(
             skip_summary=skip_summary,
             allowed_attachment_keys=allowed_attachment_keys,
             message_index=idx,
+            notice_metadata=notice_metadata,
+            unresolved_notice_images=unresolved_notice_images,
         )
         prepared.append(clean_msg)
 

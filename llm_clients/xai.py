@@ -203,13 +203,13 @@ def _build_xai_messages(
 
         if role == "system" and idx in notice_indices:
             # system メッセージは文字しか持てない。会話の途中のシステム通知が
-            # 画像を持っていたら、黙って落とさずに説明の文を本文へ足す。説明は
-            # 保存済みの要約か URI だけで、その場では生成しない (生成の成否で
-            # 送信本文が揺れないように — llm_clients/system_notice.py の
-            # system_notice_image_note)。head とその前の指示は従来どおり文字だけ。
-            text = with_system_notice_image_notes(
-                text, attachment_cache.get(idx, []), msg.get("metadata"),
-            )
+            # 画像を持っていたら、黙って落とさずに説明の文を本文へ足す。画像は
+            # ファイルの有無を問わず metadata から並べる (ファイルが消えた画像
+            # だけの通知も落とさない)。説明は保存済みの要約か URI だけで、その場
+            # では生成しない (生成の成否で送信本文が揺れないように —
+            # llm_clients/system_notice.py の system_notice_image_note)。head と
+            # その前の指示は従来どおり文字だけ。
+            text = with_system_notice_image_notes(text, msg.get("metadata"))
 
         # 本文の空の system / assistant は捨てる。user は画像だけの発言が
         # ありうるので、画像も画像の説明も無いと分かってから捨てる。

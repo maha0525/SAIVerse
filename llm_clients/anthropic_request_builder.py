@@ -8,7 +8,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .exceptions import InvalidRequestError
-from .system_notice import accepts_mid_conversation_system, present_system_notices
+from .system_notice import (
+    accepts_mid_conversation_system,
+    is_presented_system_notice,
+    present_system_notices,
+    system_notice_image_note,
+    unresolved_system_notice_images,
+)
 from .utils import (
     attachment_limit_is_off,
     content_to_text,
@@ -134,6 +140,7 @@ def _build_anthropic_content_blocks(
     max_image_bytes: Optional[int],
     allowed_attachment_keys: Optional[Set[Tuple[int, int]]],
     message_index: int,
+    is_notice: bool = False,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     content_blocks: List[Dict[str, Any]] = []
     text = content_to_text(content)
@@ -141,6 +148,24 @@ def _build_anthropic_content_blocks(
         content_blocks.append({"type": "text", "text": text})
 
     is_dynamic = isinstance(metadata, dict) and bool(metadata.get("__realtime_context__"))
+
+    # タグ化したシステム通知 (is_presented_system_notice) の画像は、埋め込めない
+    # ときに生成した要約ではなく保存済みの要約か URI だけの説明にし、ファイルが
+    # 読めない画像も説明の文で残す (送信本文が要約の生成の成否で揺れないように。
+    # llm_clients/system_notice.py の system_notice_image_note)。
+    unresolved: List[Dict[str, Any]] = (
+        unresolved_system_notice_images(metadata, attachments) if is_notice else []
+    )
+
+    def _note_for(att: Dict[str, Any]) -> str:
+        if is_notice:
+            return system_notice_image_note(att, metadata)
+        return image_summary_note(
+            att["path"],
+            att["mime_type"],
+            att.get("uri", att.get("path", "unknown")),
+            skip_summary=skip_summary,
+        )
 
     for att_idx, att in enumerate(attachments):
         should_embed = supports_images and role == "user" and (
@@ -159,13 +184,10 @@ def _build_anthropic_content_blocks(
                 continue
             logging.warning("Image file not found or unreadable: %s", att.get("uri") or att.get("path"))
 
-        note = image_summary_note(
-            att["path"],
-            att["mime_type"],
-            att.get("uri", att.get("path", "unknown")),
-            skip_summary=skip_summary,
-        )
-        content_blocks.append({"type": "text", "text": note})
+        content_blocks.append({"type": "text", "text": _note_for(att)})
+
+    for entry in unresolved:
+        content_blocks.append({"type": "text", "text": _note_for(entry)})
 
     return content_blocks, is_dynamic
 
@@ -234,6 +256,7 @@ def _prepare_anthropic_messages(
             max_image_bytes=max_image_bytes,
             allowed_attachment_keys=allowed_attachment_keys,
             message_index=i,
+            is_notice=is_presented_system_notice(msg),
         )
         if not content_blocks:
             continue

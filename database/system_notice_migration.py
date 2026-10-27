@@ -31,7 +31,9 @@ role=user + タグで載った世代)、``execution_ledger`` / ``execution_outbo
 写しを ``<SAIVERSE_HOME>/backups/system_notice_migration/`` に取る (通常の
 起動時バックアップは数が上限を超えると古いものから消えるので、この写しは
 別の置き場に置く)。移行の結果は同じ置き場にレポートとして書き出す — 本番へ
-当てたあとに人の目で確かめるためのもの。
+当てたあとに人の目で確かめるためのもの。レポートの材料は DB ごとの結果の
+JSON (``results/<時刻>_<pid>_<乱数>/``) で、ペルソナの記憶 DB では完了の印より前に
+書くので、レポートの書き出しが失敗しても次の起動で作り直せる。
 
 コピーで試すときは CLI を使う::
 
@@ -42,7 +44,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
+import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -87,15 +91,25 @@ def starts_with_system_tag(text: Any) -> bool:
     return isinstance(text, str) and text.startswith(SYSTEM_OPEN)
 
 
-def strip_system_tags(text: str) -> Optional[str]:
+def strip_system_tags(text: str, *, pairs: int = 1) -> Optional[str]:
     """外側の ``<system>…</system>`` の包みを外した本文。包みの形が曖昧なら None。
 
     剥がすのは、本文全体が「完全な ``<system>…</system>`` の組を空白だけを
-    挟んで並べたもの」になっている行だけ。各組の中身の前後の空白を落として
-    空行 (``\\n\\n``) で繋ぐ。``perception_batches`` の ``rendered_text``
-    (``<system>`` の組二つを ``\\n`` で繋いだ旧形式) は、第 3 束の提示の最終形
-    (sea/runtime_context.compose_turn_realtime_and_recall_content — 二つの本文を
-    ``\\n\\n`` で繋ぐ) と同じ形になる。
+    挟んで、ちょうど ``pairs`` 個並べたもの」になっている行だけ。各組の中身の
+    前後の空白を落として空行 (``\\n\\n``) で繋ぐ。
+
+    組の数は置き場ごとに呼び出し側が縛る。一つの包みの中に ``</system><system>``
+    を含む引用が入った行 (旧外部イベントの通知が引用を包んだ形) と、正当に組を
+    二つ並べた行は、文字の並びでは区別できない — 期待と違う数の組に見える行は
+    決め打ちで剥がさず、曖昧としてレポートへ回す。
+
+    - messages・paired_action_text・実行台帳・送信トレイ・building_messages は
+      一つの通知を一つの包みで保存していたので ``pairs=1``。
+    - ``perception_batches`` の ``rendered_text`` (kind=realtime_and_recall) は
+      リアルタイム情報と想起の二つの組を ``\\n`` で繋いだ旧形式なので ``pairs=2``。
+      剥がした結果は第 3 束の提示の最終形 (sea/runtime_context.
+      compose_turn_realtime_and_recall_content — 二つの本文を ``\\n\\n`` で繋ぐ)
+      と同じ形になる。
 
     組の中で開きと閉じが同数そろって入れ子になっているタグ (中断の再開文が元の
     発火文を引用している世代など) は本文の一部としてそのまま残す — 送るときに
@@ -109,6 +123,7 @@ def strip_system_tags(text: str) -> Optional[str]:
     - 対の無い閉じタグ (``<system>A </system> B</system>``)
     - 閉じられていない開きタグ (途中で切れた形、``<system>A <system>B</system>``)
     - 組の外に空白以外の文字がある (``<system>A</system> B``)
+    - 完全な組の数が ``pairs`` と違う
     """
     segments: List[str] = []
     current: List[str] = []
@@ -141,6 +156,8 @@ def strip_system_tags(text: str) -> Optional[str]:
         i += 1
     if depth != 0 or not segments:
         return None  # 閉じられていない開きタグ
+    if len(segments) != pairs:
+        return None  # 置き場が期待する組の数と違う (引用か正当な複数の組か決められない)
     return "\n\n".join(s.strip() for s in segments if s.strip())
 
 
@@ -303,8 +320,12 @@ class StoreResult:
     updates: List[Tuple[str, tuple]] = field(default_factory=list)
     already_done: bool = False
     error: Optional[str] = None
+    #: 結果の JSON から読み戻したときの系統別件数 (``changes`` はサンプルだけになる)。
+    restored_counts: Optional[Dict[Tuple[str, str], int]] = None
 
     def counts(self) -> Dict[Tuple[str, str], int]:
+        if self.restored_counts is not None:
+            return dict(self.restored_counts)
         out: Dict[Tuple[str, str], int] = {}
         for c in self.changes:
             out[(c.table, c.kind)] = out.get((c.table, c.kind), 0) + 1
@@ -316,6 +337,67 @@ class StoreResult:
             self.changes or self.skipped or self.unknown_system_count
             or self.untagged_memorize_count or self.error
         )
+
+    @property
+    def has_leftovers(self) -> bool:
+        """変換しなかった行・推定できなかった行・旧 MEMORIZE の候補があるか (人の確認が要る行)。"""
+        return bool(self.skipped or self.unknown_system_count or self.untagged_memorize_count)
+
+    def leftover_counts(self) -> List[int]:
+        return [len(self.skipped), self.unknown_system_count, self.untagged_memorize_count]
+
+    def to_json(self) -> Dict[str, Any]:
+        """レポートを組み直せるだけの中身 (件数・サンプル・残した行) を JSON にできる形で。"""
+        from dataclasses import asdict
+
+        return {
+            "label": self.label,
+            "path": self.path,
+            "persona": self.persona,
+            "backup_path": self.backup_path,
+            "already_done": self.already_done,
+            "error": self.error,
+            "counts": [[t, k, n] for (t, k), n in sorted(self.counts().items())],
+            "samples": [asdict(c) for c in _sample_changes(self.changes)],
+            "skipped": [asdict(s) for s in self.skipped],
+            "unknown_system_count": self.unknown_system_count,
+            "unknown_system_samples": [asdict(s) for s in self.unknown_system_samples],
+            "untagged_memorize_count": self.untagged_memorize_count,
+            "untagged_memorize_samples": [asdict(s) for s in self.untagged_memorize_samples],
+        }
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "StoreResult":
+        return cls(
+            label=data["label"],
+            path=data["path"],
+            persona=bool(data.get("persona")),
+            backup_path=data.get("backup_path"),
+            already_done=bool(data.get("already_done")),
+            error=data.get("error"),
+            restored_counts={(t, k): n for t, k, n in data.get("counts") or []},
+            changes=[Change(**c) for c in data.get("samples") or []],
+            skipped=[Skipped(**s) for s in data.get("skipped") or []],
+            unknown_system_count=int(data.get("unknown_system_count") or 0),
+            unknown_system_samples=[Skipped(**s) for s in data.get("unknown_system_samples") or []],
+            untagged_memorize_count=int(data.get("untagged_memorize_count") or 0),
+            untagged_memorize_samples=[
+                Skipped(**s) for s in data.get("untagged_memorize_samples") or []
+            ],
+        )
+
+
+def _sample_changes(changes: Sequence[Change]) -> List[Change]:
+    """レポートに載せるサンプル (表と系統の組ごとに先頭 :data:`SAMPLES_PER_KIND` 件)。"""
+    seen: Dict[Tuple[str, str], int] = {}
+    out: List[Change] = []
+    for c in changes:
+        key = (c.table, c.kind)
+        if seen.get(key, 0) >= SAMPLES_PER_KIND:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        out.append(c)
+    return out
 
 
 def _head(text: Any) -> str:
@@ -349,6 +431,15 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _col_or_null(cols: set, name: str) -> str:
+    """SELECT に書く列の式。古いスキーマで列が無ければ NULL として読む。
+
+    移行の判定は読み取り専用で init_db (列の追加) より前に走るので、列の足りない
+    古い記憶 DB でも走査が例外にならないようにする。
+    """
+    return name if name in cols else f"NULL AS {name}"
+
+
 # ---------------------------------------------------------------------------
 # ペルソナの記憶 DB
 # ---------------------------------------------------------------------------
@@ -368,10 +459,15 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     if not _table_exists(conn, "messages"):
         return
     cols = _columns(conn, "messages")
+    if not {"id", "role", "content"} <= cols:
+        # 判定に要る列が無い DB は対象が無い (変換もしない)
+        return
+    meta_col = _col_or_null(cols, "metadata")
+    order = "created_at, rowid" if "created_at" in cols else "rowid"
     rows = conn.execute(
-        "SELECT id, role, content, metadata FROM messages "
+        f"SELECT id, role, content, {meta_col} FROM messages "
         "WHERE substr(content, 1, ?) = ? OR role = 'system' "
-        "ORDER BY created_at, rowid",
+        f"ORDER BY {order}",
         (len(SYSTEM_OPEN), SYSTEM_OPEN),
     ).fetchall()
     for row_id, role, content, raw_meta in rows:
@@ -421,11 +517,12 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     # generate_image など) は role=user・タグ無しの本文で保存された世代がある。
     # 発話でないことの来歴を機械的に確定できないので変換はせず、候補を数えて
     # レポートに出す。
-    for row_id, content, raw_meta in conn.execute(
+    memorize_rows = conn.execute(
         "SELECT id, content, metadata FROM messages "
         "WHERE role = 'user' AND metadata LIKE '%playbook:%' "
-        "ORDER BY created_at, rowid",
-    ).fetchall():
+        f"ORDER BY {order}",
+    ).fetchall() if "metadata" in cols else []
+    for row_id, content, raw_meta in memorize_rows:
         if starts_with_system_tag(content):
             continue
         tags = _tags_of(_load_json(raw_meta))
@@ -458,7 +555,9 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 "messages.paired_action_text", str(row_id), "paired_action", text, body,
             ))
 
-    if _table_exists(conn, "perception_batches"):
+    if _table_exists(conn, "perception_batches") and {"id", "rendered_text"} <= _columns(
+        conn, "perception_batches",
+    ):
         batch_cols = _columns(conn, "perception_batches")
         kind_expr = "kind" if "kind" in batch_cols else "'perception'"
         for batch_id, batch_kind, text in conn.execute(
@@ -471,7 +570,8 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                     "perception_batches", str(batch_id), str(batch_kind), [], _head(text),
                 ))
                 continue
-            body = strip_system_tags(text)
+            # リアルタイム情報と想起の二つの組を並べた形だけを剥がす
+            body = strip_system_tags(text, pairs=2)
             if body is None:
                 result.skipped.append(Skipped(
                     "perception_batches", str(batch_id), str(batch_kind), [], _head(text),
@@ -499,14 +599,49 @@ def _apply(conn: sqlite3.Connection, updates: Sequence[Tuple[str, tuple]]) -> No
 
 
 def _snapshot(src: Path, dest: Path) -> None:
-    """SQLite のバックアップ API で ``src`` の写しを ``dest`` に作る。"""
+    """SQLite のバックアップ API で ``src`` の写しを ``dest`` に作る。
+
+    ``dest`` は新しく作る (既にあれば FileExistsError) — 同じ秒に起動した別の
+    プロセスの写しを上書きしない。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "xb"):
+        pass
     with closing(sqlite3.connect(str(src))) as s, closing(sqlite3.connect(str(dest))) as d:
         s.backup(d)
 
 
+def _unique_suffix() -> str:
+    """秒の時刻に足して、同時に起動したプロセス同士・同じ秒の二回の実行で名前が重ならない印。"""
+    return f"{os.getpid()}_{uuid.uuid4().hex[:6]}"
+
+
+def _snapshot_name(prefix: str, stamp: str) -> str:
+    """写しのファイル名 (秒の時刻だけだと同時に起動した二つのプロセスで重なる)。"""
+    return f"{prefix}.pre_migration_{stamp}_{_unique_suffix()}.bak"
+
+
 def _open_readonly(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
+    """一つの DB の結果を ``results_dir/<key>.json`` に書く (レポートの材料)。
+
+    ペルソナの記憶 DB では完了の印のコミットより前に書く — レポートの書き出しが
+    失敗しても、次の起動でこの JSON 群からレポートだけを作り直せる
+    (:func:`regenerate_pending_reports`)。
+    """
+    if results_dir is None:
+        return
+    _write_json_atomic(results_dir / f"{key}.json", result.to_json())
 
 
 def migrate_persona_db(
@@ -516,12 +651,16 @@ def migrate_persona_db(
     output_dir: Path,
     dry_run: bool = False,
     stamp: str,
+    results_dir: Optional[Path] = None,
 ) -> StoreResult:
     """一つのペルソナの記憶 DB を移行する。
 
     印 (:data:`MIGRATION_MARKER_KEY`) が立っていれば何もしない。変換する行が
     あれば、DB に何かを書く前 (``init_db`` のスキーマ用意より前) に写しを
     ``output_dir/<persona_id>/`` へ取る (写しが取れなければ書き換えない)。
+    書き換えの取引の中で印をもう一度確かめ、別のプロセスが先に終えていれば
+    何もせずに終える。``results_dir`` を渡すと、見るべきものがあるとき結果を
+    JSON で印のコミットより前に書く (:func:`_write_result_json`)。
     ``dry_run`` は読み取り専用で開き、何も書かない。
     """
     result = StoreResult(label=f"ペルソナ {persona_id}", path=str(db_path), persona=True)
@@ -539,7 +678,7 @@ def migrate_persona_db(
         scan_persona_conn(conn, probe)
 
     if probe.updates:
-        backup = output_dir / persona_id / f"memory.db.pre_migration_{stamp}.bak"
+        backup = output_dir / persona_id / _snapshot_name("memory.db", stamp)
         try:
             _snapshot(db_path, backup)
         except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
@@ -558,6 +697,15 @@ def migrate_persona_db(
     with closing(init_db(str(db_path))) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if _persona_marker_set(conn):
+                # 同時に起動した別のプロセスが、こちらの読み取りの後に移行を
+                # 終えた。何も書かずに終える (取った写しは使わないので消す)。
+                conn.rollback()
+                if result.backup_path:
+                    Path(result.backup_path).unlink(missing_ok=True)
+                return StoreResult(
+                    label=result.label, path=result.path, persona=True, already_done=True,
+                )
             scan_persona_conn(conn, result)
             if result.updates and result.backup_path is None:
                 # 読み取り専用の走査で見えなかった変換が出た — 写しの無いまま
@@ -566,6 +714,9 @@ def migrate_persona_db(
                     "rows to convert appeared after the read-only scan; no backup was taken"
                 )
             _apply(conn, result.updates)
+            if result.has_findings or result.backup_path:
+                # 印より前に結果を残す (レポートが書けなくても作り直せるように)
+                _write_result_json(results_dir, f"persona_{persona_id}", result)
             set_embed_metadata(
                 conn, MIGRATION_MARKER_KEY,
                 datetime.now(timezone.utc).isoformat(), commit=False,
@@ -728,6 +879,8 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
 
 def migrate_main_db(
     db_path: Path, *, output_dir: Path, dry_run: bool = False, stamp: str,
+    results_dir: Optional[Path] = None,
+    last_leftovers: Optional[List[int]] = None,
 ) -> StoreResult:
     """本体 DB を移行する。
 
@@ -735,16 +888,25 @@ def migrate_main_db(
     変換すると条件から外れるので、毎起動で呼んでも二度目以降は何も書かない。
     書き換える行があるときは、書き換える前に写しを ``output_dir`` に取る
     (起動時の pre_upgrade バックアップは数が上限を超えると消えるので別に取る)。
+
+    ``results_dir`` を渡すと、変換があるとき (書き換えのコミットより前) と、
+    残した行の件数が前回 (``last_leftovers``) と違うときに結果を JSON で書く
+    — 本体 DB は毎起動で走査され、残した行は毎回同じものが見えるので、件数が
+    変わらなければレポートの材料にしない。
     """
     result = StoreResult(label="本体 DB", path=str(db_path))
     if not db_path.exists():
         return result
     with closing(_open_readonly(db_path)) as conn:
         scan_main_conn(conn, result)
-    if dry_run or not result.updates:
+    if dry_run:
+        return result
+    if not result.updates:
+        if result.has_leftovers and result.leftover_counts() != last_leftovers:
+            _write_result_json(results_dir, "main", result)
         return result
 
-    backup = output_dir / f"saiverse.db.pre_migration_{stamp}.bak"
+    backup = output_dir / _snapshot_name("saiverse.db", stamp)
     try:
         _snapshot(db_path, backup)
     except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
@@ -762,7 +924,15 @@ def migrate_main_db(
         conn.execute("BEGIN IMMEDIATE")
         try:
             scan_main_conn(conn, applied)
+            if not applied.updates:
+                # 同時に起動した別のプロセスが先に変換を終えた — 取った写しは使わない
+                Path(backup).unlink(missing_ok=True)
+                applied.backup_path = None
             _apply(conn, applied.updates)
+            if applied.changes or (
+                applied.has_leftovers and applied.leftover_counts() != last_leftovers
+            ):
+                _write_result_json(results_dir, "main", applied)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -800,12 +970,7 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
                 lines.append(f"- {table} / {kind}: {count}")
             lines.append("")
             lines.append(f"### サンプル (系統ごとに最大 {SAMPLES_PER_KIND} 件)")
-            seen: Dict[Tuple[str, str], int] = {}
-            for c in res.changes:
-                key = (c.table, c.kind)
-                if seen.get(key, 0) >= SAMPLES_PER_KIND:
-                    continue
-                seen[key] = seen.get(key, 0) + 1
+            for c in _sample_changes(res.changes):
                 lines.append(f"- [{c.table} / {c.kind}] id={c.row_id}")
                 lines.append(f"  - 前: {_head(c.before)}")
                 if c.before != c.after:
@@ -856,21 +1021,104 @@ def _iter_persona_dbs(saiverse_home: Path) -> Iterable[Tuple[str, Path]]:
             yield child.name, db
 
 
-def _report_needed(results: Sequence[StoreResult]) -> bool:
-    """レポートを書くか。
+#: DB ごとの結果の JSON の置き場 (``output_dir`` の下に、起動ごとのフォルダ
+#: ``<時刻>_<pid>_<乱数>`` を作る)。
+RESULTS_DIR_NAME = "results"
+#: レポートを書き終えた起動のフォルダに置く印のファイル (中身はレポートのパス)。
+REPORTED_MARKER_NAME = "REPORTED"
+#: DB ごとの、前回の走査で残した行の件数 (``{DB のパス: [変換しなかった,
+#: 推定できなかった, 旧 MEMORIZE の候補]}``)。本体 DB は毎起動で走査されるので、
+#: 件数が変わらない残りだけでは毎回レポートを書かない。
+LAST_LEFTOVERS_NAME = "last_leftovers.json"
 
-    変換・エラーがあれば書く。変換しなかった行・推定できなかった行だけなら、
-    ペルソナの記憶 DB を初めて見た回 (印がまだ無かった回) だけ書く — 本体 DB は
-    印を持たないので、残した行だけを理由に毎起動レポートを書かないようにする。
-    """
+
+def _load_last_leftovers(output_dir: Path) -> Dict[str, List[int]]:
+    try:
+        data = json.loads((output_dir / LAST_LEFTOVERS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_last_leftovers(
+    output_dir: Path, results: Sequence[StoreResult], previous: Dict[str, List[int]],
+) -> None:
+    state = dict(previous)
     for r in results:
-        if r.changes or r.error:
-            return True
-        if r.persona and not r.already_done and (
-            r.skipped or r.unknown_system_count or r.untagged_memorize_count
-        ):
-            return True
-    return False
+        if r.error or r.already_done:
+            continue
+        if not r.has_leftovers and r.path not in state:
+            continue
+        state[r.path] = r.leftover_counts()
+    if state != previous:
+        _write_json_atomic(output_dir / LAST_LEFTOVERS_NAME, state)
+
+
+def _try_write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
+    """失敗した DB の結果の JSON (書けなくても他の DB は止めない)。"""
+    try:
+        _write_result_json(results_dir, key, result)
+    except Exception:  # noqa: BLE001
+        LOGGER.error(
+            "[system-notice-migration] could not write the result of %s", result.label,
+            exc_info=True,
+        )
+
+
+def _load_run_results(run_dir: Path) -> List[StoreResult]:
+    out: List[StoreResult] = []
+    for path in sorted(run_dir.glob("*.json")):
+        try:
+            out.append(StoreResult.from_json(json.loads(path.read_text(encoding="utf-8"))))
+        except (OSError, ValueError, KeyError, TypeError):
+            LOGGER.warning(
+                "[system-notice-migration] unreadable result file %s", path, exc_info=True,
+            )
+    # 本体 DB を先に、ペルソナは名前の順に
+    out.sort(key=lambda r: (r.persona, r.label))
+    return out
+
+
+def _write_run_report(run_dir: Path, report_path: Path, *, stamp: str) -> Optional[Path]:
+    """一回の起動の結果の JSON 群からレポートを書き、その起動のフォルダに書き終えた印を置く。"""
+    results = _load_run_results(run_dir)
+    if not results:
+        return None
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(render_report(results, dry_run=False, stamp=stamp), encoding="utf-8")
+    (run_dir / REPORTED_MARKER_NAME).write_text(str(report_path), encoding="utf-8")
+    return report_path
+
+
+def regenerate_pending_reports(saiverse_home: Path) -> List[Path]:
+    """前の起動で結果の JSON を書いたのにレポートを書けなかった分を、JSON 群から作り直す。
+
+    DB には触らない (完了の印はそのまま尊重する)。作り直したレポートのパスを返す。
+    """
+    output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
+    results_root = output_dir / RESULTS_DIR_NAME
+    if not results_root.is_dir():
+        return []
+    written: List[Path] = []
+    for run_dir in sorted(results_root.iterdir()):
+        if not run_dir.is_dir() or (run_dir / REPORTED_MARKER_NAME).exists():
+            continue
+        if not any(run_dir.glob("*.json")):
+            continue
+        try:
+            path = _write_run_report(
+                run_dir, output_dir / f"report_{run_dir.name}.md", stamp=run_dir.name,
+            )
+        except Exception:  # noqa: BLE001 — 作り直せなければ次の起動でまた試す
+            LOGGER.error(
+                "[system-notice-migration] could not regenerate the report for %s", run_dir,
+                exc_info=True,
+            )
+            continue
+        if path is not None:
+            LOGGER.info("[system-notice-migration] report regenerated: %s", path)
+            written.append(path)
+    return written
 
 
 def run_migration(
@@ -882,49 +1130,81 @@ def run_migration(
 ) -> Tuple[List[StoreResult], Optional[Path]]:
     """本体 DB と全ペルソナの記憶 DB を移行し、見るべきものがあればレポートを書く。
 
-    返り値は (DB ごとの結果, レポートのパス)。レポートは、変換した行・変換
-    しなかったタグ始まりの行・推定できなかった role=system 行・旧 MEMORIZE の
-    結果の候補・エラーのどれかがあるときだけ書く (印の立った後の起動では
-    書かない)。
+    返り値は (DB ごとの結果, レポートのパス)。各 DB の結果は、見るべきもの
+    (変換した行・変換しなかったタグ始まりの行・推定できなかった role=system 行・
+    旧 MEMORIZE の結果の候補・エラー) があるとき、DB を一つ処理するたびに
+    ``results/<時刻>_<pid>_<乱数>/`` へ JSON で書き、レポートはその JSON 群から組む
+    (ペルソナの記憶 DB は印のコミットより前に書くので、レポートが書けなくても
+    次の起動で :func:`regenerate_pending_reports` が作り直せる)。本体 DB の
+    残した行は、件数が前回と同じなら材料にしない。``dry_run`` は JSON を
+    書かず、見るべきものがあればその場の結果からレポートを書く。
     """
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = f"{stamp}_{_unique_suffix()}"
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
+    results_dir = None if dry_run else output_dir / RESULTS_DIR_NAME / run_id
+    last_leftovers = {} if dry_run else _load_last_leftovers(output_dir)
     results: List[StoreResult] = []
 
     if db_path is not None:
         try:
             results.append(migrate_main_db(
                 db_path, output_dir=output_dir, dry_run=dry_run, stamp=stamp,
+                results_dir=results_dir, last_leftovers=last_leftovers.get(str(db_path)),
             ))
         except Exception as exc:  # noqa: BLE001 — 一つの DB の失敗で他を止めない
             LOGGER.error("[system-notice-migration] main DB migration failed", exc_info=True)
-            results.append(StoreResult(
+            failed = StoreResult(
                 label="本体 DB", path=str(db_path), error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
-            ))
+            )
+            results.append(failed)
+            _try_write_result_json(results_dir, "main", failed)
 
     for persona_id, persona_db in _iter_persona_dbs(saiverse_home):
         try:
             results.append(migrate_persona_db(
                 persona_db, persona_id=persona_id, output_dir=output_dir,
-                dry_run=dry_run, stamp=stamp,
+                dry_run=dry_run, stamp=stamp, results_dir=results_dir,
             ))
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "[system-notice-migration] persona %s migration failed", persona_id,
                 exc_info=True,
             )
-            results.append(StoreResult(
+            failed = StoreResult(
                 label=f"ペルソナ {persona_id}", path=str(persona_db), persona=True,
                 error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
-            ))
+            )
+            results.append(failed)
+            _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
 
     written: Optional[Path] = None
-    if _report_needed(results):
-        written = report_path or (
-            output_dir / f"report_{stamp}{'_dry_run' if dry_run else ''}.md"
-        )
-        written.parent.mkdir(parents=True, exist_ok=True)
-        written.write_text(render_report(results, dry_run=dry_run, stamp=stamp), encoding="utf-8")
+    if results_dir is None:
+        if any(r.has_findings for r in results):
+            written = report_path or output_dir / f"report_{stamp}_dry_run.md"
+            written.parent.mkdir(parents=True, exist_ok=True)
+            written.write_text(render_report(results, dry_run=True, stamp=stamp), encoding="utf-8")
+    else:
+        report_ok = True
+        if results_dir.is_dir() and any(results_dir.glob("*.json")):
+            try:
+                written = _write_run_report(
+                    results_dir, report_path or output_dir / f"report_{run_id}.md", stamp=stamp,
+                )
+            except Exception:  # noqa: BLE001 — 次の起動で JSON 群から作り直す
+                LOGGER.error(
+                    "[system-notice-migration] could not write the report; it will be "
+                    "regenerated from %s on the next start", results_dir, exc_info=True,
+                )
+                written = None
+                report_ok = False
+        if report_ok:
+            try:
+                _save_last_leftovers(output_dir, results, last_leftovers)
+            except Exception:  # noqa: BLE001
+                LOGGER.error(
+                    "[system-notice-migration] could not save the leftover counts", exc_info=True,
+                )
     for res in results:
         if res.changes or res.error:
             LOGGER.info(
@@ -946,21 +1226,37 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
     """
     from saiverse.data_paths import get_saiverse_home
 
+    home = get_saiverse_home()
+    alerts: List[Dict[str, Any]] = []
     try:
-        results, report = run_migration(
-            db_path=Path(db_path), saiverse_home=get_saiverse_home(),
-        )
+        regenerated = regenerate_pending_reports(home)
+    except Exception:  # noqa: BLE001
+        LOGGER.error("[system-notice-migration] report regeneration failed", exc_info=True)
+        regenerated = []
+    if regenerated:
+        alerts.append({
+            "id": "system_notice_migration_report_regenerated",
+            "level": "info",
+            "title": "前回書けなかったシステム通知の移行のレポートを作り直しました",
+            "message": "レポート: " + ", ".join(str(p) for p in regenerated),
+            "details": {},
+        })
+    try:
+        results, report = run_migration(db_path=Path(db_path), saiverse_home=home)
     except Exception:  # noqa: BLE001
         LOGGER.error("[system-notice-migration] migration aborted", exc_info=True)
-        return [{
+        return alerts + [{
             "id": "system_notice_migration_failed",
             "level": "warning",
             "title": "システム通知の記録の移行に失敗しました",
             "message": "起動時の移行が途中で止まりました。次の起動で再試行します。ログを確認してください。",
             "details": {},
         }]
-    alerts: List[Dict[str, Any]] = []
     failed = [r for r in results if r.error]
+    # 人の確認が要る行 (変換しなかった行・推定できなかった行・旧 MEMORIZE の候補)。
+    # レポートを書いた回だけ数える — 本体 DB の残りは件数が変わらなければ
+    # レポートの材料にしないので、毎起動で知らせない。
+    review_rows = sum(sum(r.leftover_counts()) for r in results) if report else 0
     if failed:
         alerts.append({
             "id": "system_notice_migration_failed",
@@ -977,7 +1273,21 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "id": "system_notice_migration_done",
             "level": "info",
             "title": "システム通知の記録を新しい形式へ移行しました",
-            "message": f"移行前の写しと結果のレポートを保存しました: {report}",
+            "message": f"移行前の写しと結果のレポートを保存しました: {report}" + (
+                f" 変換せずに残した、確認が要る行が {review_rows} 件あります (レポートに一覧があります)。"
+                if review_rows else ""
+            ),
+            "details": {},
+        })
+    elif report is not None and review_rows:
+        alerts.append({
+            "id": "system_notice_migration_review",
+            "level": "warning",
+            "title": "システム通知の記録の移行で、確認が要る行があります",
+            "message": (
+                f"変換せずに残した行・種類を推定できなかった行が {review_rows} 件あります。"
+                f"一覧はレポートにあります: {report}"
+            ),
             "details": {},
         })
     return alerts
@@ -999,6 +1309,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO)
     home = Path(args.home)
     db = Path(args.db) if args.db else home / "user_data" / "database" / "saiverse.db"
+    if not args.dry_run:
+        for regenerated in regenerate_pending_reports(home):
+            print(f"regenerated report: {regenerated}")
     results, report = run_migration(
         db_path=db if db.exists() else None,
         saiverse_home=home,

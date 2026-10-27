@@ -29,6 +29,7 @@
 - ペルソナが `save_playbook` で直した組み込みの Playbook（同じ名前のファイル版がある Playbook）は、次の起動で黙ってファイル版に戻っている可能性がある。ログには `playbook_sync: updated '<名前>' from <パス>` が INFO で出るだけで、画面には何も出ない。
 - ユーザーが画面で直した組み込みの Playbook は、SAIVerse の更新でその Playbook のファイルが変わった最初の起動で、黙ってファイル版に戻る。
 - 実際にどの Playbook が戻されたかは、まだ調べていない。
+- システム通知の一本化（[system_notice_delivery.md](../intent/system_notice_delivery.md)）で、組み込みの Playbook 7 本のファイル版が変わった（building_move・create_building・document_create・document_search・generate_image・novel_writing・schedule_management。MEMORIZE を role=system・タグ無しの本文にした）。このため、利用者が世界編集で変えていた同じ名前の Playbook は、この改修を含む版の最初の起動で、判定 2 によってファイル版で上書きされる。これがこの食い違いが実害になる最初の例になる。食い違いそのものは未裁定のまま残す。一方で、上位層（user_data / expansion_data）のファイルや DB だけにある Playbook が旧形式のシステム通知を作り続ける場合は自動で書き換えず、起動時に画面の警告（`saiverse/playbook_sync.py` の `playbook_compat_alerts`）で更新を促す。
 
 ## 未裁定のこと
 
