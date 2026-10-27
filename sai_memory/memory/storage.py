@@ -2731,7 +2731,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     劣化するため。本文の文字列 (``<system>`` で始まるか) では判定しない
     (同 不変条件 2)。本文に ``<system>`` を埋め込んで role=user で保存していた
     旧世代の行 (Track切替通知等、event_message タグを持たない世代がある) は、
-    database/migrate.py の移行で role=system へ正規化する。
+    起動時の移行 (database/system_notice_migration.py) で role=system へ正規化する。
 
     ``get_conversation_window_around`` (コア記憶 scene) と
     ``get_conversation_messages_between`` (範囲クリップの読み出し) が共用する

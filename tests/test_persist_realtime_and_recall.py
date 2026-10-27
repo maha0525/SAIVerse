@@ -2851,27 +2851,38 @@ _NOT_SENT_WARNING = "the record has a row that the first send of this turn does 
 # ---------------------------------------------------------------------------
 
 
-SNAPSHOT_TOOL = "get_situation_snapshot"
+SNAPSHOT_TOOL = "situation_recorder"
 _CHANGE_MARK = "【状況変化】"
 
 
-def _use_real_situation_snapshot(env) -> None:
-    """本物の get_situation_snapshot (状況の変化を記録に書く) が動く最小の世界。
+def _register_situation_recorder(env, monkeypatch) -> None:
+    """ツールの実行中に記録へ一行書く偽のツール (TOOL ノードから呼ぶ)。
 
-    ツールは persona_context の manager から自分を引き、記録 (実 SAIMemoryAdapter
-    のメモリ内でない一時ファイルの SQLite) の作業メモリと比べて、変化があれば
-    ``<system>【状況変化】…</system>`` の行を記録に書く。
+    以前は本物の get_situation_snapshot (状況の変化を記録に書く) を使っていたが、
+    呼び出し元の無いツールとして削除した (docs/intent/system_notice_delivery.md
+    「掃除」)。この場面で見たいのは「ツールの中で書かれた記録の行」が送る列の
+    どこに並ぶかなので、同じことをする偽のツールに置き換える。書く行の形は今の
+    システム通知 (role=system・タグ無し本文 + 識別の印)。
     """
-    env.manager.all_personas = {PERSONA_ID: env.persona}
-    env.manager.user_presence_status = "online"
-    env.persona.manager_ref = env.manager
-    env.persona.timezone_name = "UTC"
-    env.persona.buildings = {}
-    env.persona.id_to_name_map = {}
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+    from tools import TOOL_REGISTRY
+
+    def fake_situation_recorder(**kwargs):
+        env.persona.sai_memory.append_persona_message({
+            "role": "system",
+            "content": f"{_CHANGE_MARK}ユーザー: オフライン → オンライン",
+            "metadata": {
+                "tags": ["internal", "situation_change"],
+                SYSTEM_NOTICE_KEY: "situation_change",
+            },
+        })
+        return ("現在の状況: ユーザーはオンライン", {"has_change": True})
+
+    monkeypatch.setitem(TOOL_REGISTRY, SNAPSHOT_TOOL, fake_situation_recorder)
 
 
 def _situation_snapshot_then_llm_playbook():
-    """TOOL (状況の変化を記録する get_situation_snapshot) → LLM。"""
+    """TOOL (ツールの中で状況の変化を記録に書く) → LLM。"""
     return _custom_playbook([
         {
             "id": "snap", "type": "tool", "action": SNAPSHOT_TOOL,
@@ -2936,7 +2947,7 @@ def _prepare_scene(env, monkeypatch, scene: str) -> Dict[str, Any]:
         _register_camera(env, monkeypatch)
         kwargs["playbook"] = _tool_then_llm_playbook()
     elif scene == "situation_change":
-        _use_real_situation_snapshot(env)
+        _register_situation_recorder(env, monkeypatch)
         kwargs["playbook"] = _situation_snapshot_then_llm_playbook()
     elif scene == "tool_memorize_tool":
         _register_camera(env, monkeypatch)
@@ -2979,8 +2990,8 @@ def test_first_send_matches_the_next_turn(env, monkeypatch, scene):
     """不変条件 1: どの場面でも、ターンの最初の呼び出しの列が次のターンの最初の
     呼び出しの列の先頭と一字一句同じ (SAIVerse の列と Gemini の送信形式の両方)。
 
-    ``situation_change`` (本物の get_situation_snapshot が状況の変化を記録に
-    書く) と ``tool_memorize_tool`` (MEMORIZE の行が二つの TOOL の結果の間に
+    ``situation_change`` (ツールの中で状況の変化を記録に書く) と
+    ``tool_memorize_tool`` (MEMORIZE の行が二つの TOOL の結果の間に
     記録される) は Codex 六巡目の指摘の場面で、送る列を記録に揃える前は
     次のターンの先頭と割れた。"""
     turn1, turn2 = _run_scene_turns(env, monkeypatch, scene)

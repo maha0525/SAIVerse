@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 120（うち Spell 化: 79）
+**登録ツール数**: 116（うち Spell 化: 79）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -35,9 +35,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `game_set_scene` | Change the current scene state of the game you rule (exploration / conversation / battle / shopping / rest, or a cust… | `scene*`: string | シーン変更 (GM) |
 | `generate_image` | Generate an image from a text prompt, optionally using reference images. Supports multiple AI models: - nano_banana_2… | `prompt*`: string, `model`: string, `aspect_ratio`: string, `quality`: string, `size`: string, `title`: string, `input_images`: array | — |
 | `get_building_messages` | Get new messages from building history that this persona hasn't seen yet. Adds them to persona history. | `building_id`: string | — |
-| `get_history` | Get conversation history as messages array for LLM context, including system prompt and persona history. | `building_id`: string, `max_chars`: integer, `include_system_prompt`: boolean, `include_inventory`: boolean, `include_building_items`: boolean, `balanced`: boolean, `include_internal`: boolean, `include_visual_context`: boolean | — |
-| `get_since_last_user_conversation` | Get summary and recent log of events since the last user conversation. Returns a summary with a UUID that can be used… | `include_raw_log`: boolean, `max_raw_messages`: integer | — |
-| `get_situation_snapshot` | Get current situation snapshot including time, location, and who is present. Optionally detect and record changes. | `building_id`: string, `detect_changes`: boolean | — |
 | `get_system_prompt` | Build and return the system prompt for the active persona, including world setting, persona info, and building context. | `building_id`: string, `include_inventory`: boolean, `include_building_items`: boolean, `include_available_playbooks`: boolean | — |
 | `get_task_summary` | Get a summary of the active persona's tasks including active and pending tasks. | `limit`: integer | — |
 | `get_visual_context` | Build visual context messages containing structured environment info for LLM context. | `building_id`: string, `include_self`: boolean, `include_building`: boolean, `include_other_personas`: boolean | — |
@@ -76,7 +73,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
 | `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
 | `read_url_section` | URLのページ内から、見出し名やキーワードで指定した節だけを抽出して読み込みます。 read_url_outline で長文と判定されたページの深掘り用です。 まず見出し（h1〜h4）の部分一致を試み、見つからなければ本文キーワード一… | `url*`: string, `section_query*`: string, `around`: integer | ページ節読み込み |
-| `record_wait` | Record a wait action. Consolidates consecutive waits into a single message. | `reason`: string | — |
 | `resolve_uri` | Resolve SAIVerse URIs to retrieve their content. Supports messagelog, memopedia, chronicle, item, building, web, and … | `uris*`: array, `max_total_chars`: integer | URI閲覧 |
 | `run_playbook` | Run a Playbook as a sub-line and receive its report_to_parent (a string summary written by the sub-line). Use this wh… | `name*`: string | Playbook 起動 |
 | `save_playbook` | Save or update a playbook definition into the shared database. | `name*`: string, `description*`: string, `scope`: string, `created_by_persona_id`: string, `building_id`: string, `playbook_json*`: string, `router_callable`: boolean, `user_selectable`: boolean, `display_name`: string | — |

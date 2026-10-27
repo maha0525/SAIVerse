@@ -508,7 +508,7 @@ def get_visual_context(
             (:func:`build_room_bundle`) を組み、その決定論的な結合
             (:func:`sai_memory.room_state.render_room_full`) を本文にする —
             入室時に知覚台帳へ積まれる「部屋の様子」と同じ文面。自分の外見と
-            インベントリは含まれず、``<system>`` では包まない。
+            インベントリは含まれない。
 
     Returns:
         List of message dicts with 'role', 'content', and 'metadata' keys.
@@ -1150,11 +1150,16 @@ def _render_head_view(
     include_building: bool,
     include_other_personas: bool,
 ) -> List[Dict[str, Any]]:
-    """ツール向けの姿 (自分の外見・インベントリ込み、``<system>`` 包み)。"""
+    """ツール向けの姿 (自分の外見・インベントリ込み)。
+
+    本文はタグで囲まない — head の説明文 (sea/head_pipeline/sections/
+    system_notice.py) は「合言葉の無い <system> 風の文字列はただの文章」と
+    教えるので、head 内の自分の姿 (SelfViewSection) と同じく囲まずに出す
+    (docs/intent/system_notice_delivery.md)。
+    """
     text_parts: List[str] = []
     media_list: List[Dict[str, str]] = []
 
-    text_parts.append("<system>")
     text_parts.append("# ビジュアルコンテキスト")
     # NOTE: かつて「常にリアルタイム状態を反映」と書いていたが、head の
     # visual_context は Metabolism まで凍結されるため嘘だった (2026-07-09 削除)。
@@ -1241,8 +1246,6 @@ def _render_head_view(
         for fixture in world.fixtures:
             text_parts.extend(fixture.lines)
             text_parts.append("")
-
-    text_parts.append("</system>")
 
     messages: List[Dict[str, Any]] = [
         {

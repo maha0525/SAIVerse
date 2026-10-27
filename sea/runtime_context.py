@@ -2508,67 +2508,6 @@ def _presented_recalled_keys(messages: Sequence[Dict[str, Any]]) -> set:
     return keys
 
 
-def _expand_recalled_ids(
-    runtime,
-    persona: Any,
-    recalled_ids: List[Dict[str, Any]],
-    messages: List[Dict[str, Any]],
-) -> None:
-    """Expand recalled_ids into actual content and append as a system message.
-
-    Resolves each recalled ID via URI resolver to get the actual content,
-    then appends a single system message at the end of the messages list.
-    """
-    from saiverse.uri_resolver import UriResolver
-
-    resolver = UriResolver(manager=runtime.manager)
-    persona_id = getattr(persona, "persona_id", None)
-    if not persona_id:
-        return
-
-    sections = []
-    for item in recalled_ids:
-        uri = item.get("uri", "")
-        title = item.get("title", "")
-        source_type = item.get("type", "")
-
-        if not uri:
-            continue
-
-        try:
-            resolved = resolver.resolve(uri, persona_id=persona_id)
-            if resolved and resolved.content:
-                content = resolved.content
-                # Truncate per item to keep context manageable
-                if len(content) > 1500:
-                    content = content[:1500] + "..."
-                label = "Chronicle" if source_type == "chronicle" else "Memopedia"
-                sections.append(f"### [{label}] {title}\n{content}")
-            else:
-                LOGGER.debug(
-                    "[sea][prepare-context] Could not resolve recalled URI: %s", uri,
-                )
-        except Exception as exc:
-            LOGGER.debug(
-                "[sea][prepare-context] Error resolving recalled URI %s: %s", uri, exc,
-            )
-
-    if sections:
-        recalled_text = "## 想起した記憶\n以下はワーキングメモリに保持されている記憶です。\n\n" + "\n\n".join(sections)
-        messages.append({
-            "role": "system",
-            "content": recalled_text,
-            "metadata": {"__recalled_memory__": True},
-        })
-        LOGGER.info(
-            "[sea][prepare-context] Expanded %d/%d recalled_ids into context (%d chars)",
-            len(sections), len(recalled_ids), len(recalled_text),
-        )
-        LOGGER.debug(
-            "[sea][prepare-context] Recalled memory content:\n%s", recalled_text,
-        )
-
-
 def _replace_weave_messages(
     messages: List[Dict[str, Any]], new_weave: List[Dict[str, Any]],
 ) -> None:

@@ -297,6 +297,7 @@ database/
 ├── models.py         # SQLAlchemy モデル
 ├── api_server.py     # DB API サーバー（inter-city / persona-proxy ルートは凍結封鎖: 503）
 ├── migrate.py        # マイグレーション（自動バックアップ付き）
+├── system_notice_migration.py # システム通知の旧形式データの移行（起動時に自動。本体 DB + 各ペルソナの記憶 DB）
 ├── seed.py           # 初期データ（⚠️ 全データ削除）
 ├── backup.py         # 起動時バックアップ
 ├── building_messages.py # Building メッセージ

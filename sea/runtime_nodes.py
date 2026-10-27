@@ -209,11 +209,13 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         prev_force_lightweight = state.get("_force_lightweight_model")
         try:
             # ライン分岐時は PulseContext も分離する (line='sub')。
-            # 共有のままだとサブラインの LLM I/O (検索 prompt や空の summarize 応答) が
-            # 親メインライン側で context_profile 経由 (_pulse_ctx.get_protocol_messages())
-            # で取得されメインラインの messages に流入してしまう。
+            # 分離を入れた当時 (Phase C-2a 修正、まはー指摘 2026-04-28) は、共有の
+            # ままだとサブラインの LLM I/O (検索 prompt や空の summarize 応答) が
+            # 親メインライン側の LLM ノードへ PulseContext のログ経由で流入した
+            # (その読み口 PulseContext.get_protocol_messages は呼び出し元が無くなり
+            # 2026-10-28 に削除 — docs/intent/system_notice_delivery.md「掃除」)。
             # サブラインに渡したい情報は report_to_parent に集約させる設計のため、
-            # PulseContext は分離するのが正しい (Phase C-2a 修正、まはー指摘 2026-04-28)。
+            # PulseContext は分離したままにする。
             isolate = (
                 (execution == "subagent")
                 or getattr(node_def, "isolate_pulse_context", False)
@@ -287,13 +289,12 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
 
         # サブライン → 親ラインへの結果報告 (Intent B v0.9, Phase 3 段階 4-B)
         # output_schema 経由で伝播された report_to_parent を親ラインに渡す。
-        # 親ラインの LLM ノードが messages を組み立てる経路は 2 通り:
-        #   (1) context_profile 不使用 → state["_messages"] を直接使う
-        #   (2) context_profile 使用 → _profile_base + _pulse_ctx.get_protocol_messages()
-        #                              つまり state["_messages"] への append は無視される
-        # 両方の経路に届かせるため、_messages と親 PulseContext の両方に append する。
-        # (Phase C-2a の最初の実装では state["_messages"] のみで context_profile 経由は
-        # 届かない不具合だった。まはー指摘 2026-04-28 で修正。)
+        # 渡し先は三つ: (1) state["_messages"] (この Pulse の中の親の LLM ノード
+        # 向け)、(2) 親 PulseContext のログ (Pulse 終了時に pulse_logs へ書かれ、
+        # Pulse ログの表示が読む)、(3) SAIMemory (次の Pulse 以降の文脈)。
+        # (2) はかつて context_profile を使う LLM ノードの読み口
+        # (PulseContext.get_protocol_messages、2026-10-28 に呼び出し元ゼロで削除)
+        # へ届かせるためのものだった (まはー指摘 2026-04-28)。
         if sub_line == "sub":
             report = state.get("report_to_parent")
             if report:
@@ -320,7 +321,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                         system_notice_message(formatted, "subline_report")
                     )
 
-                    # (2) 親 PulseContext への明示的 append (context_profile 使用ノード向け)
+                    # (2) 親 PulseContext への明示的 append (pulse_logs の記録向け)
                     parent_pulse_ctx = state.get("_pulse_context")
                     if parent_pulse_ctx is not None:
                         from sea.pulse_context import PulseLogEntry
