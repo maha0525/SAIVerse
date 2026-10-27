@@ -316,6 +316,85 @@ def test_compat_alerts_flag_legacy_notices_and_missing_tools(session_factory, mo
     assert {pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()} == before
 
 
+def test_compat_alerts_separate_tools_of_unconnected_mcp_servers(session_factory, monkeypatch):
+    """設定にある MCP サーバーの名前で始まる参照は、未接続の可能性として別の警告に出す。"""
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {"weather": {}, "someaddon__elyth": {}},
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [
+            {"id": "n1", "type": "tool", "action": "weather__forecast"},
+            {"id": "n2", "type": "tool", "action": "someaddon__elyth__post"},
+        ],
+        "uses_gone_tool": [
+            {"id": "n1", "type": "tool", "action": "unknown_server__tool"},
+            {"id": "n2", "type": "tool", "action": "forecast"},  # 素の名前は見分けられない
+        ],
+    })
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_missing_mcp_tool"]["details"]["references"] == [
+        {"playbook": "uses_mcp", "tool": "someaddon__elyth__post"},
+        {"playbook": "uses_mcp", "tool": "weather__forecast"},
+    ]
+    assert "MCP サーバーが未接続なだけの可能性" in alerts["playbook_missing_mcp_tool"]["message"]
+    assert alerts["playbook_missing_tool"]["details"]["references"] == [
+        {"playbook": "uses_gone_tool", "tool": "forecast"},
+        {"playbook": "uses_gone_tool", "tool": "unknown_server__tool"},
+    ]
+
+
+def test_compat_alerts_skip_tools_of_per_persona_mcp_servers(session_factory, monkeypatch):
+    """ペルソナごとに接続するサーバーのツールは起動時に無いのが正常なので、どちらの警告にも出さない。"""
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {
+            "weather": {"scope": "global"},
+            "someaddon__elyth": {"scope": "Per_Persona"},  # 起動処理と同じく小文字で読む
+            # 名前が前方で重なるときは長い方のサーバーの種別で判定する
+            "someaddon": {},
+        },
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [
+            {"id": "n1", "type": "tool", "action": "weather__forecast"},
+            {"id": "n2", "type": "tool", "action": "someaddon__elyth__post"},
+            {"id": "n3", "type": "tool", "action": "someaddon__other"},
+        ],
+    })
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_missing_mcp_tool"]["details"]["references"] == [
+        {"playbook": "uses_mcp", "tool": "someaddon__other"},
+        {"playbook": "uses_mcp", "tool": "weather__forecast"},
+    ]
+    assert "playbook_missing_tool" not in alerts
+
+
+def test_compat_alerts_are_quiet_when_only_per_persona_mcp_tools_are_missing(session_factory, monkeypatch):
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {"someaddon__elyth": {"scope": "per_persona"}},
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [{"id": "n1", "type": "tool", "action": "someaddon__elyth__post"}],
+    })
+
+    assert playbook_compat_alerts(session_factory) == []
+
+
 def test_compat_alerts_are_quiet_for_the_builtin_playbooks(session_factory):
     """同梱の public Playbook は、旧形式も存在しないツールの参照も持たない。"""
     from saiverse.playbook_sync import _creates_legacy_system_notice

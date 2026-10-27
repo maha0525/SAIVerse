@@ -14,9 +14,11 @@ SAIVerse 層が組んだ messages 列には、head (プロンプト先頭部) �
   元の位置で ``<system pass="合言葉">本文</system>`` の role=user に変える
   (画像などの metadata.media は引き継ぎ、写しの metadata に通知の印
   ``SYSTEM_NOTICE_KEY`` を必ず付ける)。
-- それ以外のメッセージ: 本文と ``tool_calls`` の引数に現れた合言葉を伏せる
-  (モデルが合言葉を復唱して記録に残った場合の再利用を防ぐ)。本文が部品の並び
-  なら、部品をまたいで連結した文字列で伏せる。
+- それ以外のメッセージ: 本文と ``tool_calls`` の引数と、metadata の
+  ``reasoning_details`` (前のターンの思考。OpenAI 互換のクライアントが次の
+  リクエストへ送り返す) の思考の文に現れた合言葉を伏せる (モデルが合言葉を
+  復唱して記録に残った場合の再利用を防ぐ)。本文が部品の並びなら、部品を
+  またいで連結した文字列で伏せる。
 
 head の印を持つメッセージが一つも無い列 (head を組まない要約・判定などの呼び出し)
 は何も変えずに返す — その列の先頭の system は呼び出し側の指示で、各クライアントの
@@ -271,6 +273,31 @@ def _redact_tool_call_arguments(tool_calls: Any, passphrase: str) -> Any:
     return out
 
 
+#: 思考の送り返し (metadata の ``reasoning_details`` — OpenAI 互換のクライアントが
+#: ``reasoning_passback_field`` で次のリクエストへ同梱する) の各項目のうち、
+#: 思考の文を持つ欄 (llm_clients/openai_reasoning.merge_streaming_reasoning_details
+#: が連結する欄と同じ)。署名や暗号化された欄は伏せない (書き換えると送り返しが壊れる)。
+_REASONING_TEXT_KEYS = ("text", "summary")
+
+
+def _redact_reasoning_details(details: Any, passphrase: str) -> Any:
+    """``reasoning_details`` の各項目の思考の文から合言葉を伏せた写し。"""
+    if not isinstance(details, list):
+        return details
+    out = []
+    for item in details:
+        if isinstance(item, dict):
+            redacted = {
+                key: redact_passphrase(item[key], passphrase)
+                for key in _REASONING_TEXT_KEYS
+                if isinstance(item.get(key), str)
+            }
+            if redacted:
+                item = {**item, **redacted}
+        out.append(item)
+    return out
+
+
 def _content_text(content: Any) -> str:
     from .utils import content_to_text
 
@@ -285,8 +312,8 @@ def _without_passphrase(msg: Dict[str, Any]) -> Dict[str, Any]:
     return {**msg, "metadata": new_meta}
 
 
-def _stored_image_summary(att: Dict[str, Any], metadata: Any) -> str:
-    """記録の metadata (``media`` / ``images`` の項目の ``summary``) に保存済みの画像の要約。"""
+def _stored_media_summary(att: Dict[str, Any], metadata: Any) -> str:
+    """記録の metadata (``media`` / ``images`` の項目の ``summary``) に保存済みの画像・音声・動画の要約。"""
     if not isinstance(metadata, dict):
         return ""
     from pathlib import Path
@@ -310,35 +337,48 @@ def _stored_image_summary(att: Dict[str, Any], metadata: Any) -> str:
     return ""
 
 
-def system_notice_image_note(att: Dict[str, Any], metadata: Any) -> str:
-    """システム通知の画像を文字で届けるときの説明の文 (決定的)。
+#: :func:`system_notice_media_note` の種類ごとの見出し (llm_clients/utils の
+#: image_summary_note / audio_summary_note / video_summary_note と同じ語)。
+_MEDIA_NOTE_LABELS = {"image": "画像", "audio": "音声", "video": "動画"}
 
-    ``att`` は saiverse/media_utils.iter_image_media の項目か、
-    :func:`system_notice_image_entries` の項目。system のまま届ける通知は文字しか
-    持てず、タグ化した通知でも画像を埋め込めない (画像非対応のモデル・枚数の上限の
+
+def system_notice_media_note(att: Dict[str, Any], metadata: Any, kind: str) -> str:
+    """システム通知の画像・音声・動画を文字で届けるときの説明の文 (決定的)。
+
+    ``kind`` は ``"image"`` / ``"audio"`` / ``"video"``。``att`` は
+    saiverse/media_utils の iter_image_media / iter_audio_media / iter_video_media
+    の項目か、:func:`system_notice_image_entries` の項目。system のまま届ける通知は
+    文字しか持てず、タグ化した通知でも埋め込めない (非対応のモデル・枚数の上限の
     外・ファイルが読めない) ときは説明の文になる。記録の metadata に保存済みの
-    要約があればそれを使い、無ければ ``[画像: <uri>]`` だけにする — その場で
-    要約を生成する llm_clients/utils.image_summary_note を使うと、生成の成否で
-    同じ記録から組む送信本文が変わる (不変条件 6)。
+    要約があればそれを使い、無ければ ``[画像: <uri>]`` (音声・動画も同じ形) だけに
+    する — その場で要約を生成する llm_clients/utils の image_summary_note などを
+    使うと、生成の成否で同じ記録から組む送信本文が変わる (不変条件 6)。
 
     この文は合言葉の変換 (:func:`present_system_notices`) の後で本文へ足される
-    ので、要約の文に現れた合言葉はここで伏せ、``<system`` も無害化する。
+    ことがあるので、要約の文に現れた合言葉はここで伏せ、``<system`` も無害化する。
     """
+    label = _MEDIA_NOTE_LABELS[kind]
     uri = att.get("uri") or str(att.get("path") or "unknown")
-    summary = _stored_image_summary(att, metadata)
+    summary = _stored_media_summary(att, metadata)
     if summary:
         summary = redact_known_passphrases(_neutralize_system_tags(summary))
-    return f"[画像: {uri}] {summary}" if summary else f"[画像: {uri}]"
+    return f"[{label}: {uri}] {summary}" if summary else f"[{label}: {uri}]"
 
 
-def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
-    """記録の metadata にある画像の項目を、ファイルの有無を問わず並べる (``uri`` と ``path``)。
+def system_notice_image_note(att: Dict[str, Any], metadata: Any) -> str:
+    """システム通知の画像の説明の文 (:func:`system_notice_media_note` の画像版)。"""
+    return system_notice_media_note(att, metadata, "image")
 
-    読み方は saiverse/media_utils.iter_image_media と同じ (``media`` は種類で絞り、
-    ``images`` は全部画像とみなす) だが、ファイルを探さない。iter_image_media は
-    読めない画像を返さないので、それだけを頼ると画像だけの通知が本文の空な
-    通知として消える。``images`` の項目が ``media`` の項目と同じ URI・パスなら
-    重ねて返さない。
+
+def system_notice_media_entries(metadata: Any, kind: str) -> List[Dict[str, Any]]:
+    """記録の metadata にある画像・音声・動画の項目を、ファイルの有無を問わず並べる (``uri`` と ``path``)。
+
+    ``kind`` は ``"image"`` / ``"audio"`` / ``"video"``。読み方は saiverse/media_utils の
+    iter_image_media / iter_audio_media / iter_video_media と同じ (``media`` は種類で
+    絞り、画像だけは ``images`` も全部画像とみなして読む) だが、ファイルを探さない。
+    iter_*_media は読めないファイルの項目を返さないので、それだけを頼ると画像・
+    音声・動画だけの通知が本文の空な通知として消える。``images`` の項目が
+    ``media`` の項目と同じ URI・パスなら重ねて返さない。
     """
     if not isinstance(metadata, dict):
         return []
@@ -351,12 +391,12 @@ def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
             item_type = str(item.get("type") or "").lower()
             item_mime = str(item.get("mime_type") or "").lower()
             if item_type:
-                if item_type != "image":
+                if item_type != kind:
                     continue
-            elif not item_mime.startswith("image/"):
+            elif not item_mime.startswith(f"{kind}/"):
                 continue
             candidates.append(item)
-    images = metadata.get("images")
+    images = metadata.get("images") if kind == "image" else None
     if isinstance(images, list):
         candidates.extend(item for item in images if isinstance(item, dict))
     from pathlib import Path
@@ -370,7 +410,7 @@ def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
         path_s = str(Path(path)) if isinstance(path, (str, Path)) and str(path) else ""
         if not uri and not path_s:
             continue
-        key = _image_entry_key({"uri": uri, "path": path_s})
+        key = _media_entry_key({"uri": uri, "path": path_s})
         if key in seen:
             continue
         seen.add(key)
@@ -378,8 +418,13 @@ def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _image_entry_key(att: Dict[str, Any]) -> str:
-    """画像の項目を同定する文字列 (iter_image_media の項目の ``uri`` 欄と同じ作り方)。"""
+def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
+    """記録の metadata にある画像の項目 (:func:`system_notice_media_entries` の画像版)。"""
+    return system_notice_media_entries(metadata, "image")
+
+
+def _media_entry_key(att: Dict[str, Any]) -> str:
+    """画像・音声・動画の項目を同定する文字列 (iter_*_media の項目の ``uri`` 欄と同じ作り方)。"""
     from pathlib import Path
 
     uri = att.get("uri")
@@ -389,15 +434,22 @@ def _image_entry_key(att: Dict[str, Any]) -> str:
     return str(Path(path)) if path else ""
 
 
+def unresolved_system_notice_media(
+    metadata: Any, attachments: List[Dict[str, Any]], kind: str,
+) -> List[Dict[str, Any]]:
+    """metadata の ``kind`` の項目のうち、iter_*_media の結果 ``attachments`` に無いもの (ファイルが読めない項目)。"""
+    resolved = {_media_entry_key(att) for att in attachments}
+    return [
+        entry for entry in system_notice_media_entries(metadata, kind)
+        if _media_entry_key(entry) not in resolved
+    ]
+
+
 def unresolved_system_notice_images(
     metadata: Any, attachments: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """metadata の画像のうち、iter_image_media の結果 ``attachments`` に無いもの (ファイルが読めない画像)。"""
-    resolved = {_image_entry_key(att) for att in attachments}
-    return [
-        entry for entry in system_notice_image_entries(metadata)
-        if _image_entry_key(entry) not in resolved
-    ]
+    return unresolved_system_notice_media(metadata, attachments, "image")
 
 
 def with_system_notice_image_notes(text: str, metadata: Any) -> str:
@@ -501,6 +553,14 @@ def present_system_notices(
             )
         if passphrase and "tool_calls" in msg:
             new_msg["tool_calls"] = _redact_tool_call_arguments(msg.get("tool_calls"), passphrase)
+        new_meta = _metadata(new_msg)
+        if passphrase and new_meta and "reasoning_details" in new_meta:
+            new_msg["metadata"] = {
+                **new_meta,
+                "reasoning_details": _redact_reasoning_details(
+                    new_meta["reasoning_details"], passphrase,
+                ),
+            }
         out.append(new_msg)
     return out
 
@@ -518,8 +578,11 @@ __all__ = [
     "system_notice_image_entries",
     "system_notice_image_note",
     "system_notice_indices",
+    "system_notice_media_entries",
+    "system_notice_media_note",
     "system_notice_passphrase",
     "tag_system_notice",
     "unresolved_system_notice_images",
+    "unresolved_system_notice_media",
     "with_system_notice_image_notes",
 ]

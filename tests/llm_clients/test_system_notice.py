@@ -772,3 +772,170 @@ def test_recent_passphrases_survive_the_limit(monkeypatch):
     clock["now"] += 700  # old1・new3 は 3700 秒前、old2 は 700 秒前
     notice_mod._remember_passphrase("new4")
     assert list(notice_mod._KNOWN_PASSPHRASES) == ["old2", "new4"]
+
+
+# ---------------------------------------------------------------------------
+# 10. 前のターンの思考の送り返し (reasoning_details) にも合言葉を残さない
+# ---------------------------------------------------------------------------
+
+
+def _conversation_with_reasoning() -> list:
+    msgs = _conversation()
+    msgs[2] = {
+        "role": "assistant",
+        "content": "やあ",
+        "metadata": {"reasoning_details": [
+            {"type": "reasoning.text", "text": f"合言葉は {PASS} だった", "signature": "sig-1",
+             "index": 0},
+            {"type": "reasoning.summary", "summary": f"要約 {PASS}", "index": 1},
+            {"type": "reasoning.encrypted", "data": "opaque", "index": 2},
+        ]},
+    }
+    return msgs
+
+
+@pytest.mark.parametrize("convert", [False, True])
+def test_reasoning_passback_masks_the_passphrase(convert):
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+
+    msgs = _conversation_with_reasoning()
+    out = prepare_openai_messages(
+        msgs, supports_images=False, convert_system_to_user=convert,
+        reasoning_passback_field="reasoning_details",
+    )
+    details = out[2]["reasoning_details"]
+    assert PASS not in json.dumps(details, ensure_ascii=False)
+    masked = "*" * len(PASS)
+    assert details[0] == {
+        "type": "reasoning.text", "text": f"合言葉は {masked} だった", "signature": "sig-1",
+        "index": 0,
+    }
+    assert details[1]["summary"] == f"要約 {masked}"
+    # 思考の文以外の欄 (署名・暗号化された中身) は触らない
+    assert details[2] == {"type": "reasoning.encrypted", "data": "opaque", "index": 2}
+    # 入力の記録は変えない
+    assert PASS in msgs[2]["metadata"]["reasoning_details"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# 11. 通知の音声・動画も、埋め込めないときは保存済みの要約か URI だけの説明にする
+# ---------------------------------------------------------------------------
+
+
+def _media_only_notice(path: str, kind: str, mime: str, **entry_extra) -> list:
+    msgs = _conversation()
+    msgs[3] = {
+        "role": "system",
+        "content": "",
+        "metadata": {"media": [{"path": path, "mime_type": mime, "type": kind, **entry_extra}]},
+    }
+    return msgs
+
+
+@pytest.fixture
+def av_summary_generator():
+    generator = MagicMock(return_value="生成した要約")
+    with patch("saiverse.media_summary.ensure_audio_summary", new=generator), patch(
+        "saiverse.media_summary.ensure_video_summary", new=generator,
+    ), patch("llm_clients.gemini.ensure_audio_summary", new=generator), patch(
+        "llm_clients.gemini.ensure_video_summary", new=generator,
+    ):
+        yield generator
+
+
+_AV_CASES = [("audio", "音声", "audio/ogg", "notice.ogg"), ("video", "動画", "video/mp4", "notice.mp4")]
+
+
+@pytest.mark.parametrize("kind,label,mime,filename", _AV_CASES)
+def test_gemini_notice_audio_video_use_stored_notes(
+    tmp_path, av_summary_generator, gemini_client, monkeypatch, kind, label, mime, filename,
+):
+    path = tmp_path / filename
+    path.write_bytes(b"\x00\x01")
+    # 非対応のモデル: 保存済みの要約があればそれ、無ければ URI だけ
+    setattr(gemini_client, f"supports_{kind}", False)
+    _, contents = gemini_client._convert_messages(
+        _media_only_notice(str(path), kind, mime, summary=f"保存済み {PASS}"),
+    )
+    text = contents[2].parts[0].text
+    assert text.startswith(f'<system pass="{PASS}">')
+    assert f"[{label}: {path}] 保存済み " + "*" * len(PASS) in text
+    _, contents = gemini_client._convert_messages(_media_only_notice(str(path), kind, mime))
+    assert contents[2].parts[0].text.endswith(f"[{label}: {path}]")
+
+    # 対応のモデルでファイルが読めない: 黙って捨てず、同じ説明の文で残す
+    setattr(gemini_client, f"supports_{kind}", True)
+    monkeypatch.setattr(f"llm_clients.gemini.load_{kind}_bytes_for_llm", lambda *a, **k: (None, None))
+    _, contents = gemini_client._convert_messages(_media_only_notice(str(path), kind, mime))
+    assert contents[2].parts[0].text.endswith(f"[{label}: {path}]")
+
+    av_summary_generator.assert_not_called()
+
+
+@pytest.mark.parametrize("kind,label,mime,filename", _AV_CASES)
+def test_shared_audio_video_fallback_uses_stored_notes_for_notices(
+    tmp_path, av_summary_generator, kind, label, mime, filename,
+):
+    """Gemini 以外のクライアントが通る共通の経路 (_inject_unsupported_media_summaries) も同じ規則。"""
+    from types import SimpleNamespace
+
+    from llm_clients.base import LLMClient
+
+    path = tmp_path / filename
+    path.write_bytes(b"\x00\x01")
+    client = SimpleNamespace(supports_audio=False, supports_video=False)
+
+    msgs = _media_only_notice(str(path), kind, mime, summary="保存済み")
+    out = LLMClient._inject_unsupported_media_summaries(client, msgs)
+    assert out[3]["content"] == f"[{label}: {path}] 保存済み"
+    av_summary_generator.assert_not_called()
+
+    # 通知でない発言は従来どおりその場で要約する
+    msgs = _media_only_notice(str(path), kind, mime)
+    msgs[3]["role"] = "user"
+    out = LLMClient._inject_unsupported_media_summaries(client, msgs)
+    assert out[3]["content"] == f"[{label}: {path}] 生成した要約"
+
+
+@pytest.mark.parametrize("kind,label,mime,filename", _AV_CASES)
+def test_notice_whose_audio_video_file_is_missing_survives(
+    tmp_path, av_summary_generator, gemini_client, kind, label, mime, filename,
+):
+    """ファイルが消えた音声・動画だけの通知は、metadata の記述から説明の文を持って残る。
+
+    iter_audio_media / iter_video_media はファイルの無い項目を返さないので、それだけを
+    頼ると本文の空な通知として消える (画像の test_notice_whose_image_file_is_missing_survives
+    と同じ)。
+    """
+    from types import SimpleNamespace
+
+    from llm_clients.base import LLMClient
+
+    missing = str(tmp_path / filename)
+    note = f"[{label}: {missing}]"
+
+    # Gemini (タグ化): 対応・非対応のどちらでも説明の文が残る
+    for supports in (True, False):
+        setattr(gemini_client, f"supports_{kind}", supports)
+        _, contents = gemini_client._convert_messages(_media_only_notice(missing, kind, mime))
+        text = contents[2].parts[0].text
+        assert text.startswith(f'<system pass="{PASS}">')
+        assert text.endswith(note)
+        # 保存済みの要約があればそれも残す
+        _, contents = gemini_client._convert_messages(
+            _media_only_notice(missing, kind, mime, summary="保存済み"),
+        )
+        assert contents[2].parts[0].text.endswith(f"{note} 保存済み")
+
+    # Gemini 以外のクライアントが通る共通の経路 (この時点ではまだ role=system)
+    client = SimpleNamespace(supports_audio=False, supports_video=False)
+    out = LLMClient._inject_unsupported_media_summaries(
+        client, _media_only_notice(missing, kind, mime),
+    )
+    assert out[3]["content"] == note
+    out = LLMClient._inject_unsupported_media_summaries(
+        client, _media_only_notice(missing, kind, mime, summary="保存済み"),
+    )
+    assert out[3]["content"] == f"{note} 保存済み"
+
+    av_summary_generator.assert_not_called()

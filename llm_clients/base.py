@@ -128,11 +128,22 @@ class LLMClient:
         if self.supports_audio and self.supports_video:
             return messages
 
+        from .system_notice import (
+            system_notice_indices,
+            system_notice_media_note,
+            unresolved_system_notice_media,
+        )
         from .utils import inject_audio_video_summaries
         from saiverse.media_utils import iter_audio_media, iter_video_media
 
+        # 会話の途中のシステム通知 (この時点ではまだ role=system) の音声・動画は、
+        # その場で要約を生成せず、保存済みの要約か URI だけの説明にする — 生成の
+        # 成否で同じ記録から組む送信本文が揺れないように
+        # (docs/intent/system_notice_delivery.md 不変条件 6、画像と同じ規則)。
+        notice_indices = system_notice_indices(messages)
+
         new_msgs: List[Dict[str, Any]] = []
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 new_msgs.append(msg)
                 continue
@@ -143,11 +154,36 @@ class LLMClient:
 
             audio_items = iter_audio_media(metadata) if not self.supports_audio else []
             video_items = iter_video_media(metadata) if not self.supports_video else []
+            content = msg.get("content", "")
+
+            if idx in notice_indices and isinstance(content, str):
+                # iter_audio_media / iter_video_media はファイルが無い項目を返さない
+                # ので、通知は metadata の記述からも並べ、ファイルが消えていても
+                # 説明の文で残す (画像の unresolved_system_notice_images と同じ形)。
+                # 残さないと、音声・動画だけの通知は本文の空な通知として消える。
+                new_text = content
+                for kind, items, supported in (
+                    ("audio", audio_items, self.supports_audio),
+                    ("video", video_items, self.supports_video),
+                ):
+                    if supported:
+                        continue
+                    missing = unresolved_system_notice_media(metadata, items, kind)
+                    for att in list(items) + missing:
+                        note = system_notice_media_note(att, metadata, kind)
+                        new_text = f"{new_text}\n{note}" if new_text else note
+                if new_text == content:
+                    new_msgs.append(msg)
+                    continue
+                new_msg = dict(msg)
+                new_msg["content"] = new_text
+                new_msgs.append(new_msg)
+                continue
+
             if not audio_items and not video_items:
                 new_msgs.append(msg)
                 continue
 
-            content = msg.get("content", "")
             if not isinstance(content, str):
                 # Complex content (e.g. tool_calls); skip injection rather than risk
                 # breaking the structure.

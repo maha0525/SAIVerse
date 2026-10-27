@@ -326,7 +326,9 @@ from .system_notice import (
     is_presented_system_notice,
     present_system_notices,
     system_notice_image_note,
+    system_notice_media_note,
     unresolved_system_notice_images,
+    unresolved_system_notice_media,
 )
 from .utils import (
     CACHE_BOUNDARY_METADATA_KEY,
@@ -1721,6 +1723,14 @@ class GeminiClient(LLMClient):
                 ):
                     note = system_notice_image_note(entry, message.get("metadata"))
                     text_content = f"{text_content}\n{note}" if text_content else note
+                # 音声・動画も同じ — iter_audio_media / iter_video_media はファイルが
+                # 無い項目を返さないので、metadata の記述から説明の文で残す
+                for kind, resolved in (("audio", audio_attachments), ("video", video_attachments)):
+                    for entry in unresolved_system_notice_media(
+                        message.get("metadata"), resolved, kind,
+                    ):
+                        note = system_notice_media_note(entry, message.get("metadata"), kind)
+                        text_content = f"{text_content}\n{note}" if text_content else note
 
             # === Image processing ===
             if attachments and self.supports_images:
@@ -1816,12 +1826,25 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load audio for Gemini payload: %s", attachment["uri"]
                         )
+                        if is_notice:
+                            # 通知の音声は画像と同じく説明の文で残す (生成はしない)
+                            note = system_notice_media_note(
+                                attachment, message.get("metadata"), "audio",
+                            )
+                            text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
             elif audio_attachments:
                 # supports_audio=False: inject audio summaries as text only
                 skip_audio_summary = idx in skip_audio_summary_indices
                 for attachment in audio_attachments:
+                    if is_notice:
+                        # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
+                        note = system_notice_media_note(
+                            attachment, message.get("metadata"), "audio",
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                        continue
                     summary = (
                         None if skip_audio_summary
                         else ensure_audio_summary(attachment["path"], attachment["mime_type"])
@@ -1844,12 +1867,25 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load video for Gemini payload: %s", attachment["uri"]
                         )
+                        if is_notice:
+                            # 通知の動画は画像と同じく説明の文で残す (生成はしない)
+                            note = system_notice_media_note(
+                                attachment, message.get("metadata"), "video",
+                            )
+                            text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
             elif video_attachments:
                 # supports_video=False: inject video summaries as text only
                 skip_video_summary = idx in skip_video_summary_indices
                 for attachment in video_attachments:
+                    if is_notice:
+                        # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
+                        note = system_notice_media_note(
+                            attachment, message.get("metadata"), "video",
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                        continue
                     summary = (
                         None if skip_video_summary
                         else ensure_video_summary(attachment["path"], attachment["mime_type"])
