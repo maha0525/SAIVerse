@@ -1,4 +1,4 @@
-"""Codex Terra configuration reaches the existing Responses serializer offline."""
+"""Terra configurations reach their existing provider serializers offline."""
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -79,3 +79,60 @@ def test_terra_responses_body_preserves_image_and_supported_output_mode(with_too
     else:
         assert body["text"]["format"]["type"] == "json_schema"
         assert body["text"]["format"]["strict"] is True
+
+
+def test_metered_terra_builtin_provider_capabilities_and_parameters(builtin_configs):
+    config = builtin_configs['gpt-6.1-terra']
+    assert config['model'] == 'gpt-6.1-terra'
+    assert config['provider_ref'] == config['provider'] == 'openai'
+    assert config['protocol'] == 'openai_compat'
+    assert config['base_url'] == 'https://api.openai.com/v1'
+    assert config['api_key_env'] == 'OPENAI_API_KEY'
+    assert config['supports_images'] is True
+    assert config['context_length'] == 272000
+    params = config['parameters']
+    assert params['reasoning_effort']['options'] == ['none', 'low', 'medium', 'high', 'xhigh', 'max']
+    assert params['reasoning_effort']['default'] == 'medium'
+    assert params['max_completion_tokens']['default'] == params['max_completion_tokens']['max'] == 8192
+    assert params['verbosity']['client_support'] == ['responses']
+    assert set(params) == {'reasoning_effort', 'verbosity', 'max_completion_tokens'}
+
+
+@pytest.mark.parametrize('input_tokens', [272000, 272001])
+def test_metered_terra_cost_uses_full_request_long_context_tier(builtin_configs, input_tokens):
+    long_context = input_tokens > 272000
+    input_rate, cached_rate, output_rate = (2, .1, 7.5) if long_context else (1, .05, 5)
+    expected = ((input_tokens - 10000) * input_rate + 10000 * cached_rate + 1000 * output_rate) / 1_000_000
+    assert model_configs.calculate_cost('gpt-6.1-terra', input_tokens, 1000, cached_tokens=10000) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('structured', [False, True])
+def test_metered_terra_factory_preserves_image_and_safe_request_parameters(builtin_configs, monkeypatch, structured):
+    from llm_clients.openai import OpenAIClient
+
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-offline-key')
+    config = builtin_configs['gpt-6.1-terra']
+    # Keep provider validation real, but resolve its public address offline.
+    # Replace the SDK at construction: no real credential or network access.
+    with patch("saiverse.provider_security.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]), \
+         patch("llm_clients.openai.OpenAI"):
+        client = get_llm_client('gpt-6.1-terra', config['provider'], config['context_length'], config)
+    assert isinstance(client, OpenAIClient)
+    assert client.model == client.config_key == 'gpt-6.1-terra'
+    image = 'data:image/png;base64,iVBORw0KGgo='
+    messages = [{'role': 'user', 'content': [
+        {'type': 'text', 'text': 'Synthetic input'},
+        {'type': 'image_url', 'image_url': {'url': image}},
+    ]}]
+    prepared = client._prepare_messages(messages)
+    assert prepared[0]['content'][1]['image_url']['url'] == image
+    schema = {'type': 'object', 'properties': {'answer': {'type': 'string'}}, 'required': ['answer']}
+    kwargs = client._build_request_kwargs(response_schema=schema if structured else None, temperature=None)
+    assert kwargs['reasoning_effort'] == 'medium'
+    assert kwargs['max_completion_tokens'] == 8192
+    assert not {'tools', 'tool_choice', 'verbosity', 'temperature', 'top_p', 'logprobs', 'top_logprobs'} & kwargs.keys()
+    if structured:
+        assert kwargs['response_format']['type'] == 'json_schema'
+        assert kwargs['response_format']['json_schema']['strict'] is True
+    else:
+        assert 'response_format' not in kwargs
