@@ -87,7 +87,7 @@ def _sent_kwargs(config_key, configs, monkeypatch, *, override=None):
     return kwargs
 
 
-@pytest.mark.parametrize("config_key", ["gpt-6.1-sol", "gpt-6-astra", "gpt-5"])
+@pytest.mark.parametrize("config_key", ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-5"])
 def test_builtin_openai_reasoning_models_send_no_temperature(builtin_configs, monkeypatch, config_key):
     kwargs = _sent_kwargs(config_key, builtin_configs, monkeypatch)
     assert kwargs["reasoning_effort"] == builtin_configs[config_key]["parameters"]["reasoning_effort"]["default"]
