@@ -224,8 +224,15 @@ def prepare_openai_messages(
     call that skips one shifts the rest without any error (NIM once passed
     convert_system_to_user into max_image_embeds, which embedded zero images).
     """
-    from .system_notice import is_head_system_message, present_system_notices
+    from .system_notice import (
+        is_head_system_message,
+        present_system_notices,
+        system_notice_indices,
+        with_system_notice_image_notes,
+    )
 
+    # system のまま送る途中のシステム通知の位置 (画像を説明の文に置き換える)。
+    direct_notice_indices: Set[int] = set()
     if any(is_head_system_message(m) for m in messages):
         convert_notices = (
             convert_system_to_user if convert_system_notices is None
@@ -234,6 +241,8 @@ def prepare_openai_messages(
         messages = present_system_notices(
             messages, accepts_mid_system=not convert_notices,
         )
+        if not convert_notices:
+            direct_notice_indices = system_notice_indices(messages)
         # 途中の通知は上で扱い済み。残る system は head とその前の指示だけ
         # なので、位置による変換は掛けない。
         convert_system_to_user = False
@@ -252,9 +261,25 @@ def prepare_openai_messages(
             prepared.append(msg)
             continue
 
+        attachments = attachment_cache.get(idx, [])
+        if idx in direct_notice_indices and attachments:
+            # system のまま送る通知は文字しか持てない。画像は空判定より前に
+            # 説明の文として本文へ足す — 本文が空で画像だけの通知も落とさない。
+            # 説明は保存済みの要約か URI だけで、その場では生成しない (生成の
+            # 成否で送信本文が揺れないように — llm_clients/system_notice.py の
+            # system_notice_image_note)。
+            msg = {
+                **msg,
+                "content": with_system_notice_image_notes(
+                    content_to_text(msg.get("content") or ""),
+                    attachments, msg.get("metadata"),
+                ),
+            }
+            attachments = []
+
         # 本文の空の user でも、画像を持っていれば画像だけの発言として残す
         # (画像か画像の説明が下の build_message_content_with_attachments で入る)
-        keeps_images = msg.get("role") == "user" and bool(attachment_cache.get(idx))
+        keeps_images = msg.get("role") == "user" and bool(attachments)
 
         if is_empty_message(msg) and not keeps_images:
             logging.debug("Skipping empty message with role=%s", msg.get("role"))
@@ -270,7 +295,6 @@ def prepare_openai_messages(
         converted_content = normalized[1] if normalized else None
 
         metadata = msg.get("metadata")
-        attachments = attachment_cache.get(idx, [])
         skip_summary = idx in skip_summary_indices
 
         clean_msg: Dict[str, Any] = {}

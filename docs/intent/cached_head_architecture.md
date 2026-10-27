@@ -339,7 +339,7 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 ### C7. required Section を欠いた head で LLM を実行しない (fail-closed、W6 / SEA 監査 S6、2026-07-21)
 
-人格の同一性を担う Section (`required = True`: common_prompt / persona_self / core_memory) の **capture 失敗 (既存値なし)・render 失敗・snapshot 永続化失敗**が残っている間は、`render_head_messages` が `HeadNotReadyError` を投げ、`prepare_context` がそれを LLM 実行前に伝播させて Pulse を中断する。人格に属さない発話が本人履歴へ確定する経路を塞ぐのが目的。運用の細目:
+人格の同一性を担う Section (`required = True`: common_prompt / persona_self / core_memory) の **capture 失敗 (既存値なし)・render 失敗・snapshot 永続化失敗**が残っている間は、`render_head_messages` が `HeadNotReadyError` を投げ、`prepare_context` がそれを LLM 実行前に伝播させて Pulse を中断する。人格に属さない発話が本人履歴へ確定する経路を塞ぐのが目的。2026-10-28 からはシステム通知の読み方の Section (`system_notice`) も `required = True` にした — 欠けると、合言葉付きの通知 (または会話の途中の system) が読み方の説明無しで届くため (docs/intent/system_notice_delivery.md)。運用の細目:
 
 - **失敗と空は別物**。空の snapshot を正しく capture して render が None を返すのは正規挙動 (head に出ないだけ)。fail-closed の対象は失敗のみ。
 - **capture 失敗の痕跡は None ではなく欠損**。既存値があれば据え置き (stale-but-real = 直近の正しい snapshot で走る)、無ければ key を置かず `LineHeadSnapshot.capture_failures` に理由を記帳する。`ensure_snapshot` は None 値も欠損として認識し、**欠損 Section だけ** `recapture_missing` で毎呼び出し再試行する (= 復旧後の自己修復。capture_all での全再構築は 1 Section の持続故障で毎 Pulse の head 再構築 = cache 破壊 + 通知基準リセットに化けるため禁止)。

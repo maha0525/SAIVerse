@@ -193,7 +193,8 @@ class HeadSection(Protocol):
 
     任意属性 ``required: bool`` (既定 False、Protocol には含めない):
     True の Section は人格の同一性を担う (common_prompt / persona_self /
-    core_memory)。capture / render / persist の失敗時は LLM を実行しない
+    core_memory) か、欠けると送る形と説明が食い違う (system_notice — システム
+    通知の読み方)。capture / render / persist の失敗時は LLM を実行しない
     (fail-closed、W6 / SEA 監査 S6)。False の Section の失敗は警告つきで
     degrade し、次 Pulse の再 capture で自己回復する。
     「空を render する」のは失敗ではない — 空の snapshot が正しく capture

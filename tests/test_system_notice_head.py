@@ -324,3 +324,48 @@ def test_render_head_messages_end_to_end(monkeypatch):
     assert head["metadata"][SYSTEM_NOTICE_PASSPHRASE_KEY] == passphrase
     assert SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER in head["content"]
     assert passphrase not in head["content"]
+
+
+# ---------------------------------------------------------------------------
+# 6. 説明を欠いた head では送らない
+# ---------------------------------------------------------------------------
+
+
+def test_explanation_section_is_required():
+    from sea.head_pipeline.sections.system_notice import SystemNoticeSection
+
+    registry = HeadSectionRegistry()
+    registry.register(_Section())
+    registry.register(SystemNoticeSection())
+    assert "system_notice" in registry.required_section_names()
+
+
+def test_head_without_the_explanation_is_not_sent(monkeypatch):
+    """説明の判定 (capture) に失敗したら、説明の無い head で LLM を実行しない。"""
+    from sea.head_pipeline.integration import render_head_messages
+    from sea.head_pipeline.sections.system_notice import SystemNoticeSection
+    from sea.head_pipeline.types import HeadNotReadyError
+
+    def _broken(model_key):
+        raise RuntimeError("model config unreadable")
+
+    monkeypatch.setattr(
+        "llm_clients.system_notice.model_accepts_mid_conversation_system", _broken,
+    )
+    registry = HeadSectionRegistry()
+    registry.register(_Section())
+    registry.register(SystemNoticeSection())
+    pipeline = HeadPipeline(registry=registry)
+    persona = SimpleNamespace(persona_id=PERSONA_ID, model=MODEL)
+    manager = SimpleNamespace(sea_runtime=None)
+    with pytest.raises(HeadNotReadyError) as excinfo:
+        render_head_messages(persona, manager, "b1", pipeline=pipeline, model_key=MODEL)
+    assert "system_notice" in excinfo.value.sections
+
+    # 判定が直れば次の呼び出しで欠損分だけ撮り直して送れる
+    monkeypatch.setattr(
+        "llm_clients.system_notice.model_accepts_mid_conversation_system",
+        lambda model_key: False,
+    )
+    messages = render_head_messages(persona, manager, "b1", pipeline=pipeline, model_key=MODEL)
+    assert SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER in messages[0]["content"]

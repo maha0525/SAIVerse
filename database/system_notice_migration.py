@@ -87,17 +87,28 @@ def starts_with_system_tag(text: Any) -> bool:
     return isinstance(text, str) and text.startswith(SYSTEM_OPEN)
 
 
-def strip_system_tags(text: str) -> str:
-    """一番外側の ``<system>…</system>`` の包みを外した本文。
+def strip_system_tags(text: str) -> Optional[str]:
+    """外側の ``<system>…</system>`` の包みを外した本文。包みの形が曖昧なら None。
 
-    本文を一番外側の塊 (包みの中身と、包みの外の地の文) に分け、各塊の前後の
-    空白を落として空行 (``\\n\\n``) で繋ぐ。``perception_batches`` の
-    ``rendered_text`` (``<system>`` の塊二つを ``\\n`` で繋いだ旧形式) は、
-    第 3 束の提示の最終形 (sea/runtime_context.
-    compose_turn_realtime_and_recall_content — 二つの本文を ``\\n\\n`` で繋ぐ) と
-    同じ形になる。包みの中に入れ子で現れたタグ (中断の再開文が元の発火文を
-    引用している世代など) は本文の一部としてそのまま残す — 送るときに
+    剥がすのは、本文全体が「完全な ``<system>…</system>`` の組を空白だけを
+    挟んで並べたもの」になっている行だけ。各組の中身の前後の空白を落として
+    空行 (``\\n\\n``) で繋ぐ。``perception_batches`` の ``rendered_text``
+    (``<system>`` の組二つを ``\\n`` で繋いだ旧形式) は、第 3 束の提示の最終形
+    (sea/runtime_context.compose_turn_realtime_and_recall_content — 二つの本文を
+    ``\\n\\n`` で繋ぐ) と同じ形になる。
+
+    組の中で開きと閉じが同数そろって入れ子になっているタグ (中断の再開文が元の
+    発火文を引用している世代など) は本文の一部としてそのまま残す — 送るときに
     クライアント層が無害化する (llm_clients/system_notice.py)。
+
+    次の形は None を返す (呼び出し側は変換せずレポートへ回す)。どれも、外部
+    由来の本文 (建物のイベント文・メンションなど) に ``</system>`` や
+    ``<system>`` が混ざっていた可能性があり、どこまでが包みかを機械的に決め
+    られない — 決め打ちで剥がすと本文が変わる:
+
+    - 対の無い閉じタグ (``<system>A </system> B</system>``)
+    - 閉じられていない開きタグ (途中で切れた形、``<system>A <system>B</system>``)
+    - 組の外に空白以外の文字がある (``<system>A</system> B``)
     """
     segments: List[str] = []
     current: List[str] = []
@@ -106,30 +117,30 @@ def strip_system_tags(text: str) -> str:
     n = len(text)
     while i < n:
         if text.startswith(SYSTEM_OPEN, i):
-            if depth == 0:
-                segments.append("".join(current))
-                current = []
-            else:
+            if depth > 0:
                 current.append(SYSTEM_OPEN)
             depth += 1
             i += len(SYSTEM_OPEN)
             continue
         if text.startswith(SYSTEM_CLOSE, i):
-            if depth == 1:
+            if depth == 0:
+                return None  # 対の無い閉じタグ
+            depth -= 1
+            if depth == 0:
                 segments.append("".join(current))
                 current = []
-                depth = 0
             else:
-                # depth > 1: 入れ子の閉じタグ / depth == 0: 対の無い閉じタグ。
-                # どちらも本文の一部として残す。
                 current.append(SYSTEM_CLOSE)
-                if depth > 1:
-                    depth -= 1
             i += len(SYSTEM_CLOSE)
             continue
-        current.append(text[i])
+        if depth == 0:
+            if not text[i].isspace():
+                return None  # 組の外の地の文
+        else:
+            current.append(text[i])
         i += 1
-    segments.append("".join(current))
+    if depth != 0 or not segments:
+        return None  # 閉じられていない開きタグ
     return "\n\n".join(s.strip() for s in segments if s.strip())
 
 
@@ -213,7 +224,7 @@ def classify_tagged_message(
     if metadata.get("with") == ["system"]:
         return "schedule"
     if _has_playbook_tag(tags):
-        if strip_system_tags(content).startswith(_SUBLINE_REPORT_PREFIX):
+        if (strip_system_tags(content) or "").startswith(_SUBLINE_REPORT_PREFIX):
             return "subline_report"
         return "playbook_memorize"
     return None
@@ -262,6 +273,12 @@ class Skipped:
     role: str
     tags: List[str]
     head: str
+    #: 変換しなかった理由 (空 = 系統を判定できなかった)。
+    reason: str = ""
+
+
+#: :func:`strip_system_tags` が包みの形を決められなかった行の理由。
+AMBIGUOUS_TAGS_REASON = "タグの対応が曖昧"
 
 
 @dataclass
@@ -277,6 +294,11 @@ class StoreResult:
     skipped: List[Skipped] = field(default_factory=list)
     unknown_system_count: int = 0
     unknown_system_samples: List[Skipped] = field(default_factory=list)
+    #: タグ無し本文の role=user で ``playbook:`` タグを持ち ``conversation`` タグの
+    #: 無い行 (旧世界の MEMORIZE の結果の候補)。変換はせず、人の目で確かめる
+    #: ためにレポートへ出す。
+    untagged_memorize_count: int = 0
+    untagged_memorize_samples: List[Skipped] = field(default_factory=list)
     #: 当てる UPDATE 文 (SQL, 引数)。走査は読むだけで、書くのは :func:`_apply`。
     updates: List[Tuple[str, tuple]] = field(default_factory=list)
     already_done: bool = False
@@ -291,7 +313,8 @@ class StoreResult:
     @property
     def has_findings(self) -> bool:
         return bool(
-            self.changes or self.skipped or self.unknown_system_count or self.error
+            self.changes or self.skipped or self.unknown_system_count
+            or self.untagged_memorize_count or self.error
         )
 
 
@@ -356,13 +379,14 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         role_s = role.lower() if isinstance(role, str) else ""
         if starts_with_system_tag(content):
             kind = classify_tagged_message(role, content, metadata)
-            if kind is None:
+            body = strip_system_tags(content) if kind is not None else None
+            if kind is None or body is None:
                 result.skipped.append(Skipped(
                     "messages", str(row_id), str(role),
                     sorted(_tags_of(metadata)), _head(content),
+                    reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
                 ))
                 continue
-            body = strip_system_tags(content)
             new_meta = dict(metadata)
             new_meta[SYSTEM_NOTICE_KEY] = kind
             result.updates.append((
@@ -393,6 +417,26 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
             "messages(印の付与)", str(row_id), kind, str(content or ""), str(content or ""),
         ))
 
+    # 旧世界の MEMORIZE の結果 (building_move / document_create / document_search /
+    # generate_image など) は role=user・タグ無しの本文で保存された世代がある。
+    # 発話でないことの来歴を機械的に確定できないので変換はせず、候補を数えて
+    # レポートに出す。
+    for row_id, content, raw_meta in conn.execute(
+        "SELECT id, content, metadata FROM messages "
+        "WHERE role = 'user' AND metadata LIKE '%playbook:%' "
+        "ORDER BY created_at, rowid",
+    ).fetchall():
+        if starts_with_system_tag(content):
+            continue
+        tags = _tags_of(_load_json(raw_meta))
+        if not _has_playbook_tag(tags) or "conversation" in tags:
+            continue
+        result.untagged_memorize_count += 1
+        if len(result.untagged_memorize_samples) < UNKNOWN_SYSTEM_LIST_LIMIT:
+            result.untagged_memorize_samples.append(Skipped(
+                "messages", str(row_id), "user", sorted(tags), _head(content),
+            ))
+
     if "paired_action_text" in cols:
         for row_id, text in conn.execute(
             "SELECT id, paired_action_text FROM messages "
@@ -400,6 +444,12 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
             (len(SYSTEM_OPEN), SYSTEM_OPEN),
         ).fetchall():
             body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "messages.paired_action_text", str(row_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
             result.updates.append((
                 "UPDATE messages SET paired_action_text = ? WHERE id = ?",
                 (body, row_id),
@@ -422,6 +472,12 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 ))
                 continue
             body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "perception_batches", str(batch_id), str(batch_kind), [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
             result.updates.append((
                 "UPDATE perception_batches SET rendered_text = ? WHERE id = ?",
                 (body, batch_id),
@@ -464,43 +520,51 @@ def migrate_persona_db(
     """一つのペルソナの記憶 DB を移行する。
 
     印 (:data:`MIGRATION_MARKER_KEY`) が立っていれば何もしない。変換する行が
-    あれば、書き換える前に写しを ``output_dir/<persona_id>/`` へ取る (写しが
-    取れなければ書き換えない)。``dry_run`` は読み取り専用で開き、何も書かない。
+    あれば、DB に何かを書く前 (``init_db`` のスキーマ用意より前) に写しを
+    ``output_dir/<persona_id>/`` へ取る (写しが取れなければ書き換えない)。
+    ``dry_run`` は読み取り専用で開き、何も書かない。
     """
     result = StoreResult(label=f"ペルソナ {persona_id}", path=str(db_path), persona=True)
-    if dry_run:
-        with closing(_open_readonly(db_path)) as conn:
-            if _persona_marker_set(conn):
-                result.already_done = True
-                return result
+    # 印の確認と変換対象の走査は読み取り専用で行う — init_db は開くだけで
+    # CREATE / ALTER と既存行の埋め直しをコミットするので、写しより先に呼ぶと
+    # 写しが「触る前」の状態でなくなる。
+    with closing(_open_readonly(db_path)) as conn:
+        if _persona_marker_set(conn):
+            result.already_done = True
+            return result
+        if dry_run:
             scan_persona_conn(conn, result)
-        return result
+            return result
+        probe = StoreResult(label=result.label, path=result.path)
+        scan_persona_conn(conn, probe)
+
+    if probe.updates:
+        backup = output_dir / persona_id / f"memory.db.pre_migration_{stamp}.bak"
+        try:
+            _snapshot(db_path, backup)
+        except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
+            LOGGER.error(
+                "[system-notice-migration] could not back up %s; skipping its migration",
+                db_path, exc_info=True,
+            )
+            result.error = f"移行前の写しを取れなかったので、この DB は移行していません: {exc}"
+            return result
+        result.backup_path = str(backup)
 
     from sai_memory.memory.storage import init_db, set_embed_metadata
 
     # init_db はペルソナの読み込み (SAIMemoryAdapter) と同じ開き方で、列と
-    # embed_metadata を用意する。
+    # embed_metadata を用意する (印を書くのに要る)。
     with closing(init_db(str(db_path))) as conn:
-        if _persona_marker_set(conn):
-            result.already_done = True
-            return result
-        probe = StoreResult(label=result.label, path=result.path)
-        scan_persona_conn(conn, probe)
-        if probe.updates:
-            backup = output_dir / persona_id / f"memory.db.pre_migration_{stamp}.bak"
-            try:
-                _snapshot(db_path, backup)
-            except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
-                LOGGER.error(
-                    "[system-notice-migration] could not back up %s; skipping its migration",
-                    db_path, exc_info=True,
-                )
-                result.error = f"移行前の写しを取れなかったので、この DB は移行していません: {exc}"
-                return result
-            result.backup_path = str(backup)
         conn.execute("BEGIN IMMEDIATE")
         try:
             scan_persona_conn(conn, result)
+            if result.updates and result.backup_path is None:
+                # 読み取り専用の走査で見えなかった変換が出た — 写しの無いまま
+                # 書き換えない。
+                raise RuntimeError(
+                    "rows to convert appeared after the read-only scan; no backup was taken"
+                )
             _apply(conn, result.updates)
             set_embed_metadata(
                 conn, MIGRATION_MARKER_KEY,
@@ -551,12 +615,13 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         ).fetchall():
             metadata = _load_json(raw_meta)
             tags = _tags_of(metadata)
-            if (
+            is_voice_call = (
                 role == "user"
                 and "event_message" in tags
                 and metadata.get("voice_call") is True
-            ):
-                body = strip_system_tags(content)
+            )
+            body = strip_system_tags(content) if is_voice_call else None
+            if body is not None:
                 result.updates.append((
                     "UPDATE building_messages SET role = 'host', content = ? WHERE id = ?",
                     (body, row_id),
@@ -567,6 +632,7 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 continue
             result.skipped.append(Skipped(
                 "building_messages", str(row_id), str(role), sorted(tags), _head(content),
+                reason=AMBIGUOUS_TAGS_REASON if is_voice_call else "",
             ))
 
     if _table_exists(conn, "execution_ledger"):
@@ -583,6 +649,12 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
             if not starts_with_system_tag(text):
                 continue
             body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "execution_ledger(on_event)", str(exec_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
             envelope = dict(envelope, user_input=body)
             payload = dict(payload, dispatch_envelope=envelope)
             result.updates.append((
@@ -602,6 +674,12 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
             if not starts_with_system_tag(text):
                 continue
             body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "execution_ledger(sluice)", str(exec_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
             recorded = dict(recorded, prompt=body)
             result.updates.append((
                 "UPDATE execution_ledger SET RESULT_JSON = ? WHERE EXECUTION_ID = ?",
@@ -627,13 +705,14 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 continue
             metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
             kind = classify_tagged_message(message.get("role"), content, metadata)
-            if kind is None:
+            body = strip_system_tags(content) if kind is not None else None
+            if kind is None or body is None:
                 result.skipped.append(Skipped(
                     "execution_outbox", str(outbox_id), str(message.get("role")),
                     sorted(_tags_of(metadata)), _head(content),
+                    reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
                 ))
                 continue
-            body = strip_system_tags(content)
             new_meta = dict(metadata)
             new_meta[SYSTEM_NOTICE_KEY] = kind
             message = dict(message, role="system", content=body, metadata=new_meta)
@@ -737,8 +816,9 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
                 f"### 変換しなかった <system> 始まりの行 (全 {len(res.skipped)} 件)"
             )
             for s in res.skipped:
+                reason = f" 理由={s.reason}" if s.reason else ""
                 lines.append(
-                    f"- [{s.table}] id={s.row_id} role={s.role} tags={s.tags}: {s.head}"
+                    f"- [{s.table}] id={s.row_id} role={s.role} tags={s.tags}{reason}: {s.head}"
                 )
         if res.unknown_system_count:
             lines.append("")
@@ -747,6 +827,15 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
                 f"先頭 {len(res.unknown_system_samples)} 件を表示。印は付けていない)"
             )
             for s in res.unknown_system_samples:
+                lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
+        if res.untagged_memorize_count:
+            lines.append("")
+            lines.append(
+                "### タグ無しの role=user で playbook: タグがあり conversation タグの無い行 "
+                f"(旧 MEMORIZE の結果の候補。全 {res.untagged_memorize_count} 件、"
+                f"先頭 {len(res.untagged_memorize_samples)} 件を表示。変換はしていない)"
+            )
+            for s in res.untagged_memorize_samples:
                 lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
         lines.append("")
     return "\n".join(lines)
@@ -778,7 +867,7 @@ def _report_needed(results: Sequence[StoreResult]) -> bool:
         if r.changes or r.error:
             return True
         if r.persona and not r.already_done and (
-            r.skipped or r.unknown_system_count
+            r.skipped or r.unknown_system_count or r.untagged_memorize_count
         ):
             return True
     return False
@@ -794,8 +883,9 @@ def run_migration(
     """本体 DB と全ペルソナの記憶 DB を移行し、見るべきものがあればレポートを書く。
 
     返り値は (DB ごとの結果, レポートのパス)。レポートは、変換した行・変換
-    しなかったタグ始まりの行・推定できなかった role=system 行・エラーの
-    どれかがあるときだけ書く (印の立った後の起動では書かない)。
+    しなかったタグ始まりの行・推定できなかった role=system 行・旧 MEMORIZE の
+    結果の候補・エラーのどれかがあるときだけ書く (印の立った後の起動では
+    書かない)。
     """
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME

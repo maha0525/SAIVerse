@@ -66,6 +66,10 @@ class SystemNoticeSection:
 
     name = "system_notice"
     order = 570  # self_image(560) の直後、spell_list(600) の前
+    # 説明を欠いた head で送ると、合言葉付きの通知 (または途中の system) が
+    # 読み方の説明無しで届く。capture / render / 永続化に失敗したら LLM を
+    # 実行しない (types.HeadSection の required、W6 fail-closed)。
+    required = True
     # 判定はモデル設定から決まり、Section の撮り直しを促す世界の出来事は無い。
     # モデル設定の変更は deserialize の判定のやり直しと、head の作り直し
     # (Metabolism / anchor TTL 切れ) で反映される。

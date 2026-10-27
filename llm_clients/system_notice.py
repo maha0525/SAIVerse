@@ -158,7 +158,9 @@ def redact_passphrase(text: str, passphrase: str) -> str:
 #: 応答を書く側では見分けられないため (不変条件 3)。上限を超えたら古いものから
 #: 忘れる (head の作り直しで合言葉は入れ替わる)。
 _KNOWN_PASSPHRASES: "OrderedDict[str, None]" = OrderedDict()
-_KNOWN_PASSPHRASES_LIMIT = 256
+# 同時に生きる head ((persona_id, model_key) ごとに一つ) の数を大きく超える余裕を
+# 取る。1 件 12 文字なので、この数でも記憶量は無視できる。
+_KNOWN_PASSPHRASES_LIMIT = 4096
 _KNOWN_PASSPHRASES_LOCK = threading.Lock()
 
 
@@ -215,6 +217,55 @@ def _without_passphrase(msg: Dict[str, Any]) -> Dict[str, Any]:
         return dict(msg)
     new_meta = {k: v for k, v in meta.items() if k != SYSTEM_NOTICE_PASSPHRASE_KEY}
     return {**msg, "metadata": new_meta}
+
+
+def _stored_image_summary(att: Dict[str, Any], metadata: Any) -> str:
+    """記録の metadata (``media`` / ``images`` の項目の ``summary``) に保存済みの画像の要約。"""
+    if not isinstance(metadata, dict):
+        return ""
+    from pathlib import Path
+
+    uri = att.get("uri")
+    path = str(att.get("path") or "")
+    for key in ("media", "images"):
+        entries = metadata.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            same_uri = bool(uri) and entry.get("uri") == uri
+            same_path = bool(entry.get("path")) and str(Path(entry["path"])) == path
+            if not (same_uri or same_path):
+                continue
+            summary = entry.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+    return ""
+
+
+def system_notice_image_note(att: Dict[str, Any], metadata: Any) -> str:
+    """system のまま届ける通知の画像を置き換える説明の文 (決定的)。
+
+    ``att`` は saiverse/media_utils.iter_image_media の項目。system メッセージは
+    文字しか持てないので、画像は説明の文になる。記録の metadata に保存済みの
+    要約があればそれを使い、無ければ ``[画像: <uri>]`` だけにする — その場で
+    要約を生成する llm_clients/utils.image_summary_note を使うと、生成の成否で
+    同じ記録から組む送信本文が変わる (不変条件 6)。
+    """
+    uri = att.get("uri") or str(att.get("path") or "unknown")
+    summary = _stored_image_summary(att, metadata)
+    return f"[画像: {uri}] {summary}" if summary else f"[画像: {uri}]"
+
+
+def with_system_notice_image_notes(
+    text: str, attachments: List[Dict[str, Any]], metadata: Any,
+) -> str:
+    """通知の本文 ``text`` の後ろに、各画像の :func:`system_notice_image_note` を一行ずつ足す。"""
+    for att in attachments:
+        note = system_notice_image_note(att, metadata)
+        text = f"{text}\n{note}" if text else note
+    return text
 
 
 def tag_system_notice(body: str, passphrase: str) -> str:
@@ -296,7 +347,9 @@ __all__ = [
     "present_system_notices",
     "redact_known_passphrases",
     "redact_passphrase",
+    "system_notice_image_note",
     "system_notice_indices",
     "system_notice_passphrase",
     "tag_system_notice",
+    "with_system_notice_image_notes",
 ]

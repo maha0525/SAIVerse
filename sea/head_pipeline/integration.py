@@ -1240,7 +1240,7 @@ def render_head_messages(
     フラグ相当)。``None`` なら全 Section を render する。
 
     fail-closed (W6 / SEA 監査 S6): enabled に含まれる required Section
-    (common_prompt / persona_self / core_memory) について、capture 失敗による
+    (common_prompt / persona_self / core_memory / system_notice) について、capture 失敗による
     欠損・render 失敗・snapshot の永続化失敗が残っている場合は
     :class:`HeadNotReadyError` を投げ、呼び出し側 (prepare_context) 経由で
     LLM 実行前に Pulse を中断させる。人格に属さない発話を本人履歴へ確定させる

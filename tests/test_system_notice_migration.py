@@ -256,10 +256,124 @@ def persona_db(tmp_path):
 def test_strip_keeps_nested_tags_and_joins_blocks_with_a_blank_line():
     assert strip_system_tags("<system>\nA\n</system>") == "A"
     assert strip_system_tags("<system>A</system>\n<system>B</system>") == "A\n\nB"
-    # 入れ子のタグは本文の一部 (クライアント層が送るときに無害化する)
+    # 開きと閉じがそろった入れ子のタグは本文の一部 (クライアント層が送るときに無害化する)
     assert strip_system_tags("<system>X <system>Y</system> Z</system>") == "X <system>Y</system> Z"
-    # 対の無い閉じタグも本文に残る
-    assert strip_system_tags("<system>A</system> tail </system>") == "A\n\ntail </system>"
+
+
+@pytest.mark.parametrize("text", [
+    # 対の無い閉じタグ (外部由来の本文に </system> が混ざった形)
+    "<system>[外部イベント通知] A </system> B</system>",
+    "<system>A</system> tail </system>",
+    # 閉じられていない開きタグ (途中で切れた形)
+    "<system>A <system>B</system>",
+    "<system>A",
+    # 組の外の地の文
+    "<system>A</system> B",
+    "<system>A</system> B <system>C</system>",
+])
+def test_strip_refuses_ambiguous_wrapping(text):
+    assert strip_system_tags(text) is None
+
+
+def test_ambiguous_wrapping_is_left_untouched_and_reported(tmp_path):
+    """識別用 metadata があっても、タグの対応が曖昧な行は変換せずレポートに出す。"""
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    broken = "<system>[外部イベント通知] A </system> B</system>"
+    with closing(init_db(str(db))) as conn:
+        _insert(conn, "ambiguous", "user", broken, {"with": ["system"], "tags": ["conversation"]})
+        _insert(
+            conn, "ambiguous_paired", "assistant", "了解",
+            {"tags": ["conversation"]}, paired="<system>A</system> B", created_at=1,
+        )
+        conn.commit()
+    before = _rows(db)
+
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert _rows(db) == before
+    assert result.changes == []
+    assert result.backup_path is None
+    reasons = {(s.table, s.row_id): s.reason for s in result.skipped}
+    assert reasons == {
+        ("messages", "ambiguous"): "タグの対応が曖昧",
+        ("messages.paired_action_text", "ambiguous_paired"): "タグの対応が曖昧",
+    }
+    text = report.read_text(encoding="utf-8")
+    assert "id=ambiguous role=user" in text
+    assert "理由=タグの対応が曖昧" in text
+
+
+def test_untagged_memorize_candidates_are_reported_not_converted(tmp_path):
+    """旧世界の role=user・タグ無しの MEMORIZE の結果は変換せず、候補としてレポートに出す。"""
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        _insert(conn, "move", "user", "図書館へ移動しました", {"tags": ["playbook:building_move"]})
+        _insert(
+            conn, "image", "user", "画像を生成しました",
+            {"tags": ["tool", "playbook:generate_image"]}, created_at=1,
+        )
+        # 会話の発言 (conversation タグあり) と、playbook タグの無い発言は候補にしない
+        _insert(
+            conn, "spoken", "user", "こんにちは",
+            {"tags": ["conversation", "playbook:meta_user"]}, created_at=2,
+        )
+        _insert(conn, "plain", "user", "おはよう", {"tags": ["internal"]}, created_at=3)
+        conn.commit()
+    before = _rows(db)
+
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert _rows(db) == before
+    assert result.changes == []
+    assert result.untagged_memorize_count == 2
+    assert [s.row_id for s in result.untagged_memorize_samples] == ["move", "image"]
+    text = report.read_text(encoding="utf-8")
+    assert "旧 MEMORIZE の結果の候補。全 2 件" in text
+    assert "id=move tags=['playbook:building_move']: 図書館へ移動しました" in text
+    assert "id=spoken" not in text
+
+
+def test_persona_backup_is_taken_before_init_db_touches_the_file(tmp_path):
+    """写しは init_db のスキーマ用意・既存行の埋め直しより前の状態。"""
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    # init_db を一度も通っていない古い形の記憶 DB (列が足りず、embed_metadata も無い)
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, "
+            "content TEXT, resource_id TEXT, created_at INTEGER, metadata TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES ('n1', 't', 'user', ?, 'p1', 0, ?)",
+            (
+                "<system>[図書館] まはーさんが本を置いた</system>",
+                json.dumps({"tags": ["internal", "event_message", "pulse:abc"]}),
+            ),
+        )
+        conn.commit()
+        original_tables = sorted(r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ))
+        original_cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)")]
+
+    result = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+    assert result.error is None and result.backup_path
+
+    with closing(sqlite3.connect(result.backup_path)) as conn:
+        assert sorted(r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )) == original_tables
+        assert [r[1] for r in conn.execute("PRAGMA table_info(messages)")] == original_cols
+        assert conn.execute("SELECT role, content FROM messages").fetchall() == [
+            ("user", "<system>[図書館] まはーさんが本を置いた</system>"),
+        ]
+    # 本体は移行済み
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert conn.execute("SELECT role, content FROM messages").fetchall() == [
+            ("system", "[図書館] まはーさんが本を置いた"),
+        ]
 
 
 # ---------------------------------------------------------------------------

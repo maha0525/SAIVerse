@@ -171,6 +171,78 @@ def test_direct_openai_model_turns_notice_images_into_notes(tmp_path, no_image_s
     assert "[画像:" in direct[3]["content"]
 
 
+def _image_only_notice(path: str, **entry_extra) -> list:
+    """本文が空で画像だけを持つ途中のシステム通知を含む列。"""
+    msgs = _conversation()
+    msgs[3] = {
+        "role": "system",
+        "content": "",
+        "metadata": {"media": [
+            {"path": path, "mime_type": "image/png", "type": "image", **entry_extra},
+        ]},
+    }
+    return msgs
+
+
+def test_image_only_notice_survives_on_both_openai_paths(tmp_path, no_image_summary):
+    """本文が空で画像だけの通知は、直送でもタグ変換でも空メッセージとして落ちない。"""
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+
+    path = _write_png(tmp_path)
+
+    direct = prepare_openai_messages(
+        _image_only_notice(path), supports_images=True, convert_system_to_user=False,
+    )
+    assert [m["role"] for m in direct] == ["system", "user", "assistant", "system", "user"]
+    assert direct[3]["content"] == f"[画像: {path}]"
+
+    tagged = prepare_openai_messages(
+        _image_only_notice(path), supports_images=True, convert_system_to_user=True,
+    )
+    assert [m["role"] for m in tagged] == ["system", "user", "assistant", "user", "user"]
+    parts = tagged[3]["content"]
+    assert parts[0] == {"type": "text", "text": f'<system pass="{PASS}">\n\n</system>'}
+    assert parts[1]["type"] == "image_url"
+
+
+def test_direct_notice_image_note_does_not_depend_on_summary_generation(tmp_path):
+    """直送の通知の画像の説明は、要約の生成の成否で変わらない (不変条件 6)。"""
+    from xai_sdk.chat import system as xai_system
+
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+    from llm_clients.xai import _build_xai_messages
+
+    path = _write_png(tmp_path)
+    system_role = xai_system("x").role
+
+    def _build_both():
+        msgs = _conversation()
+        msgs[3] = {**msgs[3], "metadata": {"media": [
+            {"path": path, "mime_type": "image/png", "type": "image"},
+        ]}}
+        openai = prepare_openai_messages(
+            msgs, supports_images=True, convert_system_to_user=False,
+        )[3]["content"]
+        built = _build_xai_messages(msgs, supports_images=True)[3]
+        assert built.role == system_role
+        return openai, built.content[0].text
+
+    expected = f"予定の時刻になりました。\n[画像: {path}]"
+    for summary in (None, "生成できた要約"):
+        generator = MagicMock(return_value=summary)
+        with patch("saiverse.media_summary.ensure_image_summary", new=generator):
+            assert _build_both() == (expected, expected)
+        generator.assert_not_called()
+
+    # 記録の metadata に保存済みの要約があれば、それを使う
+    msgs = _image_only_notice(path, summary="保存済みの要約")
+    direct = prepare_openai_messages(msgs, supports_images=True, convert_system_to_user=False)
+    assert direct[3]["content"] == f"[画像: {path}] 保存済みの要約"
+    built = _build_xai_messages(_image_only_notice(path, summary="保存済みの要約"), supports_images=True)
+    assert built[3].role == system_role
+    assert built[3].content[0].text == f"[画像: {path}] 保存済みの要約"
+
+
 def test_xai_keeps_mid_system_and_replaces_placeholder(tmp_path, no_image_summary):
     from xai_sdk.chat import system as xai_system
 
