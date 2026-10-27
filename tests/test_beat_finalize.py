@@ -182,7 +182,9 @@ class PulseContextTest(FinalizeTestBase):
         pulse_ctx = MagicMock()
         _finalize_beat(self.runtime, _beat(state={"_pulse_context": pulse_ctx}))
         roles = [c.args[0].role for c in pulse_ctx.append.call_args_list]
-        self.assertEqual(roles, ["user", "assistant"])
+        # Beat を駆動した指示文はシステム通知 (role=system) として記録する
+        # (docs/intent/system_notice_delivery.md)。
+        self.assertEqual(roles, ["system", "assistant"])
         self.assertEqual(pulse_ctx.append.call_args_list[0].args[0].content, "action prompt")
         self.assertEqual(pulse_ctx.append.call_args_list[1].args[0].content, "response")
 
