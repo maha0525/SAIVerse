@@ -37,9 +37,10 @@
   公式最大出力 128000 をそのまま許可する変更ではない。
 - `verbosity` の設定形は同世代に合わせるが、`client_support: ["responses"]` とする。
   現行 Chat Completions クライアントの許可リストには含まれず送られない。温度・top_p・logprobs 等は追加しない。
-- 呼出側が温度を直接指定する既存経路（Chronicle 軽量生成の `temperature=0.3` 等）は
-  この設定では抑止しない。`medium` 等の推論ありでは公式の非対応パラメーター制約に
-  抵触するため、その経路での利用は対応範囲外。通常経路の既定温度は未指定。
+- 呼出側が温度を直接指定する既存経路（Chronicle 軽量生成の `temperature=0.3` 等）は、
+  `openai` プロバイダの `supports_sampling_with_reasoning: false` により、推論あり
+  （`reasoning_effort` が `none` 以外）のとき送信直前で温度・top_p・logprobs 等を除く
+  （PR #427、`docs/reference/providers.md`）。通常経路の既定温度は未指定。
 
 ## 根拠と検証境界
 

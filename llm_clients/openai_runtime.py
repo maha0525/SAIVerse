@@ -63,6 +63,15 @@ def build_request_kwargs(
 SDK_REQUEST_OPTION_KEYS = frozenset({"extra_headers", "extra_query", "extra_body", "timeout"})
 
 
+#: Chat Completions parameters that OpenAI rejects while reasoning is on
+#: (``reasoning_effort`` other than ``"none"``). Source: the GPT-6 migration
+#: guide, https://developers.openai.com/api/docs/guides/latest-model
+#: ("Unsupported parameters"). Dropped only where the provider declares
+#: ``supports_sampling_with_reasoning: false``; Meta and OpenRouter models
+#: accept temperature together with reasoning_effort.
+SAMPLING_KEYS_REJECTED_WITH_REASONING = ("temperature", "top_p", "top_logprobs", "logprobs")
+
+
 def apply_compat_options(req: Dict[str, Any], options: Dict[str, bool]) -> Dict[str, Any]:
     """Adapt the final SDK request, including body overrides, for compatible APIs.
 
@@ -87,6 +96,17 @@ def apply_compat_options(req: Dict[str, Any], options: Dict[str, bool]) -> Dict[
     if options.get("supports_stream_options") is False:
         result.pop("stream_options", None)
         extra.pop("stream_options", None)
+    if options.get("supports_sampling_with_reasoning") is False:
+        effort = read("reasoning_effort")
+        if effort is not None and effort != "none":
+            dropped = [key for key in SAMPLING_KEYS_REJECTED_WITH_REASONING if read(key) is not None]
+            for key in SAMPLING_KEYS_REJECTED_WITH_REASONING:
+                result.pop(key, None)
+                extra.pop(key, None)
+            if dropped:
+                logging.debug(
+                    "[openai] Dropped %s because reasoning_effort=%r", ", ".join(dropped), effort,
+                )
     if options.get("supports_message_name") is False:
         messages = read("messages")
         if messages is not None:

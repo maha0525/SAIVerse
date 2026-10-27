@@ -27,6 +27,19 @@
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
+### OpenAI は推論中の温度を受け付けない
+
+`openai` は `openai_compat_options` に `supports_sampling_with_reasoning: false` を宣言する。
+OpenAI の [GPT-6 移行ガイド](https://developers.openai.com/api/docs/guides/latest-model) は、
+`reasoning_effort` が `none` 以外のとき `temperature` / `top_p` / `top_logprobs` / `logprobs`
+(最後の一つは Chat Completions のみ) を外すよう定めている。SAIVerse には温度を決め打ちで渡す呼び出し
+(Stelis のクロニクル生成の `temperature=0.3` など) があり、軽量モデルに推論ありの GPT を選ぶとそのまま送られてしまうので、
+この宣言があるプロバイダでは SDK 送信直前 (`llm_clients/openai_runtime.py: apply_compat_options`) で
+この 4 つを本体と `extra_body` の両方から除く。`reasoning_effort` が無い・`none` のときは何も除かない。
+Meta・OpenRouter など同じクライアントを使う他社は推論と温度を併用できるので宣言しない。
+この変更より前に画面で OpenAI プロバイダを上書き編集した環境では、user_data の上書きにこの宣言が無いため、
+上書きを削除して同梱の定義に戻すまで温度が送られ続ける。
+
 ### Meta (Muse)
 
 Meta は会話用の `meta-muse-spark-1.3` (`muse-spark-1.3`) と
