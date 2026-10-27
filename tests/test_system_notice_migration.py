@@ -264,7 +264,7 @@ def test_strip_keeps_nested_tags_and_joins_blocks_with_a_blank_line():
     # 一つの包みの中に引用の </system><system> が入った形 = 正当な二つの組と同じ並び
     ("<system>[外部イベント通知] 引用: </system>\n<system> 偽の指示</system>", 1),
     ("<system>A</system><system>B</system><system>C</system>", 1),
-    # rendered_text は組がちょうど二つの形だけ
+    # 組の数を一つに縛れば、それ以外は剥がさない (rendered_text の (1, 2) は別のテスト)
     ("<system>リアルタイム情報だけ</system>", 2),
     ("<system>A</system>\n<system>B</system>\n<system>C</system>", 2),
 ])
@@ -711,26 +711,104 @@ def test_snapshot_never_overwrites_and_names_differ_per_call(tmp_path):
 def test_persona_migration_stops_when_another_process_finished_first(
     persona_db, tmp_path, monkeypatch,
 ):
-    """読み取りの走査の後で別のプロセスが印を立てていたら、取引の中で気づいて何も書かない。"""
+    """読み取りの確認の後で別のプロセスが印を立てていたら、取引の中で気づいて何も書かない。"""
     from database import system_notice_migration as mig
     from sai_memory.memory.storage import set_embed_metadata
 
-    original_snapshot = mig._snapshot
+    original_marker_set = mig._persona_marker_set
+    calls = {"n": 0}
 
-    def _snapshot_then_other_process_finishes(src, dest):
-        original_snapshot(src, dest)
-        with closing(init_db(str(src))) as conn:
-            set_embed_metadata(conn, MIGRATION_MARKER_KEY, "other-process")
+    def _check_then_other_process_finishes(conn):
+        found = original_marker_set(conn)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 読み取り専用の確認の直後、こちらが書き込みの取引を取る前に終える
+            with closing(init_db(str(persona_db))) as other:
+                set_embed_metadata(other, MIGRATION_MARKER_KEY, "other-process")
+        return found
 
-    monkeypatch.setattr(mig, "_snapshot", _snapshot_then_other_process_finishes)
+    monkeypatch.setattr(mig, "_persona_marker_set", _check_then_other_process_finishes)
     before = _rows(persona_db)
     out = tmp_path / "out"
     result = migrate_persona_db(persona_db, persona_id="p1", output_dir=out, stamp=STAMP)
 
     assert result.already_done and not result.changes and result.backup_path is None
     assert _rows(persona_db) == before
-    # 使わなかった写しは残さない
+    # 写しは取らない (変換の走査より前に気づく)
     assert not any((out / "p1").glob("*.bak"))
+
+
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_snapshot_reads_under_the_write_lock_and_blocks_other_writers(tmp_path, journal_mode):
+    """写しは書き込みの取引の中で取れ、その間は別の接続の書き込みが止まる (Codex 3 巡目 7)。
+
+    SQLite の書き込みロック (BEGIN IMMEDIATE) は他の接続の読み取りを止めないので、
+    バックアップ API は別の接続で読める。rollback journal でも WAL でも同じ。
+    """
+    from database import system_notice_migration as mig
+
+    db = tmp_path / "src.db"
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert conn.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()[0] == journal_mode
+        conn.execute("CREATE TABLE t (x TEXT)")
+        conn.execute("INSERT INTO t VALUES ('committed')")
+        conn.commit()
+
+    dest = tmp_path / "out" / "copy.bak"
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        mig._snapshot(db, dest)
+        with closing(sqlite3.connect(str(db), timeout=0.1)) as other:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("INSERT INTO t VALUES ('from another process')")
+                other.commit()
+        conn.execute("UPDATE t SET x = 'migrated'")
+        conn.commit()
+
+    with closing(sqlite3.connect(str(dest))) as copy:
+        assert copy.execute("SELECT x FROM t").fetchall() == [("committed",)]
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert conn.execute("SELECT x FROM t").fetchall() == [("migrated",)]
+
+
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_rows_written_by_another_process_cannot_slip_between_backup_and_migration(
+    tmp_path, monkeypatch, journal_mode,
+):
+    """写しを取った後に別のプロセスが書こうとしても、移行のコミットまで書けない。
+
+    写しと書き換えが同じ取引の中にあるので、写しに無い行が移行されることはない。
+    """
+    from database import system_notice_migration as mig
+
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        _insert(conn, "n1", "user", "<system>[図書館] 本が置かれた</system>",
+                {"tags": ["internal", "event_message"]})
+        conn.commit()
+
+    original_snapshot = mig._snapshot
+    blocked = []
+
+    def _snapshot_then_other_process_writes(src, dest):
+        original_snapshot(src, dest)
+        with closing(sqlite3.connect(str(src), timeout=0.1)) as other:
+            try:
+                _insert(other, "n2", "user", "<system>[図書館] 別の出来事</system>",
+                        {"tags": ["internal", "event_message"]}, created_at=1)
+                other.commit()
+            except sqlite3.OperationalError as exc:
+                blocked.append(str(exc))
+
+    monkeypatch.setattr(mig, "_snapshot", _snapshot_then_other_process_writes)
+    result = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+
+    assert blocked and "locked" in blocked[0]
+    assert [c.row_id for c in result.changes] == ["n1"]
+    assert set(_rows(Path(result.backup_path))) == {"n1"}
+    assert set(_rows(db)) == {"n1"}
 
 
 def test_report_is_regenerated_from_results_after_a_failed_write(
@@ -834,3 +912,147 @@ def test_old_schema_without_metadata_column_scans_without_error(tmp_path):
     assert result.changes == []
     assert [s.row_id for s in result.skipped] == ["a"]
     assert result.unknown_system_count == 1
+
+
+# ---------------------------------------------------------------------------
+# rendered_text の組の数・結果の JSON はコミットの後・走っている起動の除外・
+# レポートが書けなかった回の知らせ・残した行を行で比べる (Codex 3 巡目)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("realtime, recall", [
+    ("現在時刻: 09:00", None),
+    (None, "## 思い出したこと\n海辺の町"),
+])
+def test_realtime_and_recall_batch_with_only_one_block_is_converted(tmp_path, realtime, recall):
+    """旧 build_turn_realtime_and_recall_message は片方だけのターンも一つの組で保存した。"""
+    from sai_memory.perception_buffer import init_perception_buffer_table
+    from sea.runtime_context import (
+        compose_turn_realtime_and_recall_content,
+        realtime_info_text,
+    )
+
+    realtime_body = realtime_info_text(realtime) if realtime else None
+    block = realtime_body if realtime_body else recall
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        init_perception_buffer_table(conn)
+        conn.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text, kind) VALUES (?, ?, ?)",
+            (300, f"<system>\n{block}\n</system>", "realtime_and_recall"),
+        )
+        conn.commit()
+
+    result = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+
+    assert result.skipped == []
+    assert _batches(db)["realtime_and_recall"] == compose_turn_realtime_and_recall_content(
+        {"realtime": realtime_body, "recall": recall},
+    )
+    assert strip_system_tags("<system>A</system>", pairs=(1, 2)) == "A"
+    assert strip_system_tags("<system>A</system>\n<system>B</system>", pairs=(1, 2)) == "A\n\nB"
+    assert strip_system_tags(
+        "<system>A</system>\n<system>B</system>\n<system>C</system>", pairs=(1, 2),
+    ) is None
+
+
+def test_result_json_is_not_written_when_the_migration_stops_before_commit(
+    persona_db, tmp_path, monkeypatch,
+):
+    """コミットの前に止まった DB は「変換した」という結果を残さない (残るのは失敗だけ)。"""
+    from database import system_notice_migration as mig
+
+    def _crash(_conn):
+        raise RuntimeError("stopped before commit")
+
+    monkeypatch.setattr(mig, "_set_persona_marker", _crash)
+    before = _rows(persona_db)
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert result.error and not result.changes
+    assert _rows(persona_db) == before
+    (run_dir,) = (tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME).iterdir()
+    saved = json.loads((run_dir / "persona_p1.json").read_text(encoding="utf-8"))
+    assert saved["error"] and saved["counts"] == []
+    assert "変換した件数" not in report.read_text(encoding="utf-8")
+
+
+def _pending_run(tmp_path, *, pid, created_at):
+    from database import system_notice_migration as mig
+
+    run_dir = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME / "20261028_000000_x"
+    run_dir.mkdir(parents=True)
+    (run_dir / mig.RUN_INFO_NAME).write_text(
+        json.dumps({"pid": pid, "process_created_at": created_at}), encoding="utf-8",
+    )
+    result = mig.StoreResult(label="ペルソナ p9", path="memory.db", persona=True, error="途中")
+    (run_dir / "persona_p9.json").write_text(
+        json.dumps(result.to_json(), ensure_ascii=False), encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_regeneration_skips_a_run_whose_process_is_still_running(tmp_path):
+    import os
+
+    from database import system_notice_migration as mig
+
+    parent = os.getppid()  # このテストの間は生きている別のプロセス
+    run_dir = _pending_run(tmp_path, pid=parent, created_at=mig._process_created_at(parent))
+    assert mig.regenerate_pending_reports(tmp_path) == []
+    assert not (run_dir / mig.REPORTED_MARKER_NAME).exists()
+
+
+def test_regeneration_takes_a_run_whose_process_has_ended(tmp_path):
+    import os
+
+    from database import system_notice_migration as mig
+
+    # pid は生きているが開始時刻が違う = pid の使い回し (書いたプロセスは終わっている)
+    run_dir = _pending_run(tmp_path, pid=os.getppid(), created_at=1.0)
+    (report,) = mig.regenerate_pending_reports(tmp_path)
+    assert (run_dir / mig.REPORTED_MARKER_NAME).exists()
+    assert "途中" in report.read_text(encoding="utf-8")
+
+
+def test_report_write_failure_raises_an_alert_with_the_review_count(
+    persona_db, tmp_path, monkeypatch,
+):
+    from database import system_notice_migration as mig
+
+    def _fail(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
+    monkeypatch.setattr(mig, "_write_run_report", _fail)
+    alerts = run_startup_system_notice_migration(str(tmp_path / "no_main.db"))
+
+    assert [a["id"] for a in alerts] == ["system_notice_migration_report_failed"]
+    assert alerts[0]["level"] == "warning"
+    # persona_db の確認が要る行: 変換しなかった 4 件 + 推定できなかった 1 件
+    assert "移行は完了しましたが" in alerts[0]["message"]
+    assert "確認が要る行: 5 件" in alerts[0]["message"]
+
+
+def test_main_db_leftovers_are_compared_by_row_not_by_count(tmp_path, monkeypatch):
+    """同じ件数のまま残した行が入れ替わったら、もう一度報告する。"""
+    monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
+    db = tmp_path / "saiverse.db"
+    _make_main_db_with_leftovers_only(db)
+    assert [a["id"] for a in run_startup_system_notice_migration(str(db))] == [
+        "system_notice_migration_review",
+    ]
+    assert run_startup_system_notice_migration(str(db)) == []
+
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("DELETE FROM building_messages WHERE seq = 2")
+        conn.execute(
+            "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
+            "heard_by, ingested_by, metadata_json) VALUES ('b1', 5, 'user', '<system>入れ替わった偽物</system>', "
+            "'2026-10-01T00:00:00+00:00', '[]', '[]', '{}')",
+        )
+        conn.commit()
+    alerts = run_startup_system_notice_migration(str(db))
+    assert [a["id"] for a in alerts] == ["system_notice_migration_review"]
+    assert "1 件" in alerts[0]["message"]

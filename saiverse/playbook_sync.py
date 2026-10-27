@@ -359,7 +359,9 @@ def _creates_legacy_system_notice(nodes: List[Any]) -> bool:
             continue
         if str(node.get("role") or "").lower() != "user":
             continue
-        action = node.get("action")
+        # 実行側 (sea/runtime_engine.py の lg_memorize_node、sea/langgraph_runner.py) と
+        # 同じ既定: action の省略・空文字は ``{last}`` (直前のノードの結果) を記録する。
+        action = node.get("action") or "{last}"
         if not isinstance(action, str):
             continue
         if tool_keys & set(_TEMPLATE_ROOT_RE.findall(action)):

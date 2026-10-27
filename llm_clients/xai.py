@@ -32,7 +32,9 @@ from .exceptions import (
 from .system_notice import (
     accepts_mid_conversation_system,
     present_system_notices,
+    redact_passphrase,
     system_notice_indices,
+    system_notice_passphrase,
     with_system_notice_image_notes,
 )
 from .utils import (
@@ -144,6 +146,8 @@ def _build_xai_messages(
     # (llm_clients/system_notice.py、docs/intent/system_notice_delivery.md)。
     # 途中のシステム通知の位置は、画像の扱い (下の system の分岐) のために控える。
     notice_indices = system_notice_indices(messages)
+    # その送信の head の合言葉。変換の後で本文へ足す画像の説明・生成した要約を伏せる。
+    passphrase = system_notice_passphrase(messages)
     messages = present_system_notices(
         messages,
         accepts_mid_system=accepts_mid_conversation_system("xai_native", None),
@@ -209,7 +213,9 @@ def _build_xai_messages(
             # では生成しない (生成の成否で送信本文が揺れないように —
             # llm_clients/system_notice.py の system_notice_image_note)。head と
             # その前の指示は従来どおり文字だけ。
-            text = with_system_notice_image_notes(text, msg.get("metadata"))
+            text = with_system_notice_image_notes(
+                text, msg.get("metadata"), passphrase=passphrase,
+            )
 
         # 本文の空の system / assistant は捨てる。user は画像だけの発言が
         # ありうるので、画像も画像の説明も無いと分かってから捨てる。
@@ -245,11 +251,15 @@ def _build_xai_messages(
                             "Image file not found or unreadable: %s",
                             att.get("uri") or att.get("path"),
                         )
-                    # Not embedding — add text summary
-                    note = image_summary_note(
-                        att["path"], att["mime_type"],
-                        att.get("uri", att.get("path", "unknown")),
-                        skip_summary=(idx in skip_summary_indices),
+                    # Not embedding — add text summary. 生成した要約は合言葉の
+                    # 伏せ字 (present_system_notices) の後で足すので、ここで伏せる。
+                    note = redact_passphrase(
+                        image_summary_note(
+                            att["path"], att["mime_type"],
+                            att.get("uri", att.get("path", "unknown")),
+                            skip_summary=(idx in skip_summary_indices),
+                        ),
+                        passphrase,
                     )
                     text = f"{text}\n{note}" if text else note
 

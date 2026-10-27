@@ -926,11 +926,15 @@ class OpenAIClient(LLMClient):
                         continue
                     current_call_id = tc_id
                     buf = call_buffer.setdefault(tc_id, {"id": tc_id, "name": "", "arguments": ""})
+                    # 引数の断片はログに書かない (長さだけ)。断片を別々の行に書くと、
+                    # 合言葉を復唱した引数が行をまたいで割れ、ログの伏せ字に掛からない
+                    # (docs/intent/system_notice_delivery.md 不変条件 3)。結合後の引数は
+                    # _store_stream_tool_detection_from_buffer が 1 レコードで書く。
                     logging.debug(
-                        "tool_chunk id=%s name=%s args_part=%s",
+                        "tool_chunk id=%s name=%s args_part_chars=%d",
                         tc_id,
                         call.function.name or "-",
-                        call.function.arguments or "-",
+                        len(call.function.arguments or ""),
                     )
                     if call.function.name:
                         buf["name"] = call.function.name

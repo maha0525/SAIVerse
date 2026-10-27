@@ -323,10 +323,14 @@ from .base import EmptyResponseError, IncompleteStreamError, LLMClient, ToolSpec
 from saiverse.logging_config import log_timeout_event
 from .system_notice import (
     accepts_mid_conversation_system,
+    is_head_system_message,
     is_presented_system_notice,
     present_system_notices,
+    redact_passphrase,
     system_notice_image_note,
     system_notice_media_note,
+    system_notice_passphrase,
+    tag_presented_system_notice,
     unresolved_system_notice_images,
     unresolved_system_notice_media,
 )
@@ -1559,9 +1563,16 @@ class GeminiClient(LLMClient):
         その前の指示) だけが system_instruction へまとまる。列の長さは変わらない
         ので、境目の印の番号はそのまま使える。
         """
+        # その送信の head の合言葉。present_system_notices の後で本文へ足す説明の
+        # 文・生成した要約を伏せ、タグ化した通知を説明の文ごと包み直すのに使う。
+        passphrase = system_notice_passphrase(msgs)
+        notices_tagged = any(
+            isinstance(m, dict) and is_head_system_message(m) for m in msgs
+        )
         msgs = present_system_notices(
             msgs,
             accepts_mid_system=accepts_mid_conversation_system("gemini_native", None),
+            keep_notice_body=True,
         )
         system_lines: List[str] = []
         # 境目の印が付いたメッセージの番号 (複数あれば最後のもの) と、各メッセージの
@@ -1705,7 +1716,6 @@ class GeminiClient(LLMClient):
                 continue
 
             text = content_to_text(message.get("content", "")) or ""
-            text_content = text
             g_role = "user" if role == "user" else "model"
             attachments = attachment_cache.get(idx, [])
             audio_attachments = audio_cache.get(idx, [])
@@ -1717,11 +1727,19 @@ class GeminiClient(LLMClient):
             # 画像も説明の文で残す (llm_clients/system_notice.py の
             # system_notice_image_note)。
             is_notice = is_presented_system_notice(message)
+            # タグ化した通知では、説明の文は通知の本文の一部なのでタグの中へ入れる。
+            # ここでは説明の文だけを集め、最後に本文と一緒にタグで包み直す
+            # (tag_presented_system_notice)。埋め込む画像などは部品なので、タグ付きの
+            # 本文の後ろに続く。
+            tag_notice = is_notice and notices_tagged
+            text_content = "" if tag_notice else text
             if is_notice:
                 for entry in unresolved_system_notice_images(
                     message.get("metadata"), attachments,
                 ):
-                    note = system_notice_image_note(entry, message.get("metadata"))
+                    note = system_notice_image_note(
+                        entry, message.get("metadata"), passphrase=passphrase,
+                    )
                     text_content = f"{text_content}\n{note}" if text_content else note
                 # 音声・動画も同じ — iter_audio_media / iter_video_media はファイルが
                 # 無い項目を返さないので、metadata の記述から説明の文で残す
@@ -1729,7 +1747,9 @@ class GeminiClient(LLMClient):
                     for entry in unresolved_system_notice_media(
                         message.get("metadata"), resolved, kind,
                     ):
-                        note = system_notice_media_note(entry, message.get("metadata"), kind)
+                        note = system_notice_media_note(
+                            entry, message.get("metadata"), kind, passphrase=passphrase,
+                        )
                         text_content = f"{text_content}\n{note}" if text_content else note
 
             # === Image processing ===
@@ -1760,7 +1780,9 @@ class GeminiClient(LLMClient):
                 )
                 for attachment in skipped_attachments:
                     if is_notice:
-                        note = system_notice_image_note(attachment, message.get("metadata"))
+                        note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
                     else:
                         summary = _summary_for(attachment) or "(要約を取得できませんでした)"
                         note = f"[画像参照のみ: {attachment['uri']}] {summary}"
@@ -1777,7 +1799,9 @@ class GeminiClient(LLMClient):
                         # 読めなかった画像も黙って捨てず、説明の文で届ける
                         # (Anthropic・OpenAI 互換・xAI と同じ扱い)
                         if is_notice:
-                            note = system_notice_image_note(attachment, message.get("metadata"))
+                            note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
                         else:
                             summary = _summary_for(attachment) or "(要約を取得できませんでした)"
                             note = f"[画像: {attachment['uri']}] {summary}"
@@ -1801,7 +1825,9 @@ class GeminiClient(LLMClient):
                 )
                 for attachment in attachments:
                     if is_notice:
-                        note = system_notice_image_note(attachment, message.get("metadata"))
+                        note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
                         text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     if idx in skip_summary_indices:
@@ -1829,7 +1855,7 @@ class GeminiClient(LLMClient):
                         if is_notice:
                             # 通知の音声は画像と同じく説明の文で残す (生成はしない)
                             note = system_notice_media_note(
-                                attachment, message.get("metadata"), "audio",
+                                attachment, message.get("metadata"), "audio", passphrase=passphrase,
                             )
                             text_content = f"{text_content}\n{note}" if text_content else note
                         continue
@@ -1841,7 +1867,7 @@ class GeminiClient(LLMClient):
                     if is_notice:
                         # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
                         note = system_notice_media_note(
-                            attachment, message.get("metadata"), "audio",
+                            attachment, message.get("metadata"), "audio", passphrase=passphrase,
                         )
                         text_content = f"{text_content}\n{note}" if text_content else note
                         continue
@@ -1870,7 +1896,7 @@ class GeminiClient(LLMClient):
                         if is_notice:
                             # 通知の動画は画像と同じく説明の文で残す (生成はしない)
                             note = system_notice_media_note(
-                                attachment, message.get("metadata"), "video",
+                                attachment, message.get("metadata"), "video", passphrase=passphrase,
                             )
                             text_content = f"{text_content}\n{note}" if text_content else note
                         continue
@@ -1882,7 +1908,7 @@ class GeminiClient(LLMClient):
                     if is_notice:
                         # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
                         note = system_notice_media_note(
-                            attachment, message.get("metadata"), "video",
+                            attachment, message.get("metadata"), "video", passphrase=passphrase,
                         )
                         text_content = f"{text_content}\n{note}" if text_content else note
                         continue
@@ -1893,6 +1919,16 @@ class GeminiClient(LLMClient):
                     summary_note = summary or "(要約を取得できませんでした)"
                     note = f"[動画: {attachment['uri']}] {summary_note}"
                     text_content = f"{text_content}\n{note}" if text_content else note
+
+            # タグ化した通知は、説明の文を本文に足した全体をタグで包む。それ以外の
+            # 発言は、伏せ字 (present_system_notices) の後で足した生成した要約を
+            # その送信の合言葉で伏せる (伏せ字は文字数を変えない置換で、二度掛けても同じ)。
+            if tag_notice:
+                text_content = tag_presented_system_notice(
+                    message.get("metadata"), [text_content] if text_content else [], passphrase,
+                )
+            else:
+                text_content = redact_passphrase(text_content, passphrase)
 
             # === Final assembly: text first, then media parts ===
             final_parts: List[types.Part] = []
@@ -2909,7 +2945,8 @@ class GeminiClient(LLMClient):
                 candidate_index = getattr(candidate, "index", 0)
                 for part_idx, part in enumerate(candidate.content.parts):
                     if getattr(part, "function_call", None) and fcall is None:
-                        get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
+                        # 呼び出しの中身はチャンクの途中では書かず、ストリームの後で
+                        # 採った一つを 1 レコードで書く (_stream_chunk_summary と同じ理由)
                         fcall = part.function_call
                         # Capture thought_signature for thinking-enabled models (required by Gemini API)
                         _ts = getattr(part, "thought_signature", None)
@@ -3059,6 +3096,7 @@ class GeminiClient(LLMClient):
 
         # Store tool detection result if function call was detected
         if fcall is not None:
+            get_llm_logger().debug("Gemini stream function_call: %s", fcall)
             # Collect all text that was yielded
             all_text = "".join(seen_stream_texts.values())
             fcall_name = getattr(fcall, "name", None)

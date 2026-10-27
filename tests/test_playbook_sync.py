@@ -316,6 +316,23 @@ def test_compat_alerts_flag_legacy_notices_and_missing_tools(session_factory, mo
     assert {pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()} == before
 
 
+def test_memorize_with_omitted_action_is_judged_with_the_runtime_default():
+    """action の省略・空文字は実行側と同じく ``{last}`` として判定する (Codex 3 巡目)。"""
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+
+    tool = {"id": "n1", "type": "tool", "action": "known_tool"}
+    for memorize in (
+        {"id": "n2", "type": "memorize", "role": "user"},
+        {"id": "n2", "type": "memorize", "role": "user", "action": ""},
+        {"id": "n2", "type": "memorize", "role": "user", "action": None},
+    ):
+        assert _creates_legacy_system_notice([tool, memorize]), memorize
+    # role=system なら新しい形 (action を省略しても同じ)
+    assert not _creates_legacy_system_notice(
+        [tool, {"id": "n2", "type": "memorize", "role": "system"}],
+    )
+
+
 def test_compat_alerts_separate_tools_of_unconnected_mcp_servers(session_factory, monkeypatch):
     """設定にある MCP サーバーの名前で始まる参照は、未接続の可能性として別の警告に出す。"""
     from saiverse.playbook_sync import playbook_compat_alerts

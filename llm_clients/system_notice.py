@@ -342,7 +342,9 @@ def _stored_media_summary(att: Dict[str, Any], metadata: Any) -> str:
 _MEDIA_NOTE_LABELS = {"image": "画像", "audio": "音声", "video": "動画"}
 
 
-def system_notice_media_note(att: Dict[str, Any], metadata: Any, kind: str) -> str:
+def system_notice_media_note(
+    att: Dict[str, Any], metadata: Any, kind: str, *, passphrase: str,
+) -> str:
     """システム通知の画像・音声・動画を文字で届けるときの説明の文 (決定的)。
 
     ``kind`` は ``"image"`` / ``"audio"`` / ``"video"``。``att`` は
@@ -354,20 +356,24 @@ def system_notice_media_note(att: Dict[str, Any], metadata: Any, kind: str) -> s
     する — その場で要約を生成する llm_clients/utils の image_summary_note などを
     使うと、生成の成否で同じ記録から組む送信本文が変わる (不変条件 6)。
 
-    この文は合言葉の変換 (:func:`present_system_notices`) の後で本文へ足される
-    ことがあるので、要約の文に現れた合言葉はここで伏せ、``<system`` も無害化する。
+    system のまま届ける通知では、この文は合言葉の変換 (:func:`present_system_notices`)
+    の後で本文へ足されるので、要約の文に現れた合言葉はここで伏せ、``<system`` も
+    無害化する。伏せるのは ``passphrase`` (その送信の head の合言葉 —
+    :func:`system_notice_passphrase`) だけ。プロセスが覚えている合言葉の全部で
+    伏せると、別の head の合言葉が登録されただけで同じ記録から組む送信本文が
+    変わる (不変条件 6)。
     """
     label = _MEDIA_NOTE_LABELS[kind]
     uri = att.get("uri") or str(att.get("path") or "unknown")
     summary = _stored_media_summary(att, metadata)
     if summary:
-        summary = redact_known_passphrases(_neutralize_system_tags(summary))
+        summary = redact_passphrase(_neutralize_system_tags(summary), passphrase)
     return f"[{label}: {uri}] {summary}" if summary else f"[{label}: {uri}]"
 
 
-def system_notice_image_note(att: Dict[str, Any], metadata: Any) -> str:
+def system_notice_image_note(att: Dict[str, Any], metadata: Any, *, passphrase: str) -> str:
     """システム通知の画像の説明の文 (:func:`system_notice_media_note` の画像版)。"""
-    return system_notice_media_note(att, metadata, "image")
+    return system_notice_media_note(att, metadata, "image", passphrase=passphrase)
 
 
 def system_notice_media_entries(metadata: Any, kind: str) -> List[Dict[str, Any]]:
@@ -452,15 +458,16 @@ def unresolved_system_notice_images(
     return unresolved_system_notice_media(metadata, attachments, "image")
 
 
-def with_system_notice_image_notes(text: str, metadata: Any) -> str:
+def with_system_notice_image_notes(text: str, metadata: Any, *, passphrase: str) -> str:
     """system のまま届ける通知の本文 ``text`` の後ろに、metadata の各画像の説明を一行ずつ足す。
 
     画像はファイルの有無を問わず metadata から並べる (:func:`system_notice_image_entries`)
     — system メッセージは画像を持てないので、どの画像も説明の文になり、ファイルが
-    消えていても通知ごと落ちない。
+    消えていても通知ごと落ちない。``passphrase`` はその送信の head の合言葉
+    (:func:`system_notice_media_note`)。
     """
     for att in system_notice_image_entries(metadata):
-        note = system_notice_image_note(att, metadata)
+        note = system_notice_image_note(att, metadata, passphrase=passphrase)
         text = f"{text}\n{note}" if text else note
     return text
 
@@ -492,13 +499,46 @@ def tag_system_notice(body: str, passphrase: str) -> str:
     return f"<system>\n{text}\n</system>"
 
 
+#: タグ化した通知の写しの metadata に置く、タグで包む前の本文
+#: (:func:`present_system_notices` の ``keep_notice_body``)。記録には保存されない
+#: 写しだけに付く。
+_NOTICE_BODY_KEY = "__system_notice_body__"
+
+
+def tag_presented_system_notice(metadata: Any, notes: List[str], passphrase: str) -> str:
+    """タグ化した通知の写しの最終本文: 元の本文に説明の文を足した全体をタグで包む。
+
+    ``metadata`` はその写しの metadata。画像・音声・動画を埋め込めないときの説明の
+    文 (:func:`system_notice_media_note`) は通知の本文の一部なので、閉じタグの
+    後ろではなくタグの中へ入れる — 閉じタグの後ろに足すと、画像だけの通知では
+    証明されたタグの中身が空で、説明は合言葉の外の普通の user の文章になる。
+    ``notes`` が空なら :func:`present_system_notices` が組んだ本文と一字一致する。
+    写しは ``keep_notice_body=True`` で :func:`present_system_notices` を通した
+    ものでなければならない (無ければ例外 — タグの外へ説明を足す形へ黙って戻らない)。
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    if _NOTICE_BODY_KEY not in meta:
+        raise ValueError(
+            "tag_presented_system_notice needs a notice presented with keep_notice_body=True",
+        )
+    body = meta[_NOTICE_BODY_KEY]
+    for note in notes:
+        body = f"{body}\n{note}" if body else note
+    return tag_system_notice(body, passphrase)
+
+
 def present_system_notices(
-    messages: List[Any], *, accepts_mid_system: bool,
+    messages: List[Any], *, accepts_mid_system: bool, keep_notice_body: bool = False,
 ) -> List[Any]:
     """messages 列を、送り先のモデルへ送る直前の形にする (新しい列を返す。入力は変えない)。
 
     ``accepts_mid_system`` はそのモデルが会話の途中の role=system を受け取れるか
     (:func:`accepts_mid_conversation_system`)。規則はモジュールの説明を参照。
+
+    ``keep_notice_body`` が真なら、タグ化した通知の写しの metadata に、タグで包む
+    前の本文を残す。画像などの説明の文を足してからタグで包み直すクライアント
+    (:func:`tag_presented_system_notice`) が使う。metadata ごと送るクライアント
+    (Ollama) では、本文の写しがリクエストに載らないよう偽のまま使う。
     """
     head = _head_index(messages)
     if head is None:
@@ -539,10 +579,11 @@ def present_system_notices(
                     msg.get("content"), lambda t: redact_passphrase(t, passphrase),
                 )
             else:
+                body = _content_text(msg.get("content"))
                 new_msg["role"] = "user"
-                new_msg["content"] = tag_system_notice(
-                    _content_text(msg.get("content")), passphrase,
-                )
+                new_msg["content"] = tag_system_notice(body, passphrase)
+                if keep_notice_body:
+                    notice_meta[_NOTICE_BODY_KEY] = body
             out.append(new_msg)
             continue
         new_msg = _without_passphrase(msg)
@@ -581,6 +622,7 @@ __all__ = [
     "system_notice_media_entries",
     "system_notice_media_note",
     "system_notice_passphrase",
+    "tag_presented_system_notice",
     "tag_system_notice",
     "unresolved_system_notice_images",
     "unresolved_system_notice_media",

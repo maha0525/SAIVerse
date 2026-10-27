@@ -59,6 +59,11 @@ def _write_png(tmp_path) -> str:
     return str(path)
 
 
+def _tagged(body: str) -> str:
+    """合言葉付きタグで包んだ通知の本文 (説明の文もタグの中に入る)。"""
+    return f'<system pass="{PASS}">\n{body}\n</system>'
+
+
 @pytest.fixture
 def no_image_summary():
     mocked = MagicMock(return_value="[合成] 要約")
@@ -619,16 +624,15 @@ def test_tagged_notice_images_use_stored_notes_on_every_client(
         supports_images=False, convert_system_to_user=True,
     )
     assert openai[3]["role"] == "user"
-    assert expected in openai[3]["content"]
+    # 説明の文は合言葉付きタグの中 (閉じタグが最後)
+    assert openai[3]["content"] == _tagged(expected)
 
     anth = _anthropic_build(_image_only_notice(path, summary="保存済み"))
-    notice_blocks = anth["messages"][2]["content"]
-    assert notice_blocks[0]["text"].startswith(f'<system pass="{PASS}">')
-    assert {"type": "text", "text": expected} in notice_blocks
+    assert anth["messages"][2]["content"] == [{"type": "text", "text": _tagged(expected)}]
 
     gemini_client.supports_images = False
     _, contents = gemini_client._convert_messages(_image_only_notice(path, summary="保存済み"))
-    assert expected in contents[2].parts[0].text
+    assert contents[2].parts[0].text == _tagged(expected)
 
     summary_generator.assert_not_called()
 
@@ -642,8 +646,7 @@ def test_tagged_notice_over_the_embed_limit_uses_stored_note(tmp_path, summary_g
         _image_only_notice(path), supports_images=True, convert_system_to_user=True,
         max_image_embeds=0,
     )
-    parts = out[3]["content"]
-    assert {"type": "text", "text": f"[画像: {path}]"} in parts
+    assert out[3]["content"] == _tagged(f"[画像: {path}]")
     summary_generator.assert_not_called()
 
 
@@ -672,16 +675,15 @@ def test_notice_whose_image_file_is_missing_survives(tmp_path, summary_generator
             _image_only_notice(missing), supports_images=supports, convert_system_to_user=True,
         )
         assert tagged[3]["role"] == "user"
-        assert note in _joined(tagged[3]["content"])
-        assert f'<system pass="{PASS}">' in _joined(tagged[3]["content"])
+        assert tagged[3]["content"] == _tagged(note)
 
     anth = _anthropic_build(_image_only_notice(missing))
-    assert {"type": "text", "text": note} in anth["messages"][2]["content"]
+    assert anth["messages"][2]["content"] == [{"type": "text", "text": _tagged(note)}]
 
     for supports in (True, False):
         gemini_client.supports_images = supports
         _, contents = gemini_client._convert_messages(_image_only_notice(missing))
-        assert note in contents[2].parts[0].text
+        assert contents[2].parts[0].text == _tagged(note)
 
     summary_generator.assert_not_called()
 
@@ -858,16 +860,15 @@ def test_gemini_notice_audio_video_use_stored_notes(
         _media_only_notice(str(path), kind, mime, summary=f"保存済み {PASS}"),
     )
     text = contents[2].parts[0].text
-    assert text.startswith(f'<system pass="{PASS}">')
-    assert f"[{label}: {path}] 保存済み " + "*" * len(PASS) in text
+    assert text == _tagged(f"[{label}: {path}] 保存済み " + "*" * len(PASS))
     _, contents = gemini_client._convert_messages(_media_only_notice(str(path), kind, mime))
-    assert contents[2].parts[0].text.endswith(f"[{label}: {path}]")
+    assert contents[2].parts[0].text == _tagged(f"[{label}: {path}]")
 
     # 対応のモデルでファイルが読めない: 黙って捨てず、同じ説明の文で残す
     setattr(gemini_client, f"supports_{kind}", True)
     monkeypatch.setattr(f"llm_clients.gemini.load_{kind}_bytes_for_llm", lambda *a, **k: (None, None))
     _, contents = gemini_client._convert_messages(_media_only_notice(str(path), kind, mime))
-    assert contents[2].parts[0].text.endswith(f"[{label}: {path}]")
+    assert contents[2].parts[0].text == _tagged(f"[{label}: {path}]")
 
     av_summary_generator.assert_not_called()
 
@@ -918,14 +919,12 @@ def test_notice_whose_audio_video_file_is_missing_survives(
     for supports in (True, False):
         setattr(gemini_client, f"supports_{kind}", supports)
         _, contents = gemini_client._convert_messages(_media_only_notice(missing, kind, mime))
-        text = contents[2].parts[0].text
-        assert text.startswith(f'<system pass="{PASS}">')
-        assert text.endswith(note)
+        assert contents[2].parts[0].text == _tagged(note)
         # 保存済みの要約があればそれも残す
         _, contents = gemini_client._convert_messages(
             _media_only_notice(missing, kind, mime, summary="保存済み"),
         )
-        assert contents[2].parts[0].text.endswith(f"{note} 保存済み")
+        assert contents[2].parts[0].text == _tagged(f"{note} 保存済み")
 
     # Gemini 以外のクライアントが通る共通の経路 (この時点ではまだ role=system)
     client = SimpleNamespace(supports_audio=False, supports_video=False)
@@ -939,3 +938,174 @@ def test_notice_whose_audio_video_file_is_missing_survives(
     assert out[3]["content"] == f"{note} 保存済み"
 
     av_summary_generator.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 12. 説明の文はタグの中・後から足す要約の伏せ字・伏せ字は現行の合言葉だけ・
+#     ストリームの断片をログに出さない・Codex は変換に失敗したら送らない (Codex 3 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_notice_body_and_media_note_share_one_tag_on_every_tagging_client(
+    tmp_path, summary_generator, gemini_client,
+):
+    """本文のある通知でも、埋め込めない画像の説明は閉じタグの前に入る。埋め込んだ画像はその後ろ。"""
+    from llm_clients.anthropic_request_builder import build_request_params
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+
+    present = _write_png(tmp_path)
+    missing = str(tmp_path / "gone.png")
+
+    def _msgs():
+        msgs = _conversation()
+        msgs[3] = {**msgs[3], "metadata": {"media": [
+            {"path": present, "mime_type": "image/png", "type": "image"},
+            {"path": missing, "mime_type": "image/png", "type": "image", "summary": "消えた写真"},
+        ]}}
+        return msgs
+
+    expected = _tagged(f"予定の時刻になりました。\n[画像: {missing}] 消えた写真")
+
+    # 画像対応: タグ付きの本文 (説明の文を含む) → 埋め込んだ画像
+    parts = prepare_openai_messages(
+        _msgs(), supports_images=True, convert_system_to_user=True,
+    )[3]["content"]
+    assert parts[0] == {"type": "text", "text": expected}
+    assert [p["type"] for p in parts] == ["text", "image_url"]
+
+    anth = build_request_params(
+        messages=_msgs(), tools=None, response_schema=None, temperature=None,
+        enable_cache=False, cache_ttl="5m", model="claude-test", max_tokens=100,
+        extra_params={}, thinking_config=None, thinking_effort=None,
+        supports_images=True, max_image_bytes=None,
+    )["request_params"]["messages"][2]["content"]
+    assert anth[0] == {"type": "text", "text": expected}
+    assert [b["type"] for b in anth] == ["text", "image"]
+
+    gemini_client.supports_images = True
+    _, contents = gemini_client._convert_messages(_msgs())
+    assert contents[2].parts[0].text == expected
+    assert len(contents[2].parts) == 2  # 本文の後ろに埋め込んだ画像
+
+    # 画像非対応: どちらの画像も説明の文になり、全部がタグの中
+    both = _tagged(
+        f"予定の時刻になりました。\n[画像: {present}]\n[画像: {missing}] 消えた写真"
+    )
+    assert prepare_openai_messages(
+        _msgs(), supports_images=False, convert_system_to_user=True,
+    )[3]["content"] == both
+    summary_generator.assert_not_called()
+
+
+def test_generated_summary_of_an_ordinary_message_is_masked(tmp_path, gemini_client):
+    """伏せ字の後で足す、通常の発言の画像の生成した要約も合言葉を伏せる。"""
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+    from llm_clients.xai import _build_xai_messages
+
+    path = _write_png(tmp_path)
+    generator = MagicMock(return_value=f"要約の中の {PASS}")
+    masked = "*" * len(PASS)
+
+    def _msgs():
+        msgs = _conversation()
+        msgs[4] = {"role": "user", "content": "見て", "metadata": {"media": [
+            {"path": path, "mime_type": "image/png", "type": "image"},
+        ]}}
+        return msgs
+
+    with patch("saiverse.media_summary.ensure_image_summary", new=generator), patch(
+        "llm_clients.gemini.ensure_image_summary", new=generator,
+    ):
+        for convert in (False, True):
+            out = prepare_openai_messages(
+                _msgs(), supports_images=False, convert_system_to_user=convert,
+            )
+            assert PASS not in _joined(out[4]["content"])
+            assert masked in _joined(out[4]["content"])
+
+        anth = _anthropic_build(_msgs())
+        texts = "".join(b.get("text", "") for b in anth["messages"][-1]["content"])
+        assert PASS not in texts and masked in texts
+
+        built = _build_xai_messages(_msgs(), supports_images=False)
+        texts = "".join(c.text for c in built[4].content)
+        assert PASS not in texts and masked in texts
+
+        gemini_client.supports_images = False
+        _, contents = gemini_client._convert_messages(_msgs())
+        text = contents[-1].parts[0].text
+        assert PASS not in text and masked in text
+    assert generator.called
+
+
+def test_stored_summary_masking_does_not_depend_on_other_heads(tmp_path):
+    """保存済みの要約の伏せ字はその送信の合言葉だけ — 別の head の合言葉の登録で送信本文が変わらない。"""
+    from llm_clients.openai_message_preparer import prepare_openai_messages
+
+    other = "Other9Pass00"
+    path = _write_png(tmp_path)
+
+    def _build():
+        msgs = _image_only_notice(path, summary=f"要約 {other} と {PASS}")
+        return prepare_openai_messages(
+            msgs, supports_images=True, convert_system_to_user=False,
+        )[3]["content"]
+
+    before = _build()
+    # 別の head (別のペルソナ・別のモデル) の合言葉がこのプロセスで使われる
+    present_system_notices(
+        [_head(other), {"role": "system", "content": "x"}], accepts_mid_system=False,
+    )
+    after = _build()
+    assert before == after
+    assert other in after  # 別の head の合言葉は、この送信では伏せる対象ではない
+    assert PASS not in after
+
+
+def test_openai_tool_stream_log_keeps_no_argument_fragments(caplog, monkeypatch):
+    from types import SimpleNamespace
+
+    from llm_clients.openai import OpenAIClient
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test_openai_key")
+    echoed = "Tt5ArgsSplit7"
+    first, second = echoed[:6], echoed[6:]
+
+    def _chunk(arguments, name=None):
+        call = SimpleNamespace(
+            id="call_1", function=SimpleNamespace(name=name, arguments=arguments),
+        )
+        delta = SimpleNamespace(tool_calls=[call], content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)])
+
+    with patch("llm_clients.openai.OpenAI"):
+        client = OpenAIClient("gpt-4.1-nano")
+    resp = [_chunk('{"text": "' + first, name="say"), _chunk(second + '"}')]
+    with caplog.at_level("DEBUG"):
+        list(client._stream_tool_mode(resp=resp, history_snippets=[], reasoning_chunks=[]))
+
+    assert client.consume_tool_detection()["tool_args"] == {"text": echoed}
+    messages = [r.getMessage() for r in caplog.records]
+    # 結合後の値は 1 レコードで書く (ハンドラの伏せ字に掛かる)。断片だけのレコードは無い。
+    assert any(echoed in m for m in messages)
+    for m in messages:
+        if echoed not in m:
+            assert first not in m and second not in m, m
+
+
+def test_codex_refuses_to_send_when_preparation_fails(monkeypatch):
+    from llm_clients import openai_codex as codex_mod
+    from llm_clients.exceptions import InvalidRequestError
+
+    def _boom(*_a, **_k):
+        raise ValueError("broken image")
+
+    monkeypatch.setattr(codex_mod, "prepare_openai_messages", _boom)
+    client = codex_mod.OpenAICodexClient("synthetic-codex")
+    posted = MagicMock()
+    monkeypatch.setattr(client, "_post_with_auth_retry", posted)
+    with pytest.raises(InvalidRequestError):
+        client._build_body(_first_turn_with_notice(), None, None, None, None)
+    with pytest.raises(InvalidRequestError):
+        client.generate(_first_turn_with_notice())
+    posted.assert_not_called()

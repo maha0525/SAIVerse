@@ -36,6 +36,7 @@ from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .base import LLMClient, ToolSpecFormat
+from .exceptions import InvalidRequestError
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -633,12 +634,20 @@ class OpenAICodexClient(LLMClient):
                 keep_metadata_keys=(OUTPUT_PHASES_METADATA_KEY,),
             )
         except Exception as exc:  # noqa: BLE001
-            LOG.warning(
-                "prepare_openai_messages failed; falling back to raw messages "
-                "(image attachments may be dropped): %s",
-                exc,
-            )
-            return messages
+            # 元の messages のまま送り続けない (fail-closed)。この変換は画像の展開
+            # だけでなく、システム通知を元の位置で合言葉付きタグにし、head の合言葉の
+            # 仮置きを置き換え、通知以外の本文の合言葉を伏せる
+            # (docs/intent/system_notice_delivery.md)。元の messages では、通知が
+            # instructions へ寄って位置を失い、伏せ字の無い本文が送られる。
+            LOG.error("prepare_openai_messages failed; refusing to send: %s", exc)
+            raise InvalidRequestError(
+                f"Codex request preparation failed: {exc}",
+                original_error=exc,
+                user_message=(
+                    "送信するメッセージの変換に失敗したため、送信を中止しました。"
+                    "ログを確認してください。"
+                ),
+            ) from exc
 
     def _build_body(
         self,
@@ -1146,10 +1155,10 @@ class OpenAICodexClient(LLMClient):
             try:
                 return json.loads(data_str)
             except json.JSONDecodeError:
-                LOG.debug(
-                    "could not parse SSE payload: %s",
-                    redact_secrets(data_str, getattr(resp, _SENT_TOKEN_ATTR, None))[:200],
-                )
+                # 中身は書かない (大きさだけ)。payload は生成途中の断片を運ぶので、
+                # 冒頭で切ると合言葉を復唱した応答の断片がログに残り、行ごとの
+                # 伏せ字に掛からない (docs/intent/system_notice_delivery.md 不変条件 3)。
+                LOG.debug("could not parse SSE payload (%d chars)", len(data_str))
                 return None
 
         for chunk in resp.iter_content():

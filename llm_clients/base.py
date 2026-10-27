@@ -131,6 +131,7 @@ class LLMClient:
         from .system_notice import (
             system_notice_indices,
             system_notice_media_note,
+            system_notice_passphrase,
             unresolved_system_notice_media,
         )
         from .utils import inject_audio_video_summaries
@@ -140,7 +141,10 @@ class LLMClient:
         # その場で要約を生成せず、保存済みの要約か URI だけの説明にする — 生成の
         # 成否で同じ記録から組む送信本文が揺れないように
         # (docs/intent/system_notice_delivery.md 不変条件 6、画像と同じ規則)。
+        # 説明の文はこの後の present_system_notices で本文ごと伏せ字とタグの変換を
+        # 通る (この時点では通知の本文の一部として足すので、タグの中に入る)。
         notice_indices = system_notice_indices(messages)
+        passphrase = system_notice_passphrase(messages)
 
         new_msgs: List[Dict[str, Any]] = []
         for idx, msg in enumerate(messages):
@@ -170,7 +174,9 @@ class LLMClient:
                         continue
                     missing = unresolved_system_notice_media(metadata, items, kind)
                     for att in list(items) + missing:
-                        note = system_notice_media_note(att, metadata, kind)
+                        note = system_notice_media_note(
+                            att, metadata, kind, passphrase=passphrase,
+                        )
                         new_text = f"{new_text}\n{note}" if new_text else note
                 if new_text == content:
                     new_msgs.append(msg)
