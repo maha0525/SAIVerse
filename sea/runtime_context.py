@@ -31,27 +31,90 @@ from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 LOGGER = logging.getLogger(__name__)
 
 
+#: 添付アイテム作成の注記のシステム通知の系統名 (``SYSTEM_NOTICE_KEY`` の値)。
+#: 注記は記録に無く、文脈を組むたびに発言の metadata から組み直される
+#: (sea/runtime.py の ``_enrich_history_with_attachments``) — 送る列を記録に
+#: 揃えるとき (:func:`_align_with_record`) は、履歴の組み立てだけが作る形として
+#: 読み直した並びの側を使う。
+ATTACHMENT_NOTE_NOTICE = "attachment_note"
+#: リアルタイム情報 (OFF のモデルで最新の入力の直前に置くもの) の系統名。
+REALTIME_NOTICE = "realtime"
+#: リアルタイム情報の見出し (本文の一行目)。
+REALTIME_INFO_HEADING = "## リアルタイム情報"
+
+
+def realtime_info_text(lines: str) -> str:
+    """リアルタイム情報の本文 (見出し + 行)。組み方はこの一枚だけ。"""
+    return f"{REALTIME_INFO_HEADING}\n{lines}"
+
+
+def realtime_context_message(
+    content: str, *, metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """OFF のモデルの送る列に置くリアルタイム情報のメッセージ (role=system の通知)。
+
+    印 ``__realtime_context__`` はリアルタイムスペルの結果の追記先・プレビューの
+    節分け・自動想起の除外が読む。
+    """
+    from sai_memory.memory.storage import system_notice_message
+
+    meta: Dict[str, Any] = dict(metadata) if metadata else {}
+    meta["__realtime_context__"] = True
+    return system_notice_message(content, REALTIME_NOTICE, metadata=meta)
+
+
+def last_input_index(messages: Sequence[Dict[str, Any]]) -> Optional[int]:
+    """送る列の最後の「入力」(role=user の発言、またはシステム通知) の位置。
+
+    OFF のモデルでリアルタイム情報・自動想起を差し込む位置 (その直前) を決める。
+    システム通知は以前 ``<system>`` タグ付きの role=user で並んでいたので、
+    「最後の user」はスケジュールの発火文・知覚のまとめ・自律行動の記録なども
+    指していた。通知が role=system へ移った後も同じ位置を指すよう、通知も
+    入力に数える (docs/intent/system_notice_delivery.md「role を手掛かりにして
+    いる読み手の点検」)。リアルタイム情報そのもの (``__realtime_context__``) は
+    数えない。
+    """
+    from sai_memory.memory.storage import is_system_notice
+
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict):
+            continue
+        if (msg.get("metadata") or {}).get("__realtime_context__"):
+            continue
+        if msg.get("role") == "user" or is_system_notice(msg):
+            return idx
+    return None
+
+
 def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """AUTONOMOUS アスペクトの assistant 発言を user+<system> 形式に変換する。
+    """AUTONOMOUS アスペクトの assistant 発言を role=system の自律行動の記録に変換する。
 
     軽量モデルで生成された自律行動の口調が、後続パルスのコンテキストに
     assistant ロールとして残ると口調ブレの感染源になる。コンテキスト組み立て
-    時のみ変換し、SAIMemory の保存データは変えない。
+    時のみ変換し、SAIMemory の保存データは変えない。形はシステム通知
+    (``SYSTEM_NOTICE_KEY`` = ``"autonomous_record"``、docs/intent/
+    system_notice_delivery.md)。元の発言の id・時刻・metadata は引き継ぐ。
     """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     result: List[Dict[str, Any]] = []
     for msg in messages:
         aspect = (msg.get("metadata") or {}).get("aspect")
         if aspect == "autonomous" and msg.get("role") == "assistant":
             content = msg.get("content", "")
             reframed_content = (
-                "<system>[自律行動の記録]\n"
+                "[自律行動の記録]\n"
                 "あなたは自律的に以下の行動を取りました：\n"
-                f"```\n{content}\n```\n"
-                "</system>"
+                f"```\n{content}\n```"
             )
             reframed = {k: v for k, v in msg.items() if k not in ("role", "content")}
-            reframed["role"] = "user"
+            reframed["role"] = "system"
             reframed["content"] = reframed_content
+            reframed["metadata"] = {
+                **(msg.get("metadata") or {}),
+                SYSTEM_NOTICE_KEY: "autonomous_record",
+            }
             result.append(reframed)
         else:
             result.append(msg)
@@ -222,9 +285,15 @@ def _record_key(msg: Any) -> Optional[tuple]:
 
 
 def _is_history_form(msg: Any) -> bool:
-    """履歴の組み立てだけが作る形 (知覚のまとめ・省略の印・残した行・時刻の目安)。"""
+    """履歴の組み立てだけが作る形 (知覚のまとめ・省略の印・残した行・時刻の目安・添付の注記)。"""
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     meta = msg.get("metadata") if isinstance(msg, dict) else None
-    return isinstance(meta, dict) and any(
+    if not isinstance(meta, dict):
+        return False
+    if meta.get(SYSTEM_NOTICE_KEY) == ATTACHMENT_NOTE_NOTICE:
+        return True
+    return any(
         meta.get(k) for k in (
             CONSUMED_PERCEPTION_KEY, PERSISTED_REALTIME_AND_RECALL_KEY,
             HISTORY_TIME_ANCHOR_KEY,
@@ -465,10 +534,19 @@ def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool
         return False
 
 
+#: そのターンのまとまり (と残した行) のシステム通知の系統名。
+REALTIME_AND_RECALL_NOTICE = "realtime_and_recall"
+
+
 def compose_turn_realtime_and_recall_content(info: Dict[str, Any]) -> str:
-    """そのターンのまとまりの文面 (リアルタイム情報 → 自動想起の順に改行で繋ぐ)。"""
+    """そのターンのまとまりの文面 (リアルタイム情報 → 自動想起の順に空行で繋ぐ)。
+
+    どちらもタグで囲まない本文 (docs/intent/system_notice_delivery.md)。この
+    文面がそのまま残した行の ``rendered_text`` になり、次のターン以降も同じ文面で
+    送られる (persist_realtime_and_recall.md 不変条件 1)。
+    """
     parts = [p for p in (info.get("realtime"), info.get("recall")) if p]
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def build_turn_realtime_and_recall_message(
@@ -508,6 +586,8 @@ def build_turn_realtime_and_recall_message(
         ] if recall_text else [],
         "persisted": False,
     }
+    from sai_memory.memory.storage import system_notice_message
+
     metadata: Dict[str, Any] = {
         "__realtime_context__": True,
         TURN_REALTIME_AND_RECALL_KEY: info,
@@ -515,11 +595,11 @@ def build_turn_realtime_and_recall_message(
     realtime_meta = realtime_msg.get("metadata") if realtime_msg else None
     if isinstance(realtime_meta, dict) and isinstance(realtime_meta.get("media"), list):
         metadata["media"] = list(realtime_meta["media"])
-    return {
-        "role": "user",
-        "content": compose_turn_realtime_and_recall_content(info),
-        "metadata": metadata,
-    }
+    return system_notice_message(
+        compose_turn_realtime_and_recall_content(info),
+        REALTIME_AND_RECALL_NOTICE,
+        metadata=metadata,
+    )
 
 
 def find_turn_realtime_and_recall_index(
@@ -649,10 +729,10 @@ def add_realtime_spell_lines_to_turn_message(
 ) -> bool:
     """リアルタイムスペルの結果の行を、そのターンのまとまりのリアルタイム情報に足す。
 
-    足し方は今までの追記 (リアルタイム情報の ``</system>`` の直前に入れる) と
-    同じ。リアルタイム情報がまだ無い (時刻の項目が両方 OFF) なら、スペルの
-    結果だけのリアルタイム情報を作る。自動想起の文面には触れない — 文面全体の
-    ``</system>`` を置換すると、想起の閉じタグの前にも結果が入ってしまう。
+    足し方は OFF のモデルの追記 (sea/runtime_llm._place_realtime_spell_result —
+    リアルタイム情報の末尾に行を足す) と同じ。リアルタイム情報がまだ無い (時刻の
+    項目が両方 OFF) なら、スペルの結果だけのリアルタイム情報を作る。自動想起の
+    文面には触れない — 結果はリアルタイム情報の部分の末尾に入る。
 
     もう送ったまとまりには足さない (False を返す — 呼び出し側は別の末尾の
     メッセージに置き、保存しない)。足したら True。
@@ -664,13 +744,9 @@ def add_realtime_spell_lines_to_turn_message(
         return True
     realtime = info.get("realtime")
     if realtime:
-        if "</system>" in realtime:
-            head, sep, tail = realtime.rpartition("</system>")
-            realtime = head + "\n" + new_content + "\n" + sep + tail
-        else:
-            realtime = realtime + "\n" + new_content
+        realtime = realtime + "\n" + new_content
     else:
-        realtime = f"<system>\n## リアルタイム情報\n{new_content}\n</system>"
+        realtime = realtime_info_text(new_content)
     info["realtime"] = realtime
     turn_msg["content"] = compose_turn_realtime_and_recall_content(info)
     return True
@@ -1190,14 +1266,16 @@ def _append_history(
                     from datetime import datetime as _dt
                     ts_int = int(oldest_ts)
                     ts_str = _dt.fromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S")
-                    anchor_msg = {
-                        "role": "user",
-                        "content": f"<system>以下、{ts_str} 以降のやり取りです</system>",
+                    from sai_memory.memory.storage import system_notice_message
+
+                    anchor_msg = system_notice_message(
+                        f"以下、{ts_str} 以降のやり取りです",
+                        "history_time_anchor",
                         # 記録に残らないが、同じ履歴からは毎ターン同じ
                         # 文面で組み直される (reread_recorded_history も同じ
                         # この関数で組み直す)。
-                        "metadata": {HISTORY_TIME_ANCHOR_KEY: True},
-                    }
+                        metadata={HISTORY_TIME_ANCHOR_KEY: True},
+                    )
                     messages.append(anchor_msg)
                     LOGGER.debug(
                         "[sea][prepare-context] Inserted timestamp anchor: %s",
@@ -1394,12 +1472,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             if realtime_msg and persist_mode:
                 persist_realtime_msg = realtime_msg
             elif realtime_msg:
-                # Find the last user message and insert realtime context before it
-                last_user_idx = None
-                for i in range(len(messages) - 1, -1, -1):
-                    if messages[i].get("role") == "user" and not messages[i].get("metadata", {}).get("__realtime_context__"):
-                        last_user_idx = i
-                        break
+                # Find the last input (user message or system notice) and
+                # insert realtime context before it (last_input_index)
+                last_user_idx = last_input_index(messages)
 
                 if last_user_idx is not None:
                     # Insert before last user message
@@ -1510,14 +1585,24 @@ def _chronicle_enabled_for(runtime: Any, persona: Any) -> bool:
         return True
 
 
-def _perception_block_text(rendered_text: str) -> str:
-    """バッチの確定文面を提示ブロックの本文にする (組成の一点)。
+#: 知覚のまとめ・省略の印のシステム通知の系統名 (``SYSTEM_NOTICE_KEY`` の値)。
+PERCEPTION_NOTICE = "perception"
+PERCEPTION_OMISSION_NOTICE = "perception_omission"
 
-    勘定 (:func:`sea.eviction_plan.message_chars`) が数えるのはこの文字列なので、
-    合計上限の判定も同じ関数で測る — 「送る側と測る側が同じ一枚を見る」規則を
-    知覚の上限にも通す。
+
+def _perception_block(content: str, created_at: Any, metadata: Dict[str, Any], *, kind: str = PERCEPTION_NOTICE) -> Dict[str, Any]:
+    """知覚のまとめ (と省略の印・残した行) を送る列のブロックにする (組成の一点)。
+
+    role=system のシステム通知で、本文はバッチの確定文面をタグで囲まずにそのまま
+    出す (docs/intent/system_notice_delivery.md)。勘定
+    (:func:`sea.eviction_plan.message_chars`) が数えるのもこの本文 — 送る側と
+    測る側が同じ一枚を見る。
     """
-    return f"<system>{rendered_text}</system>"
+    from sai_memory.memory.storage import system_notice_message
+
+    block = system_notice_message(content, kind, metadata=metadata)
+    block["created_at"] = created_at
+    return block
 
 
 #: 下ろした跡地に置く機構名義の一行の見出しは台帳側の一枚
@@ -1554,19 +1639,17 @@ def _perception_omission_block(
     )
     if chronicle_enabled:
         body += "消えたのではなく、記憶の整理の際にあらすじへ引き継がれます。"
-    return {
-        "role": "user",
-        "content": (
-            f"<system>{PERCEPTION_OMISSION_HEADER}\n{body}</system>"
-        ),
-        "created_at": int(created_at),
-        "metadata": {
+    return _perception_block(
+        f"{PERCEPTION_OMISSION_HEADER}\n{body}",
+        int(created_at),
+        {
             "tags": ["internal", "event_message", "perception"],
             CONSUMED_PERCEPTION_KEY: True,
             "__perception_omitted__": int(records),
             "__perception_omitted_batches__": len(dropped),
         },
-    }
+        kind=PERCEPTION_OMISSION_NOTICE,
+    )
 
 
 def list_presented_perception_blocks(
@@ -1586,7 +1669,7 @@ def list_presented_perception_blocks(
     組成規則の二枚目を作らないことでしか防げない。
 
     - バッチの ``rendered_text`` (消費時に確定したペルソナが見た文面) を
-      ``<system>`` 包みでそのまま出す — 生の台帳項目からの再構成 (再 reduce /
+      role=system のシステム通知としてそのまま出す — 生の台帳項目からの再構成 (再 reduce /
       再 format) はしない (reduce で消えた中間状態の復活・秒精度の時刻衝突に
       よるグループ混線の根)。
     - **Metabolism が決めた縮み**は候補を取った直後に一度だけ適用する
@@ -1909,16 +1992,12 @@ def list_presented_perception_blocks(
                 metadata["media"] = media
             if not (content_text or "").strip() and not media:
                 # 回収 (room_state_packages.md §11-2) で全項目が外れた消費の
-                # 空バッチ — 見せるものが無いので空の <system></system> を
-                # 作らない。送る側と測る側は同じこの一枚を通るので勘定は
-                # ずれない。
+                # 空バッチ — 見せるものが無いので空の通知を作らない。送る側と
+                # 測る側は同じこの一枚を通るので勘定はずれない。
                 continue
-            blocks.append({
-                "role": "user",
-                "content": _perception_block_text(content_text),
-                "created_at": batch.consumed_at,
-                "metadata": metadata,
-            })
+            blocks.append(_perception_block(
+                content_text or "", batch.consumed_at, metadata,
+            ))
         return blocks
     except Exception:
         if raise_on_error:
@@ -2033,12 +2112,11 @@ def _realtime_and_recall_block(
         metadata[REALTIME_AND_RECALL_PULSE_ID_KEY] = str(batch.pulse_id)
     if media:
         metadata["media"] = media
-    return {
-        "role": "user",
-        "content": content,
-        "created_at": batch.consumed_at,
-        "metadata": metadata,
-    }
+    # 送ったときのまとまり (build_turn_realtime_and_recall_message) と同じ
+    # role=system・同じ系統の通知として出す。
+    return _perception_block(
+        content, batch.consumed_at, metadata, kind=REALTIME_AND_RECALL_NOTICE,
+    )
 
 
 def _block_batch_id(msg: Dict[str, Any]) -> int:
@@ -2354,19 +2432,20 @@ def _maybe_inject_auto_recall(
             "turn block (%d chars)", len(result.recalled_keys), result.char_count,
         )
     else:
-        recall_msg = {
-            "role": "user",
-            "content": result.block,
-            "metadata": {"__auto_recall__": True},
-        }
+        from sai_memory.memory.storage import is_system_notice, system_notice_message
 
-        # realtime_context と同じ挿入面: 最新 user メッセージの直前に入れる
+        recall_msg = system_notice_message(
+            result.block, "auto_recall", metadata={"__auto_recall__": True},
+        )
+
+        # realtime_context と同じ挿入面: 最新の入力 (user メッセージ、または
+        # システム通知 — :func:`last_input_index` と同じ数え方) の直前に入れる
         # (cached_head_architecture C5 と同じ末尾注入面)。auto_recall メタ付きの
         # 自己メッセージは対象外にして冪等にする。
         last_user_idx = None
         for i in range(len(messages) - 1, -1, -1):
             m = messages[i]
-            if m.get("role") != "user":
+            if m.get("role") != "user" and not is_system_notice(m):
                 continue
             meta = m.get("metadata") or {}
             if meta.get("__auto_recall__") or meta.get("__realtime_context__"):
@@ -2402,7 +2481,7 @@ def _maybe_inject_auto_recall(
     # 永続化用の受け渡し (reasoning と同じ「state 経由で speak/say ノードまで運ぶ」流儀)。
     # _prepare_context は純粋関数 (messages しか返さない) なので、run_playbook が
     # parent_state に転記できるよう persona の一時属性に置く (persona._current_pulse_type
-    # と同じパターン。永続化するのは <system> タグを剥がした本文のみ — スペル実行結果と
+    # と同じパターン。永続化するのは想起の本文のみ — スペル実行結果と
     # 同様、履歴末尾への再注入とは別経路で ChatMessage.auto_recall に載る (api/routes/chat.py)。
     # LLM コンテキストには載らない (推論と同じ扱い。metadata は llm_clients 側で
     # 読まれるのは media 系キーのみ)。
@@ -2784,12 +2863,13 @@ def preview_context(
             )
             if reduced_pending:
                 pb_text = format_perception_message(reduced_pending)
-                pb_msg = {"role": "user", "content": f"<system>{pb_text}</system>"}
+                # 送るときと同じ形 (role=system・タグ無しの知覚のまとめ)。
+                pb_msg = _perception_block(pb_text, None, {})
                 pb_tokens = estimate_messages_tokens([pb_msg], provider)
                 section_tokens["perception_buffer"] = pb_tokens
                 section_msg_counts["perception_buffer"] = 1
                 annotated_messages.append({
-                    "role": "user",
+                    "role": pb_msg["role"],
                     "content": pb_msg["content"],
                     "section": "perception_buffer",
                     "tokens": pb_tokens,

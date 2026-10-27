@@ -181,7 +181,8 @@ def test_mixed_round_reinvokes_and_includes_quick_result():
     assert len(client.calls) == 1      # 従来どおり再呼び出し
     assert continuation == "結果を見て続けます。"
     # quick の結果も同じ注入メッセージに含まれる (不変条件 7)
-    injected = [m for m in msgs if m.get("role") == "user" and "[Spell Result" in m.get("content", "")]
+    # 結果は role=system のシステム通知 (docs/intent/system_notice_delivery.md)
+    injected = [m for m in msgs if m.get("role") == "system" and "[Spell Result" in m.get("content", "")]
     assert len(injected) == 1
 
 

@@ -498,12 +498,16 @@ def test_image_only_utterance_reaches_the_payload_after_context_enrichment(
         "content": remembered["content"],
         "metadata": remembered["metadata"],
     }])
+    # 添付アイテム作成の注記は発言の本文へ連結せず、直後の独立したシステム
+    # 通知になる (docs/intent/system_notice_delivery.md)。発言は画像だけで届く。
+    assert [m["role"] for m in history] == ["user", "system"]
+    assert history[1]["metadata"]["__system_notice__"] == "attachment_note"
     xai_kinds = [p.WhichOneof("content") for p in
                  _build_xai_messages(history, supports_images=True)[0].content]
-    assert xai_kinds == ["text", "image_url"]
+    assert "image_url" in xai_kinds
     openai_kinds = [p["type"] for p in
                     prepare_openai_messages(history, supports_images=True)[0]["content"]]
-    assert openai_kinds == ["text", "image_url"]
+    assert "image_url" in openai_kinds
 
 
 # --- 機構の文と、ユーザーの言葉の見分け (文字列の形に頼らない) -----------------
@@ -538,11 +542,18 @@ def test_attachment_names_with_a_line_break_are_still_not_read_as_words(png_path
     assert auto_recall._last_user_utterance(messages) is None
 
 
-def test_the_payload_text_is_unchanged_by_keeping_the_said_text(png_path):
-    # 控えは metadata に置くだけで、送る本文は従来と一字も変わらない
+def test_the_attachment_note_is_a_separate_system_notice(png_path):
+    # 発言の本文はユーザーの言葉のまま。注記は直後の独立したシステム通知
+    # (docs/intent/system_notice_delivery.md)
     metadata = _image_metadata(png_path)
     enriched = _enriched([{"role": "user", "content": "見て", "metadata": metadata}])
-    assert enriched[0]["content"] == "見て\n<system>添付アイテム作成: 画像「photo.png」</system>"
+    assert enriched[0]["content"] == "見て"
+    assert "__said_content__" not in enriched[0]["metadata"]
+    assert enriched[1] == {
+        "role": "system",
+        "content": "添付アイテム作成: 画像「photo.png」",
+        "metadata": {"__system_notice__": "attachment_note"},
+    }
     assert "__said_content__" not in metadata  # 元の発言の metadata は書き換えない
 
 

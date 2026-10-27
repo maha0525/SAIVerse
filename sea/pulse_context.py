@@ -665,13 +665,16 @@ class PulseContext:
         the current Pulse (including function calling protocol pairs).
 
         All protocol-compatible roles (user, assistant, tool, system) are
-        included.  Mid-conversation system messages are handled by the LLM
-        client layer's ``convert_system_to_user`` mechanism for backends that
-        require system messages at the beginning only.
+        included.  Mid-conversation system entries come out as role=system
+        notices (``SYSTEM_NOTICE_KEY``); the LLM client layer converts them for
+        backends that cannot take a system message mid-conversation
+        (llm_clients/system_notice.py, docs/intent/system_notice_delivery.md).
 
         Entries with roles outside the LLM protocol (e.g. speak-only entries
         that duplicate assistant content) are skipped.
         """
+        from sai_memory.memory.storage import system_notice_message
+
         msgs: List[Dict[str, Any]] = []
         for entry in self.logs:
             if entry.role == "tool" and entry.tool_call_id:
@@ -684,22 +687,21 @@ class PulseContext:
                 }
             elif entry.role == "tool" and not entry.tool_call_id:
                 # Playbook-defined TOOL node result (no function-calling pair).
-                # tool role は tool_call_id が必須なのでここでは使えず、また
-                # role='system' を messages 中途に挿入すると Gemini 等で互換性
-                # 問題が出る。そのため user role + <system> タグの統一形式で
-                # 送る (詳細: sea/runtime_llm.py の同様の自動ラップ箇所のコメント参照)。
+                # tool role は tool_call_id が必須なのでここでは使えないので、
+                # システム通知として出す。
                 tool_label = entry.tool_name or "tool"
-                msg = {
-                    "role": "user",
-                    "content": f"<system>[{tool_label}] {entry.content}</system>",
-                }
+                msg = system_notice_message(
+                    f"[{tool_label}] {entry.content}", "tool_result",
+                )
             elif entry.role == "assistant" and entry.tool_calls:
                 msg = {
                     "role": "assistant",
                     "content": entry.content,
                     "tool_calls": entry.tool_calls,
                 }
-            elif entry.role in ("user", "assistant", "system"):
+            elif entry.role == "system":
+                msg = system_notice_message(entry.content, "pulse_log")
+            elif entry.role in ("user", "assistant"):
                 msg = {"role": entry.role, "content": entry.content}
             else:
                 continue

@@ -193,14 +193,12 @@ def _build_notice(fold: FoldedRange, digest_text: str) -> str:
         how = "中身を思い出したいときは Chronicle の検索・詳細読みで辿れます。"
     body = digest_text.strip()
     return (
-        "<system>\n"
         "【この位置の記憶は圧縮されています】\n"
         f"長い出来事だったため、ここにあった {count} 件の記録はあらすじに畳まれました。"
         "消えたのではなく、畳まれているだけです。"
         f"{how}\n\n"
         "--- あらすじ ---\n"
-        f"{body}\n"
-        "</system>"
+        f"{body}"
     )
 
 
@@ -289,20 +287,25 @@ def _placeholder(
 ) -> Dict[str, Any]:
     """置き換えメッセージ。
 
-    role は ``user`` + ``<system>`` 包み — SAIMemory の system メッセージが提示コンテキストへ
-    出るときと同じ形 (saiverse_memory/adapter.py の payload 変換) に揃える。機構の
-    声を機構の声として、ペルソナの発話と混ぜない。
+    role=system のシステム通知 (``SYSTEM_NOTICE_KEY`` = ``"fold_digest"``) —
+    SAIMemory の system メッセージが提示コンテキストへ出るときと同じ形
+    (saiverse_memory/adapter.py の payload 変換、docs/intent/
+    system_notice_delivery.md) に揃える。機構の声を機構の声として、ペルソナの
+    発話と混ぜない。
     """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     return {
         # 位置は「提示コンテキストに残っている最初のメッセージ」なので id / 時刻もそれに合わせる
         # (範囲の先頭が提示コンテキストの外に出ていても、置き換えは提示コンテキストの中の正しい位置に立つ)。
         "id": f"folded:{first_msg.get('id')}",
-        "role": "user",
+        "role": "system",
         "content": _build_notice(fold, digest_text),
         "created_at": first_msg.get("created_at", fold.start_at),
         "line_role": "main_line",
         "scope": "committed",
         "metadata": {
+            SYSTEM_NOTICE_KEY: "fold_digest",
             FOLDED_MARKER: True,
             "message_count": len(fold.message_ids),
             "chronicle_entry_ids": list(fold.chronicle_entry_ids),

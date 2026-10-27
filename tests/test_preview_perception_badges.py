@@ -32,7 +32,6 @@ from sai_memory.perception_buffer import (
 )
 from sai_memory.room_state import render_room_full, room_key
 from sea.runtime_context import (
-    _perception_block_text,
     list_presented_perception_blocks,
     merge_perception_blocks,
     preview_context,
@@ -197,9 +196,12 @@ class PreviewPerceptionBadgeTest(unittest.TestCase):
             self.runtime, self.persona, self.recent, raise_on_error=True,
         )
         by_text = {b["content"]: b for b in blocks}
-        # content は確定文面の <system> 包みそのもの (バッジの文言は混ざらない)。
-        self.assertIn(_perception_block_text(self.room_text), by_text)
-        self.assertIn(_perception_block_text(self.plain_text), by_text)
+        # content は確定文面そのもの (role=system のシステム通知、タグ無し —
+        # docs/intent/system_notice_delivery.md)。バッジの文言は混ざらない。
+        self.assertIn(self.room_text, by_text)
+        self.assertIn(self.plain_text, by_text)
+        for b in blocks:
+            self.assertEqual(b["role"], "system")
 
     def test_marks_never_reach_the_llm_payload(self):
         """metadata の印は message preparer が落とす — 印の有無で payload 不変。"""

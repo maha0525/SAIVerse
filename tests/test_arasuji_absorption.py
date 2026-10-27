@@ -579,12 +579,13 @@ class TestRunAbsorption:
         entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
         recall_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(10),
-            rendered_text="<system>ふと浮かんだ記憶:\n- 灯台の思い出</system>",
+            # 残す文面はタグ無し (docs/intent/system_notice_delivery.md)
+            rendered_text="ふと浮かんだ記憶:\n- 灯台の思い出",
             recalled_keys=[("memopedia", "p1")],
         )
         notice_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(11),
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:11\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:11",
         )
         mark_batches_annexed(conn, [recall_id, notice_id], entry.id)
         conn.commit()
@@ -623,7 +624,7 @@ class TestRunAbsorption:
         ).fetchone()
         kept_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(0) + 30,
-            rendered_text="<system>ふと浮かんだ記憶:\n- run の想起</system>",
+            rendered_text="ふと浮かんだ記憶:\n- run の想起",
             recalled_keys=[("memopedia", "p9")],
             boundary_created_at=int(created_at), boundary_rowid=int(rowid),
         )

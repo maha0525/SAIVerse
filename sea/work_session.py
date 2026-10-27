@@ -9,7 +9,7 @@ act→observe ループを、ラウンド予算付きで運転する。実体は
   (sub_line / volatile / lightweight, ``sea.pulse_context.Aspect``) のライン
   として走る。新アスペクトは作らない。
 - **指示書注入**: ``instruction`` をセッションラインの最初のメッセージ
-  (head 直後の user + ``<system>`` タグ) として注入する。head は既存
+  (head と履歴の直後の role=system のシステム通知) として注入する。head は既存
   sub_line と同じくペルソナの (persona, model) 固定 head をそのまま使う。
 - **ラウンド予算**: ``budget_rounds`` を ``_run_spell_loop(max_rounds=...)``
   に渡す。env グローバル ``SAIVERSE_SPELL_MAX_ROUNDS`` の既存挙動は不変。
@@ -412,7 +412,14 @@ def run_work_session(
                     str(instruction).strip(), budget_rounds, Aspect.WORKER.mode_display_name
                 )
             messages: List[Dict[str, Any]] = list(base_messages)
-            messages.append({"role": "user", "content": instruction_content})
+            # 指示書は role=system のシステム通知として足す (送り先のモデルに
+            # 合わせた変換はクライアント層 — docs/intent/system_notice_delivery.md)。
+            # 同じ本文が最初の周の発言の paired_action_text に残る。
+            from sai_memory.memory.storage import system_notice_message
+
+            messages.append(
+                system_notice_message(instruction_content, "work_session_instruction")
+            )
 
             state: Dict[str, Any] = {
                 "_pulse_id": pulse_id,
@@ -457,7 +464,7 @@ def run_work_session(
                 state["_execution_context"] = execution_context
 
             pulse_ctx.append(PulseLogEntry(
-                role="user", content=instruction_content,
+                role="system", content=instruction_content,
                 node_id="work_session_instruction",
                 playbook_name=WORK_SESSION_PLAYBOOK_NAME,
             ))
@@ -738,13 +745,12 @@ def _resolve_manager_from_context() -> Optional[Any]:
 def _build_instruction_message(
     instruction: str, budget_rounds: int, mode_name: str
 ) -> str:
-    """指示書をセッションラインの最初のメッセージとして整形する。
+    """指示書をセッションラインの最初のメッセージの本文として整形する。
 
-    Playbook の action と同じ「user role + <system> タグ」統一形式
-    (プロバイダ互換のための対策済み形式、sea/runtime_llm.py の解説参照)。
+    本文はタグで囲まない。送る列には Playbook の action と同じく role=system の
+    システム通知として足す (docs/intent/system_notice_delivery.md)。
     """
     return (
-        "<system>"
         f"あなたは今「{mode_name}」で作業セッションを開始します。\n"
         "以下の指示書に従い、スペルを使って実際に作業してください。\n\n"
         "【指示書】\n"
@@ -753,8 +759,7 @@ def _build_instruction_message(
         f"- 使えるラウンド数（スペル発動と結果確認の往復）は最大 {budget_rounds} 回です。\n"
         "- スペルの実行結果を確認してから次の手を決めてください。\n"
         "- 指示書の作業が終わったら、スペルを含まない短い締めの言葉で終了してください。\n"
-        "- 実行していない作業を「やった」と書かないでください。\n"
-        "</system>"
+        "- 実行していない作業を「やった」と書かないでください。"
     )
 
 
@@ -763,19 +768,18 @@ def _build_life_instruction_message(situation: str, budget_rounds: int) -> str:
 
     作業の指示書と違い、目的・成果義務・作業ルールを課さない。許可形のみで
     書く (義務形は充填独白 v1 を呼び戻す — timetable_redesign §5.5)。
-    形式は :func:`_build_instruction_message` と同じ「user role + <system>」。
+    形式は :func:`_build_instruction_message` と同じ (タグ無しの本文。送る列には
+    role=system のシステム通知として足す)。
     """
     spell_line = (
         f"気になったことがあればスペルを使ってもかまいません（最大 {budget_rounds} 回）。"
         if budget_rounds > 0 else ""
     )
     return (
-        "<system>"
         f"{situation}\n"
         "この時間の過ごし方は自由です。目に入るもの・流れてきたものを眺めて、"
         "感じたことがあればそのまま書き留めておけます。何かを作ったり成果を"
-        f"出したりする必要はありません。{spell_line}\n"
-        "</system>"
+        f"出したりする必要はありません。{spell_line}"
     )
 
 

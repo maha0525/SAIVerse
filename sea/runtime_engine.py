@@ -187,10 +187,10 @@ class RuntimeEngine:
                 # (= the path that becomes the only path once context_profile is
                 # removed in Phase 3 段階 4-D) would otherwise miss the result.
                 # Pattern matches lg_subplay_node's report_to_parent fix
-                # (sea/runtime_nodes.py:229-263, まはー指摘 2026-04-28). Wrapped
-                # as user role + <system> tag for cross-provider compatibility
-                # (Gemini rejects mid-stream system role; see sea/runtime_llm.py
-                # の同一書式コメント).
+                # (sea/runtime_nodes.py:229-263, まはー指摘 2026-04-28). Sent as
+                # a role=system notice; the client layer converts it for models
+                # that reject mid-conversation system messages
+                # (docs/intent/system_notice_delivery.md).
                 self._append_tool_message(
                     state, persona_obj, playbook,
                     f"tool '{tool_name}' result:\n{result_str}",
@@ -230,13 +230,14 @@ class RuntimeEngine:
     ) -> None:
         """TOOL ノードの結果 (またはエラー) を送る列 ``state["_messages"]`` へ足す。
 
-        既定は今までどおり、記録に残さない ``<system>…</system>`` の user
-        メッセージ。リアルタイム情報と自動想起を残すモデルの、残すパルスの列で、
+        形はどちらも role=system のシステム通知 (``SYSTEM_NOTICE_KEY`` =
+        ``"tool_result"``、docs/intent/system_notice_delivery.md)。既定は今までどおり
+        記録に残さない。リアルタイム情報と自動想起を残すモデルの、残すパルスの列で、
         ターンの最初の LLM 呼び出しをまだ送っていない間
         (:func:`sea.runtime_llm.records_additions_before_first_send`) は、事前
         スペルの結果 (sea/runtime_llm._execute_pre_spells) と同じ規則で足す —
         system ロールの記録に残し、その id を持たせ、記録が次のターンに復元
-        されるのと同じ文面 (``presented_system_record_content``) で送る。記録に
+        されるのと同じ本文 (``presented_system_record_content``) で送る。記録に
         残さないと、最初の呼び出しで送ったこの結果の位置が次のターンでは返事に
         置き換わり、前方一致が割れる (docs/intent/persist_realtime_and_recall.md
         不変条件 1、Codex 五巡目 #2)。最初の送信の直前に送る列の後ろ側は記録から
@@ -247,16 +248,19 @@ class RuntimeEngine:
         """
         if state.get("_messages") is None:
             state["_messages"] = []
+        from sai_memory.memory.storage import (
+            SYSTEM_NOTICE_KEY,
+            presented_system_record_content,
+            system_notice_message,
+        )
         from sea.runtime_llm import records_additions_before_first_send
 
         if not records_additions_before_first_send(state):
-            state["_messages"].append({"role": "user", "content": f"<system>{body}</system>"})
+            state["_messages"].append(system_notice_message(body, "tool_result"))
             return
-        from sai_memory.memory.storage import presented_system_record_content
-
-        msg: Dict[str, Any] = {
-            "role": "user", "content": presented_system_record_content(body),
-        }
+        msg: Dict[str, Any] = system_notice_message(
+            presented_system_record_content(body), "tool_result",
+        )
         try:
             stored_id = self.runtime._store_memory(
                 persona, body, role="system",
@@ -264,6 +268,7 @@ class RuntimeEngine:
                 pulse_id=state.get("_pulse_id"),
                 playbook_name=playbook.name,
                 pulse_context=state.get("_pulse_context"),
+                metadata={SYSTEM_NOTICE_KEY: "tool_result"},
                 return_message_id=True,
             )
             if stored_id:
@@ -417,11 +422,14 @@ class RuntimeEngine:
                         "node": node_id,
                     })
                 # Record error to SAIMemory so the persona (and subsequent LLM calls) can see it
+                from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
                 if not self.runtime._store_memory(
                     persona, error_msg,
                     role="system",
                     tags=["error", "exec", str(sub_name).strip()],
                     pulse_id=state.get("_pulse_id"),
+                    metadata={SYSTEM_NOTICE_KEY: "playbook_exec_error"},
                 ):
                     LOGGER.warning("Failed to store exec error to SAIMemory for node %s", node_id)
                     if event_callback:

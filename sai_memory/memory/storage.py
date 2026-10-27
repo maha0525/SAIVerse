@@ -1314,29 +1314,54 @@ SYSTEM_NOTICE_PASSPHRASE_KEY = "__system_notice_passphrase__"
 SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER = "{{SYSTEM_NOTICE_PASSPHRASE}}"
 
 
-def wrap_system_record_content(content: str) -> str:
-    """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。
-
-    履歴の復元 (saiverse_memory.adapter._payload_from_message_locked) と、記録と
-    同じものをその場で送る経路 (スペルの結果・事前スペルの結果 —
-    sea/runtime_llm) が**同じこの一枚**を通る。送ったときの本文と、保存して
-    次のターンに復元される本文が一字でも違うと、前回の送信が今回の送信の
-    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 2)。
-    ``content`` は :func:`compose_message_content` を通した後の文字列。
-    """
-    if content:
-        return f"<system>\n{content}\n</system>"
-    return "<system></system>"
-
-
 def presented_system_record_content(text: str) -> str:
-    """これから system ロールで保存する ``text`` が、復元されたときに出る本文。
+    """これから system ロールで保存する ``text`` が、記録から復元されたときに出る本文。
 
     リンク付きスレッドの抜粋などを持たない素の記録の
-    :func:`compose_message_content` (前後の空白を落とす) →
-    :func:`wrap_system_record_content` と同じ結果。
+    :func:`compose_message_content` (前後の空白を落とす) と同じ結果。記録と
+    同じものをその場で送る経路 (スペルの結果・事前スペルの結果・TOOL ノードの
+    結果・子ラインの結果報告) はこの一枚を通す — 送ったときの本文と、保存して
+    次のターンに復元される本文 (saiverse_memory.adapter.
+    _payload_from_message_locked) が一字でも違うと、前回の送信が今回の送信の
+    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 1)。
     """
-    return wrap_system_record_content((text or "").strip())
+    return (text or "").strip()
+
+
+def system_notice_message(
+    content: str, kind: str, *, metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """会話の途中のシステム通知を、messages 列に出す形 (role=system・タグ無し) にする。
+
+    docs/intent/system_notice_delivery.md「読み出しと messages 列の組み立て」。
+    本文はタグで囲まない — 送り先のモデルに合わせた変換 (そのまま送るか、
+    合言葉付きタグの user にするか) はクライアント層 (llm_clients/
+    system_notice.py) だけが行う。``kind`` は :data:`SYSTEM_NOTICE_KEY` の値
+    (その通知を作った系統の ASCII snake_case 名)。``metadata`` に渡した鍵
+    (media・内部の印など) はそのまま写す。本文は加工しない — 記録から復元される
+    本文と揃える必要がある呼び出し元は :func:`presented_system_record_content`
+    を通してから渡す。
+    """
+    meta: Dict[str, Any] = dict(metadata) if metadata else {}
+    meta[SYSTEM_NOTICE_KEY] = kind
+    return {"role": "system", "content": content, "metadata": meta}
+
+
+def is_system_notice(msg: Any) -> bool:
+    """messages 列のメッセージが、会話の途中のシステム通知か。
+
+    role=system で、識別用の metadata (:data:`SYSTEM_NOTICE_KEY`) を持つもの。
+    head が組んだ system メッセージ (:data:`HEAD_MESSAGE_KEY`) は通知ではない。
+    """
+    if not isinstance(msg, dict):
+        return False
+    role = msg.get("role")
+    if not (isinstance(role, str) and role.lower() == "system"):
+        return False
+    meta = msg.get("metadata")
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(SYSTEM_NOTICE_KEY)) and not meta.get(HEAD_MESSAGE_KEY)
 
 
 def compose_message_content(

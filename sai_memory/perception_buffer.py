@@ -953,8 +953,9 @@ def insert_realtime_and_recall_batch(
     docs/intent/persist_realtime_and_recall.md §4.2。知覚の消費とは別の
     トランザクションで、台帳の項目には触れない (消費を伴わない種類)。
 
-    - ``rendered_text`` は LLM へ送ったメッセージの ``content`` そのもの
-      (``<system>`` の包みを含む)。提示はこれを包み直さずにそのまま出す —
+    - ``rendered_text`` は LLM へ送ったメッセージ (role=system のシステム通知)
+      の ``content`` そのもの (タグで囲まない —
+      docs/intent/system_notice_delivery.md)。提示はこれをそのまま出す —
       一字でも変わると、次のターンの送信の先頭が前回の送信と一致しなくなる。
     - ``media`` はそのメッセージに付いていた画像 (リアルタイムスペルの結果)。
     - ``recalled_keys`` は文面に入っている自動想起の ``(source_type,
@@ -986,12 +987,6 @@ def insert_realtime_and_recall_batch(
     return int(cur.lastrowid)
 
 
-def _strip_system_tags(text: str) -> str:
-    """``<system>`` / ``</system>`` の包みを全部外す (材料の読みやすさのため)。"""
-    import re
-    return re.sub(r"</?system>", "", text or "").strip()
-
-
 #: あらすじの材料の種類 (:func:`batch_material_item` の ``label``)。
 #: sai_memory/arasuji/generator.py がプロンプトのラベルへ写す。
 MATERIAL_LABEL_RECALL = "recall"
@@ -1015,7 +1010,7 @@ def batch_material_item(
       §4.3) は材料に入れる (arasuji_levels.md §7-1 のまはー裁定 — 本人の提示に
       立った行はすべて材料に入る)。想起を含む行は ``label="recall"``
       (【想起 (過去の再提示)】)、含まない行は ``label="notice"`` (【通知】)。
-      文面は ``<system>`` の包みを外したもの。長さの規則は材料の整形側
+      文面は残した本文そのもの。長さの規則は材料の整形側
       (generator._format_messages_for_prompt) が他の材料と同じに当てる。
     - それ以外 (知覚のまとめ) は従来どおり確定文面そのまま (ラベルは整形側が
       本文から決める)。
@@ -1041,7 +1036,9 @@ def batch_material_item(
     if batch.is_realtime_and_recall:
         item = {
             "at": int(batch.consumed_at),
-            "text": _strip_system_tags(batch.rendered_text),
+            # 残した文面はタグで囲まれていない (送る列に role=system の通知
+            # として出した本文そのもの — docs/intent/system_notice_delivery.md)。
+            "text": (batch.rendered_text or "").strip(),
             "label": (
                 MATERIAL_LABEL_RECALL if batch.recalled_keys()
                 else MATERIAL_LABEL_NOTICE
@@ -1597,7 +1594,7 @@ _KIND_HEADERS = {
     "world_state": "[システム通知]",       # 世界状態の差分 (入退室・アイテム・スペル 等)
     "feed": "[フィード]",                  # フィード施設の新着記事 (rss_feed_intake.md)
     "persona_recall": "",                     # 入室時の過去会話想起 (本文が自己完結)
-    "surroundings": "",                       # 移動先の様子 (本文が <system> 見出し込みで自己完結)
+    "surroundings": "",                       # 移動先の様子 (本文が見出し込みで自己完結)
 }
 _DEFAULT_HEADER = "[システム通知]"
 
@@ -1621,7 +1618,8 @@ def perception_block_text(kind: str, content: str) -> str:
 
 
 def format_perception_message(items: List[PerceptionItem]) -> str:
-    """reduce 済み知覚を 1 メッセージ分の本文に整形する (``<system>`` 包みは呼び出し側)。
+    """reduce 済み知覚を 1 メッセージ分の本文に整形する (タグで囲まない — 送る列には
+    role=system のシステム通知として出す。docs/intent/system_notice_delivery.md)。
 
     **発生順 (list_pending の created_at→id 順) を保って出す**。型でグルーピングすると
     時系列が壊れ、複数 Building を移動した場合に「後から入室した相手が前の部屋にいた」

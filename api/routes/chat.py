@@ -53,7 +53,7 @@ class ChatMessage(BaseModel):
     videos: Optional[List[ChatMessageImage]] = None
     reasoning: Optional[str] = None
     # 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」の
-    # 本文 (<system> タグ除去済み)。reasoning と同じくアシスタント応答メッセージの
+    # 本文 (タグ無し)。reasoning と同じくアシスタント応答メッセージの
     # metadata から復元する (永続化は sea/runtime.py _lg_say_node 等、
     # metadata["auto_recall"])。
     auto_recall: Optional[str] = None

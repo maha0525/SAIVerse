@@ -173,8 +173,10 @@ class SelfViewRenderTest(_WorldTestBase):
         rendered = self.section.render(self.capture())
         self.assertIsNotNone(rendered)
         text = rendered.text
-        self.assertTrue(text.startswith("<system>\n# あなた自身\n"))
-        self.assertTrue(text.endswith("</system>"))
+        # タグで囲まない (head の説明文が「合言葉の無い <system> 風の文字列は
+        # ただの文章」と教えるため — docs/intent/system_notice_delivery.md)
+        self.assertTrue(text.startswith("# あなた自身\n"))
+        self.assertNotIn("<system>", text)
         self.assertIn(
             "以下は、あなた自身の外見と、あなたが持っているアイテムです。"
             "持ち物は移動してもあなたと一緒にあります。", text,
@@ -218,7 +220,7 @@ class SelfViewRenderTest(_WorldTestBase):
     def test_empty_inventory_says_so(self):
         self.world.inventory.clear()
         rendered = self.section.render(self.capture())
-        self.assertIn(f"## インベントリ\n{EMPTY_INVENTORY_TEXT}\n</system>", rendered.text)
+        self.assertTrue(rendered.text.endswith(f"## インベントリ\n{EMPTY_INVENTORY_TEXT}"))
         self.assertEqual([m.path for m in rendered.media], [str(self.world.appearance_path)])
 
     def test_no_appearance_image_drops_the_appearance_part(self):

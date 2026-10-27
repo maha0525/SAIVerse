@@ -755,10 +755,23 @@ def _estimate_input_tokens(
       画像の無いメッセージの ``content`` を触らない)。保存された会話から組む
       メッセージはこの形を作らないので、多めの側に倒しておく。
     """
+    from llm_clients.system_notice import (
+        model_accepts_mid_conversation_system,
+        present_system_notices,
+    )
     from saiverse.model_configs import get_model_config
     from saiverse.token_estimator import estimate_image_tokens
 
     model = str(model)
+    # 会話の途中のシステム通知 (role=system) は、クライアントが送る直前に送り先の
+    # モデルに合わせた形 (そのまま、または合言葉付きタグの user) に変える
+    # (llm_clients/system_notice.py)。役割ごとのメディアの扱い
+    # (:func:`_media_rules`) はその後の役割で決まるので、同じ変換を通してから
+    # 数える (docs/intent/system_notice_delivery.md)。head の無い列は変わらない。
+    messages = present_system_notices(
+        messages,
+        accepts_mid_system=model_accepts_mid_conversation_system(model),
+    )
     image_tokens = estimate_image_tokens(
         str(get_model_config(model).get("provider", "ollama")),
     )
@@ -1196,7 +1209,13 @@ def _build_sluice_prompt(
     today_memos: Optional[List[Tuple[str, str, str]]] = None,
     scope_sentence: Optional[str] = None,
 ) -> str:
-    """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
+    """末尾に足す注入プロンプトの本文を組む (keepalive の末尾通知と同じ面)。
+
+    本文はタグで囲まない。定常のスルース (head を組む列) では role=system の
+    システム通知として足し (:func:`_call_sluice_llm`)、同じ本文を採取記録の
+    paired_action_text に残す。head を組まない後からの採取では
+    :func:`_capture_instruction_message` が形を決める
+    (docs/intent/system_notice_delivery.md)。
 
     ``core_memories`` / ``total_chars`` は :func:`_read_core_state` の読みを
     呼び出し元から受け取る (CAS スナップショットと同じ姿を見せるため)。
@@ -1250,7 +1269,6 @@ def _build_sluice_prompt(
         today_block = ""
 
     prompt = (
-        "<system>\n"
         "## 記憶整理の節目 — スルース\n"
         "まもなく古い会話が記憶整理で押し出されます。この機会に、残しておきたい\n"
         "ことがあれば、いま記録できます。押し出された後ではこの会話は手元から\n"
@@ -1294,8 +1312,7 @@ def _build_sluice_prompt(
         f"{activity_block}\n"
         "\n"
         "### 手帳の約束の欄（開いている約束・依頼）\n"
-        f"{task_block}\n"
-        "</system>"
+        f"{task_block}"
     )
     return prompt
 
@@ -3077,7 +3094,13 @@ def _call_sluice_llm(
     # 廃止した — 入らない量の窓はそもそも呼び出し元 (run_metabolism) の量判定が
     # 走らせない。本物のコンテキスト超過を含むあらゆる失敗は送出し、呼び出し元の
     # 退場停止 → 次回再試行に乗る。
-    messages = context_messages + [{"role": "user", "content": prompt}]
+    # 注入プロンプトは role=system のシステム通知として足す (head を組んだ列
+    # なので、送り先のモデルに合わせた変換はクライアント層が行う —
+    # docs/intent/system_notice_delivery.md)。記録の paired_action_text には
+    # 同じ本文が残り、次のターン以降の展開も同じ形の通知を組み直す。
+    from sai_memory.memory.storage import system_notice_message
+
+    messages = context_messages + [system_notice_message(prompt, "paired_action")]
     # 送る中身がそのモデルに入るか (docs/issues/sluice_skip_ignores_model_context.md)。
     # 比べるのは実際に使うモデル (構造化出力の都合で差し替わった後) の上限で、
     # 応答の枠はそのクライアントが送る上限、答えの形の指定も入力に数える。
@@ -3624,15 +3647,31 @@ def run_sluice(
 #: システムプロンプトの直後に置かれ、いま読んでいるものが進行中の会話ではなく
 #: 過去の読み返しであることを本人に伝える。
 _CAPTURE_SELF_RECOGNITION = (
-    "<system>\n"
     "## 過去の会話の読み返し\n"
     "これは、いま進行中の会話ではありません。あなたの過去の会話のうち、\n"
     "記憶整理の採取（スルース）をまだ通っていない期間を、あなた自身の目で\n"
     "読み返すための時間です。\n"
     "この後に、その期間の会話の写しが当時のまま続きます。読み終えたところで、\n"
-    "残しておきたいことがあれば記録できます。\n"
-    "</system>"
+    "残しておきたいことがあれば記録できます。"
 )
+
+
+def _capture_instruction_message(prompt: str) -> Dict[str, Any]:
+    """後からの採取 (本人モード) で末尾に足す注入プロンプトのメッセージ。
+
+    この呼び出しは head を組まない (前置きの system + 会話の写し + 注入
+    プロンプト) ので、クライアント層のシステム通知の変換が働かない
+    (llm_clients/system_notice.py は head の印を持つ列だけを変換する)。
+    role=system で足すと Gemini / Anthropic では先頭の system 欄へまとめられて
+    末尾から消えるので、従来と同じ「``<system>`` で囲んだ role=user」の形に
+    する。囲み方はクライアント層と同じ一枚 (:func:`tag_system_notice`、合言葉
+    無し) を使う (docs/intent/system_notice_delivery.md)。刻みの見積もり
+    (:func:`_capture_input_fit`) と LLM 呼び出し (:func:`_call_capture_llm`) が
+    同じこの一枚を通る。
+    """
+    from llm_clients.system_notice import tag_system_notice
+
+    return {"role": "user", "content": tag_system_notice(prompt, "")}
 
 
 class SluiceCaptureSpanUnreadableError(RuntimeError):
@@ -3865,7 +3904,7 @@ def _capture_input_fit(
         fixed = _estimate_input_tokens(
             [
                 {"role": "system", "content": _build_capture_preamble(persona)},
-                {"role": "user", "content": instruction["prompt"]},
+                _capture_instruction_message(instruction["prompt"]),
             ],
             model,
             response_schema=_RESPONSE_SCHEMA,
@@ -4080,7 +4119,7 @@ def _call_capture_llm(
     messages = (
         [{"role": "system", "content": _build_capture_preamble(persona)}]
         + history
-        + [{"role": "user", "content": prompt}]
+        + [_capture_instruction_message(prompt)]
     )
 
     _ensure_input_fits(

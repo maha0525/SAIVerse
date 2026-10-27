@@ -301,13 +301,14 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                 if report_text:
                     # 記録はシステム通知として role=system・タグ無し本文で残す
                     # (docs/intent/system_notice_delivery.md 不変条件 1)。この
-                    # Pulse の中で送る列へ足す分は、次のターンに記録から復元
-                    # される本文と一字も違わない形 (presented_system_record_content
-                    # = 復元形の user) にする — スペルの結果と同じ扱い
-                    # (persist_realtime_and_recall.md 不変条件 1)。
+                    # Pulse の中で送る列へ足す分も、次のターンに記録から復元
+                    # される形 (role=system・同じ印・presented_system_record_content
+                    # を通した本文) と一字も違わないようにする — スペルの結果と
+                    # 同じ扱い (persist_realtime_and_recall.md 不変条件 1)。
                     from sai_memory.memory.storage import (
                         SYSTEM_NOTICE_KEY,
                         presented_system_record_content,
+                        system_notice_message,
                     )
 
                     notice_text = f"サブ Playbook '{sub_name}' の実行結果:\n{report_text}"
@@ -315,14 +316,16 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                     # (1) state["_messages"] への append (context_profile 不使用ノード向け)
                     if state.get("_messages") is None:
                         state["_messages"] = []
-                    state["_messages"].append({"role": "user", "content": formatted})
+                    state["_messages"].append(
+                        system_notice_message(formatted, "subline_report")
+                    )
 
                     # (2) 親 PulseContext への明示的 append (context_profile 使用ノード向け)
                     parent_pulse_ctx = state.get("_pulse_context")
                     if parent_pulse_ctx is not None:
                         from sea.pulse_context import PulseLogEntry
                         parent_pulse_ctx.append(PulseLogEntry(
-                            role="user",
+                            role="system",
                             content=formatted,
                             node_id=node_id,
                             playbook_name=playbook.name,

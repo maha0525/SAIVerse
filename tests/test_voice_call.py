@@ -1136,10 +1136,41 @@ def test_history_turns_label_speakers_like_the_memory_transcription(monkeypatch)
         {"role": "user", "parts": [{"text": "こんにちは"}]},
         {"role": "model", "parts": [{"text": "やあ"}]},
         {
+            # host 名義の機構の行はシステム通知。Live API は user / model の役しか
+            # 持たないので、クライアント層と同じ一枚 (tag_system_notice) で囲んだ
+            # user の行になる (docs/intent/system_notice_delivery.md)
             "role": "user",
-            "parts": [{"text": "別の子: 私もいるよ\n<system>[試験場] 雨が降り始めた</system>"}],
+            "parts": [{"text": "別の子: 私もいるよ\n<system>\n[試験場] 雨が降り始めた\n</system>"}],
         },
     ]
+
+
+def test_history_text_keeps_speech_as_user_and_marks_host_lines_as_system():
+    """他ペルソナ・ユーザーの発話は role=user のまま (不変条件 7)、host 名義の
+    機構の行だけが system になる (docs/intent/system_notice_delivery.md)。"""
+    from saiverse.voice_call import _history_text
+
+    manager = make_manager()
+    other = SimpleNamespace(persona_id="persona_other", persona_name="別の子")
+    manager.all_personas["persona_other"] = other
+    persona = manager.personas[PERSONA_ID]
+    heard = [PERSONA_ID, "persona_other"]
+
+    user_line = _history_text(manager, persona, BUILDING_ID, {
+        "role": "user", "content": "こんにちは", "heard_by": heard,
+    })
+    other_line = _history_text(manager, persona, BUILDING_ID, {
+        "role": "assistant", "persona_id": "persona_other",
+        "content": "私もいるよ", "heard_by": heard,
+    })
+    host_line = _history_text(manager, persona, BUILDING_ID, {
+        "role": "host", "content": "<div>雨が降り始めた</div>", "heard_by": heard,
+    })
+
+    assert user_line == ("user", "こんにちは")
+    assert other_line == ("user", "別の子: 私もいるよ")
+    assert host_line == ("system", "[試験場] 雨が降り始めた")
+    assert "<system" not in host_line[1]
 
 
 def test_history_turns_skip_what_the_persona_could_not_hear(monkeypatch):
@@ -1198,7 +1229,7 @@ def test_history_turns_drop_legacy_presence_notices(monkeypatch):
     turns = build_history_turns(manager, manager.personas[PERSONA_ID], BUILDING_ID)
 
     assert turns == [
-        {"role": "user", "parts": [{"text": "<system>[試験場] 雪が積もった</system>"}]},
+        {"role": "user", "parts": [{"text": "<system>\n[試験場] 雪が積もった\n</system>"}]},
     ]
 
 

@@ -2,8 +2,9 @@
 
 記憶アーキテクチャ v2 (docs/intent/memory_architecture_v2.md) §4 の中核。ペルソナに
 「思い出す」という行動を選ばせるのではなく、世界側が現在の会話に関連する記憶を
-ローカル埋め込み検索で自動的に浮かび上がらせ、``<system>`` タグ付き user メッセージ
-として履歴末尾 (最新入力の直前) に**一時注入**する。
+ローカル埋め込み検索で自動的に浮かび上がらせ、role=system のシステム通知
+(docs/intent/system_notice_delivery.md) として履歴末尾 (最新入力の直前) に
+**一時注入**する。
 
 不変条件 (§10):
 - **LLM は絶対に呼ばない** (§10-1)。埋め込み検索 + 決定論フィルタのみ。
@@ -44,6 +45,7 @@ from sea.eviction_plan import (
     is_injected_perception,
     is_persisted_realtime_and_recall,
 )
+from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, is_system_notice
 from saiverse.references import to_uri
 
 LOGGER = logging.getLogger("saiverse.auto_recall")
@@ -361,11 +363,36 @@ def reset_ledger(persona_id: str) -> None:
 # realtime/visual メタメッセージは会話本文でないので除外する。
 _QUERY_ROLES = frozenset({"user", "assistant"})
 
+#: 会話本文に数えないシステム通知の系統。添付アイテム作成の注記はユーザーの
+#: 発言に付く機構の文で、発言の直後に独立した通知として並ぶ
+#: (sea/runtime.py の ``_enrich_history_with_attachments``)。以前は発言の本文の
+#: 末尾に連結され、発言の言葉を読む側は足す前の本文を読んでいた
+#: (saiverse.media_utils.said_content) — その扱いを保つ。
+_NON_CONVERSATIONAL_NOTICES = frozenset({"attachment_note"})
+
+
+def _is_user_side(msg: Dict[str, Any]) -> bool:
+    """「入力の側」のメッセージか — role=user、または会話本文に数えるシステム通知。
+
+    システム通知 (スケジュールの発火文・子ラインの報告・建物の出来事など —
+    ``SYSTEM_NOTICE_KEY`` を持つ role=system) は、以前は ``<system>`` タグ付きの
+    role=user で列に並び、ユーザーの発言と同じく検索の元・「このターンの入力」に
+    なっていた (docs/intent/auto_recall_jev_rerank.md — スケジュール発火文を
+    検索の元に含める現行の決定)。role=system へ移った後もその扱いを保つ
+    (docs/intent/system_notice_delivery.md「role を手掛かりにしている読み手の点検」)。
+    """
+    if msg.get("role") == "user":
+        return True
+    if not is_system_notice(msg):
+        return False
+    kind = (msg.get("metadata") or {}).get(SYSTEM_NOTICE_KEY)
+    return kind not in _NON_CONVERSATIONAL_NOTICES
+
 
 def _is_conversational_message(msg: Dict[str, Any]) -> bool:
     """クエリ生成・コンテキスト除外の対象になる「会話本文」メッセージか。"""
     role = msg.get("role")
-    if role not in _QUERY_ROLES:
+    if role not in _QUERY_ROLES and not _is_user_side(msg):
         return False
     metadata = msg.get("metadata") or {}
     # head 由来の user メッセージ (memory_weave / visual_context) や realtime は
@@ -378,8 +405,9 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
         return False
     if metadata.get("__auto_recall__"):
         return False
-    # 送信直前に差し込まれる知覚ブロック (部屋の様子・通知) は role="user" で
-    # 履歴へ時刻順マージされるが、ユーザーが言った言葉ではない。会話文として
+    # 送信直前に差し込まれる知覚ブロック (部屋の様子・通知) は role=system の
+    # システム通知として履歴へ時刻順マージされ、上の判定ではほかの通知と同じく
+    # 入力の側に数えられるが、ユーザーが言った言葉ではない。会話文として
     # 数えると、発話の後ろに挟まったブロックがクエリの種の座を奪う
     # (2026-09-06 に部屋の描画が head の __visual_context__ からこのブロックへ
     # 引っ越したとき、この除外リストが追従しなかったのが根因)。
@@ -419,7 +447,7 @@ def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, A
     「部屋の様子」に乗っ取られる。
     """
     for m in reversed(messages):
-        if m.get("role") != "user":
+        if not _is_user_side(m):
             continue
         metadata = m.get("metadata") or {}
         if (
@@ -463,17 +491,6 @@ def _current_attachment_summaries(messages: List[Dict[str, Any]]) -> List[str]:
     return summaries
 
 
-# 知覚ブロックの content は ``<system>…</system>`` で包まれている。クエリや Jev の
-# 判断材料に使うときは、この包みを外した本文だけを渡す。
-_SYSTEM_WRAPPER_PATTERN = re.compile(r"\A\s*<system>\s*(.*?)\s*</system>\s*\Z", re.DOTALL)
-
-
-def _strip_system_wrapper(text: str) -> str:
-    """``<system>…</system>`` の包みを外す (包まれていなければそのまま返す)。"""
-    match = _SYSTEM_WRAPPER_PATTERN.match(text)
-    return match.group(1) if match else text
-
-
 def _trailing_perception_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """末尾から遡り、最初の会話本文に当たるまでに現れた知覚ブロックを時刻順に返す。
 
@@ -503,7 +520,9 @@ def _fresh_observation_texts(messages: List[Dict[str, Any]]) -> List[str]:
     """このターンで新しく目に入った知覚ブロックの本文を時刻順に返す。"""
     texts: List[str] = []
     for m in _trailing_perception_blocks(messages):
-        body = _strip_system_wrapper(str(m.get("content") or "")).strip()
+        # 知覚ブロックは role=system のシステム通知で、本文はタグで囲まれて
+        # いない (docs/intent/system_notice_delivery.md)。
+        body = str(m.get("content") or "").strip()
         if body:
             texts.append(body)
     return texts
@@ -536,7 +555,7 @@ def _seed_is_user_utterance(messages: List[Dict[str, Any]]) -> bool:
         return True
     for m in reversed(messages):
         if _is_conversational_message(m):
-            return m.get("role") == "user"
+            return _is_user_side(m)
     return False
 
 
@@ -602,7 +621,7 @@ def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:
     for m in reversed(messages):
         if not _is_conversational_message(m):
             continue
-        if m.get("role") != "user":
+        if not _is_user_side(m):
             continue
         content = m.get("content")
         if isinstance(content, str) and _said_text(m).strip():
@@ -663,7 +682,7 @@ def _find_entity_triggers(
     for m in reversed(convo):
         content = m.get("content")
         text = _said_text(m).strip() if isinstance(content, str) else ""
-        if not removed_last_user and m.get("role") == "user" and text == last_utterance.strip():
+        if not removed_last_user and _is_user_side(m) and text == last_utterance.strip():
             removed_last_user = True
             continue
         if text:
@@ -1431,15 +1450,17 @@ def _run_reflex_rerank(
 class AutoRecallResult:
     """auto_recall の実行結果。"""
     injected: bool
-    block: Optional[str]        # 注入する <system> ブロック本文 (injected=True のとき)
+    block: Optional[str]        # 注入するシステム通知の本文 (injected=True のとき)
     query: str
     hit_count: int              # unified_recall が返した総ヒット数
     accepted_count: int         # しきい値通過 (今ターン新規採用) 件数
     ledger_size: int            # 台帳に残っている総件数
     char_count: int             # ブロックの文字数
-    # <system>/</system> タグを剥がした本文 (injected=True のとき)。ChatMessage.auto_recall
-    # への永続化用 (sea/runtime_context.py の persona._pending_auto_recall_text 経由)。
-    # LLM コンテキストには一切使わない — block (タグ付き) だけが履歴末尾に注入される。
+    # 画面に出す本文 (injected=True のとき)。ChatMessage.auto_recall への永続化用
+    # (sea/runtime_context.py の persona._pending_auto_recall_text 経由)。LLM
+    # コンテキストには使わない — 履歴末尾に注入されるのは block だけ。提示が
+    # タグで囲まなくなった (docs/intent/system_notice_delivery.md) ので、今は
+    # block と同じ文字列。
     plain_text: Optional[str] = None
     # このターンは反射判断が**時間内に答えなかった**ので従来方式へ戻った。呼び出し側
     # (sea/runtime_context.py) が画面の注記として知らせるためだけの旗で、注入の中身には
@@ -1848,7 +1869,9 @@ def run_auto_recall(
         if item_vivid:
             body_lines.extend(item_vivid)
     body = header + "\n" + "\n".join(body_lines) + "\n" + footer
-    block = f"<system>{body}</system>"
+    # 送る列には role=system のシステム通知として本文のまま出す (タグで囲まない —
+    # docs/intent/system_notice_delivery.md)。
+    block = body
 
     LOGGER.info(
         "[auto_recall] injecting %d memories (persona=%s, thread=%s, %d chars, "

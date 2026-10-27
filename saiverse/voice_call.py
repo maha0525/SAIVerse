@@ -343,7 +343,9 @@ def _history_text(manager: Any, persona: Any, building_id: str, message: Dict[st
         cleaned = re.sub(r"<[^>]+>", "", content).strip()
         if not cleaned:
             return None
-        return ("user", f"<system>[{_building_name(persona, building_id)}] {cleaned}</system>")
+        # host 名義の機構の行はシステム通知 (docs/intent/system_notice_delivery.md)。
+        # 他ペルソナ・ユーザーの発話は上のとおり role=user のまま (不変条件 7)。
+        return ("system", f"[{_building_name(persona, building_id)}] {cleaned}")
 
     return None
 
@@ -353,9 +355,18 @@ def _merge_turns(pairs: Iterable[tuple]) -> List[Dict[str, Any]]:
 
     Live API に渡す prefix は user / model が交互になっている方が素直なので、
     連続する同 role は改行で束ねる。
+
+    Live API の client content は user / model の役しか持てず、head (合言葉の
+    説明を持つプロンプト先頭部) も組まないので、``system`` の行 (機構の通知) は
+    ``<system>`` で囲んだ user の行にする。囲み方はクライアント層と同じ一枚
+    (llm_clients.system_notice.tag_system_notice、合言葉無し) を使う。
     """
+    from llm_clients.system_notice import tag_system_notice
+
     turns: List[Dict[str, Any]] = []
     for role, text in pairs:
+        if role == "system":
+            role, text = "user", tag_system_notice(text, "")
         if turns and turns[-1]["role"] == role:
             turns[-1]["parts"][0]["text"] += "\n" + text
         else:

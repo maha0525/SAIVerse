@@ -1359,11 +1359,14 @@ class SEARuntime:
         """
         state["last"] = message
         self._append_tool_result_message(state, playbook_name, message)
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         if not self._store_memory(
             persona, message,
             role="system",
             tags=["permission", "denied", playbook_name],
             pulse_id=state.get("_pulse_id"),
+            metadata={SYSTEM_NOTICE_KEY: "playbook_permission"},
         ):
             LOGGER.warning("[sea][perm] Failed to store permission result to SAIMemory")
 
@@ -2182,10 +2185,11 @@ class SEARuntime:
 
     #: keep-alive の末尾メッセージ。意味的に不活性 (何のイベントでもない) で、
     #: SAIMemory には保存されない — 次の本物の呼び出しのリクエストには現れず、
-    #: 共有 prefix (head + 履歴) だけがキャッシュ上で温め直される。
+    #: 共有 prefix (head + 履歴) だけがキャッシュ上で温め直される。role=system の
+    #: システム通知として足す (docs/intent/system_notice_delivery.md)。
     _KEEPALIVE_TAIL = (
-        "<system>（キャッシュ維持のための自動処理です。世界では何も起きていません。"
-        "「.」とだけ返答してください）</system>"
+        "（キャッシュ維持のための自動処理です。世界では何も起きていません。"
+        "「.」とだけ返答してください）"
     )
 
     def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
@@ -2338,7 +2342,9 @@ class SEARuntime:
                     persona_id, model_key, entry.get("anchor_id"), composed_anchor,
                 )
                 return False
-            messages.append({"role": "user", "content": self._KEEPALIVE_TAIL})
+            from sai_memory.memory.storage import system_notice_message
+
+            messages.append(system_notice_message(self._KEEPALIVE_TAIL, "keepalive"))
             node_def = SimpleNamespace(id="cache_keepalive", memorize=None, speak=False)
             # Beat 相当の開始点 — Pulse 外なので pulse_context=None (standard tier)。
             execution_context = resolve_execution_context(persona, None)
@@ -2586,8 +2592,18 @@ class SEARuntime:
         """Enrich history messages with attachment context.
 
         If a message has metadata with attached items (images/documents),
-        append a system note about the created items to help persona understand context.
+        place a system notice about the created items right after it to help
+        persona understand context.
+
+        注記は発言の本文へ連結せず、発言の直後に独立した role=system の
+        システム通知 (``SYSTEM_NOTICE_KEY`` = ``"attachment_note"``) として置く
+        (docs/intent/system_notice_delivery.md)。発言の本文はユーザーが言った
+        言葉そのままに残る。注記は記録には無く、文脈を組むたびに発言の metadata
+        から同じ文面で組み直される。
         """
+        from sai_memory.memory.storage import system_notice_message
+        from saiverse.media_utils import SAID_CONTENT_KEY
+
         enriched = []
         for msg in messages:
             metadata = msg.get("metadata", {})
@@ -2612,34 +2628,30 @@ class SEARuntime:
                 if item_name:
                     attachment_notes.append(f"ドキュメント「{item_name}」")
 
-            if attachment_notes:
-                # Append system note to content
-                original_content = msg.get("content", "")
-                items_str = "、".join(attachment_notes)
-                note = f"\n<system>添付アイテム作成: {items_str}</system>"
-                # 足した文はユーザーが言った言葉ではないので、足す前の本文を
-                # 控えておく。発言の言葉を読む側 (自動想起) はそれを読む
-                # (文字列の形から機構の文を見分けない — ユーザーが同じ形を書いた
-                # ときや、名前に改行が入ったときに取り違える)。
-                from saiverse.media_utils import SAID_CONTENT_KEY
-
-                enriched_msg = {
+            if SAID_CONTENT_KEY in metadata:
+                # 発言の本文はもう書き換えないので、控え (足す前の本文) を持つ
+                # 発言は無い。控えがあるなら記録に紛れ込んだもの (送り手が書いた
+                # 等) なので、読み手 (saiverse.media_utils.said_content) へ渡す
+                # 前に外す。
+                msg = {
                     **msg,
-                    "content": original_content + note,
-                    "metadata": {**metadata, SAID_CONTENT_KEY: original_content},
+                    "metadata": {
+                        k: v for k, v in metadata.items() if k != SAID_CONTENT_KEY
+                    },
                 }
-                enriched.append(enriched_msg)
-            else:
-                from saiverse.media_utils import SAID_CONTENT_KEY
+            enriched.append(msg)
+            if attachment_notes:
+                items_str = "、".join(attachment_notes)
+                from sea.runtime_context import ATTACHMENT_NOTE_NOTICE
 
-                if SAID_CONTENT_KEY in metadata:
-                    # 控えはここで足した文の分だけを表す。ここで足していない
-                    # 発言に控えがあるなら、記録に紛れ込んだもの (送り手が書いた
-                    # 等) なので、読み手へ渡す前に外す。
-                    stripped = {k: v for k, v in metadata.items() if k != SAID_CONTENT_KEY}
-                    enriched.append({**msg, "metadata": stripped})
-                else:
-                    enriched.append(msg)
+                note = system_notice_message(
+                    f"添付アイテム作成: {items_str}", ATTACHMENT_NOTE_NOTICE,
+                )
+                # 時刻順のマージ・Chronicle の材料で発言と同じ位置に並ぶよう、
+                # 発言の時刻を写す。
+                if msg.get("created_at") is not None:
+                    note["created_at"] = msg.get("created_at")
+                enriched.append(note)
 
         return enriched
 
@@ -2716,7 +2728,8 @@ class SEARuntime:
         returns None — so user settings can never block spell delivery.
 
         Returns:
-            Message dict with role="user" and <system> wrapper, or None if no
+            Message dict (role=system のシステム通知、
+            ``sea.runtime_context.realtime_context_message``), or None if no
             item is enabled / nothing could be rendered (the message is then
             not sent at all).
         """
@@ -2783,17 +2796,14 @@ class SEARuntime:
         if not sections:
             return None
 
-        # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py の同様の
-        # 自動ラップ箇所のコメント参照)。Gemini 等が messages 中途の system role
-        # を受け付けないため、role='user' + <system>...</system> で全プロバイダ
-        # 共通の「指示扱いブロック」として送る。system role に直すと Gemini
-        # 互換が壊れる — 「system っぽいから system role にしたい」直感は誤り。
-        content = "<system>\n## リアルタイム情報\n" + "\n".join(f"- {s}" for s in sections) + "\n</system>"
-        return {
-            "role": "user",
-            "content": content,
-            "metadata": {"__realtime_context__": True},  # Mark for identification
-        }
+        # role=system のシステム通知として出す。送り先のモデルが会話の途中の
+        # system を受け取れないときの変換はクライアント層が行う
+        # (docs/intent/system_notice_delivery.md)。
+        from sea.runtime_context import realtime_context_message, realtime_info_text
+
+        return realtime_context_message(
+            realtime_info_text("\n".join(f"- {s}" for s in sections)),
+        )
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
         """Resolve playbook by kind with DB→disk→fallback.

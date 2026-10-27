@@ -223,8 +223,10 @@ def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
     asyncio.run(node_fn(state))
 
     # (1) state["_messages"] に append された
+    # 子ラインの結果報告は role=system のシステム通知
+    # (docs/intent/system_notice_delivery.md)
     assert any(
-        msg["role"] == "user" and "検索結果のまとめ。" in msg["content"]
+        msg["role"] == "system" and "検索結果のまとめ。" in msg["content"]
         for msg in state["_messages"]
     ), "report_to_parent should be in state['_messages']"
 
@@ -234,7 +236,7 @@ def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
         f"report_to_parent should be appended to parent PulseContext exactly once "
         f"(got {len(appended_in_pulse)})"
     )
-    assert appended_in_pulse[0].role == "user"
+    assert appended_in_pulse[0].role == "system"
 
     # state["report_to_parent"] はクリアされる
     assert "report_to_parent" not in state
@@ -302,10 +304,13 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata():
     assert stored_text == "サブ Playbook 'dummy_sub' の実行結果:\n重要なまとめ"
     assert "<system" not in stored_text
     # この Pulse の中で送る列へ足した分は、次のターンに記録から復元される
-    # 本文 (復元形) と一字も違わない
+    # 形 (role=system・同じ印・同じ本文) と一字も違わない
     restored = presented_system_record_content(stored_text)
-    assert state["_messages"] == [{"role": "user", "content": restored}]
-    assert [e.content for e in pulse_ctx.logs if e.role == "user"] == [restored]
+    assert state["_messages"] == [{
+        "role": "system", "content": restored,
+        "metadata": {SYSTEM_NOTICE_KEY: "subline_report"},
+    }]
+    assert [e.content for e in pulse_ctx.logs if e.role == "system"] == [restored]
 
 
 def test_subplay_line_main_does_not_call_store_memory():
