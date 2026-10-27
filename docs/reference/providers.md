@@ -16,6 +16,7 @@
 | `plamo` | PLaMo (Preferred Networks) | `openai_compat` | `https://api.platform.preferredai.jp/v1` | `PLAMO_API_KEY` |
 | `sakana` | Sakana AI | `openai_compat` | `https://api.sakana.ai/v1` | `SAKANA_API_KEY` |
 | `sarashina` | Sarashina (SB Intuitions) | `openai_compat` | `https://api.sarashina.ai/v1` | `SARASHINA_API_KEY` |
+| `meta` | Meta (Muse) | `openai_compat` | `https://api.meta.ai/v1` | `META_API_KEY` |
 | `lmstudio` | LM Studio (local) | `openai_compat` | `http://127.0.0.1:1234/v1` | —（不要） |
 | `ollama` | Ollama (local) | `ollama_compat` | —（未設定＝自動探索） | — |
 | `llama_cpp_server` | llama.cpp Server (local) | `openai_compat` | `http://127.0.0.1:8080/v1` | —（不要） |
@@ -25,6 +26,17 @@
 | `openai_decisions` | OpenAI Decisions | `jev_compat` | `https://api.openai.com` | `OPENAI_API_KEY` |
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
+
+### Meta (Muse)
+
+Meta は会話用の `meta-muse-spark-1.3` (`muse-spark-1.3`) と
+`meta-muse-wonder-1.0` (`muse-wonder-1.0`、プレビュー) を同梱する。
+`default_supports_images` と `default_convert_system_to_user` を true にしており、
+両モデルへ継承される。`openai_compat_options` は宣言しない (OpenAI の既定動作)。
+Muse は推論を止められないので、モデル定義の `reasoning_effort` に `none` は無い。
+Meta が 400 を返す `stop` / `top_p` などはモデル定義の `parameters` に入れていない。
+設定手順と料金は [Meta (Muse) のキー設定](../api-keys/meta.md)、
+設計の判断は [meta_muse_provider.md](../intent/meta_muse_provider.md) を参照。
 
 ### Sarashina の OpenAI 互換設定
 
