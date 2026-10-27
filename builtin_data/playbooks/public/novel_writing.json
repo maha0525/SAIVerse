@@ -213,8 +213,8 @@
     {
       "id": "memorize_result",
       "type": "memorize",
-      "action": "<system>小説「{novel_title}」の執筆が完了しました！\n\n{document_result}\n\n## 作者の感想\n{reflection_text}</system>",
-      "role": "user",
+      "action": "小説「{novel_title}」の執筆が完了しました！\n\n{document_result}\n\n## 作者の感想\n{reflection_text}",
+      "role": "system",
       "tags": [
         "novel_writing"
       ]

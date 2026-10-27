@@ -351,10 +351,12 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertIn("赴任のことを覚えておく", content)
         self.assertIn(f"core:{cores[0].id}", content)
 
-    # -- case 1b: 記録は event_message 形式のシステム通知 (role=user) ------
+    # -- case 1b: 記録は event_message 形式のシステム通知 (role=system) ----
 
     def test_record_is_event_message_system_narration(self):
         import json as _json
+
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
         result = _sluice_result(
             reflection="赴任のことを覚えておく",
@@ -363,11 +365,12 @@ class SluiceRunTest(_AdapterTestBase):
         self._run(result)
 
         role, content, metadata = _read_sluice_record_full(self.adapter)
-        # プロンプト無し assistant 発話ではなく <system> 包みのナレーション。
-        self.assertEqual(role, "user")
-        self.assertTrue(content.startswith("<system>"))
-        self.assertTrue(content.rstrip().endswith("</system>"))
-        self.assertIn("記憶整理の節目 — スルースの採取判断:", content)
+        # プロンプト無し assistant 発話ではなく、システム通知のナレーション
+        # (role=system・タグ無し本文 — docs/intent/system_notice_delivery.md)。
+        self.assertEqual(role, "system")
+        self.assertNotIn("<system", content)
+        self.assertTrue(content.startswith("記憶整理の節目 — スルースの採取判断:"))
+        self.assertEqual(_json.loads(metadata)[SYSTEM_NOTICE_KEY], "sluice_capture")
         # reflection は persona_name プレフィックス付きで載る (全文、省略なし)。
         self.assertIn("エアの判断: 赴任のことを覚えておく", content)
         # タグは internal / event_message / sluice の 3 つ。

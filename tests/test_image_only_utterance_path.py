@@ -557,6 +557,11 @@ def test_chat_send_drops_metadata_keys_only_the_server_writes(png_path):
         "media": [{"type": "audio", "path": "v.ogg"}],
         "__said_content__": "Bob",
         "__visual_context__": True,
+        "__system_notice__": "schedule",
+        # 機構の識別に読まれる印も送り手には書かせない
+        # (docs/intent/system_notice_delivery.md 不変条件 4)。
+        "tags": ["internal", "event_message"],
+        "with": ["system"],
         "source": "api",
     }
     assert _client_metadata(raw) == {"source": "api"}

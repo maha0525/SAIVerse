@@ -519,6 +519,16 @@ class RuntimeEngine:
             pulse_context = state.get("_pulse_context")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
+            if role == "system":
+                # role=system の MEMORIZE はシステム通知 (ツールの結果など) の
+                # 記録。識別の印を付ける (docs/intent/system_notice_delivery.md
+                # 不変条件 1)。state 由来の metadata は書き換えずに写す。
+                from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+                metadata = {
+                    **(metadata if isinstance(metadata, dict) else {}),
+                    SYSTEM_NOTICE_KEY: "playbook_memorize",
+                }
             # action が `{last}` だけで role が assistant なら、この MEMORIZE は
             # state["last"] をそのまま本人の発言として記憶に書く。前の LLM ノードが
             # 記憶に保存しなかった返事 (sea/message_stamp.UNSTORED_REPLY_STATE_KEY) が

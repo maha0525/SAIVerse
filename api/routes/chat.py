@@ -972,9 +972,9 @@ def _cleanup_attachment_items(
             )
 
 
-#: 発言の metadata のうち、サーバーが添付を保存したときにだけ書くキー
-#: (画像・ドキュメント・音声・動画の置き場)。
-_SERVER_WRITTEN_METADATA_KEYS = frozenset({"images", "documents", "media"})
+#: 発言の metadata のうち、サーバーだけが書くキー。添付の置き場 (画像・
+#: ドキュメント・音声・動画) と、機構の印として読まれる ``tags`` / ``with``。
+_SERVER_WRITTEN_METADATA_KEYS = frozenset({"images", "documents", "media", "tags", "with"})
 
 
 def _client_metadata(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -982,8 +982,11 @@ def _client_metadata(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     添付の置き場はサーバーが保存した添付からだけ作る (送り手が書くと、任意の
     ファイルを画像として LLM へ送らせたり、中身の無い添付で空の発言を通したり
-    できる)。``__`` で始まるキーは機構が内部で使う印 (例: 文脈を組むときに控える
-    ``__said_content__``) で、送り手が書くと自動想起などが偽の本文を読む。
+    できる)。``tags`` (``event_message`` などの機構の印) と ``with`` (スケジュール
+    入力の ``["system"]`` など) も機構の識別に読まれるので、送り手には書かせない
+    (docs/intent/system_notice_delivery.md 不変条件 4)。``__`` で始まるキーは機構が
+    内部で使う印 (例: 文脈を組むときに控える ``__said_content__``、システム通知の
+    識別 ``__system_notice__``) で、送り手が書くと自動想起などが偽の本文を読む。
     """
     if not isinstance(raw, dict):
         return {}

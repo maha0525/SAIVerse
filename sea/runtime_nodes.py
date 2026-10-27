@@ -299,12 +299,19 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             if report:
                 report_text = str(report).strip()
                 if report_text:
-                    # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py
-                    # の同様の自動ラップ箇所のコメント参照)。Gemini 等が messages
-                    # 中途の system role を受け付けないため、user role でラップする。
-                    formatted = (
-                        f"<system>サブ Playbook '{sub_name}' の実行結果:\n{report_text}</system>"
+                    # 記録はシステム通知として role=system・タグ無し本文で残す
+                    # (docs/intent/system_notice_delivery.md 不変条件 1)。この
+                    # Pulse の中で送る列へ足す分は、次のターンに記録から復元
+                    # される本文と一字も違わない形 (presented_system_record_content
+                    # = 復元形の user) にする — スペルの結果と同じ扱い
+                    # (persist_realtime_and_recall.md 不変条件 1)。
+                    from sai_memory.memory.storage import (
+                        SYSTEM_NOTICE_KEY,
+                        presented_system_record_content,
                     )
+
+                    notice_text = f"サブ Playbook '{sub_name}' の実行結果:\n{report_text}"
+                    formatted = presented_system_record_content(notice_text)
                     # (1) state["_messages"] への append (context_profile 不使用ノード向け)
                     if state.get("_messages") is None:
                         state["_messages"] = []
@@ -335,8 +342,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                     pulse_id_for_memory = state.get("_pulse_id")
                     runtime._store_memory(
                         persona,
-                        formatted,
-                        role="user",
+                        notice_text,
+                        role="system",
+                        metadata={SYSTEM_NOTICE_KEY: "subline_report"},
                         line_role="main_line",
                         scope="committed",
                         pulse_id=pulse_id_for_memory,

@@ -859,12 +859,21 @@ def test_a_call_without_any_transcript_still_leaves_a_trace(monkeypatch, written
 
     assert len(adapter.appended) == 1
     notice, _suffix = adapter.appended[0]
-    # システム通告は user ロール + <system> タグ (既存の転記経路と同じ流儀)。
-    assert notice["role"] == "user"
-    assert notice["content"] == f"<system>{NO_TRANSCRIPT_NOTICE}</system>"
+    # 記憶にはシステム通知 (role=system・タグ無し本文 + 識別の印) として残す
+    # (docs/intent/system_notice_delivery.md 不変条件 1)。
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    assert notice["role"] == "system"
+    assert notice["content"] == NO_TRANSCRIPT_NOTICE
     assert notice["metadata"]["tags"] == ["internal", "event_message"]
+    assert notice["metadata"][SYSTEM_NOTICE_KEY] == "voice_call"
     assert len(written_rows) == 1
-    assert written_rows[0][2]["ingested_by"] == [PERSONA_ID]
+    building_row = written_rows[0][2]
+    assert building_row["ingested_by"] == [PERSONA_ID]
+    # 建物履歴では機構の出来事の行 (host)。識別の印は記憶の行だけのもの。
+    assert building_row["role"] == "host"
+    assert building_row["content"] == NO_TRANSCRIPT_NOTICE
+    assert SYSTEM_NOTICE_KEY not in building_row["metadata"]
 
 
 def test_a_call_that_never_started_leaves_nothing(monkeypatch, written_rows):

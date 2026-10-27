@@ -1398,7 +1398,7 @@ def _apply_core_ops(
             )
         applied += 1
         alive_contents[content] = new_id
-        # 記録は <system> 包みのシステム通知として SAIMemory に残る
+        # 記録はシステム通知 (role=system) として SAIMemory に残る
         # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
         # 本文は全文を書く (不変条件 §5-8 / 2026-07-07 まはー指摘)。
         lines.append(f"コア記憶 core:{new_id} に採取: {content}")
@@ -2097,10 +2097,11 @@ def _persist_record(
     は過程を本線の context に載せない (入口は一本 — ダイジェスト一行だけが
     committed で立つ) ため、採取ありでも 'discardable' を渡す。
 
-    role は "user"、``record_text`` は呼び出し側で ``<system>…</system>`` に
-    包んだシステム通知形式で渡る (event_message の確立形式)。プロンプト無しの
+    role は "system"、``record_text`` はタグ無しのシステム通知の本文で渡る
+    (docs/intent/system_notice_delivery.md 不変条件 1)。プロンプト無しの
     ``role="assistant"`` メッセージは「自分は普段こう喋る」という few-shot 汚染源に
     なるため、ペルソナ発話ではなくナレーションとして残す (2026-07-07 まはー指摘)。
+    ``paired_action_text`` (``prompt_snapshot``) の形はここでは変えない。
 
     書き込み失敗は握り潰さず送出する (Codex 第六巡 修正 2) — finalize 失敗として
     台帳が applied のまま残り、次回の再適用 → 再 finalize で回収される。
@@ -2119,8 +2120,10 @@ def _persist_record(
     except Exception:
         pulse_id = None  # pulse 文脈は任意メタ — 取得失敗は記録を止めない
 
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     adapter.append_persona_message({
-        "role": "user",
+        "role": "system",
         "content": record_text,
         # tz-aware UTC ISO 文字列必須 (naive だと adapter が system TZ 解釈で
         # created_at が ±9h ずれる)。
@@ -2128,7 +2131,10 @@ def _persist_record(
         # internal/event_message タグは機構名義の印 (storage.MECHANISM_TAGS)。
         # scene 切り出し・会話キーワード検索からは自動除外される。Chronicle
         # 編纂には 2026-08-29 裁定から材料として入る (長文は決定論の一行に縮む)。
-        "metadata": {"tags": ["internal", "event_message", "sluice"]},
+        "metadata": {
+            "tags": ["internal", "event_message", "sluice"],
+            SYSTEM_NOTICE_KEY: "sluice_capture",
+        },
         "line_role": "main_line",
         "scope": scope_override or (
             "committed" if applied_total > 0 else "discardable"
@@ -3504,7 +3510,8 @@ def run_sluice(
     applied_total = ops_applied + memos_applied + promises_applied
     result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
 
-    # 5. 記録テキスト。event_message 形式のシステム通知として <system> に包む
+    # 5. 記録テキスト。event_message 形式のシステム通知 (role=system・タグ無し本文、
+    #    _persist_record) として残す
     #    (ペルソナ発話ではなくナレーション。few-shot 汚染回避、2026-07-07 まはー指摘)。
     #    判断 (reflection) と適用結果行を全文載せる (省略・切り詰め禁止、不変条件 §5-8)。
     persona_name = getattr(persona, "persona_name", None) or persona_id or "assistant"
@@ -3515,7 +3522,7 @@ def run_sluice(
         body_lines.extend(result_lines)
     if applied_total == 0 and not result_lines:
         body_lines.append("今回は採取しませんでした。")
-    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+    record_text = "\n".join(body_lines)
 
     # 6. 確定クロージャ (Codex 第五巡 修正 2)。適用は済んでいるが、
     #    ①台帳を閉じる (applied → completed) ②判断ターン記録の永続 ③完了通知
@@ -3884,7 +3891,7 @@ def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any
     """記録された範囲 [start, end] の実会話メッセージを正典順で読む。
 
     読みは :func:`sai_memory.memory.storage.get_conversation_messages_between`
-    — 機構名義の行 (event_message / handy_tool / spell) と ``<system>`` 頭の
+    — 機構名義の行 (event_message / handy_tool / spell) と role=system の
     通知は対象に入れない。本人の目で読み返して採取する材料は発話であって、
     機構の定型文ではない。端の行が無い・thread が食い違うときは None (呼び出し
     側が fail-closed で止める)。
@@ -4332,7 +4339,7 @@ def _run_capture_chunk(
         body_lines.extend(result_lines)
     if applied_total == 0 and not result_lines:
         body_lines.append("今回は採取しませんでした。")
-    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+    record_text = "\n".join(body_lines)
 
     # 永続が先、completed が最後 (run_sluice の finalize と同じ順序)。
     # 読み返しの過程は本線の context に載せない (入口は一本 — 走行の締めに
@@ -4853,8 +4860,9 @@ def _append_capture_digest(
     (day_close の _collect_today_session_digests) がタグで拾う既存の読み手に、
     「今日、過去の会話を読み返した」という事実がそのまま乗る。
     role は作業セッションの digest (assistant = 本人の言葉) と違って
-    user + ``<system>`` 包み — この一行は件数から機械が組んだ文で、機構の
-    代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
+    system (タグ無し本文のシステム通知 — docs/intent/system_notice_delivery.md
+    不変条件 1) — この一行は件数から機械が組んだ文で、機構の代筆を本人名義
+    (assistant) にしない (発話の尊厳の規律)。
     書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
     失敗として報告し、記録の欠けを黙って飲まない。
 
@@ -4868,12 +4876,17 @@ def _append_capture_digest(
         raise SluiceStorageUnavailableError(
             "sai_memory adapter is missing; cannot append the capture digest"
         )
-    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    metadata: Dict[str, Any] = {
+        "tags": [DIGEST_TAG, "sluice"],
+        SYSTEM_NOTICE_KEY: "sluice_digest",
+    }
     if nonce:
         metadata["capture_digest_nonce"] = nonce
     message_id = adapter.append_persona_message({
-        "role": "user",
-        "content": f"<system>{digest_text}</system>",
+        "role": "system",
+        "content": digest_text,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "metadata": metadata,
         "line_role": "main_line",

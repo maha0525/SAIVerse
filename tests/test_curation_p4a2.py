@@ -877,8 +877,13 @@ class TestRunPendingPlans:
 
         assert len(messages) == 1, f"event_message が書かれていない: {messages}"
         msg = messages[0]
-        # role は "user"（機構の名義）
-        assert msg.get("role") == "user", f"role が 'user' でない: {msg.get('role')}"
+        # role は "system"（機構の名義のシステム通知、タグ無し本文 —
+        # docs/intent/system_notice_delivery.md 不変条件 1）
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+        assert msg.get("role") == "system", f"role が 'system' でない: {msg.get('role')}"
+        assert (msg.get("metadata") or {}).get(SYSTEM_NOTICE_KEY) == "curation"
+        assert "<system" not in (msg.get("content") or "")
         # タグ規約
         tags = (msg.get("metadata") or {}).get("tags") or []
         assert "event_message" in tags, f"'event_message' タグがない: {tags}"

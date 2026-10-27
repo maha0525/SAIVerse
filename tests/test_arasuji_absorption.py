@@ -105,12 +105,12 @@ class _Client:
 
 def _add_message(
     adapter, minute, chars, prefix="会話", *, thread=None, metadata=None,
-    content=None,
+    content=None, role="user",
 ):
     """thread: 別スレッドを作る thread_suffix / metadata: tags 等 (機構 E 用)。"""
     mid = adapter.append_persona_message(
         {
-            "role": "user",
+            "role": role,
             "content": (
                 content if content is not None else f"{prefix} " + "あ" * chars
             ),
@@ -421,10 +421,16 @@ class TestStandaloneAndSilentRuns:
         assert plan.silent_message_count == 2
 
     def test_system_notice_rows_do_not_count_as_utterances(self, adapter):
-        """'<system>' 頭の本文 (タグを持たない世代のシステム通知) も発話に
-        数えない — _conversation_exclusion と同じ規則の名指し再利用。"""
+        """role=system のシステム通知 (機構タグを持たないものも) は発話に
+        数えない — _conversation_exclusion と同じ規則の名指し再利用
+        (docs/intent/system_notice_delivery.md 不変条件 1)。"""
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         conn = adapter.conn
-        _add_message(adapter, 0, 0, content="<system>Track を切り替えました")
+        _add_message(
+            adapter, 0, 0, content="Track を切り替えました", role="system",
+            metadata={SYSTEM_NOTICE_KEY: "schedule"},
+        )
         n1 = _add_message(adapter, 10, 300, thread="t2")
         _entry(conn, [n1], start_min=10, end_min=10)
 

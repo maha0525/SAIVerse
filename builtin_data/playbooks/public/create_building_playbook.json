@@ -115,8 +115,8 @@
     {
       "id": "announce_result",
       "type": "memorize",
-      "action": "<system>{last}</system>",
-      "role": "user",
+      "action": "{last}",
+      "role": "system",
       "tags": [
         "tool",
         "create_building"

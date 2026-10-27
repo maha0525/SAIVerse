@@ -413,12 +413,22 @@ class SEARuntime:
             LOGGER.exception("[perception_buffer] flush failed in run_meta_user")
 
         # スケジュール実行時はプロンプトをペルソナ自身のhistoryに直接追加（他のペルソナには見せない）
+        # システム通知として role=system・タグ無し本文で保存する
+        # (docs/intent/system_notice_delivery.md 不変条件 1)。組み立て側
+        # (schedule_manager / inject_persona_event / autonomy_wiring /
+        # pulse_controller の再開文) はタグ無しの本文を渡す。
         if pulse_type == "schedule" and user_input:
             try:
+                from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
                 schedule_msg: Dict[str, Any] = {
-                    "role": "user",
+                    "role": "system",
                     "content": user_input,
-                    "metadata": {"with": ["system"], **(metadata or {})},
+                    "metadata": {
+                        "with": ["system"],
+                        **(metadata or {}),
+                        SYSTEM_NOTICE_KEY: "schedule",
+                    },
                 }
                 persona.history_manager.add_to_persona_only(schedule_msg)
                 LOGGER.debug("[schedule] Recorded schedule prompt to persona history for %s", getattr(persona, "persona_id", "?"))

@@ -105,8 +105,10 @@ COMPRESSION_TRIGGER_TOKENS = 100000
 COMPRESSION_TARGET_TOKENS = 64000
 
 #: 文字起こしが 1 件も取れなかった通話に残す一行 (item: 通話の痕跡)。
-#: ペルソナへのシステム通告は user ロール + ``<system>`` タグ、が既存の流儀
-#: (get_building_messages.py の host 経路と同じ)。
+#: ペルソナの記憶にはシステム通知 (role=system・タグ無し本文 + 識別の印) として
+#: 残し (docs/intent/system_notice_delivery.md 不変条件 1)、建物履歴には機構の
+#: 出来事の行 (role=host) として残す (:func:`_memory_message` /
+#: :func:`_building_entry`)。
 NO_TRANSCRIPT_NOTICE = "(音声通話が行われたが、文字起こしは得られなかった)"
 
 _CALL_MODE_INSTRUCTION = {
@@ -715,7 +717,8 @@ def _memory_message(
       ``_transcribe_message``) が組む ``metadata["with"] = ["user"]`` 付きの
       user 行と同形。
     - 通話の痕跡の一行 (``entry["system"]``): host 経路の転記と同じく
-      user ロール + ``<system>`` タグ + ``tags=["internal", "event_message"]``。
+      role=system・タグ無し本文 + ``tags=["internal", "event_message"]`` +
+      システム通知の印 (``SYSTEM_NOTICE_KEY``)。
 
     ``line_role`` / ``scope`` は message dict の top-level に明示する
     (``saiverse_memory.adapter._append_message`` がそこから読む)。転記経路の
@@ -740,7 +743,10 @@ def _memory_message(
         "scope": "committed",
     }
     if entry.get("system"):
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         metadata["tags"] = ["internal", "event_message"]
+        metadata[SYSTEM_NOTICE_KEY] = "voice_call"
     elif role == "assistant":
         message["persona_id"] = getattr(persona, "persona_id", None)
         metadata["with"] = _conversation_partners(persona, manager, building_id)
@@ -776,7 +782,15 @@ def _building_entry(
     (``get_building_messages.py``) ので、載せると他のペルソナの記憶に
     「自分のフォルダ基準では存在しないパス」が書き込まれる。記憶は追記のみ
     なので、その嘘は永久に残る。紐は通話したペルソナ自身の記憶の行だけに刻む。
+
+    通話の痕跡の一行 (``entry["system"]``) は、建物履歴では機構の出来事の行
+    (role=host) にする。建物履歴の system 通知の置き場は host で、自動転記は
+    host の行を同席者の記憶へシステム通知として写す (``get_building_messages.py``
+    の host 経路)。システム通知の印 (``SYSTEM_NOTICE_KEY``) は記憶の行だけの
+    もので、建物履歴の行には載せない。
     """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     persona_id = getattr(persona, "persona_id", None)
     occupants = list((getattr(manager, "occupants", None) or {}).get(building_id, []))
     heard = {str(oid) for oid in occupants if oid}
@@ -789,8 +803,9 @@ def _building_entry(
     message = _memory_message(entry, persona, manager, building_id)
     metadata = dict(message["metadata"])
     metadata.pop("voice_audio", None)  # 上の docstring 参照 (他人の記憶へ写る行)
+    metadata.pop(SYSTEM_NOTICE_KEY, None)
     row: Dict[str, Any] = {
-        "role": message["role"],
+        "role": "host" if entry.get("system") else message["role"],
         "content": message["content"],
         "timestamp": message["timestamp"],
         "metadata": metadata,
@@ -1251,8 +1266,8 @@ class VoiceCallSession:
             # という事実だけは残す — 何も残さないと、ペルソナから見て
             # その時間は存在しなかったことになる。
             return [{
-                "role": "user",
-                "content": f"<system>{NO_TRANSCRIPT_NOTICE}</system>",
+                "role": "system",
+                "content": NO_TRANSCRIPT_NOTICE,
                 "timestamp": _now_iso(),
                 "system": True,
             }]

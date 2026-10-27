@@ -156,6 +156,27 @@ class TestHistoryManagerPersonaLog(unittest.TestCase):
         self.assertEqual((status, mid), ("synced", "m9"))
         self.assertEqual(len(self.history_manager.messages), before + 1)
 
+    def test_system_role_is_synced_only_with_the_system_notice_key(self):
+        # システム通知 (識別の印付きの role=system) は記憶へ書く
+        # (docs/intent/system_notice_delivery.md 不変条件 1)。印の無い system 行
+        # (機構がその場の状況として積むだけの行) は従来どおり書かない。
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+        adapter = self._Adapter(mid="m5")
+        self.history_manager.set_memory_adapter(adapter)
+        status, mid = self.history_manager.add_to_persona_only(
+            {"role": "system", "content": "印の無い system 行"}
+        )
+        self.assertEqual((status, mid), ("skipped", None))
+        self.assertEqual(adapter.calls, 0)
+        status, mid = self.history_manager.add_to_persona_only({
+            "role": "system",
+            "content": "スケジュールの実行時刻です。",
+            "metadata": {SYSTEM_NOTICE_KEY: "schedule"},
+        })
+        self.assertEqual((status, mid), ("synced", "m5"))
+        self.assertEqual(adapter.calls, 1)
+
 
 class TestRecentEntrantEventsViaDB(unittest.TestCase):
     """get_recent_entrant_events / mark_entrant_event_recalled の DB 経由動作。"""

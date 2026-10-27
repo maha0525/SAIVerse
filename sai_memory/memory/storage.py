@@ -1284,6 +1284,15 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+#: システム通知の識別に使う metadata の鍵 (docs/intent/system_notice_delivery.md
+#: 不変条件 1・4)。値はその通知を作った系統の ASCII snake_case 名 (例:
+#: ``"schedule"``, ``"building_event"``, ``"subline_report"``)。供給側は
+#: role=system・タグ無し本文と一緒にこの鍵を書く。``__`` で始まるので、送り手から
+#: 届く metadata からは api/routes/chat.py の ``_client_metadata`` が必ず取り除く
+#: (サーバーだけが書ける)。
+SYSTEM_NOTICE_KEY = "__system_notice__"
+
+
 def wrap_system_record_content(content: str) -> str:
     """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。
 
@@ -2670,10 +2679,13 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     role: 会話本文 (user 発話 / persona 応答) のみ対象。persona 応答は歴史的に
     'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
     両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
-    会話本文ではないため除外する。
-    content が '<system>' で始まる行は、role=user で保存されるシステム通知
-    (Track切替通知等、event_message タグを持たない世代がある) なので除外する。
-    口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
+    会話本文ではないため除外する。システム通知は role=system で保存する決まり
+    (docs/intent/system_notice_delivery.md 不変条件 1) なので、この role の条件で
+    除外される — 口調のアンカー (scene) にシステム通知が混入すると手本として
+    劣化するため。本文の文字列 (``<system>`` で始まるか) では判定しない
+    (同 不変条件 2)。本文に ``<system>`` を埋め込んで role=user で保存していた
+    旧世代の行 (Track切替通知等、event_message タグを持たない世代がある) は、
+    database/migrate.py の移行で role=system へ正規化する。
 
     ``get_conversation_window_around`` (コア記憶 scene) と
     ``get_conversation_messages_between`` (範囲クリップの読み出し) が共用する
@@ -2694,7 +2706,6 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             WHERE json_each.value IN ({tag_placeholders})
         )
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        AND content NOT LIKE '<system>%'
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
@@ -2706,12 +2717,13 @@ def filter_real_conversation_ids(
 
     定義は ``_conversation_exclusion`` を名指しで再利用する — role が
     user/model/assistant で、機構タグ (handy_tool / spell / event_message) も
-    line_role 除外も ``'<system>'`` 頭の本文も持たない行だけが「発話」。
+    line_role 除外も持たない行だけが「発話」。
 
     吸収の機構 E (docs/intent/chronicle_coverage_gaps.md) が「吸収先の無い
-    run を単独編纂してよいか」の線引きに使う。role だけで判定してはならない:
-    機構の記録 (入室通知等) は role=user で保存されており、role 判定では
-    「発話あり」に化けて捏造あらすじの温床に戻る。
+    run を単独編纂してよいか」の線引きに使う。機構の記録 (入室通知等) が
+    「発話あり」に化けると捏造あらすじの温床に戻る。システム通知は role=system
+    で保存する決まり (docs/intent/system_notice_delivery.md 不変条件 1) なので
+    role の条件で外れ、機構タグの条件がその二重の柵になる。
     """
     ids = [str(m) for m in message_ids]
     if not ids:
@@ -2743,7 +2755,7 @@ def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
     - ``_conversation_exclusion()`` — SCENE / 範囲クリップと同じ実会話定義
       (Stelis スレッド除外・handy_tool/spell/event_message タグ除外・
       sub_line/meta_judgment/nested line_role 除外・role は user/model/assistant
-      のみ・'<system>' 始まり本文の除外)
+      のみ = role=system のシステム通知の除外)
     - 通常履歴 (``get_messages_last``) と同じ ``scope='discardable'`` 除外
 
     列は messages の非修飾列名で参照する。JOIN 先で使う場合は、相手側に
@@ -2940,19 +2952,8 @@ def search_conversation_messages(
     - ``date_from_ts`` / ``date_to_ts``: created_at の範囲 (Unix 秒、両端含む)。
     - 戻り値は created_at 降順 (新しい順)、最大 ``limit`` 件。
     """
-    tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
-    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
-    exclusion_clause = f"""
-        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        AND role IN ('user', 'model', 'assistant')
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({tag_placeholders})
-        )
-        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        AND content NOT LIKE '<system>%'
-    """
-    params: List[Any] = list(MECHANISM_TAGS) + list(CHRONICLE_EXCLUDED_LINE_ROLES)
+    exclusion_clause, exclusion_params = _conversation_exclusion()
+    params: List[Any] = list(exclusion_params)
 
     where_parts = [exclusion_clause]
     for kw in keywords:

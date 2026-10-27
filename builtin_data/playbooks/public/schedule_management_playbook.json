@@ -28,8 +28,8 @@
     {
       "id": "record_list_result",
       "type": "memorize",
-      "action": "<system>{last}</system>",
-      "role": "user",
+      "action": "{last}",
+      "role": "system",
       "tags": [
         "tool",
         "schedule_management"
@@ -159,8 +159,8 @@
     {
       "id": "record_add_result",
       "type": "memorize",
-      "action": "<system>{last}</system>",
-      "role": "user",
+      "action": "{last}",
+      "role": "system",
       "tags": [
         "tool",
         "schedule_add"
@@ -214,8 +214,8 @@
     {
       "id": "record_delete_result",
       "type": "memorize",
-      "action": "<system>{last}</system>",
-      "role": "user",
+      "action": "{last}",
+      "role": "system",
       "tags": [
         "tool",
         "schedule_management"
