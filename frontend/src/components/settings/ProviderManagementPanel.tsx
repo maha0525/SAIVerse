@@ -54,6 +54,7 @@ const API_KEY_DOCS: Record<string, string> = {
     NVIDIA_API_KEY: 'nvidia-nim',
     TYPESAFE_API_KEY: 'typesafe',
     SARASHINA_API_KEY: 'sarashina',
+    META_API_KEY: 'meta',
 };
 
 // A name for the tier a key variable belongs to, shown next to its label so
