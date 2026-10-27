@@ -2,6 +2,8 @@
 
 [system_notice_delivery.md](../intent/system_notice_delivery.md) の前提調査。LLM へ渡る messages 列 (送るメッセージの配列) に入る「ユーザーの実発言・ペルソナ自身の発話**ではない**テキスト」を、供給側 (通知を作って積む側のコード)・保存・読み出しの三面から洗った。調査は Opus のサブエージェント (読み取り専用) が行い、設計の生死に関わる要所 (読み出しの変換が 1 箇所にまとまっていること、文字列での会話の選別、スケジュール入力と子ラインの保存、死んだコード) はメティスがコードで裏取りした。基点: develop (a8fbb855 時点の worktree)。
 
+**2026-10-28 の訂正**: この調査の #13 (添付アイテム作成の注記) は「ユーザー発言の末尾に埋め込んで保存」と書いたが、実装時の確認で、保存はされておらず、文脈を組み立てるたびに `sea/runtime.py` の `_enrich_history_with_attachments` が発言の metadata からその場で足す形だった。だから #13 は移行の対象ではない (経緯は [intent](../intent/system_notice_delivery.md) の経緯の節)。それ以外の記述は 2026-10-27 時点の記録として変えていない。
+
 凡例 — **a**: role=user で本文に `<system>` タグ / **b**: role=user でタグ無しのシステムメッセージ / **c**: role=system を会話の途中に挿入 / **d**: システムメッセージを role=assistant で保存。
 
 ## 結論 (要点)
@@ -37,7 +39,7 @@
 | 10 | paired_action_text 列 | `sea/runtime_llm.py:1286` (Playbook の action)、`:4191` (スペル初回周・作業セッションの指示書)、`sea/sluice.py:2137` | 列そのものが識別になる |
 | 11 | リアルタイム情報・自動想起のまとまり (履歴に残す設定 persist_realtime_and_recall のモデルのみ) | `perception_batches.rendered_text` (kind=`realtime_and_recall`。`sea/runtime_context.py:513` → `sai_memory/perception_buffer.py:940` 付近) | 別テーブルの kind が識別になる |
 | 12 | (呼び出し元なし) 状況変化の通知 | `builtin_data/tools/get_situation_snapshot.py:276` | `[internal,situation_change]` |
-| 13 | ユーザー発言の末尾に埋め込む「添付アイテム作成」の注記 | `sea/runtime.py:2604` 付近 (元の本文は `SAID_CONTENT_KEY` に控え済み) | `SAID_CONTENT_KEY` |
+| 13 | ユーザー発言の末尾に埋め込む「添付アイテム作成」の注記 (**2026-10-28 訂正**: 保存はされておらず、文脈を組むたびに `_enrich_history_with_attachments` が足す形だった。移行の対象ではない) | `sea/runtime.py:2604` 付近 (元の本文は `SAID_CONTENT_KEY` に控え済み) | `SAID_CONTENT_KEY` |
 
 MEMORIZE でタグ無し・role=user のまま保存している Playbook (role=system 化の対象): `building_move_playbook.json:65`、`document_create_playbook.json:68`、`document_search_playbook.json:88,112`、`generate_image_playbook.json:141`。
 

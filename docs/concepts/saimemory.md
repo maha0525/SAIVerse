@@ -23,7 +23,7 @@
 - タグ（`conversation` / `internal` / `task` / `summary` / `event_message` 等）で分類・検索される
 - [Pulse](pulse.md) 内の詳細は `pulse_logs` テーブルに記録され、重要なノード出力は両方に書く「二重書き込み」で確実に残す
 
-> **タグ注意**: 新種のシステム通知を挿入する時は `event_message` タグ必須（タグ漏れでペルソナのコンテキストに乗らない事故）。
+> **システム通知の形 (2026-10-28 改訂)**: システム通知は role=system・タグ無し本文で保存し、識別用の metadata `__system_notice__` (`sai_memory/memory/storage.py` の `SYSTEM_NOTICE_KEY`。値は系統名) を必ず付ける。識別の正はこの印で、送る列でも `is_system_notice` がこれを読む ([system_notice_delivery.md](../intent/system_notice_delivery.md))。印の無い role=system の行は、建物から個人記憶への転記 (`persona/history_manager.py` の `_sync_to_memory`) で書かれない。`event_message` などの tags は残っていて、あらすじの機構名義の判定 (`MECHANISM_TAGS`) や scene の除外は今も tags を読むので、機構名義に数えたい通知には従来どおり付ける。以前の規則は「新種のシステム通知を挿入する時は `event_message` タグ必須（タグ漏れでペルソナのコンテキストに乗らない事故）」だった。
 
 ### 中身の3層
 

@@ -65,7 +65,9 @@ OpenAI SDK → Chat Completions (`POST https://api.meta.ai/v1/chat/completions`)
 - 会話の途中の system メッセージは user へ変換する
   (`default_convert_system_to_user`)。Meta の API では system が developer と同列に扱われ、
   会話構造の検証が OpenAI より厳密だと案内されているため、OpenRouter 経由の
-  Muse 定義と同じ安全側に倒す。
+  Muse 定義と同じ安全側に倒す。2026-10-28 から、このフラグの意味は「会話の途中の
+  システム通知を合言葉付きタグの user に変える」になった
+  ([system_notice_delivery.md](system_notice_delivery.md))。この決定自体の撤回は経緯を参照。
 - キャッシュは Meta 側で自動 (先頭一致)。`cached_tokens` は
   `prompt_tokens_details` に含まれて返るため、既存の使用量記録処理でそのまま読み取って集計できる。
   `prompt_cache_key` は送らない。SAIVerse にはどのプロバイダにも `prompt_cache_key` を
@@ -106,3 +108,4 @@ Meta の実サーバーへの通信や、本番ペルソナの呼び出し・デ
 
 - 2026-10-27: まはーの依頼で着手。公式資料を読み、同梱プロバイダ定義 1 本・モデル定義 2 本・
   文書を追加し、外部通信なしのモック HTTP テストを作成した。
+- 2026-10-28: 「会話の途中の system メッセージは user へ変換する」の決定は、PR #429 (2026-10-28 時点で未マージ) で撤回する。システム通知を role=system へ一本化する改修 ([system_notice_delivery.md](system_notice_delivery.md)) で、この撤回を全プロバイダへ一般化した — 途中の system を受け取れないモデルへは、クライアント層が送る直前に合言葉付きタグの user に変える。

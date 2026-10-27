@@ -27,7 +27,7 @@ SAIVerseのペルソナは、ユーザーとの対話を通じて人格・記憶
 
 タイムラインやメンションを読んだ内容は、ペルソナのSAIMemoryに記録しなければならない。記録しなければ、ペルソナは「見た」という事実を次のやり取りで参照できない。
 
-ポーリングで検出された通知 (`x_poll_handler` Playbook) は `["x_polling", "notification"]` タグで `<system>` メッセージとして会話履歴に挿入される。リプライ生成等の Playbook 経由の発火は `["conversation", "x_reply"]` 等のタグを付与する。タグ設計は、後から「X 由来の情報」をフィルタできることが目的であり、`conversation` がなければ通常の会話コンテキスト構築時に参照されない点に注意。
+ポーリングで検出された通知 (`x_poll_handler` Playbook) は `["x_polling", "notification"]` タグでシステム通知として会話履歴に挿入される (形は 2026-10-28 から role=system・タグ無し本文 + 識別用の metadata `__system_notice__` — [system_notice_delivery.md](system_notice_delivery.md)。それより前は `<system>` メッセージと書いていた)。リプライ生成等の Playbook 経由の発火は `["conversation", "x_reply"]` 等のタグを付与する。タグ設計は、後から「X 由来の情報」をフィルタできることが目的であり、`conversation` がなければ通常の会話コンテキスト構築時に参照されない点に注意。
 
 ### 3. 投稿前の安全確認
 

@@ -231,8 +231,15 @@ Branch A/B × stream/sync を §3.2 の4関数に分割。`node` 本体は
 
 ## 5. 不変条件（壊すと事故る。コード内コメントと過去 issue から集約）
 
-1. **`<system>` タグ + user role 形式は変更禁止**（L2210-2239 の設計判断コメント）。
-   role='system' 化は Gemini 互換が壊れる。移設時はコメントごと持っていく
+1. ~~**`<system>` タグ + user role 形式は変更禁止**（L2210-2239 の設計判断コメント）。
+   role='system' 化は Gemini 互換が壊れる。移設時はコメントごと持っていく~~
+   **2026-10-28 に撤回**: システム通知は role=system・タグ無し本文 + `__system_notice__` へ
+   一本化し、Gemini など会話の途中の system を受け取れないモデルへの変換 (合言葉付きタグの
+   user) はクライアント層 (`llm_clients/system_notice.py`) が受け持つ形になった
+   ([system_notice_delivery.md](../intent/system_notice_delivery.md))。この項の設計判断
+   コメントは `sea/runtime_llm.py` から消えている。分割で守るべきなのは「SEA 層は通知を
+   role=system で出し、タグの文字列を組まない」こと (`tests/test_system_tag_literals.py` が固定)。
+   この文書の L 番号と「`<system>` タグ wrap」の記述は 2026-10-28 より前の実装の記録
 2. **Spell はテキスト順逐次実行**。`_run_spell_loop` / `_execute_pre_spells` の両経路とも
    並列 gather に戻さない（memory: `project_spell_loop_sequential`）
 3. **SAIMemory へは continuation（plain）のみ**。merged 全文（`<user_only>` / spellResult HTML 入り）を

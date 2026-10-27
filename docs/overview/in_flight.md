@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🔵 設計中 | システム通知を system ロールへ一本化し、受け付けないモデルには合言葉付きタグで変換 | intent と全数調査の一覧は起草済みで、ブランチ feature/system-notice-delivery にある。次 = まはーが設計を確認し、OK なら実装の束 (供給側の正規化 / クライアント層の変換 / 選別条件の置き換え / 移行) を一つのリリースに載せる段取りを決める。 | まはー (設計確認) | [intent](../intent/system_notice_delivery.md) | 2026-10-27 |
+| 🟣 検証待ち | システム通知を system ロールへ一本化し、受け付けないモデルには合言葉付きタグで変換 | 実装と文書の改訂はブランチ feature/system-notice-impl にあり、レビューの消し込みと検証が残っている。次 = 本番 DB の写しで移行の dry-run レポートを目視し、隔離環境の通しと画面の確認のあと、費用の承認を得て実サービスで通知に従うかを測る。 | メティス (レビュー・隔離検証) → まはー (実機確認) | [intent](../intent/system_notice_delivery.md) | 2026-10-28 |
 | 🟣 検証待ち | Meta の Muse (Spark 1.3 / Wonder) を公式プロバイダとして同梱 | 実装と外部通信なしのモック HTTP テストはブランチ feature/meta-muse-provider の PR にある。次 = まはーが PR を確認し、META_API_KEY を設定して両モデルで会話・画像・構造化出力が通るかを実サービスで確かめる。 | まはー (PR 確認と実サービス確認) | [intent](../intent/meta_muse_provider.md) | 2026-10-27 |
 | 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
 | 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正はブランチ feature/mac-setup-tls-and-brew-path にあり、まだ develop に入っていない。次 = レビューの消し込みと検収を経て develop に入れ、次のリリースを Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | 私 (レビューと検収) → リリース → Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-10-26 |

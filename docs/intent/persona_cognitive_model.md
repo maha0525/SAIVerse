@@ -705,7 +705,7 @@ Playbook 内から別の Playbook を呼ぶ時、ライン指定を明示する�
 
 #### 子ラインから親ラインへの結果報告 （v0.14 で `report_to_main` → `report_to_parent` 改名）
 
-子ラインで動く Playbook は **`output_schema` に `report_to_parent` を必須**で含める (旧 `report_to_main` から改名、v0.14)。完了時にこの内容が**親ラインの messages へ system タグ付き user メッセージ**として append される。
+子ラインで動く Playbook は **`output_schema` に `report_to_parent` を必須**で含める (旧 `report_to_main` から改名、v0.14)。完了時にこの内容が**親ラインの messages へシステム通知**として append される。形は 2026-10-28 から role=system・タグ無し本文 (`__system_notice__` = `subline_report`) で、会話の途中の system を受け取れないモデルへはクライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](system_notice_delivery.md))。それより前は system タグ付き user メッセージだった。
 
 改名理由: 親が必ずメインラインとは限らない (子サブが子サブを呼ぶ場合、親はサブライン)。親が誰であっても、子は親に成果を返す関係性。
 
@@ -823,7 +823,7 @@ B フロー時の効率を確保するため、**中断する側で事前にサ�
 その代わり：
 
 - **Track 開始 / 再開時に開いた Note の最新状態**を読み込む
-- **再開時は中断時の Note 状態との差分**を event entry（system タグ付き user メッセージ）として挿入
+- **再開時は中断時の Note 状態との差分**を event entry（システム通知。2026-10-28 から role=system — [system_notice_delivery.md](system_notice_delivery.md)。それより前は system タグ付き user メッセージ）として挿入
 - 別 Track での発見・更新が、Note を開いている全 Track に自然に伝わる
 
 この仕組みにより:
