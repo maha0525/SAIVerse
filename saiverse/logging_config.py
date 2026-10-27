@@ -54,6 +54,35 @@ def _truncate_base64_filter(record: logging.LogRecord) -> bool:
     return True
 
 
+def _redact_passphrase_filter(record: logging.LogRecord) -> bool:
+    """Filter that masks system-notice passphrases in log records.
+
+    The passphrase is inserted into the sent request only by the client layer
+    (llm_clients/system_notice.py), and a model may echo it back in a response,
+    which every client logs in its own way. Masking at the handler covers all of
+    those lines (docs/intent/system_notice_delivery.md invariant 3). The module
+    is looked up in ``sys.modules`` only: if it was never imported, no
+    passphrase was ever sent.
+    """
+    notice = sys.modules.get("llm_clients.system_notice")
+    redact = getattr(notice, "redact_known_passphrases", None)
+    if redact is None:
+        return True
+    try:
+        message = record.getMessage()
+    except Exception:
+        return True
+    redacted = redact(message)
+    if redacted != message:
+        record.msg = redacted
+        record.args = None
+    if record.exc_info and not record.exc_text:
+        record.exc_text = logging.Formatter().formatException(record.exc_info)
+    if record.exc_text:
+        record.exc_text = redact(record.exc_text)
+    return True
+
+
 def get_session_log_dir() -> Path:
     """Get the session-specific log directory, creating it if needed."""
     global _session_log_dir
@@ -148,6 +177,7 @@ def configure_logging(level_name: Optional[str] = None) -> Path:
     
     # Add filter to truncate base64 data in logs
     tee_handler.addFilter(_truncate_base64_filter)
+    tee_handler.addFilter(_redact_passphrase_filter)
     
     root_logger.addHandler(tee_handler)
     
@@ -197,6 +227,7 @@ def _configure_llm_logger() -> None:
     ))
     # Add base64 truncation filter to LLM logger
     file_handler.addFilter(_truncate_base64_filter)
+    file_handler.addFilter(_redact_passphrase_filter)
     llm_logger.addHandler(file_handler)
 
     # Don't propagate to root logger (LLM logs are verbose)
@@ -213,6 +244,7 @@ def _configure_error_logger() -> None:
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
     error_handler.addFilter(_truncate_base64_filter)
+    error_handler.addFilter(_redact_passphrase_filter)
     # Add to root logger so it catches WARNING/ERROR/CRITICAL from all modules
     logging.getLogger().addHandler(error_handler)
 
@@ -362,6 +394,7 @@ def _configure_sea_trace_logger() -> None:
         "%(asctime)s %(message)s",
         datefmt="%H:%M:%S"
     ))
+    file_handler.addFilter(_redact_passphrase_filter)
     trace_logger.addHandler(file_handler)
 
     # Don't propagate to root logger
@@ -409,6 +442,7 @@ def _configure_timeout_diagnostics_logger() -> None:
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
+    file_handler.addFilter(_redact_passphrase_filter)
     timeout_logger.addHandler(file_handler)
     
     # Don't propagate to root logger

@@ -356,6 +356,49 @@ def test_anthropic_request_log_is_redacted(monkeypatch):
     assert any("*" * len(PASS) in line for line in logged)
 
 
+def test_log_handlers_mask_an_echoed_passphrase():
+    """応答に復唱された合言葉は、どのクライアントのどのログ行でもハンドラが伏せる。
+
+    応答のログ (各クライアントの raw / Response の行、_dump_llm_io の
+    LLM_RESPONSE) は応答を書く側では合言葉を見分けられないので、送る形に
+    差し込んだ合言葉をハンドラの filter が覚えていて伏せる。
+    """
+    import io
+    import logging
+
+    from saiverse.logging_config import _redact_passphrase_filter
+
+    echoed = "Zz9EchoPass01"
+    present_system_notices(
+        [_head(echoed), {"role": "system", "content": "通知"}],
+        accepts_mid_system=False,
+    )
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(_redact_passphrase_filter)
+    logger = logging.getLogger("tests.system_notice.echo")
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        logger.debug("[anthropic] Response: %s", {"text": f"合言葉は {echoed} です"})
+        try:
+            raise RuntimeError(f"bad request echoing {echoed}")
+        except RuntimeError:
+            logger.exception("call failed")
+        logger.debug("no secret here: %s", "plain")
+    finally:
+        logger.removeHandler(handler)
+
+    out = stream.getvalue()
+    assert echoed not in out
+    assert "*" * len(echoed) in out
+    assert "RuntimeError" in out
+    assert "no secret here: plain" in out
+
+
 # ---------------------------------------------------------------------------
 # 5. head の印が無い列は従来どおり
 # ---------------------------------------------------------------------------

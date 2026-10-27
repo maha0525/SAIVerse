@@ -308,6 +308,39 @@ def test_persona_rows_are_normalized_to_the_final_form(persona_db, tmp_path):
     assert result.unknown_system_count == 1
 
 
+def test_rows_whose_metadata_is_not_an_object_are_left_and_reported(tmp_path):
+    """metadata が辞書に読めない行 (壊れた JSON・配列) は変換せず、レポートに残す。
+
+    識別用 metadata が読めない行は系統を判定できない — 印だけの metadata に
+    置き換えると元の metadata が失われる。
+    """
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        for row_id, role, content, raw in (
+            ("tagged_broken", "user", "<system>部屋の様子</system>", "{not json"),
+            ("tagged_list", "user", "<system>部屋の様子</system>", '["event_message"]'),
+            ("system_broken", "system", "結果", "{not json"),
+        ):
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, role, content, resource_id, "
+                "created_at, metadata) VALUES (?, 't', ?, ?, 'p1', 0, ?)",
+                (row_id, role, content, raw),
+            )
+        conn.commit()
+    with closing(sqlite3.connect(str(db))) as conn:
+        before = conn.execute("SELECT id, role, content, metadata FROM messages").fetchall()
+
+    result = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+
+    with closing(sqlite3.connect(str(db))) as conn:
+        after = conn.execute("SELECT id, role, content, metadata FROM messages").fetchall()
+    assert after == before
+    assert result.changes == []
+    assert {s.row_id for s in result.skipped} == {"tagged_broken", "tagged_list"}
+    assert result.unknown_system_count == 1
+
+
 def test_realtime_and_recall_batch_matches_the_turn_composition(persona_db, tmp_path):
     from sea.runtime_context import (
         compose_turn_realtime_and_recall_content,

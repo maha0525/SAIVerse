@@ -30,6 +30,8 @@ import logging
 import re
 import secrets
 import string
+import threading
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set
 
 from sai_memory.memory.storage import (
@@ -150,6 +152,38 @@ def redact_passphrase(text: str, passphrase: str) -> str:
     return text.replace(passphrase, "*" * len(passphrase))
 
 
+#: このプロセスで送る形に差し込んだ合言葉 (新しいものほど後ろ)。ログの書き出し
+#: (saiverse/logging_config.py のハンドラの filter) が、どのクライアントのどの
+#: ログ行 (送る形・応答・例外の文) からもこれを伏せる — 応答に復唱された合言葉は
+#: 応答を書く側では見分けられないため (不変条件 3)。上限を超えたら古いものから
+#: 忘れる (head の作り直しで合言葉は入れ替わる)。
+_KNOWN_PASSPHRASES: "OrderedDict[str, None]" = OrderedDict()
+_KNOWN_PASSPHRASES_LIMIT = 256
+_KNOWN_PASSPHRASES_LOCK = threading.Lock()
+
+
+def _remember_passphrase(passphrase: str) -> None:
+    if not passphrase:
+        return
+    with _KNOWN_PASSPHRASES_LOCK:
+        _KNOWN_PASSPHRASES[passphrase] = None
+        _KNOWN_PASSPHRASES.move_to_end(passphrase)
+        while len(_KNOWN_PASSPHRASES) > _KNOWN_PASSPHRASES_LIMIT:
+            _KNOWN_PASSPHRASES.popitem(last=False)
+
+
+def redact_known_passphrases(text: str) -> str:
+    """このプロセスで送る形に差し込んだどの合言葉も ``text`` から伏せる。"""
+    if not isinstance(text, str) or not _KNOWN_PASSPHRASES:
+        return text
+    with _KNOWN_PASSPHRASES_LOCK:
+        known = tuple(_KNOWN_PASSPHRASES)
+    for passphrase in known:
+        if passphrase in text:
+            text = redact_passphrase(text, passphrase)
+    return text
+
+
 def _neutralize_system_tags(text: str) -> str:
     """本文の中の ``<system`` / ``</system`` を全角の ``＜`` で始まる文字列にする。"""
     return _SYSTEM_TAG_RE.sub(lambda m: "＜" + m.group(1) + m.group(2), text)
@@ -213,6 +247,7 @@ def present_system_notices(
             "[system_notice] head message carries no passphrase; notices are tagged "
             "without one",
         )
+    _remember_passphrase(passphrase)
     notices = system_notice_indices(messages)
 
     out: List[Any] = []
@@ -259,6 +294,7 @@ __all__ = [
     "is_head_system_message",
     "model_accepts_mid_conversation_system",
     "present_system_notices",
+    "redact_known_passphrases",
     "redact_passphrase",
     "system_notice_indices",
     "system_notice_passphrase",
