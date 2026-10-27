@@ -54,7 +54,7 @@ LOGGER = logging.getLogger(__name__)
 # 並び順 = system メッセージ内の出力順。各 Section の order 属性に合わせる
 # (common_prompt < persona_self < core_memory(250) < building(300) < facilities(310) <
 #  available_playbooks(400) < autonomy_modes(550) < self_image(560) <
-#  spell_list(600) < addon_guidance(610) < desk(730))。
+#  system_notice(570) < spell_list(600) < addon_guidance(610) < desk(730))。
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
@@ -72,6 +72,10 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "available_playbooks",
     "autonomy_modes",
     "self_image",
+    # 2026-10-28: システム通知の読み方 (sections/system_notice.py)。届け方
+    # (合言葉付きタグか system のままか) はモデルで決まるので、文面もモデル
+    # ごと — head は (persona, model) に一つなのでキャッシュは割れない。
+    "system_notice",
     "spell_list",
     # 2026-10-12: アドオンからの案内 (例: 仮想身体の部屋の全身エモート記法)。
     # 増減・変化は差分通知で届く (sections/addon_guidance.py)。案内が無ければ
@@ -1145,6 +1149,17 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
     """
     if pipeline.has_snapshot(ctx.persona_id, ctx.model_key):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
+        if snapshot is not None and not snapshot.passphrase:
+            # 合言葉を持たない head (DB から読み込んだ旧行に、一部の Section の
+            # 撮り直しだけが重なった組など)。下の読み込み直後の分岐と同じ理由で
+            # 作り直す。
+            LOGGER.info(
+                "head_pipeline: in-memory snapshot has no system notice passphrase, "
+                "recapturing persona=%s model=%s",
+                ctx.persona_id, ctx.model_key,
+            )
+            pipeline.capture_all(ctx)
+            return
         if _is_anchor_ttl_expired(ctx):
             LOGGER.info(
                 "head_pipeline: anchor TTL expired (in-memory snapshot), recapturing persona=%s model=%s",
@@ -1161,6 +1176,18 @@ def ensure_snapshot(pipeline: HeadPipeline, ctx: LineHeadInput) -> None:
         return
     if pipeline.load_from_store(ctx.persona_id, ctx.model_key):
         snapshot = pipeline.get_snapshot(ctx.persona_id, ctx.model_key)
+        if snapshot is not None and not snapshot.passphrase:
+            # システム通知の合言葉を持たない行 (session_head_snapshot.PASSPHRASE
+            # 列ができる前に保存された head)。合言葉は head の作り直しと同時に
+            # だけ生成するので、作り直す (docs/intent/system_notice_delivery.md
+            # 不変条件 3, 6)。B は読み込んだ行のものを持ち越す (capture_all の規約)。
+            LOGGER.info(
+                "head_pipeline: stored snapshot has no system notice passphrase, "
+                "recapturing persona=%s model=%s",
+                ctx.persona_id, ctx.model_key,
+            )
+            pipeline.capture_all(ctx)
+            return
         if _is_anchor_ttl_expired(ctx):
             LOGGER.info(
                 "head_pipeline: anchor TTL expired (loaded snapshot), recapturing persona=%s model=%s",
@@ -1297,9 +1324,27 @@ def _compose_messages(
             continue
         system_parts.append(rendered.text)
     if system_parts:
+        # head の印 (HEAD_MESSAGE_KEY): クライアント層が「先頭の system 欄へ
+        # まとめる system」をこの印で見分ける — 会話の途中のシステム通知
+        # (role=system) と位置では区別しない (docs/intent/system_notice_delivery.md
+        # 不変条件 5)。合言葉の実際の値 (SYSTEM_NOTICE_PASSPHRASE_KEY) はこの
+        # metadata に載せて運び、本文には仮置きの文字列だけを書く (不変条件 3 —
+        # 置換はクライアント層の最終変換でだけ行う)。pin した snapshot から読むので、
+        # 入れ子の子ラインが親の列の写しを別モデルで送っても、本文の説明と変換の
+        # 値は同じ snapshot のものになる。
+        from sai_memory.memory.storage import (
+            HEAD_MESSAGE_KEY,
+            SYSTEM_NOTICE_PASSPHRASE_KEY,
+        )
+
+        head_metadata: dict[str, Any] = {HEAD_MESSAGE_KEY: True}
+        passphrase = getattr(snapshot, "passphrase", "") if snapshot is not None else ""
+        if passphrase:
+            head_metadata[SYSTEM_NOTICE_PASSPHRASE_KEY] = passphrase
         messages.append({
             "role": "system",
             "content": "\n\n---\n\n".join(system_parts),
+            "metadata": head_metadata,
         })
 
     # Memory Weave: snapshot の entry を種類ごとに個別 user message として展開

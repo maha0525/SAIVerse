@@ -171,6 +171,13 @@ class LineHeadSnapshot:
     # 「None Section を欠損と認識しない」穴の根治)。永続化はしない: DB 上は
     # key 不在がそのまま欠損を表し、load 後の ensure_snapshot が再 capture する。
     capture_failures: dict[str, str] = field(default_factory=dict)
+    # システム通知の合言葉 (docs/intent/system_notice_delivery.md 不変条件 3, 6)。
+    # head を作り直す (:meth:`HeadPipeline.capture_all`) たびにランダムに生成し、
+    # 一部の Section だけを撮り直す経路 (recapture_missing / capture_for_event) は
+    # 同じ値を引き継ぐ — 同じ head を使い続けている間は同じ値。snapshot と一緒に
+    # 永続化する (session_head_snapshot.PASSPHRASE)。空 = 合言葉を持たない旧行で、
+    # ensure_snapshot が head を作り直す。
+    passphrase: str = ""
 
 
 @runtime_checkable

@@ -223,7 +223,8 @@ sea/
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。
                           #   self_view = 自分の外見とインベントリ、独立した user メッセージ。
-                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く）
+                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く。
+                          #   system_notice = システム通知の読み方、文面はモデルの届け方で出し分け）
 ```
 
 ### manager/

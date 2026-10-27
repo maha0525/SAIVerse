@@ -1292,6 +1292,27 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
 #: (サーバーだけが書ける)。
 SYSTEM_NOTICE_KEY = "__system_notice__"
 
+#: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
+#: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
+#: ``_compose_messages`` が人格指示の system メッセージの metadata に ``True`` で
+#: 付ける。LLM クライアントが「先頭の system 欄へまとめる system」と「会話の途中の
+#: システム通知」を分ける判定は、位置ではなくこの印で行う (履歴が空のターンでは、
+#: 冒頭の通知が人格指示と位置では区別できないため)。記録には保存されない。
+HEAD_MESSAGE_KEY = "__head__"
+
+#: head の system メッセージの metadata に載せる合言葉の実際の値の鍵 (不変条件 3)。
+#: 値は ``SessionHeadSnapshot.PASSPHRASE`` と同じ。組み上がった messages 列と
+#: 一緒にクライアント層まで運ばれ、llm_clients/system_notice.py の最終変換が読んで
+#: 剥がす。llm_io.log を書く saiverse/logging_config.py の
+#: ``_sanitize_messages_for_log`` もこの鍵を落とす。
+SYSTEM_NOTICE_PASSPHRASE_KEY = "__system_notice_passphrase__"
+
+#: head の本文に書く合言葉の仮置き文字列。実際の値への置換はクライアント層の
+#: 最終変換 (llm_clients/system_notice.py) が、head の印を持つ system メッセージの
+#: 本文に対してだけ行う — SAIVerse 層で messages を写す口 (llm_io.log・
+#: /api/chat/preview) には仮置きのまま出る。
+SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER = "{{SYSTEM_NOTICE_PASSPHRASE}}"
+
 
 def wrap_system_record_content(content: str) -> str:
     """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。

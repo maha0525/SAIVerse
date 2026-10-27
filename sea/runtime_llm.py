@@ -6065,14 +6065,31 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 from saiverse.model_configs import get_model_system_prompt
                 _model_sys_prompt = get_model_system_prompt(_model_config_key)
                 if _model_sys_prompt:
-                    _injected = False
-                    for _mi, _msg in enumerate(messages):
-                        if _msg.get("role") == "system":
-                            # Create new dict to avoid mutating shared base_msgs
-                            messages[_mi] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
-                            _injected = True
-                            break
-                    if not _injected:
+                    # 足す先は head の system メッセージ (head の印で見分ける)。
+                    # head の無い列では先頭の system。会話の途中のシステム通知
+                    # (role=system) に足してはならない
+                    # (docs/intent/system_notice_delivery.md 不変条件 5)。
+                    from sai_memory.memory.storage import HEAD_MESSAGE_KEY
+
+                    def _is_target(_m: Any) -> bool:
+                        _meta = _m.get("metadata") if isinstance(_m, dict) else None
+                        return isinstance(_meta, dict) and bool(_meta.get(HEAD_MESSAGE_KEY))
+
+                    _target = next(
+                        (_mi for _mi, _msg in enumerate(messages) if _is_target(_msg)),
+                        None,
+                    )
+                    if (
+                        _target is None and messages
+                        and isinstance(messages[0], dict)
+                        and messages[0].get("role") == "system"
+                    ):
+                        _target = 0
+                    if _target is not None:
+                        _msg = messages[_target]
+                        # Create new dict to avoid mutating shared base_msgs
+                        messages[_target] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
+                    else:
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
 

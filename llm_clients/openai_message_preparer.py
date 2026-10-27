@@ -194,6 +194,7 @@ def prepare_openai_messages(
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
     keep_metadata_keys: Tuple[str, ...] = (),
+    convert_system_notices: Optional[bool] = None,
 ) -> List[Any]:
     """Prepare messages for OpenAI-compatible APIs by removing internal-only fields.
 
@@ -201,10 +202,42 @@ def prepare_openai_messages(
     preparation (the result keeps ``{"metadata": {key: value}}`` with only
     those keys). Empty by default, so the result carries no metadata.
 
+    System messages (docs/intent/system_notice_delivery.md):
+
+    - A list that carries the head's system message (metadata
+      ``HEAD_MESSAGE_KEY``) goes through
+      :func:`llm_clients.system_notice.present_system_notices` first. The head's
+      system message stays a system message; later role=system notices become
+      passphrase-tagged user messages in place (keeping their media) when
+      ``convert_system_notices`` is true, and stay system messages otherwise.
+      ``convert_system_notices`` defaults to ``convert_system_to_user`` (the
+      model config flag: true = the model cannot take a mid-conversation
+      system message). The Codex client passes ``convert_system_to_user=False``
+      with ``convert_system_notices=True``: it lifts the system messages into
+      ``instructions`` itself, but the notices must stay in place.
+    - A list without the head's system message (summaries, judgments and other
+      calls that build their own prompt) keeps the older behaviour:
+      ``convert_system_to_user`` turns system messages that follow a non-system
+      message into ``<system>``-tagged user messages, leading ones stay.
+
     Options are keyword-only: several neighbours accept None/bool, so a positional
     call that skips one shifts the rest without any error (NIM once passed
     convert_system_to_user into max_image_embeds, which embedded zero images).
     """
+    from .system_notice import is_head_system_message, present_system_notices
+
+    if any(is_head_system_message(m) for m in messages):
+        convert_notices = (
+            convert_system_to_user if convert_system_notices is None
+            else convert_system_notices
+        )
+        messages = present_system_notices(
+            messages, accepts_mid_system=not convert_notices,
+        )
+        # 途中の通知は上で扱い済み。残る system は head とその前の指示だけ
+        # なので、位置による変換は掛けない。
+        convert_system_to_user = False
+
     attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
         messages, max_image_embeds_override=max_image_embeds,
         supports_images=supports_images,

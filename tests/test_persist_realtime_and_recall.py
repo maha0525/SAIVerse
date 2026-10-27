@@ -33,6 +33,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sai_memory.memory.storage import HEAD_MESSAGE_KEY
 from sai_memory.unified_recall import RecallHit
 
 PERSONA_ID = "tester"
@@ -284,7 +285,12 @@ def env(request, tmp_path, monkeypatch):
         )
         monkeypatch.setattr(
             "sea.head_pipeline.render_head_messages",
-            lambda *a, **k: [{"role": "system", "content": "HEAD"}],
+            # 本物の head と同じく head の印を持つ (sea/head_pipeline/integration
+            # の _compose_messages)。head は role ではなくこの印で見分ける。
+            lambda *a, **k: [{
+                "role": "system", "content": "HEAD",
+                "metadata": {HEAD_MESSAGE_KEY: True},
+            }],
         )
         monkeypatch.setattr("sai_memory.unified_recall.unified_recall", recall)
 

@@ -184,7 +184,14 @@ def reread_recorded_history(
 
 
 def _is_head_message(msg: Any) -> bool:
-    """head 由来のメッセージ (システムプロンプト・Memory Weave・自分の外見)。"""
+    """head 由来のメッセージ (システムプロンプト・Memory Weave・自分の外見)。
+
+    システムプロンプトは role ではなく head の印 (``HEAD_MESSAGE_KEY``) で
+    見分ける — 会話の途中のシステム通知も role=system で列に並ぶので、role で
+    判定すると通知を head に数えてしまう (docs/intent/system_notice_delivery.md
+    不変条件 5)。
+    """
+    from sai_memory.memory.storage import HEAD_MESSAGE_KEY
     from sea.head_pipeline.integration import (
         _MEMORY_WEAVE_CONTEXT_MARKER,
         _SELF_VIEW_MARKER,
@@ -193,11 +200,10 @@ def _is_head_message(msg: Any) -> bool:
 
     if not isinstance(msg, dict):
         return False
-    if msg.get("role") == "system":
-        return True
     meta = msg.get("metadata")
     return isinstance(meta, dict) and any(
         meta.get(k) for k in (
+            HEAD_MESSAGE_KEY,
             _MEMORY_WEAVE_CONTEXT_MARKER, _SELF_VIEW_MARKER, _VISUAL_CONTEXT_MARKER,
         )
     )
@@ -704,6 +710,9 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     # 一度リアルタイム情報に載せたが、部屋を出て消えたことが出来事として残らない
     # ので、スペル一覧と同じ head + 差分通知の道へ移した。
     "addon_guidance",
+    # 2026-10-28: システム通知の読み方 (sea/head_pipeline/sections/system_notice.py、
+    # docs/intent/system_notice_delivery.md)。
+    "system_notice",
 })
 
 
@@ -2703,11 +2712,15 @@ def preview_context(
     section_msg_counts: Dict[str, int] = {s: 0 for s in section_order}
     section_msg_counts["attachments"] = 0
 
+    from sai_memory.memory.storage import HEAD_MESSAGE_KEY
+
     annotated_messages: List[Dict[str, Any]] = []
     for i, msg in enumerate(messages):
         meta = msg.get("metadata") or {}
-        # Determine section
-        if msg.get("role") == "system":
+        # Determine section。システムプロンプトは head の印で見分ける (会話の
+        # 途中のシステム通知も role=system なので、role では履歴と区別できない
+        # — docs/intent/system_notice_delivery.md 不変条件 5)。
+        if meta.get(HEAD_MESSAGE_KEY):
             section = "system_prompt"
         elif meta.get("__memory_weave_context__"):
             mw_type = meta.get("__memory_weave_type__", "")

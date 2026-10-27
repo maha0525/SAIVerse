@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .exceptions import InvalidRequestError
+from .system_notice import accepts_mid_conversation_system, present_system_notices
 from .utils import (
     attachment_limit_is_off,
     content_to_text,
@@ -290,6 +291,15 @@ def build_request_params(
     supports_sampling_parameters: bool = True,
     supports_assistant_prefill: bool = True,
 ) -> Dict[str, Any]:
+    # 会話の途中のシステム通知 (head より後ろの role=system) は、Messages API が
+    # 途中に system を置けないので、元の位置で合言葉付きタグの user にする。
+    # 残る system (head とその前の指示) だけが下で system 欄へまとまる
+    # (docs/intent/system_notice_delivery.md 不変条件 5)。head の印が無い列は
+    # 変わらない (従来どおり全 system が system 欄へ)。
+    messages = present_system_notices(
+        messages,
+        accepts_mid_system=accepts_mid_conversation_system("anthropic_native", None),
+    )
     system_blocks, remaining_messages = _prepare_anthropic_system(messages, enable_cache=enable_cache, cache_ttl=cache_ttl)
     prepared_messages = _prepare_anthropic_messages(
         remaining_messages,

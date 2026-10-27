@@ -291,6 +291,7 @@ from saiverse.llm_router import route
 
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, ToolSpecFormat, get_llm_logger
 from saiverse.logging_config import log_timeout_event
+from .system_notice import accepts_mid_conversation_system, present_system_notices
 from .utils import (
     CACHE_BOUNDARY_METADATA_KEY,
     content_to_text,
@@ -1512,7 +1513,18 @@ class GeminiClient(LLMClient):
         一致しない — 印の付いたメッセージが**実際に落ちた contents の番号**を返す
         (印が無い・そのメッセージが contents を作らなかったなら None)。印そのものは
         metadata にあるだけで、Content には載らない。
+
+        会話の途中のシステム通知 (head より後ろの role=system) は、Gemini が
+        contents の途中に system を置けないので、最初に元の位置で合言葉付きタグの
+        user にする (llm_clients/system_notice.py、
+        docs/intent/system_notice_delivery.md 不変条件 5)。残る system (head と
+        その前の指示) だけが system_instruction へまとまる。列の長さは変わらない
+        ので、境目の印の番号はそのまま使える。
         """
+        msgs = present_system_notices(
+            msgs,
+            accepts_mid_system=accepts_mid_conversation_system("gemini_native", None),
+        )
         system_lines: List[str] = []
         # 境目の印が付いたメッセージの番号 (複数あれば最後のもの) と、各メッセージの
         # 変換を始めた時点の contents の長さ。

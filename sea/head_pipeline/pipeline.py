@@ -223,6 +223,12 @@ class HeadPipeline:
         if not self.has_snapshot(ctx.persona_id, ctx.model_key):
             stored_base = self._stored_base_version(ctx.persona_id, ctx.model_key)
 
+        # head の作り直し = システム通知の合言葉の更新 (docs/intent/
+        # system_notice_delivery.md 不変条件 3, 6)。合言葉は会話の途中の通知の
+        # 送信本文にも入るので、更新してよいのは head の本文ごと作り直すとき
+        # だけ — 一部の Section だけを撮り直す経路は引き継ぐ。
+        from llm_clients.system_notice import generate_passphrase
+
         snapshot = LineHeadSnapshot(
             persona_id=ctx.persona_id,
             model_key=ctx.model_key,
@@ -231,6 +237,7 @@ class HeadPipeline:
             snapshot_version=0,  # 公開ロック内で採番する (下)
             sections=sections_dict,
             capture_failures=capture_failures,
+            passphrase=generate_passphrase(),
         )
 
         with self._lock:
@@ -353,6 +360,8 @@ class HeadPipeline:
                 snapshot_version=state.snapshot.snapshot_version + 1,
                 sections=new_sections,
                 capture_failures=new_failures,
+                # 欠損分を埋めるだけで head の作り直しではない — 合言葉は引き継ぐ
+                passphrase=state.snapshot.passphrase,
             )
             state.snapshot = new_snapshot
             state.stale_sections = (
@@ -459,6 +468,8 @@ class HeadPipeline:
             snapshot_version=state.snapshot.snapshot_version + 1,
             sections=new_sections,
             capture_failures=capture_failures,
+            # 一部の Section の最新化で head の作り直しではない — 合言葉は引き継ぐ
+            passphrase=state.snapshot.passphrase,
         )
         state.snapshot = new_snapshot
         # 触った Section だけ更新する (他は据え置き) — この経路は一部の

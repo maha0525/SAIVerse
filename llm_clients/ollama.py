@@ -12,6 +12,7 @@ import requests
 
 from .base import LLMClient, ToolSpecFormat
 from .exceptions import EmptyResponseError
+from .system_notice import accepts_mid_conversation_system, present_system_notices
 from .utils import positive_token_count
 
 
@@ -165,6 +166,20 @@ class OllamaClient(LLMClient):
         self.url = f"{self.base}/v1/chat/completions"
         self.chat_url = f"{self.base}/api/chat"
 
+    @staticmethod
+    def _present_system_notices(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """会話の途中のシステム通知を合言葉付きタグの user にする (送る直前の変換)。
+
+        Ollama はチャットテンプレート次第で途中の system が落ちうるので、タグで
+        囲む側に倒す (llm_clients/system_notice.py の判定)。この変換は metadata の
+        合言葉も剥がす — Ollama へは messages を metadata ごと送るので、剥がさないと
+        合言葉の値がリクエストに載る。head の印が無い列は変わらない。
+        """
+        return present_system_notices(
+            messages,
+            accepts_mid_system=accepts_mid_conversation_system("ollama_compat", None),
+        )
+
     @classmethod
     def reset_probe_cache(cls) -> None:
         """Reset the cached probe result so the next instance will re-probe."""
@@ -241,6 +256,7 @@ class OllamaClient(LLMClient):
             Dict: Tool detection result when tools is provided
         """
         messages = self._inject_unsupported_media_summaries(messages)
+        messages = self._present_system_notices(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
 
@@ -557,6 +573,7 @@ class OllamaClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         messages = self._inject_unsupported_media_summaries(messages)
+        messages = self._present_system_notices(messages)
         # For structured output, use non-streaming to get complete JSON
         # Priority: /api/chat (native, widely supported) -> /v1/chat/completions (fallback)
         if response_schema:

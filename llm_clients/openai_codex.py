@@ -69,6 +69,7 @@ from .output_phases import (
     output_phases_for_sent_text,
 )
 from .schema_utils import normalize_schema_for_strict_json_output
+from .system_notice import accepts_mid_conversation_system
 from .utils import positive_token_count
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
@@ -619,6 +620,13 @@ class OpenAICodexClient(LLMClient):
                 max_image_bytes=self._max_image_bytes,
                 max_image_embeds=self._max_image_embeds,
                 convert_system_to_user=False,
+                # 会話の途中のシステム通知 (head より後ろの role=system) は
+                # instructions へ寄せず、元の位置で合言葉付きタグの user にする
+                # (Responses API は input の途中に system を置けない —
+                # docs/intent/system_notice_delivery.md 不変条件 5)。
+                convert_system_notices=not accepts_mid_conversation_system(
+                    "openai_codex", None,
+                ),
                 reasoning_passback_field=None,
                 # _build_input reads the per-message split of past assistant
                 # turns from here; the preparer drops metadata otherwise.

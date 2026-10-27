@@ -247,11 +247,23 @@ def _sanitize_messages_for_log(messages: list) -> list:
             return result
         return content
 
+    # head の system メッセージは合言葉の実際の値を metadata で運ぶ (本文は仮置きの
+    # まま)。ログには書かない (docs/intent/system_notice_delivery.md 不変条件 3)。
+    from sai_memory.memory.storage import SYSTEM_NOTICE_PASSPHRASE_KEY
+
     sanitized = []
     for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append(msg)
+            continue
         new_msg = dict(msg)
         if "content" in new_msg:
             new_msg["content"] = _sanitize_content(new_msg["content"])
+        metadata = new_msg.get("metadata")
+        if isinstance(metadata, dict) and SYSTEM_NOTICE_PASSPHRASE_KEY in metadata:
+            new_msg["metadata"] = {
+                k: v for k, v in metadata.items() if k != SYSTEM_NOTICE_PASSPHRASE_KEY
+            }
         sanitized.append(new_msg)
     return sanitized
 

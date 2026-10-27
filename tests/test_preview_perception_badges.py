@@ -23,6 +23,7 @@ import unittest
 from types import SimpleNamespace
 
 from llm_clients.openai_message_preparer import prepare_openai_messages
+from sai_memory.memory.storage import HEAD_MESSAGE_KEY
 from sai_memory.perception_buffer import (
     create_consumption_batch,
     init_perception_buffer_table,
@@ -91,7 +92,12 @@ class _PreviewRuntime:
             self, persona, self._recent, raise_on_error=True,
         )
         merged = merge_perception_blocks(self._recent, blocks)
-        return [{"role": "system", "content": "システムプロンプト"}] + merged
+        # 本物の head と同じく head の印を持つ (プレビューは role ではなくこの印で
+        # システムプロンプトの節に分類する)。
+        return [{
+            "role": "system", "content": "システムプロンプト",
+            "metadata": {HEAD_MESSAGE_KEY: True},
+        }] + merged
 
 
 class PreviewPerceptionBadgeTest(unittest.TestCase):
