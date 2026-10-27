@@ -4,6 +4,5 @@
   "protocol": "openai_compat",
   "base_url": "https://api.meta.ai/v1",
   "api_key_env": "META_API_KEY",
-  "default_supports_images": true,
-  "default_convert_system_to_user": true
+  "default_supports_images": true
 }
