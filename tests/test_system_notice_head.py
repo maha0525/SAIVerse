@@ -191,7 +191,7 @@ def test_row_without_passphrase_is_rebuilt_on_load_keeping_b(session_factory):
 
 def test_head_system_message_carries_the_mark_and_the_value():
     from sea.head_pipeline.integration import _compose_messages
-    from sea.head_pipeline.sections.system_notice import TAGGED_NOTICE_TEXT
+    from sea.head_pipeline.sections.system_notice import SYSTEM_NOTICE_TEXT
     from sea.head_pipeline.types import LineHeadSnapshot
 
     snapshot = LineHeadSnapshot(
@@ -200,7 +200,7 @@ def test_head_system_message_carries_the_mark_and_the_value():
     )
     messages = _compose_messages(snapshot, {
         "common_prompt": RenderedSection(text="人格"),
-        "system_notice": RenderedSection(text=TAGGED_NOTICE_TEXT),
+        "system_notice": RenderedSection(text=SYSTEM_NOTICE_TEXT),
     })
     head = messages[0]
     assert head["role"] == "system"
@@ -212,28 +212,37 @@ def test_head_system_message_carries_the_mark_and_the_value():
 
 
 # ---------------------------------------------------------------------------
-# 4. 説明文の出し分け
+# 4. 説明文 (全モデル共通の一枚)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("accepts, expected_tagged", [(False, True), (True, False)])
-def test_explanation_follows_the_shared_judgement(monkeypatch, accepts, expected_tagged):
+def test_explanation_is_one_text_for_every_model():
+    """説明文はモデルで出し分けない — どの届け方でも真になる一枚。
+
+    出し分けていた時期は、line="sub" の子ラインが親のモデル向け head の写しを
+    別のモデルで使うと、説明と実際の届き方が食い違った (経緯は
+    sections/system_notice.py のモジュールの説明)。
+    """
     from sea.head_pipeline.sections import system_notice as section_mod
 
-    monkeypatch.setattr(
-        "llm_clients.system_notice.model_accepts_mid_conversation_system",
-        lambda model_key: accepts,
-    )
     section = section_mod.SystemNoticeSection()
     snap = section.capture(_ctx())
-    assert snap.tagged is expected_tagged
     rendered = section.render(snap).text
-    if expected_tagged:
-        assert rendered == section_mod.TAGGED_NOTICE_TEXT
-        assert f'pass="{SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER}"' in rendered
-    else:
-        assert rendered == section_mod.DIRECT_NOTICE_TEXT
-        assert SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER not in rendered
+    assert rendered == section_mod.SYSTEM_NOTICE_TEXT
+    # 合言葉の仮置き文字列は常に載る (実値の差し込みはクライアント層)
+    assert f'pass="{SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER}"' in rendered
+    # 両方の届き方が説明されている
+    assert "system メッセージとして" in rendered
+    assert "user メッセージとして届きます" in rendered
+
+
+def test_deserialize_tolerates_the_old_two_text_payload():
+    """出し分け時代の snapshot (tagged / model_key 持ち) も黙って読み替える。"""
+    from sea.head_pipeline.sections import system_notice as section_mod
+
+    section = section_mod.SystemNoticeSection()
+    snap = section.deserialize_snapshot('{"tagged": true, "model_key": "gpt-x"}')
+    assert section.render(snap).text == section_mod.SYSTEM_NOTICE_TEXT
 
 
 def test_explanation_for_real_model_configs():
@@ -255,25 +264,6 @@ def test_explanation_for_real_model_configs():
             assert accepts is (cfg.get("convert_system_to_user") is not True), key
         seen.add(protocol)
     assert {"anthropic_native", "gemini_native"} <= seen
-
-
-def test_stale_judgement_is_recaptured(monkeypatch):
-    from sea.head_pipeline.sections.system_notice import SystemNoticeSection
-    from sea.head_pipeline.types import SnapshotStaleError
-
-    section = SystemNoticeSection()
-    monkeypatch.setattr(
-        "llm_clients.system_notice.model_accepts_mid_conversation_system",
-        lambda model_key: False,
-    )
-    data = section.serialize_snapshot(section.capture(_ctx()))
-    assert section.deserialize_snapshot(data).tagged is True
-    monkeypatch.setattr(
-        "llm_clients.system_notice.model_accepts_mid_conversation_system",
-        lambda model_key: True,
-    )
-    with pytest.raises(SnapshotStaleError):
-        section.deserialize_snapshot(data)
 
 
 # ---------------------------------------------------------------------------
@@ -341,17 +331,15 @@ def test_explanation_section_is_required():
 
 
 def test_head_without_the_explanation_is_not_sent(monkeypatch):
-    """説明の判定 (capture) に失敗したら、説明の無い head で LLM を実行しない。"""
+    """説明の節の capture に失敗したら、説明の無い head で LLM を実行しない。"""
     from sea.head_pipeline.integration import render_head_messages
     from sea.head_pipeline.sections.system_notice import SystemNoticeSection
     from sea.head_pipeline.types import HeadNotReadyError
 
-    def _broken(model_key):
-        raise RuntimeError("model config unreadable")
+    def _broken(self, ctx):
+        raise RuntimeError("capture failed")
 
-    monkeypatch.setattr(
-        "llm_clients.system_notice.model_accepts_mid_conversation_system", _broken,
-    )
+    monkeypatch.setattr(SystemNoticeSection, "capture", _broken)
     registry = HeadSectionRegistry()
     registry.register(_Section())
     registry.register(SystemNoticeSection())
@@ -362,10 +350,7 @@ def test_head_without_the_explanation_is_not_sent(monkeypatch):
         render_head_messages(persona, manager, "b1", pipeline=pipeline, model_key=MODEL)
     assert "system_notice" in excinfo.value.sections
 
-    # 判定が直れば次の呼び出しで欠損分だけ撮り直して送れる
-    monkeypatch.setattr(
-        "llm_clients.system_notice.model_accepts_mid_conversation_system",
-        lambda model_key: False,
-    )
+    # capture が直れば次の呼び出しで欠損分だけ撮り直して送れる
+    monkeypatch.undo()
     messages = render_head_messages(persona, manager, "b1", pipeline=pipeline, model_key=MODEL)
     assert SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER in messages[0]["content"]
