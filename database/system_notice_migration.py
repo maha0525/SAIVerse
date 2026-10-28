@@ -869,9 +869,13 @@ def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResul
         # 新規作成されうる各階層の親を、既存が保証される祖先 (SAIVERSE_HOME)
         # まで確定させないと、電源断でフォルダ名ごと消えて、コミット済みの
         # 完了の印だけが残りうる (Codex 7〜8 巡目)。
-        from saiverse.data_paths import get_saiverse_home
-
-        home = get_saiverse_home()
+        # 止まる位置は、この移行が実際に使っているホーム。環境変数のホーム
+        # (get_saiverse_home) を見ると、CLI の --home で別の場所を移行している
+        # とき指定先を越えて祖先へ fsync に行き、読めない親で移行ごと巻き戻る
+        # (Codex 9 巡目)。results_dir の構成はこのモジュールが決めている
+        # (<home>/backups/<OUTPUT_DIR_NAME>/<RESULTS_DIR_NAME>/<run_id>) ので、
+        # ホームは相対で確定できる。
+        home = results_dir.parents[3] if len(results_dir.parents) > 3 else results_dir.parent
         current = results_dir.parent
         for _ in range(8):  # 安全弁 (実際の深さは 3 段)
             _fsync_dir(current)
