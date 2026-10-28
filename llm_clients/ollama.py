@@ -12,6 +12,16 @@ import requests
 
 from .base import LLMClient, ToolSpecFormat
 from .exceptions import EmptyResponseError
+from .system_notice import (
+    accepts_mid_conversation_system,
+    is_head_system_message,
+    is_presented_system_notice,
+    present_system_notices,
+    redact_passphrase_in_value,
+    system_notice_media_notes,
+    system_notice_passphrase,
+    tag_presented_system_notice,
+)
 from .utils import positive_token_count
 
 
@@ -109,6 +119,13 @@ OLLAMA_ALLOWED_REQUEST_PARAMS = {
 }
 
 
+#: Ollama の API (/api/chat と /v1/chat/completions) がメッセージに定義する欄のうち、
+#: SAIVerse が送るもの。これ以外の欄 (metadata など SAIVerse の内部の欄) は送らない。
+_OLLAMA_MESSAGE_FIELDS = (
+    "role", "content", "images", "tool_calls", "tool_call_id", "name", "tool_name",
+)
+
+
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
 
@@ -164,6 +181,74 @@ class OllamaClient(LLMClient):
             self.base = "http://127.0.0.1:11434"
         self.url = f"{self.base}/v1/chat/completions"
         self.chat_url = f"{self.base}/api/chat"
+
+    def _request_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """送る直前の messages 列: システム通知の変換をして、API の欄だけに組み直す。
+
+        会話の途中のシステム通知は合言葉付きタグの user にする — Ollama はチャット
+        テンプレート次第で途中の system が落ちうるので、タグで囲む側に倒す
+        (llm_clients/system_notice.py の判定)。head の印が無い列は変換で変わらない。
+
+        通知の画像は metadata にしか無いので、metadata を捨てる前に説明の文として
+        本文に足す (:meth:`_present_notice_images`。画像そのものは送らない)。
+
+        そのうえで、各メッセージを Ollama の API が定義する欄
+        (:data:`_OLLAMA_MESSAGE_FIELDS`) だけの新しい dict にする。SAIVerse の
+        messages は内部の metadata (思考・出力の分け方・通知の印や本文の写しなど)
+        を持っていて、それをそのまま HTTP の本文に載せると、API の外の欄として
+        中身ごとサーバーへ届く。
+
+        組み直した後の値のうち、ツール呼び出し (``tool_calls``) と、文字列でも部品の
+        並びでもない本文 (辞書のまま渡るツールの結果) は、すべての文字列から合言葉を
+        伏せる (``redact_passphrase_in_value``)。present_system_notices が伏せるのは
+        文字列の本文と文字列の ``function.arguments`` だけで、辞書の引数・結果は
+        そのまま JSON の値としてサーバーへ届く (Codex / Gemini と同じ手当て)。
+        head の本文は合言葉を正当に運ぶので伏せない (head は tool_calls を持たない)。
+        """
+        passphrase = system_notice_passphrase(messages)
+        presented = present_system_notices(
+            messages,
+            accepts_mid_system=accepts_mid_conversation_system("ollama_compat", None),
+        )
+        out: List[Any] = []
+        for msg in presented:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            if is_presented_system_notice(msg):
+                msg = self._present_notice_images(msg, passphrase)
+            is_head = is_head_system_message(msg)
+            clean = {key: msg[key] for key in _OLLAMA_MESSAGE_FIELDS if key in msg}
+            if passphrase and not is_head:
+                if "tool_calls" in clean:
+                    clean["tool_calls"] = redact_passphrase_in_value(clean["tool_calls"], passphrase)
+                content = clean.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    clean["content"] = redact_passphrase_in_value(content, passphrase)
+            out.append(clean)
+        return out
+
+    @staticmethod
+    def _present_notice_images(msg: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
+        """タグ化した通知の写しの本文に、metadata の画像の説明の文を足す (新しい dict)。
+
+        タグの中の本文は「元の本文 + metadata の全部の画像の説明の文」
+        (:func:`system_notice_media_notes` と :func:`tag_presented_system_notice`)。
+        音声・動画の説明の文は、この前の ``_inject_unsupported_media_summaries`` が
+        通知の本文に足し済み。
+
+        画像そのものは送らない (``images`` 欄へ埋め込まない)。Ollama のクライアントは
+        通常のユーザーの発言の画像も送っておらず、通知の画像も送らずに説明の文だけで
+        届ける — 通知だけ埋め込むと、送り先の形式 (/v1 は ``images`` 欄を読まない)・
+        共通の枚数とバイトの上限・スルースの見積もりとずれる (Codex 6 巡目の裁定)。
+        """
+        metadata = msg.get("metadata")
+        notes = system_notice_media_notes(metadata, ("image",), passphrase=passphrase)
+        if not notes:
+            return msg
+        new_msg = dict(msg)
+        new_msg["content"] = tag_presented_system_notice(metadata, notes, passphrase)
+        return new_msg
 
     @classmethod
     def reset_probe_cache(cls) -> None:
@@ -241,6 +326,7 @@ class OllamaClient(LLMClient):
             Dict: Tool detection result when tools is provided
         """
         messages = self._inject_unsupported_media_summaries(messages)
+        messages = self._request_messages(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
 
@@ -557,6 +643,7 @@ class OllamaClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         messages = self._inject_unsupported_media_summaries(messages)
+        messages = self._request_messages(messages)
         # For structured output, use non-streaming to get complete JSON
         # Priority: /api/chat (native, widely supported) -> /v1/chat/completions (fallback)
         if response_schema:

@@ -147,6 +147,8 @@ gold_panning が安い条件は「直前の成功コールと同じ（main_line,
 
 判断ターンはペルソナの記憶に残す（2026-07-07 まはー決定）。形式は **event_message 型のシステム通知**（role=user、content を `<system>` で包んだ「何が起きたか」のナレーション＋本人の弁の引用、tags=["internal","event_message","gold_panning"]）で、line_role=main_line / scope は採取ありなら committed・なしなら discardable。ゾーン A の各項目に「いつ・なぜ刻んだか」の来歴が残り、後の整理・矛盾解消で効く。
 
+> **現状 (2026-10-28)**: 形は role=system・タグ無し本文 + 識別用の metadata `__system_notice__` = `sluice_capture` に改めた (tags `["internal","event_message","sluice"]` と line_role / scope の規則はそのまま。`sea/sluice.py`)。システム通知を role=system へ一本化した改修による ([system_notice_delivery.md](system_notice_delivery.md))。保存済みの user＋`<system>` 包みの記録は、起動時の移行で同じ形へ書き換わる。下の「user＋`<system>`」の記述は当時の形の記録で、「機構の記録を assistant 名義にしない」理由は変わらない。
+
 **なぜ assistant 名義にしないか（2026-07-07 まはー指摘で v1 初版から変更）**: 記録を role=assistant で書くと、メインラインの anchor 復元では paired_action_text（プロンプトのスナップショット）が展開されないため、**プロンプトの見えない裸の assistant 発話**としてペルソナのコンテキストに立つ。コンテキスト内の assistant メッセージは最強の口調形成力を持つ（scene 種別の設計根拠と同じ機構）ので、ペルソナが「自分は普段からこういう構造化された文を自発的に喋る」と自己像を学習してしまう。機構が代筆する記録は本人の発話ではなく「世界で起きたことの報告」であり、event_message の確立形式に乗せるのが正しい。
 
 副次効果: event_message タグにより General Chronicle 生成・scene 切り出し・キーワード検索から自動除外される。これは意図した挙動（初版では記録が Chronicle に「本人の会話」として混入するバグがあった）。メタ判断の確定独白（`meta_judgment_finalize.py`）も同じ理由で同時に user＋`<system>` 包みへ変更した（line_role / scope / promote の判定キーは無変更。judge プロンプトへの過去判断の再掲は `meta_judgment_log.judgment_thought`（包み前の生独白）を読む別経路のため影響なし）。
@@ -185,7 +187,7 @@ gold_panning が安い条件は「直前の成功コールと同じ（main_line,
 6. **編集主体はペルソナ**（v2 §5 継承）。システムは機会と材料を供給するだけで、コア記憶への自動書き込みをしない
 7. **モデルは（persona, default）固定** — lightweight への切替・出し分けをしない。**注記 (2026-08-24)**: 組成とコールは呼び出し元の Metabolism が窓を撮ったセッションの model に揃える（窓・畳み・anchor 行は (persona, model) ごと — 別 model で組むと退場計画の窓とスルース入力が別物になる）。本項「tier 分岐を書かない」の意味は「判断の質を軽量 tier へ落とす分岐を書かない」であって、セッションの model への統一を妨げない
 8. **SAIMemory に残す記録テキストで内容を省略しない**（2026-07-07 まはー指摘で追加）— システム側の切り詰めは記録の捏造になる。プレビュー・省略は UI 表示層でのみ行う
-9. **機構が代筆する記録を assistant 名義で永続化しない**（2026-07-07 まはー指摘で追加）— プロンプトの見えない assistant メッセージは「自分は普段こう喋る」という自己像の誤学習源になる。ペルソナ名義（role=assistant）で残ってよいのは、本人がラインの流れの中で実際に発話したものだけ。機構側の記録は event_message 形式（user＋`<system>`）で書く
+9. **機構が代筆する記録を assistant 名義で永続化しない**（2026-07-07 まはー指摘で追加）— プロンプトの見えない assistant メッセージは「自分は普段こう喋る」という自己像の誤学習源になる。ペルソナ名義（role=assistant）で残ってよいのは、本人がラインの流れの中で実際に発話したものだけ。機構側の記録はシステム通知の形式（2026-10-28 から role=system・タグ無し本文 + `__system_notice__` — [system_notice_delivery.md](system_notice_delivery.md)。それより前は event_message 形式の user＋`<system>`）で書く
 
 ---
 

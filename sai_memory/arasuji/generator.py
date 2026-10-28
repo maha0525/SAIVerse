@@ -180,16 +180,6 @@ _CONDENSE_HEAD_CHARS = 40
 _CONDENSE_NAME_RE = re.compile(r"^\[([^\[\]\n]{1,120})\]")
 
 
-def _strip_system_wrap(text: str) -> str:
-    """``<system>…</system>`` 包み (システム通知の確立形式) を剥がす。"""
-    out = (text or "").strip()
-    if out.startswith("<system>"):
-        out = out[len("<system>"):]
-    if out.endswith("</system>"):
-        out = out[: -len("</system>")]
-    return out.strip()
-
-
 def condense_mechanism_text(text: str) -> str:
     """閾値超えの機構名義テキストを決定論の一行に縮める (LLM 不使用)。
 
@@ -198,7 +188,7 @@ def condense_mechanism_text(text: str) -> str:
     """
     total = len(text or "")
     first_line = next(
-        (ln.strip() for ln in _strip_system_wrap(text).splitlines() if ln.strip()),
+        (ln.strip() for ln in (text or "").strip().splitlines() if ln.strip()),
         "",
     )
     m = _CONDENSE_NAME_RE.match(first_line)
@@ -218,8 +208,12 @@ def _message_tags(msg: Message) -> tuple:
 def is_mechanism_message(msg: Message) -> bool:
     """機構名義の行か (tags に MECHANISM_TAGS のいずれかを持つか)。
 
-    判定はタグのみ — role では判定しない (システム通知は user role で
-    書かれるため)。
+    判定はタグのみ。システム通知は role=system で保存される
+    (docs/intent/system_notice_delivery.md) が、role で判定に切り替えると
+    印 (event_message 等) の無い系統 — スケジュールの発火文・子ラインの報告・
+    TOOL の結果・作業のまとめなど — が機構名義に入り、材料の縮み (U の物差し)
+    と残す量の勘定の主語が変わる。切り替えは別途の裁定事項として、ここでは
+    変えていない。
     """
     return any(t in MECHANISM_TAGS for t in _message_tags(msg))
 
@@ -265,9 +259,12 @@ def material_chars(msg: Message) -> int:
 
 
 def _is_recall_text(text: str) -> bool:
-    """入室時の想起の再提示か (本文が ``[想起:`` で始まる)。"""
-    s = _strip_system_wrap(text)
-    return s.startswith("[想起:")
+    """入室時の想起の再提示か (本文が ``[想起:`` で始まる)。
+
+    システム通知の本文はタグで囲まれていない (docs/intent/
+    system_notice_delivery.md — 保存も role=system・タグ無し)。
+    """
+    return (text or "").strip().startswith("[想起:")
 
 
 #: 材料の種別ラベル (プロンプトに出す表記)。

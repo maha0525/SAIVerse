@@ -107,7 +107,7 @@ LLM 呼び出しには性質の異なる二種類がある。
 ## 関連
 
 - `docs/issues/image_generation_api_usage_tracking.md` — 画像生成 API が Usage に載っていない件。本 issue の部分集合にあたる
-- ペルソナ倫理: 履歴の連続性が無い状態で本人名義の行動を走らせない。機構の代筆は `assistant` 名義で書かない（`<system>` 通知 / スペル結果の形式を使う）
+- ペルソナ倫理: 履歴の連続性が無い状態で本人名義の行動を走らせない。機構の代筆は `assistant` 名義で書かない（システム通知の形式を使う — 2026-10-28 から role=system・タグ無し本文 + `__system_notice__`、[system_notice_delivery.md](../intent/system_notice_delivery.md)。スペルの結果も同じ形）
 
 ## ログ
 

@@ -94,8 +94,10 @@ class MergeConsumedPerceptionsTest(unittest.TestCase):
         self.assertEqual(merged[0]["content"], "古い発言")
         # 消費時刻 1500 のブロックは 1000 と 2000 の間に入る。
         self.assertIn("誰かが入室した", merged[1]["content"])
-        self.assertTrue(merged[1]["content"].startswith("<system>"))
-        self.assertEqual(merged[1]["role"], "user")
+        # role=system のシステム通知 (タグ無し — docs/intent/system_notice_delivery.md)
+        self.assertNotIn("<system>", merged[1]["content"])
+        self.assertEqual(merged[1]["role"], "system")
+        self.assertEqual(merged[1]["metadata"]["__system_notice__"], "perception")
         self.assertEqual(merged[2]["content"], "新しい発言")
         # 旧 flush の行と同型のタグ + マージ由来の目印。
         meta = merged[1]["metadata"]

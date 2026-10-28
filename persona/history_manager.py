@@ -194,16 +194,33 @@ class HistoryManager:
         Returns:
             ``(status, message_id)``。status は
             ``"synced"`` (書けた) / ``"skipped"`` (書く先が無い — adapter 不在・
-            未 ready・system role・persona 以外の channel) / ``"failed"``
-            (adapter はいるのに書けなかった — 例外、または adapter が失敗を
-            None で返した)。従来この関数は成否を返さず失敗を握っていたため、
-            呼び出し元 (Building→個人記憶の転記 = 監査 M8) が保存失敗を検出
-            できなかった。既存呼び出し元は戻り値を無視してよい (挙動不変)。
+            未 ready・システム通知の印の無い system role・persona 以外の
+            channel) / ``"failed"`` (adapter はいるのに書けなかった — 例外、
+            または adapter が失敗を None で返した)。従来この関数は成否を返さず
+            失敗を握っていたため、呼び出し元 (Building→個人記憶の転記 = 監査 M8)
+            が保存失敗を検出できなかった。既存呼び出し元は戻り値を無視してよい
+            (挙動不変)。
+
+        role=system の行は、システム通知の印 (``SYSTEM_NOTICE_KEY``) を
+        metadata に持つものだけを書く。印の無い system 行 (inter-city 移動の
+        案内など、機構がその場の状況として積むだけの行) は従来どおり記憶へ
+        書かない。この除外が入った 2025-10 の時点で role=system として履歴へ
+        積まれていたのは、建物の入室案内 (entry_prompt)・感情サマリー・移動
+        失敗の案内などだった。システム通知 (スケジュール発火文・建物の出来事) は role=system で保存する
+        決まりなので (docs/intent/system_notice_delivery.md 不変条件 1)、印で
+        区別して通す。
         """
         if self.memory_adapter is None or not self.memory_adapter.is_ready():
             return ("skipped", None)
         if (message.get("role") or "").lower() == "system":
-            return ("skipped", None)
+            from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+            metadata_for_role = message.get("metadata")
+            if not (
+                isinstance(metadata_for_role, dict)
+                and metadata_for_role.get(SYSTEM_NOTICE_KEY)
+            ):
+                return ("skipped", None)
         try:
             metadata = message.setdefault("metadata", {})
             if isinstance(metadata, dict):

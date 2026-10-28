@@ -67,7 +67,7 @@
       "id": "record",
       "type": "memorize",
       "action": "{last}",
-      "role": "user",
+      "role": "system",
       "tags": [
         "document_create",
         "playbook_result"

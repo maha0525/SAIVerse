@@ -66,28 +66,30 @@ class GetConversationWindowAroundTest(unittest.TestCase):
         self.assertIn(anchor, [m.id for m in window])
 
     def test_excludes_system_notice_messages(self):
-        # Track切替通知等のシステム通知は role=user・タグなしで保存される世代があり、
-        # content が '<system>' で始まる。scene (口調のアンカー) に混入すると手本が
-        # 劣化するため、窓からも検索からも除外される (2026-07-04)。
+        # システム通知は role=system・タグ無し本文で保存される (機構タグを持たない
+        # ものもある — docs/intent/system_notice_delivery.md 不変条件 1)。scene
+        # (口調のアンカー) に混入すると手本が劣化するため、窓からも検索からも
+        # role で除外される (2026-07-04 の目的を role 判定で保つ)。
         ids = []
         for i in range(6):
             role = "user" if i % 2 == 0 else "model"
             ids.append(self._add(role, f"msg{i}"))
-        self._add("user", "<system>## Track切替通知\n作業に戻ります</system>")
+        self._add("system", "## Track切替通知\n作業に戻ります")
         ids.append(self._add("model", "msg6"))
         anchor = ids[5]
         window = get_conversation_window_around(self.conn, anchor, rounds=2)
         contents = [m.content for m in window]
-        self.assertTrue(all(not c.startswith("<system>") for c in contents))
+        self.assertNotIn("## Track切替通知\n作業に戻ります", contents)
+        self.assertTrue(all(m.role != "system" for m in window))
         self.assertIn("msg6", contents)  # 通知を飛ばして実会話は拾う
 
     def test_search_excludes_system_notice_messages(self):
         from sai_memory.memory.storage import search_conversation_messages
         self._add("user", "スタックチャンの話をしよう")
-        self._add("user", "<system>## Track切替通知: スタックチャン関連</system>")
+        self._add("system", "## Track切替通知: スタックチャン関連")
         hits = search_conversation_messages(self.conn, ["スタックチャン"])
         self.assertEqual(len(hits), 1)
-        self.assertFalse(hits[0].content.startswith("<system>"))
+        self.assertEqual(hits[0].content, "スタックチャンの話をしよう")
 
     def test_window_shrinks_at_start_of_conversation(self):
         # rounds=2 -> window=4 件/方向欲しいが、先頭アンカーの前には何も無いので

@@ -696,7 +696,8 @@ class ColdCaptureTest(_ColdWorldBase):
         ).fetchall()
         self.assertEqual(len(digests), 1)
         content, scope, line_role = digests[0]
-        self.assertTrue(content.startswith("<system>"))
+        # role=system・タグ無し本文のシステム通知 (docs/intent/system_notice_delivery.md)
+        self.assertNotIn("<system>", content)
         self.assertIn("読み返し", content)
         self.assertEqual(scope, "committed")
         self.assertEqual(line_role, "main_line")

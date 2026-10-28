@@ -474,7 +474,7 @@ class TestMessageSearchRealConversationOnly(unittest.TestCase):
 
     固定する不変条件: unified_recall の message ソース (keyword / embedding 双方)
     は「実会話」だけを返す — sub_line / meta_judgment / scope='discardable' /
-    event_message タグ / Stelis スレッド / '<system>' 始まり本文は、同じ語を
+    event_message タグ / Stelis スレッド / role=system のシステム通知は、同じ語を
     含んでいても message hit にならない。フィルタは storage.py の
     real_conversation_filter() で一点管理 (SCENE/Chronicle と同じ除外規則 +
     通常履歴と同じ discardable 除外)。
@@ -522,9 +522,9 @@ class TestMessageSearchRealConversationOnly(unittest.TestCase):
         self.m_stelis = _add(
             "user", f"{self.KEYWORD} サブエージェント作業ログ", thread_id="stelis-1",
         )
-        self.m_system_notice = _add(
-            "user", f"<system>{self.KEYWORD} Track切替通知</system>",
-        )
+        # 機構タグを持たない role=system のシステム通知
+        # (docs/intent/system_notice_delivery.md 不変条件 1)。
+        self.m_system_notice = _add("system", f"{self.KEYWORD} Track切替通知")
 
         self.visible = {self.m_main, self.m_legacy}
 

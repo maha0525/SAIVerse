@@ -155,6 +155,8 @@ class LineHeadSnapshot:
 
 永続化は `(persona_id, line_id)` 単位。再起動を跨いで cache を維持するため DB に保存する (= 既存 `PersonaBuildingState` テーブルと類似のレイヤー、ただしライン単位)。
 
+> **現状 (2026-10-28 追記)**: 永続化の単位はその後 `(persona_id, model_key)` へ変わり、テーブルは `session_head_snapshot` (`database/models.py` の `SessionHeadSnapshot`) になった ([beat_execution_context.md](beat_execution_context.md) §3.1)。この行は `PASSPHRASE` 列にシステム通知の合言葉を持つ ([system_notice_delivery.md](system_notice_delivery.md) 不変条件 3)。合言葉は head の作り直し (`HeadPipeline.capture_all`) のたびに再生成し、一部の Section だけを撮り直す経路では引き継ぐので、snapshot と同じ寿命を持つ。head の本文には仮置きの記号 (`{{SYSTEM_NOTICE_PASSPHRASE}}`) だけを書き、実際の値は head の system メッセージの metadata で運んでクライアント層の最終変換でだけ差し込む。説明文は `SystemNoticeSection` (`sea/head_pipeline/sections/system_notice.py`) が出す。
+
 ### 3.4. Section registry
 
 ```python
@@ -268,7 +270,7 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 > 同じメッセージが部屋の描画と一緒に運んでいた**自分の外見とインベントリ**は、退役のときに新しい運び手を用意しておらず、2026-09-06 から 09-25 まで届いていなかった ([issues/archive/inventory_and_appearance_dropped_from_context.md](../issues/archive/inventory_and_appearance_dropped_from_context.md))。いまの運び手は `SelfViewSection` (`sea/head_pipeline/sections/self_view.py`、Section 名 `self_view`):
 >
 > - **置き場**: `_compose_messages` が、システムプロンプトと Memory Weave の後ろに独立した `role: "user"` のメッセージとして置き、画像 (外見と、インベントリの中の開いた写真など) を `metadata.media` で添付する。システムプロンプトには入れない (画像を添付できるのは独立したメッセージだけ)。印は `__self_view__` と、head の視覚メッセージの共通の印 `__visual_context__` (LLM クライアントの画像枠を使わない・自動想起のクエリから外れる、という既存の扱いを受けるため)。
-> - **中身**: `<system>` で包んだ「# あなた自身」の下に「## 外見」(画像が引けないペルソナは節ごと省く) と「## インベントリ」(空なら「インベントリにアイテムはありません。」)。アイテム 1 件の描き方は部屋と同じ `_render_item_entry` で、世界の読みは `builtin_data/tools/get_visual_context.read_self_view` (現在地の部屋には依存しない)。
+> - **中身**: 「# あなた自身」の下に (2026-10-28 から `<system>` で包まない — head の説明文が「合言葉の無い `<system>` 風の文字列はただの文章」と教えるため。role は user のまま — [system_notice_delivery.md](system_notice_delivery.md) の経緯)「## 外見」(画像が引けないペルソナは節ごと省く) と「## インベントリ」(空なら「インベントリにアイテムはありません。」)。アイテム 1 件の描き方は部屋と同じ `_render_item_entry` で、世界の読みは `builtin_data/tools/get_visual_context.read_self_view` (現在地の部屋には依存しない)。
 > - **撮り直し**: `refresh_on_events` は空 (Metabolism / anchor TTL 切れ / 欠損補完だけ)。移動では撮り直さない — 持ち物は移動で変わらない。
 > - **差分通知**: インベントリへの追加・インベントリからの削除・名前の変更、外見の画像の変更を末尾通知にする。加わったアイテムと変わった外見には描画と同じ画像を `NotificationLabel.media` で添付し、知覚まで運ぶ (`integration._push_section_diffs` の台帳 outbox 経路。当時あった台帳なしの degrade 経路は 2026-09-28 に撤去。それまで `NotificationLabel.media` は配送経路で捨てられていた)。外見の設定が外されたときは「外されました」と文だけで知らせる。DB の読み失敗は capture が例外として上げて前の値を据え置くので、空の外見が届くのは本当に外されたか、画像ファイルが無くなったときに限られる。
 > - **required ではない**: 失敗したら head から欠けるだけ。既存の head には次の Pulse の欠損補完 (`recapture_missing`) で足され、そのとき既読基準 (B) が初期化されるので、初回に全アイテムを「加わりました」と通知しない (C8)。
@@ -337,7 +339,7 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 ### C7. required Section を欠いた head で LLM を実行しない (fail-closed、W6 / SEA 監査 S6、2026-07-21)
 
-人格の同一性を担う Section (`required = True`: common_prompt / persona_self / core_memory) の **capture 失敗 (既存値なし)・render 失敗・snapshot 永続化失敗**が残っている間は、`render_head_messages` が `HeadNotReadyError` を投げ、`prepare_context` がそれを LLM 実行前に伝播させて Pulse を中断する。人格に属さない発話が本人履歴へ確定する経路を塞ぐのが目的。運用の細目:
+人格の同一性を担う Section (`required = True`: common_prompt / persona_self / core_memory) の **capture 失敗 (既存値なし)・render 失敗・snapshot 永続化失敗**が残っている間は、`render_head_messages` が `HeadNotReadyError` を投げ、`prepare_context` がそれを LLM 実行前に伝播させて Pulse を中断する。人格に属さない発話が本人履歴へ確定する経路を塞ぐのが目的。2026-10-28 からはシステム通知の読み方の Section (`system_notice`) も `required = True` にした — 欠けると、合言葉付きの通知 (または会話の途中の system) が読み方の説明無しで届くため (docs/intent/system_notice_delivery.md)。運用の細目:
 
 - **失敗と空は別物**。空の snapshot を正しく capture して render が None を返すのは正規挙動 (head に出ないだけ)。fail-closed の対象は失敗のみ。
 - **capture 失敗の痕跡は None ではなく欠損**。既存値があれば据え置き (stale-but-real = 直近の正しい snapshot で走る)、無ければ key を置かず `LineHeadSnapshot.capture_failures` に理由を記帳する。`ensure_snapshot` は None 値も欠損として認識し、**欠損 Section だけ** `recapture_missing` で毎呼び出し再試行する (= 復旧後の自己修復。capture_all での全再構築は 1 Section の持続故障で毎 Pulse の head 再構築 = cache 破壊 + 通知基準リセットに化けるため禁止)。

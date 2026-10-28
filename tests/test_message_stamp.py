@@ -1174,17 +1174,25 @@ class TestSyncPresentedMessageIdsWithSent:
         assert PREDECESSOR_META_KEY not in build_generation_stamp(state)
 
     def test_head_and_perception_are_not_counted_even_with_an_id(self):
-        """head と知覚のまとめは、仮に id を持っても記録の行として数えない。"""
+        """head と知覚のまとめは、仮に id を持っても記録の行として数えない。
+
+        head は role ではなく head の印で見分ける — 会話の途中のシステム通知
+        (role=system、印なし) は記録の行として数える
+        (docs/intent/system_notice_delivery.md 不変条件 5)。
+        """
+        from sai_memory.memory.storage import HEAD_MESSAGE_KEY
         from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
         from sea.runtime_context import sent_message_ids
 
         sent = [
-            {"id": "sys", "role": "system", "content": "head"},
+            {"id": "sys", "role": "system", "content": "head",
+             "metadata": {HEAD_MESSAGE_KEY: True}},
             {"id": "perc", "role": "user", "content": "<system>部屋</system>",
              "metadata": {CONSUMED_PERCEPTION_KEY: True}},
+            {"id": "n1", "role": "system", "content": "予定の時刻です"},
             {"id": "h1", "role": "user", "content": "h1"},
         ]
-        assert sent_message_ids(sent) == ["h1"]
+        assert sent_message_ids(sent) == ["n1", "h1"]
 
 
 class TestFinalizeBeatCarriesTheStoredRowId:

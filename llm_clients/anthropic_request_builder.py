@@ -8,6 +8,18 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .exceptions import InvalidRequestError
+from .system_notice import (
+    accepts_mid_conversation_system,
+    is_head_system_message,
+    is_presented_system_notice,
+    present_system_notices,
+    redact_passphrase,
+    system_notice_image_note,
+    system_notice_media_notes,
+    system_notice_passphrase,
+    tag_presented_system_notice,
+    unresolved_system_notice_images,
+)
 from .utils import (
     attachment_limit_is_off,
     content_to_text,
@@ -133,14 +145,55 @@ def _build_anthropic_content_blocks(
     max_image_bytes: Optional[int],
     allowed_attachment_keys: Optional[Set[Tuple[int, int]]],
     message_index: int,
+    is_notice: bool = False,
+    passphrase: str = "",
+    tag_notice: bool = False,
 ) -> Tuple[List[Dict[str, Any]], bool]:
+    """メッセージ一件の content ブロック。
+
+    ``passphrase`` はその送信の head の合言葉。通常の発言に足す生成した画像の
+    要約は合言葉の伏せ字 (present_system_notices) の後で足されるので、ここで伏せる。
+    ``tag_notice`` は、このメッセージが present_system_notices で合言葉付きタグに
+    変えた通知であること (説明の文をタグの中へ入れて包み直す)。
+    """
+    tag_notice = is_notice and tag_notice
     content_blocks: List[Dict[str, Any]] = []
     text = content_to_text(content)
-    if text:
+    if text and not tag_notice:
         content_blocks.append({"type": "text", "text": text})
 
     is_dynamic = isinstance(metadata, dict) and bool(metadata.get("__realtime_context__"))
 
+    # タグ化したシステム通知 (is_presented_system_notice) の画像は、埋め込めない
+    # ときに生成した要約ではなく保存済みの要約か URI だけの説明にし、ファイルが
+    # 読めない画像も説明の文で残す (送信本文が要約の生成の成否で揺れないように。
+    # llm_clients/system_notice.py の system_notice_image_note)。説明の文は通知の
+    # 本文の一部なのでタグの中へ入れ、埋め込む画像はタグ付きの本文の後ろに続く。
+    unresolved: List[Dict[str, Any]] = (
+        unresolved_system_notice_images(metadata, attachments) if is_notice else []
+    )
+    # タグの中の本文は、画像を埋め込めたかどうかにかかわらず「元の本文 + metadata の
+    # 全部の画像の説明の文」で固定する (読み込みの成否で送信本文が揺れないように。
+    # 不変条件 6)。説明と埋め込みの重複は受け入れる。
+    notice_notes: List[str] = (
+        system_notice_media_notes(metadata, ("image",), passphrase=passphrase)
+        if tag_notice else []
+    )
+
+    def _note_for(att: Dict[str, Any]) -> str:
+        if is_notice:
+            return system_notice_image_note(att, metadata, passphrase=passphrase)
+        return redact_passphrase(
+            image_summary_note(
+                att["path"],
+                att["mime_type"],
+                att.get("uri", att.get("path", "unknown")),
+                skip_summary=skip_summary,
+            ),
+            passphrase,
+        )
+
+    image_blocks: List[Dict[str, Any]] = []
     for att_idx, att in enumerate(attachments):
         should_embed = supports_images and role == "user" and (
             allowed_attachment_keys is None or (message_index, att_idx) in allowed_attachment_keys
@@ -149,22 +202,26 @@ def _build_anthropic_content_blocks(
             data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"], max_bytes=max_image_bytes)
             if data and effective_mime:
                 b64 = base64.b64encode(data).decode("ascii")
-                content_blocks.append(
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": effective_mime, "data": b64},
-                    }
-                )
+                block = {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": effective_mime, "data": b64},
+                }
+                (image_blocks if tag_notice else content_blocks).append(block)
                 continue
             logging.warning("Image file not found or unreadable: %s", att.get("uri") or att.get("path"))
 
-        note = image_summary_note(
-            att["path"],
-            att["mime_type"],
-            att.get("uri", att.get("path", "unknown")),
-            skip_summary=skip_summary,
-        )
-        content_blocks.append({"type": "text", "text": note})
+        if not tag_notice:
+            content_blocks.append({"type": "text", "text": _note_for(att)})
+
+    if tag_notice:
+        content_blocks.append({
+            "type": "text",
+            "text": tag_presented_system_notice(metadata, notice_notes, passphrase),
+        })
+        content_blocks.extend(image_blocks)
+    else:
+        for entry in unresolved:
+            content_blocks.append({"type": "text", "text": _note_for(entry)})
 
     return content_blocks, is_dynamic
 
@@ -198,7 +255,12 @@ def _prepare_anthropic_messages(
     enable_cache: bool = True,
     cache_ttl: str = "5m",
     attachment_limit_off: bool = False,
+    passphrase: str = "",
+    notices_tagged: bool = False,
 ) -> List[Dict[str, Any]]:
+    """``passphrase`` はその送信の head の合言葉、``notices_tagged`` は列が
+    present_system_notices を通ったこと
+    (build_request_params が渡す)。"""
     attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys = _collect_attachment_state(
         messages, max_image_embeds=max_image_embeds,
         attachment_limit_off=attachment_limit_off,
@@ -233,6 +295,9 @@ def _prepare_anthropic_messages(
             max_image_bytes=max_image_bytes,
             allowed_attachment_keys=allowed_attachment_keys,
             message_index=i,
+            is_notice=is_presented_system_notice(msg),
+            passphrase=passphrase,
+            tag_notice=notices_tagged,
         )
         if not content_blocks:
             continue
@@ -290,6 +355,17 @@ def build_request_params(
     supports_sampling_parameters: bool = True,
     supports_assistant_prefill: bool = True,
 ) -> Dict[str, Any]:
+    # 会話の途中のシステム通知 (head より後ろの role=system) は、Messages API が
+    # 途中に system を置けないので、元の位置で合言葉付きタグの user にする。
+    # 残る system (head とその前の指示) だけが下で system 欄へまとまる
+    # (docs/intent/system_notice_delivery.md 不変条件 5)。head の印が無い列は
+    # 変わらない (従来どおり全 system が system 欄へ)。
+    passphrase = system_notice_passphrase(messages)
+    notices_tagged = any(is_head_system_message(m) for m in messages)
+    messages = present_system_notices(
+        messages,
+        accepts_mid_system=accepts_mid_conversation_system("anthropic_native", None),
+    )
     system_blocks, remaining_messages = _prepare_anthropic_system(messages, enable_cache=enable_cache, cache_ttl=cache_ttl)
     prepared_messages = _prepare_anthropic_messages(
         remaining_messages,
@@ -301,6 +377,8 @@ def build_request_params(
         # 上限を使わない印は system を抜く前の列で判定する (印は列の先頭 =
         # たいてい system のメッセージに付く)。
         attachment_limit_off=attachment_limit_is_off(messages),
+        passphrase=passphrase,
+        notices_tagged=notices_tagged,
     )
 
     if not supports_assistant_prefill and prepared_messages and prepared_messages[-1]["role"] == "assistant":

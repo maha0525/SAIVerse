@@ -223,7 +223,8 @@ sea/
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。
                           #   self_view = 自分の外見とインベントリ、独立した user メッセージ。
-                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く）
+                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く。
+                          #   system_notice = システム通知の読み方、文面はモデルの届け方で出し分け）
 ```
 
 ### manager/
@@ -296,6 +297,7 @@ database/
 ├── models.py         # SQLAlchemy モデル
 ├── api_server.py     # DB API サーバー（inter-city / persona-proxy ルートは凍結封鎖: 503）
 ├── migrate.py        # マイグレーション（自動バックアップ付き）
+├── system_notice_migration.py # システム通知の旧形式データの移行（起動時に自動。本体 DB + 各ペルソナの記憶 DB）
 ├── seed.py           # 初期データ（⚠️ 全データ削除）
 ├── backup.py         # 起動時バックアップ
 ├── building_messages.py # Building メッセージ

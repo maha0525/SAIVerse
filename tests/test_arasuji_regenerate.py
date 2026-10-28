@@ -696,12 +696,13 @@ class RegenerateSwapTest(unittest.TestCase):
         conn = self.adapter.conn
         recall_id = insert_realtime_and_recall_batch(
             conn, consumed_at=1,
-            rendered_text="<system>ふと浮かんだ記憶:\n- 海辺の町</system>",
+            # 残す文面はタグ無し (docs/intent/system_notice_delivery.md)
+            rendered_text="ふと浮かんだ記憶:\n- 海辺の町",
             recalled_keys=[("memopedia", "p1")],
         )
         notice_id = insert_realtime_and_recall_batch(
             conn, consumed_at=2,
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:00\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:00",
         )
         mark_batches_annexed(conn, [recall_id, notice_id], self.old_entry.id)
         conn.commit()

@@ -591,13 +591,16 @@ class PulseController:
         )
     
     def _build_resumption_prompt(self, request: ExecutionRequest) -> str:
-        """Build prompt with resumption context."""
+        """Build prompt with resumption context.
+
+        タグ無しの本文。schedule Pulse ではこの文がそのまま role=system の
+        システム通知として記録される (sea/runtime.py の run_meta_user、
+        docs/intent/system_notice_delivery.md 不変条件 1)。
+        """
         original = request.original_prompt or ""
-        return f"""<system>
-[前回の処理が中断されました]
+        return f"""[前回の処理が中断されました]
 中断理由: 優先度の高いリクエストを処理しました
 前回のプロンプト: {original}
-</system>
 
 {original}"""
     

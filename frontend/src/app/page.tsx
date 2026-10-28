@@ -192,7 +192,7 @@ interface Message {
     // Reasoning (thinking) from LLM
     reasoning?: string;
     // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
-    // <system>...</system> を剥がした本文を保持し、スペル結果と同じ折りたたみで表示する。
+    // 想起の本文 (タグ無し) を保持し、スペル結果と同じ折りたたみで表示する。
     auto_recall?: string;
     // このターンは記憶の想起の判定が時間内に終わらず、従来の方式で想起した。
     // サーバーの reflex_fallback イベント由来の**表示専用**の印で、会話履歴にも
@@ -2231,12 +2231,10 @@ export default function Home() {
                             setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
                         } else if (event.type === 'auto_recall') {
                             // 自動想起 (記憶アーキv2 §4.5): 末尾注入された「ふと浮かんだ記憶」を
-                            // スペル結果と同じ折りたたみで表示する。<system> タグは剥がす。
+                            // スペル結果と同じ折りたたみで表示する。本文はタグで囲まれて
+                            // いない (docs/intent/system_notice_delivery.md)。
                             const rawContent: string = typeof event.content === 'string' ? event.content : '';
-                            const recallBody = rawContent
-                                .replace(/^\s*<system>/, '')
-                                .replace(/<\/system>\s*$/, '')
-                                .trim();
+                            const recallBody = rawContent.trim();
                             if (recallBody) {
                                 const arAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                                 setMessages(prev => {

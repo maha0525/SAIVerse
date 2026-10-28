@@ -83,7 +83,7 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 
 **Chronicle を自動想起から除外（2026-07-08）**: Chronicle は人生の背骨を要約した広い文なので意味ベクトルが多くの話題に薄く当たり、どんなクエリでも cosine が高めに出て**しきい値を通りやすい**（「ふと浮かぶ」ではなく「常に浮かぶ」になる、まはー観察）。かつ要約ゆえ具体シーンが無く、会話に連想として繋げにくい（Fragment / message は「そのときの会話」があるので連想として振る舞える）。よって `run_auto_recall` は `search_chronicle=False` で呼ぶ。将来は**ソース種別ごとの「思い出しやすさ」（0〜100%）をペルソナ設定に置く**一般形に育て、Chronicle はその既定 0% とする想定（掛け算ではなく実効しきい値への写像で実装する予定 — E5 の cosine が 0.80〜0.90 に圧縮され帯域が狭いため、raw cosine への乗算は実質 on/off になってしまう）。
 
-**注入**: 両経路の結果を同一台帳（§4.3）で統合し、`<system>` タグ付き user メッセージとして履歴末尾（最新入力の直前）に一時注入。SEA runtime の末尾通知（差分通知）と同じ挿入面。
+**注入**: 両経路の結果を同一台帳（§4.3）で統合し、システム通知として履歴末尾（最新入力の直前）に一時注入。SEA runtime の末尾通知（差分通知）と同じ挿入面。形は 2026-10-28 から role=system・タグ無し本文（`__system_notice__` = `auto_recall`、印 `__auto_recall__`）で、「最新入力」は最後の user メッセージまたはシステム通知を指す（[system_notice_delivery.md](system_notice_delivery.md)）。それより前は `<system>` タグ付き user メッセージだった。
 
 **運用ノート（埋め込み整備の独立ステップ化、2026-07-04）**: Fragment 埋め込みに未生成の残り（backlog）があると経路2の再現率が落ちる。当初この embed 処理は Chronicle 生成の末尾に相乗りしており、生成の早期 return（未処理なし / バッチ未満 / 自律 Pulse の確認スキップ / 確認拒否）のたびに巻き添えスキップされてバックログが恒常化していた（air_city_a で Fragment 778/1638 を実測）。現在は `_ensure_recall_embeddings` として **Metabolism の無条件ステップに独立**させ、Chronicle 生成の成否・トグルに依存せず毎回未生成分を全件処理する（ローカル・無料）。即時バックフィルは `python scripts/embed_recall_sources.py <persona_id>` でも可能。
 
@@ -103,6 +103,8 @@ Cached Head Architecture との整合: ゾーン A/B は snapshot 経由・Metab
 ```
 
 ハンドルの提示が深掘りスペルへの導線になる（§2 の分業）。
+
+2026-10-28 から、本文は `<system>` で包まない（上の例の 1 行目と最終行のタグが無い形）。role=system のシステム通知として送り、会話の途中の system を受け取れないモデルへはクライアント層が送る直前に合言葉付きタグの user に変える（[system_notice_delivery.md](system_notice_delivery.md)）。
 
 **鮮明想起（vivid recall、rev4 で全 Fragment に拡張）**: 各 Fragment 項目に、`chronicle_entry_id` → 元エピソードの `source_ids` → メッセージ**チャンク**埋め込みとのコサイン比較で、**その記憶が生まれた瞬間の生ログの該当箇所**をサブ行として添える（LLM 不使用）。先頭項目は最大2行・他は1行という鮮明度の勾配を持ち、vivid 合計予算（既定400字）を並び順に消費する。抜粋は「マッチしたチャンク」を単位とし、エンティティ名の出現位置があればそこを中心に詰める——**メッセージ先頭からの位置盲目な切り出しをしない**（`message_embeddings` が chunk_index を保持しているため、決定論の再分割で該当箇所を復元できる）。設計原理はまはーの言葉から:「生ログでないと生きた記憶とは言えない」——鮮明さの正体は要約ではなく場面。
 

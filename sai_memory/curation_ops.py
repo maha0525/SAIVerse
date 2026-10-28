@@ -1342,7 +1342,8 @@ def _write_curation_report(
     """編纂完了報告を event_message 形式で SAIMemory に書く。
 
     翌朝のペルソナの文脈（tail）に届く。
-    機構の名義（user ロール ＋ system タグ）で書く——ペルソナ名義で書かない。
+    機構の名義（role=system・タグ無し本文のシステム通知 —
+    docs/intent/system_notice_delivery.md 不変条件 1）で書く——ペルソナ名義で書かない。
     event_message タグ必須（タグ漏れでコンテキストに乗らない事故を防ぐ）。
     """
     if adapter is None:
@@ -1369,13 +1370,18 @@ def _write_curation_report(
     body_lines.append("")
     body_lines.append("※ 変更は編集来歴（メモリタブ > 来歴）から差し戻せます。")
 
-    message_content = "<system>" + "\n".join(body_lines) + "</system>"
+    message_content = "\n".join(body_lines)
+
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
     try:
         append_fn({
-            "role": "user",
+            "role": "system",
             "content": message_content,
-            "metadata": {"tags": ["internal", "event_message", "curation"]},
+            "metadata": {
+                "tags": ["internal", "event_message", "curation"],
+                SYSTEM_NOTICE_KEY: "curation",
+            },
         })
         LOGGER.info(
             "[curation_ops] curation report written to SAIMemory (persona=%s "

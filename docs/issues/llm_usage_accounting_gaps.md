@@ -33,7 +33,7 @@ factory で client を作って `generate` するだけの箇所は、`consume_u
 
 確認されている箇所:
 
-- `builtin_data/tools/get_since_last_user_conversation.py` (summary)
+- ~~`builtin_data/tools/get_since_last_user_conversation.py` (summary)~~ — 呼び出し元の無いツールとして 2026-10-28 に削除 (docs/intent/system_notice_delivery.md「掃除」)
 - `saiverse/media_summary.py` (複数箇所)
 - `sai_memory/curation_ops.py`
 - `sai_memory/memory/entity_extractor.py`

@@ -32,6 +32,7 @@ from sea.head_pipeline.sections.persona_self import PersonaSelfSection
 from sea.head_pipeline.sections.self_image import SelfImageSection
 from sea.head_pipeline.sections.self_view import SelfViewSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
+from sea.head_pipeline.sections.system_notice import SystemNoticeSection
 
 
 def register_default_sections(registry) -> None:
@@ -47,6 +48,8 @@ def register_default_sections(registry) -> None:
     registry.register(AvailablePlaybooksSection())
     registry.register(AutonomyModesSection())
     registry.register(SelfImageSection())
+    # システム通知の読み方 (docs/intent/system_notice_delivery.md)
+    registry.register(SystemNoticeSection())
     registry.register(SpellListSection())
     # アドオンからの案内 (2026-10-12、spell_list と同じく head + 差分通知)
     registry.register(AddonGuidanceSection())
@@ -77,5 +80,6 @@ __all__ = [
     "SelfImageSection",
     "SelfViewSection",
     "SpellListSection",
+    "SystemNoticeSection",
     "register_default_sections",
 ]

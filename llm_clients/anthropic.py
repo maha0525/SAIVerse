@@ -14,6 +14,7 @@ from anthropic.types import Message
 
 from .base import EmptyResponseError, LLMClient, ToolSpecFormat, get_llm_logger
 from .anthropic_request_builder import build_request_params
+from .system_notice import redact_passphrase, system_notice_passphrase
 from .anthropic_response_parser import (
     _extract_text_from_response,
     _extract_thinking_from_response,
@@ -423,10 +424,17 @@ class AnthropicClient(LLMClient):
             logging.warning("[anthropic] No valid messages to send")
             return ""
 
+        # 送る形には head の合言葉が実際の値で入っている。llm_io.log へ書く写しでは
+        # 伏せる (docs/intent/system_notice_delivery.md 不変条件 3)。
+        passphrase = system_notice_passphrase(messages)
+
         def _call() -> Any:
             get_llm_logger().debug(
                 "[anthropic] Request: %s",
-                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+                redact_passphrase(
+                    json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+                    passphrase,
+                ),
             )
             result = self.client.messages.create(**request_params)
             get_llm_logger().debug("[anthropic] Response: %s", result.model_dump_json(indent=2))
@@ -474,10 +482,12 @@ class AnthropicClient(LLMClient):
             Text chunks as they are generated
         """
         self._store_reasoning([])
-        messages = self._inject_unsupported_media_summaries(messages)
 
         # For structured output, use non-streaming generate
         if response_schema:
+            # 送る直前の前処理 (音声・動画の説明の文を足すなど) は generate が自分で
+            # 掛ける。ここで掛けてから渡すと二度掛かり、説明の文が二重になって、
+            # 同期の呼び出しと送信本文が食い違う。
             result = self.generate(
                 messages, tools, response_schema,
                 temperature=temperature, enable_cache=enable_cache, cache_ttl=cache_ttl
@@ -487,6 +497,8 @@ class AnthropicClient(LLMClient):
             else:
                 yield str(result)
             return
+
+        messages = self._inject_unsupported_media_summaries(messages)
 
         build_result = build_request_params(
             messages=messages,
@@ -515,7 +527,10 @@ class AnthropicClient(LLMClient):
 
         get_llm_logger().debug(
             "[anthropic] Stream request: %s",
-            json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+            redact_passphrase(
+                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+                system_notice_passphrase(messages),
+            ),
         )
 
         last_error: Optional[Exception] = None

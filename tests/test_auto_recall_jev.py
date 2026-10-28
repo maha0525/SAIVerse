@@ -122,14 +122,16 @@ def _perception(text):
     """送信直前に差し込まれる知覚ブロック (部屋の様子・通知) を 1 枚作る。
 
     実物 (sea/runtime_context.py::list_presented_perception_blocks) と同じ形 —
-    role="user" / content は ``<system>`` 包み / metadata に
-    ``CONSUMED_PERCEPTION_KEY``。
+    role="system" のシステム通知 / content はタグ無し / metadata に
+    ``__system_notice__`` と ``CONSUMED_PERCEPTION_KEY``
+    (docs/intent/system_notice_delivery.md)。
     """
     return {
-        "role": "user",
-        "content": f"<system>{text}</system>",
+        "role": "system",
+        "content": text,
         "metadata": {
             "tags": ["internal", "event_message", "perception"],
+            "__system_notice__": "perception",
             CONSUMED_PERCEPTION_KEY: True,
         },
     }

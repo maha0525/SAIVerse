@@ -205,7 +205,10 @@ def _build_choice_lines(manager: Any, persona_id: str) -> List[str]:
 def _build_close_prompt(
     slot: Dict[str, Any], choice_lines: List[str]
 ) -> str:
-    """<system> 包みの締めプロンプト。
+    """締めプロンプトの本文 (タグ無し)。
+
+    送る列には role=system のシステム通知として足す — 送り先のモデルに合わせた
+    変換はクライアント層が行う (docs/intent/system_notice_delivery.md)。
 
     経験値ノートの意義説明は experience_ledger.md §4 の定義の短い写し。
     接地条件 (直前の実体験に基づく・実際にやったこと以外を書かない) と
@@ -227,8 +230,7 @@ def _build_close_prompt(
         prior_ref_line = ""
 
     return (
-        "<system>\n"
-        f"## コマの締め\n"
+        "## コマの締め\n"
         f"「{kind}」のコマが終わりました。締めとして、今のセッションの実績を"
         "二つだけ記録します。\n"
         "\n"
@@ -249,8 +251,7 @@ def _build_close_prompt(
         "- 今のセッションで実際にやったこと・考えたことだけを書いてください。"
         "やっていないことを書かないでください。\n"
         "- 書き残すほどのことが無ければ、note は空のままでかまいません"
-        "（無理に埋めないでください）。\n"
-        "</system>"
+        "（無理に埋めないでください）。"
     )
 
 
@@ -311,7 +312,9 @@ def run_slot_close(
             if final_phases is not None:
                 final_msg["metadata"] = {OUTPUT_PHASES_METADATA_KEY: final_phases}
             messages.append(final_msg)
-        messages.append({"role": "user", "content": prompt})
+        from sai_memory.memory.storage import system_notice_message
+
+        messages.append(system_notice_message(prompt, "slot_close"))
 
         node_def = SimpleNamespace(id="slot_close", memorize=None, speak=False)
         execution_context = close_ctx.execution_context

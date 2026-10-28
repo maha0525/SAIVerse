@@ -87,7 +87,7 @@
       "id": "record_search",
       "type": "memorize",
       "action": "{last}",
-      "role": "user",
+      "role": "system",
       "tags": [
         "document_search",
         "playbook_result"
@@ -111,7 +111,7 @@
       "id": "record_read",
       "type": "memorize",
       "action": "{last}",
-      "role": "user",
+      "role": "system",
       "tags": [
         "document_search",
         "playbook_result"
