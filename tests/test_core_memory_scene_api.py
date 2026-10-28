@@ -418,7 +418,9 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertIn("ユーザーが直した新しい本文", payload["content"])
         self.assertIn(f"core:{mid}", payload["content"])
-        self.assertTrue(payload["content"].startswith("<system>"))
+        # 本文はタグで囲まない (送る列には role=system の通知として出す —
+        # docs/intent/system_notice_delivery.md)
+        self.assertNotIn("<system>", payload["content"])
         self.assertEqual(self._correction_notices(), [])   # 行を作らない
         self.assertEqual(self._pending_perceptions(), [])
         consumed = self._consumed_perceptions()
@@ -473,7 +475,7 @@ class CoreMemorySceneApiTest(unittest.TestCase):
         payload = self.adapter.flush_perception_buffer_payload()
         self.assertIsNotNone(payload)
         self.assertIn("移動先の様子テスト", payload["content"])
-        self.assertTrue(payload["content"].startswith("<system>"))
+        self.assertNotIn("<system>", payload["content"])
         self.assertEqual(payload["media"], media)
         self.assertEqual(self._pending_perceptions(), [])
         # messages には何も書かれない (§10.1)。

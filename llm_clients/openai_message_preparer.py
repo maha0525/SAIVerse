@@ -9,10 +9,10 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .utils import (
     attachment_limit_is_off,
-    compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
     parse_attachment_limit,
+    select_embedded_attachment_keys,
 )
 
 ALLOWED_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id"}
@@ -35,8 +35,18 @@ def is_empty_message(msg: Dict[str, Any]) -> bool:
 def scan_message_metadata(
     messages: List[Any],
     max_image_embeds_override: Optional[int] = None,
+    *,
+    supports_images: bool = False,
+    max_image_bytes: Optional[int] = None,
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Set[int], Optional[Set[Tuple[int, int]]]]:
-    """Build metadata-derived caches for attachment and summary handling."""
+    """Build metadata-derived caches for attachment and summary handling.
+
+    ``supports_images`` / ``max_image_bytes`` are the client's own values; the
+    byte valve (llm_clients/utils.select_embedded_attachment_keys) only counts
+    images that build_message_content_with_attachments actually embeds
+    (user messages of an image-capable model), so with ``supports_images=False``
+    nothing is measured.
+    """
     max_image_embeds = max_image_embeds_override if max_image_embeds_override is not None else parse_attachment_limit("OPENAI")
     # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
     # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY。モデル設定の上限より優先)。
@@ -45,6 +55,9 @@ def scan_message_metadata(
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
+    # 画像を実際に埋め込むメッセージ (build_message_content_with_attachments と
+    # 同じ判定: 画像対応のモデルの user。host は system になり埋め込まない)。
+    embeddable_indices: Set[int] = set()
 
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
@@ -58,9 +71,15 @@ def scan_message_metadata(
         media_items = iter_image_media(metadata)
         if media_items:
             attachment_cache[idx] = media_items
+            if supports_images and msg.get("role") == "user":
+                embeddable_indices.add(idx)
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(
+    allowed_attachment_keys = select_embedded_attachment_keys(
         attachment_cache, max_image_embeds, exempt_indices,
+        provider="OPENAI",
+        messages=messages,
+        embeddable_indices=embeddable_indices,
+        max_image_bytes=max_image_bytes,
     )
     logging.debug(
         "[openai] attachment limit=%s, cached=%d msgs with images",
@@ -100,12 +119,84 @@ def build_message_content_with_attachments(
     skip_summary: bool,
     allowed_attachment_keys: Optional[Set[Tuple[int, int]]],
     message_index: int,
+    notice_metadata: Any = None,
+    unresolved_notice_images: Optional[List[Dict[str, Any]]] = None,
+    passphrase: str = "",
+    notice_tagged: bool = False,
 ) -> Any:
-    """Build content with image embedding or textual summaries."""
-    if not attachments:
+    """Build content with image embedding or textual summaries.
+
+    ``notice_metadata`` is set (to the message metadata) for a system notice
+    tagged into a user message (llm_clients/system_notice.is_presented_system_notice).
+    Its images that are not embedded become
+    :func:`llm_clients.system_notice.system_notice_image_note` (stored summary
+    or URI only, never generated on the spot), and ``unresolved_notice_images``
+    (images whose file cannot be read) are described the same way instead of
+    disappearing. When ``notice_tagged`` (the notice went through
+    ``present_system_notices`` and became a tagged
+    user message), the notes are part of the notice, so they go inside the
+    passphrase tag (:func:`llm_clients.system_notice.tag_presented_system_notice`).
+    The tagged text always carries a note for every image in the metadata
+    (:func:`llm_clients.system_notice.system_notice_media_notes`), whether or
+    not the image could be embedded, so it does not change with file
+    availability; embedded image parts follow the tagged text.
+
+    ``passphrase`` is this request's head passphrase. A summary generated here
+    for an ordinary message is appended after the passphrase masking of
+    :func:`llm_clients.system_notice.present_system_notices`, so it is masked
+    here.
+    """
+    from .system_notice import (
+        redact_passphrase,
+        system_notice_image_note,
+        system_notice_media_notes,
+        tag_presented_system_notice,
+    )
+
+    unresolved = list(unresolved_notice_images or [])
+    if not attachments and not unresolved:
         return original_content
 
+    is_notice = notice_metadata is not None
+
+    def _note_for(att: Dict[str, Any]) -> str:
+        if is_notice:
+            return system_notice_image_note(att, notice_metadata, passphrase=passphrase)
+        return redact_passphrase(
+            image_summary_note(
+                att["path"],
+                att["mime_type"],
+                att.get("uri", att.get("path", "unknown")),
+                skip_summary=skip_summary,
+            ),
+            passphrase,
+        )
+
     text = content_to_text(original_content)
+    if is_notice and notice_tagged:
+        # 説明の文はタグの中へ入れる。タグの中の本文は、画像を埋め込めたかどうかに
+        # かかわらず「元の本文 + 全部の画像の説明の文」で固定する — 埋め込みの
+        # 成否 (ファイルの読み込み・サイズ) で本文が変わると、同じ記録から組む
+        # 送信本文が揺れて前方一致が割れる (不変条件 6)。説明と埋め込みの重複は
+        # 受け入れる。説明の文は metadata の記述だけから metadata の並びの順に組む
+        # (ファイルが読めない画像の説明も同じ位置に入る)。埋め込めた画像は部品
+        # なのでタグで包めず、タグ付きの本文の後ろに続く。
+        notes = system_notice_media_notes(notice_metadata, ("image",), passphrase=passphrase)
+        image_parts: List[Dict[str, Any]] = []
+        for att_idx, att in enumerate(attachments):
+            embedded = None
+            if supports_images and role == "user" and (
+                allowed_attachment_keys is None
+                or (message_index, att_idx) in allowed_attachment_keys
+            ):
+                embedded = _image_url_part(att, max_image_bytes)
+            if embedded is not None:
+                image_parts.append(embedded)
+        tagged = tag_presented_system_notice(notice_metadata, notes, passphrase)
+        if image_parts:
+            return [{"type": "text", "text": tagged}, *image_parts]
+        return tagged
+
     if supports_images and role == "user":
         parts: List[Dict[str, Any]] = []
         if text:
@@ -116,54 +207,51 @@ def build_message_content_with_attachments(
                 or (message_index, att_idx) in allowed_attachment_keys
             )
             if should_embed:
-                data, effective_mime = load_image_bytes_for_llm(
-                    att["path"], att["mime_type"], max_bytes=max_image_bytes,
-                )
-                if data and effective_mime:
-                    b64 = base64.b64encode(data).decode("ascii")
-                    magic = data[:8].hex()
-                    logging.debug(
-                        "[openai_prep] image att=%s orig_mime=%s effective_mime=%s "
-                        "raw_bytes=%d b64_len=%d magic=%s",
-                        att.get("uri") or att.get("path"),
-                        att.get("mime_type"),
-                        effective_mime,
-                        len(data),
-                        len(b64),
-                        magic,
-                    )
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
-                        }
-                    )
+                embedded = _image_url_part(att, max_image_bytes)
+                if embedded is not None:
+                    parts.append(embedded)
                     continue
-                logging.warning(
-                    "Image file not found or unreadable, skipping attachment: %s",
-                    att.get("uri") or att.get("path"),
-                )
-            note = image_summary_note(
-                att["path"],
-                att["mime_type"],
-                att.get("uri", att.get("path", "unknown")),
-                skip_summary=skip_summary,
-            )
-            parts.append({"type": "text", "text": note})
+            parts.append({"type": "text", "text": _note_for(att)})
+        for entry in unresolved:
+            parts.append({"type": "text", "text": _note_for(entry)})
         return parts if parts else text
 
     note_lines: List[str] = []
     if text:
         note_lines.append(text)
     for att in attachments:
-        note = image_summary_note(
-            att["path"],
-            att["mime_type"],
-            att.get("uri", att.get("path", "unknown")),
-            skip_summary=skip_summary,
-        )
-        note_lines.append(note)
+        note_lines.append(_note_for(att))
+    for entry in unresolved:
+        note_lines.append(_note_for(entry))
     return "\n".join(note_lines)
+
+
+def _image_url_part(att: Dict[str, Any], max_image_bytes: Optional[int]) -> Optional[Dict[str, Any]]:
+    """画像を埋め込む ``image_url`` 部品 (ファイルが読めなければ None)。"""
+    data, effective_mime = load_image_bytes_for_llm(
+        att["path"], att["mime_type"], max_bytes=max_image_bytes,
+    )
+    if data and effective_mime:
+        b64 = base64.b64encode(data).decode("ascii")
+        logging.debug(
+            "[openai_prep] image att=%s orig_mime=%s effective_mime=%s "
+            "raw_bytes=%d b64_len=%d magic=%s",
+            att.get("uri") or att.get("path"),
+            att.get("mime_type"),
+            effective_mime,
+            len(data),
+            len(b64),
+            data[:8].hex(),
+        )
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
+        }
+    logging.warning(
+        "Image file not found or unreadable, skipping attachment: %s",
+        att.get("uri") or att.get("path"),
+    )
+    return None
 
 
 def prepare_openai_messages(
@@ -175,6 +263,7 @@ def prepare_openai_messages(
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
     keep_metadata_keys: Tuple[str, ...] = (),
+    convert_system_notices: Optional[bool] = None,
 ) -> List[Any]:
     """Prepare messages for OpenAI-compatible APIs by removing internal-only fields.
 
@@ -182,12 +271,65 @@ def prepare_openai_messages(
     preparation (the result keeps ``{"metadata": {key: value}}`` with only
     those keys). Empty by default, so the result carries no metadata.
 
+    System messages (docs/intent/system_notice_delivery.md):
+
+    - A list that carries the head's system message (metadata
+      ``HEAD_MESSAGE_KEY``) goes through
+      :func:`llm_clients.system_notice.present_system_notices` first. The head's
+      system message stays a system message; later role=system notices become
+      passphrase-tagged user messages in place (keeping their media) when
+      ``convert_system_notices`` is true, and stay system messages otherwise.
+      ``convert_system_notices`` defaults to ``convert_system_to_user`` (the
+      model config flag: true = the model cannot take a mid-conversation
+      system message). The Codex client passes ``convert_system_to_user=False``
+      with ``convert_system_notices=True``: it lifts the system messages into
+      ``instructions`` itself, but the notices must stay in place.
+    - A list without the head's system message (summaries, judgments and other
+      calls that build their own prompt) keeps the older behaviour:
+      ``convert_system_to_user`` turns system messages that follow a non-system
+      message into ``<system>``-tagged user messages, leading ones stay.
+
     Options are keyword-only: several neighbours accept None/bool, so a positional
     call that skips one shifts the rest without any error (NIM once passed
     convert_system_to_user into max_image_embeds, which embedded zero images).
     """
+    from .system_notice import (
+        is_head_system_message,
+        is_presented_system_notice,
+        present_system_notices,
+        system_notice_image_entries,
+        system_notice_indices,
+        system_notice_passphrase,
+        unresolved_system_notice_images,
+        with_system_notice_image_notes,
+    )
+
+    # その送信の head の合言葉 (head の無い列では空)。present_system_notices の後で
+    # 本文へ足す説明の文・要約を伏せるのに使う。
+    passphrase = system_notice_passphrase(messages)
+    # system のまま送る途中のシステム通知の位置 (画像を説明の文に置き換える)。
+    direct_notice_indices: Set[int] = set()
+    # 列が present_system_notices を通ったか — タグ化した
+    # 通知の説明の文をタグの中へ入れて包み直せるのはこのときだけ。
+    notices_presented = any(is_head_system_message(m) for m in messages)
+    if notices_presented:
+        convert_notices = (
+            convert_system_to_user if convert_system_notices is None
+            else convert_system_notices
+        )
+        messages = present_system_notices(
+            messages, accepts_mid_system=not convert_notices,
+        )
+        if not convert_notices:
+            direct_notice_indices = system_notice_indices(messages)
+        # 途中の通知は上で扱い済み。残る system は head とその前の指示だけ
+        # なので、位置による変換は掛けない。
+        convert_system_to_user = False
+
     attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
         messages, max_image_embeds_override=max_image_embeds,
+        supports_images=supports_images,
+        max_image_bytes=max_image_bytes,
     )
 
     prepared: List[Any] = []
@@ -198,9 +340,36 @@ def prepare_openai_messages(
             prepared.append(msg)
             continue
 
+        attachments = attachment_cache.get(idx, [])
+        # タグ化した通知の画像のうち、ファイルが読めないもの (下で説明の文にする)
+        unresolved_notice_images: List[Dict[str, Any]] = []
+        notice_metadata: Any = None
+        if idx in direct_notice_indices:
+            if system_notice_image_entries(msg.get("metadata")):
+                # system のまま送る通知は文字しか持てない。画像は空判定より前に
+                # 説明の文として本文へ足す — 本文が空で画像だけの通知も、画像の
+                # ファイルが消えた通知も落とさない。説明は保存済みの要約か URI
+                # だけで、その場では生成しない (生成の成否で送信本文が揺れない
+                # ように — llm_clients/system_notice.py の system_notice_image_note)。
+                msg = {
+                    **msg,
+                    "content": with_system_notice_image_notes(
+                        content_to_text(msg.get("content") or ""), msg.get("metadata"),
+                        passphrase=passphrase,
+                    ),
+                }
+            attachments = []
+        elif is_presented_system_notice(msg):
+            notice_metadata = msg.get("metadata")
+            unresolved_notice_images = unresolved_system_notice_images(
+                notice_metadata, attachments,
+            )
+
         # 本文の空の user でも、画像を持っていれば画像だけの発言として残す
         # (画像か画像の説明が下の build_message_content_with_attachments で入る)
-        keeps_images = msg.get("role") == "user" and bool(attachment_cache.get(idx))
+        keeps_images = msg.get("role") == "user" and bool(
+            attachments or unresolved_notice_images
+        )
 
         if is_empty_message(msg) and not keeps_images:
             logging.debug("Skipping empty message with role=%s", msg.get("role"))
@@ -216,7 +385,6 @@ def prepare_openai_messages(
         converted_content = normalized[1] if normalized else None
 
         metadata = msg.get("metadata")
-        attachments = attachment_cache.get(idx, [])
         skip_summary = idx in skip_summary_indices
 
         clean_msg: Dict[str, Any] = {}
@@ -249,7 +417,7 @@ def prepare_openai_messages(
         if role != "system":
             seen_non_system = True
 
-        if not attachments:
+        if not attachments and not unresolved_notice_images:
             prepared.append(clean_msg)
             continue
 
@@ -262,6 +430,10 @@ def prepare_openai_messages(
             skip_summary=skip_summary,
             allowed_attachment_keys=allowed_attachment_keys,
             message_index=idx,
+            notice_metadata=notice_metadata,
+            unresolved_notice_images=unresolved_notice_images,
+            passphrase=passphrase,
+            notice_tagged=notices_presented,
         )
         prepared.append(clean_msg)
 

@@ -29,13 +29,21 @@ from .exceptions import (
     SafetyFilterError,
     ServerError,
 )
+from .system_notice import (
+    accepts_mid_conversation_system,
+    present_system_notices,
+    redact_passphrase,
+    system_notice_indices,
+    system_notice_passphrase,
+    with_system_notice_image_notes,
+)
 from .utils import (
     attachment_limit_is_off,
-    compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
     merge_reasoning_strings,
     parse_attachment_limit,
+    select_embedded_attachment_keys,
 )
 
 _log = logging.getLogger(__name__)
@@ -133,6 +141,18 @@ def _build_xai_messages(
     """
     from xai_sdk.chat import assistant, image, system, user
 
+    # xAI は会話の途中の system をその場に置ける。ここで行うのは head の本文の
+    # 合言葉の仮置き文字列の置換と、通知以外の本文に現れた合言葉を伏せることだけ
+    # (llm_clients/system_notice.py、docs/intent/system_notice_delivery.md)。
+    # 途中のシステム通知の位置は、画像の扱い (下の system の分岐) のために控える。
+    notice_indices = system_notice_indices(messages)
+    # その送信の head の合言葉。変換の後で本文へ足す画像の説明・生成した要約を伏せる。
+    passphrase = system_notice_passphrase(messages)
+    messages = present_system_notices(
+        messages,
+        accepts_mid_system=accepts_mid_conversation_system("xai_native", None),
+    )
+
     # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
     # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。
     max_image_embeds = (
@@ -157,8 +177,20 @@ def _build_xai_messages(
         if media_items:
             attachment_cache[idx] = media_items
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(
+    # 画像を実際に埋め込むのは画像対応のモデルの user だけ (下の組み立てと同じ判定)。
+    # バイトの非常弁はこの画像だけを数える。
+    embeddable_indices = {
+        idx for idx in attachment_cache
+        if supports_images
+        and isinstance(messages[idx], dict)
+        and (messages[idx].get("role") or "").lower() == "user"
+    }
+    allowed_attachment_keys = select_embedded_attachment_keys(
         attachment_cache, max_image_embeds, exempt_indices,
+        provider="XAI",
+        messages=messages,
+        embeddable_indices=embeddable_indices,
+        max_image_bytes=max_image_bytes,
     )
 
     result: list = []
@@ -172,6 +204,18 @@ def _build_xai_messages(
 
         raw_content = msg.get("content", "")
         text = content_to_text(raw_content)
+
+        if role == "system" and idx in notice_indices:
+            # system メッセージは文字しか持てない。会話の途中のシステム通知が
+            # 画像を持っていたら、黙って落とさずに説明の文を本文へ足す。画像は
+            # ファイルの有無を問わず metadata から並べる (ファイルが消えた画像
+            # だけの通知も落とさない)。説明は保存済みの要約か URI だけで、その場
+            # では生成しない (生成の成否で送信本文が揺れないように —
+            # llm_clients/system_notice.py の system_notice_image_note)。head と
+            # その前の指示は従来どおり文字だけ。
+            text = with_system_notice_image_notes(
+                text, msg.get("metadata"), passphrase=passphrase,
+            )
 
         # 本文の空の system / assistant は捨てる。user は画像だけの発言が
         # ありうるので、画像も画像の説明も無いと分かってから捨てる。
@@ -207,11 +251,15 @@ def _build_xai_messages(
                             "Image file not found or unreadable: %s",
                             att.get("uri") or att.get("path"),
                         )
-                    # Not embedding — add text summary
-                    note = image_summary_note(
-                        att["path"], att["mime_type"],
-                        att.get("uri", att.get("path", "unknown")),
-                        skip_summary=(idx in skip_summary_indices),
+                    # Not embedding — add text summary. 生成した要約は合言葉の
+                    # 伏せ字 (present_system_notices) の後で足すので、ここで伏せる。
+                    note = redact_passphrase(
+                        image_summary_note(
+                            att["path"], att["mime_type"],
+                            att.get("uri", att.get("path", "unknown")),
+                            skip_summary=(idx in skip_summary_indices),
+                        ),
+                        passphrase,
                     )
                     text = f"{text}\n{note}" if text else note
 

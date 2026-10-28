@@ -31,7 +31,6 @@ from sai_memory.memory.storage import (
     set_thread_title,
     init_db,
     compose_message_content,
-    wrap_system_record_content,
     replace_message_embeddings,
     write_deferred_message_embedding,
     get_messages_with_persona_in_audience,
@@ -834,11 +833,11 @@ class SAIMemoryAdapter:
         C6 の照合機構 (perception_ids 突き合わせ) は、二度書きの口が構造ごと
         消えたので退役した (§10.7 C6。旧実装は git 履歴が保険)。
 
-        戻り値は ``{"content": "<system>…</system>", "media": [...]}``
+        戻り値は ``{"content": 確定文面 (タグ無し), "media": [...]}``
         (消費するものが無い / バッチを確定できなかったときは None)。ラウンド途中の
-        Beat 頭消費 (sea/runtime_llm.py の spell ループ) は、この戻り値をそのまま
-        作業中の messages に append して「バッチに確定した内容」と「続きの生成が
-        見る内容」を一致させる。tx 失敗時は pending のまま残り、次の Beat 頭で
+        Beat 頭消費 (sea/runtime_llm.py の spell ループ) は、この戻り値を
+        role=system のシステム通知にして作業中の messages に append し、「バッチに
+        確定した内容」と「続きの生成が見る内容」を一致させる。tx 失敗時は pending のまま残り、次の Beat 頭で
         再試行される (SEA 監査 S5: 知覚を落とさない)。
 
         ``pulse_id``: 消費した Beat の属する Pulse (呼び出し側が持っていれば)。
@@ -935,11 +934,11 @@ class SAIMemoryAdapter:
             return None
         if not reduced:
             # 回収で全項目が外れた (旧形式の遺物だけが pending だった、等)。
-            # 消費の印は付いたが提示する文面は無い — 空の <system></system> を
+            # 消費の印は付いたが提示する文面は無い — 空の通知を
             # 作業中の messages に足さない (提示側も空バッチは出さない —
             # sea/runtime_context.list_presented_perception_blocks)。
             return None
-        return {"content": f"<system>{text}</system>", "media": media}
+        return {"content": text, "media": media}
 
     def record_realtime_and_recall(
         self,
@@ -2380,11 +2379,12 @@ class SAIMemoryAdapter:
             ) or ""
         original_role = msg.role
         role = "assistant" if original_role == "model" else original_role
-        if isinstance(role, str) and role.lower() == "system":
-            role = "user"
-            # 送る経路 (スペルの結果など) と同じ一枚で包む
-            # (sai_memory.memory.storage.wrap_system_record_content)。
-            content = wrap_system_record_content(content)
+        # role=system の記録 (システム通知) は role=system・タグ無しのまま出す。
+        # 送り先のモデルに合わせた変換はクライアント層 (llm_clients/
+        # system_notice.py) だけが行う (docs/intent/system_notice_delivery.md
+        # 「読み出しと messages 列の組み立て」)。記録と同じものをその場で送る
+        # 経路 (スペルの結果など) は sai_memory.memory.storage.
+        # presented_system_record_content で同じ本文にそろえる。
         payload: Dict[str, Any] = {
             "id": msg.id,
             "thread_id": msg.thread_id,
@@ -2432,20 +2432,21 @@ class SAIMemoryAdapter:
         """committed 応答の paired_action_text を「action → 応答」順に展開する。
 
         payload に paired_action_text があれば、その直前に action メッセージ
-        (role=user、内容は記録時に付与済みの ``<system>...</system>``) を挿入し、
-        応答側 payload からは paired_action_text キーを除く。これで「指示 → 応答」
-        の因果が context に復元される。volatile の action は
-        _payload_from_message_locked で乗らない (= 揮発) ので対象外。
+        (role=system のシステム通知。本文は記録時のタグ無しの指示文 —
+        docs/intent/system_notice_delivery.md) を挿入し、応答側 payload からは
+        paired_action_text キーを除く。これで「指示 → 応答」の因果が context に
+        復元される。volatile の action は _payload_from_message_locked で乗らない
+        (= 揮発) ので対象外。
         """
+        from sai_memory.memory.storage import system_notice_message
+
         expanded: List[dict] = []
         for p in payloads:
             action_text = p.get("paired_action_text")
             if action_text:
-                expanded.append({
-                    "role": "user",
-                    "content": action_text,
-                    "created_at": p.get("created_at"),
-                })
+                action_msg = system_notice_message(action_text, "paired_action")
+                action_msg["created_at"] = p.get("created_at")
+                expanded.append(action_msg)
                 p = {k: v for k, v in p.items() if k != "paired_action_text"}
             expanded.append(p)
         return expanded

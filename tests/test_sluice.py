@@ -351,10 +351,12 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertIn("赴任のことを覚えておく", content)
         self.assertIn(f"core:{cores[0].id}", content)
 
-    # -- case 1b: 記録は event_message 形式のシステム通知 (role=user) ------
+    # -- case 1b: 記録は event_message 形式のシステム通知 (role=system) ----
 
     def test_record_is_event_message_system_narration(self):
         import json as _json
+
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
         result = _sluice_result(
             reflection="赴任のことを覚えておく",
@@ -363,11 +365,12 @@ class SluiceRunTest(_AdapterTestBase):
         self._run(result)
 
         role, content, metadata = _read_sluice_record_full(self.adapter)
-        # プロンプト無し assistant 発話ではなく <system> 包みのナレーション。
-        self.assertEqual(role, "user")
-        self.assertTrue(content.startswith("<system>"))
-        self.assertTrue(content.rstrip().endswith("</system>"))
-        self.assertIn("記憶整理の節目 — スルースの採取判断:", content)
+        # プロンプト無し assistant 発話ではなく、システム通知のナレーション
+        # (role=system・タグ無し本文 — docs/intent/system_notice_delivery.md)。
+        self.assertEqual(role, "system")
+        self.assertNotIn("<system", content)
+        self.assertTrue(content.startswith("記憶整理の節目 — スルースの採取判断:"))
+        self.assertEqual(_json.loads(metadata)[SYSTEM_NOTICE_KEY], "sluice_capture")
         # reflection は persona_name プレフィックス付きで載る (全文、省略なし)。
         self.assertIn("エアの判断: 赴任のことを覚えておく", content)
         # タグは internal / event_message / sluice の 3 つ。
@@ -3499,7 +3502,7 @@ class SluiceInputEstimateTest(unittest.TestCase):
     """送る中身の見積もりと上限 (docs/issues/sluice_skip_ignores_model_context.md 設計 1)。
 
     画像は LLM クライアントが実際に送る形で数える — 埋め込むのは直近の上限枚数
-    (モデル設定 → provider の環境変数 → 既定 4) と、上限に数えない
+    (モデル設定 → provider の環境変数 → どちらも無ければ上限なし) と、上限に数えない
     ``__visual_context__`` の画像。埋め込まない画像は、クライアントが注記
     (``[画像: URI] 要約``) に置き換えるなら注記として数える。音声・動画も、
     注記に置き換えるクライアントでは注記として数える (レビュー第一巡の 3)。
@@ -3510,7 +3513,7 @@ class SluiceInputEstimateTest(unittest.TestCase):
     その字数、無ければ 300 字で数える (レビュー第二巡の 2)。
     """
 
-    #: 画像に対応する OpenAI 互換のモデル (上限は環境変数 → 既定 4)。
+    #: 画像に対応する OpenAI 互換のモデル (上限は環境変数 → 無ければ上限なし)。
     VISION = "estimate-openai-vision"
     #: 画像に対応しない OpenAI 互換のモデル。
     TEXT_ONLY = "estimate-openai-text"
@@ -3546,12 +3549,17 @@ class SluiceInputEstimateTest(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
-        # 実行環境の .env が上限を変えていても、既定 4 から始める。
+        # 実行環境の .env が上限・非常弁を変えていても、既定 (枚数の上限なし、
+        # 非常弁は 12MB / 6MB) から始める。
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
         for key in list(os.environ):
-            if key.startswith("SAIVERSE_") and key.endswith("ATTACHMENT_LIMIT"):
+            if key.startswith("SAIVERSE_") and (
+                key.endswith("ATTACHMENT_LIMIT")
+                or key.endswith("ATTACHMENT_BYTE_CEILING")
+                or key.endswith("ATTACHMENT_BYTE_FLOOR")
+            ):
                 os.environ.pop(key)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -3642,9 +3650,37 @@ class SluiceInputEstimateTest(unittest.TestCase):
             2 + self.OPENAI_IMAGE * 3 + self._notes([b, d]) + 4 * 2,
         )
 
+    def test_without_an_explicit_limit_every_image_is_counted_as_embedded(self):
+        """枚数の上限を明示しなければ (既定)、画像は全部を埋め込みとして数え、
+        注記は無い (小さい画像なのでバイトの非常弁も開かない)。"""
+        many = self._image_messages(100)
+        self.assertEqual(
+            sluice._estimate_input_tokens(many, self.VISION),
+            self.OPENAI_IMAGE * 100 + 4 * 100,
+        )
+
+    def test_byte_valve_replaced_images_are_counted_as_notes(self):
+        """クライアントと同じバイトの非常弁 (llm_clients/utils.attachment_positions_
+        to_replace) が置き換える古い画像は、注記として数える。部屋の様子の画像は
+        非常弁に数えず、埋め込みのまま。"""
+        from llm_clients.utils import estimate_inline_image_bytes
+
+        messages = self._image_messages(5) + self._image_messages(1, visual_context=True)
+        unit = estimate_inline_image_bytes(Path(self._uri(0)), "image/png")
+        # 天井 = 画像 3.5 枚分、床 = 1.5 枚分: 4 枚目で開いて古い 3 枚を置き換える。
+        os.environ["SAIVERSE_OPENAI_ATTACHMENT_BYTE_CEILING"] = str(int(unit * 3.5))
+        os.environ["SAIVERSE_OPENAI_ATTACHMENT_BYTE_FLOOR"] = str(int(unit * 1.5))
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.VISION),
+            self.OPENAI_IMAGE * (2 + 1)
+            + self._notes(self._uri(i) for i in range(3))
+            + 4 * 6,
+        )
+
     def test_images_over_the_embed_limit_are_counted_as_notes(self):
-        """上限 (既定 4) を超える古い画像は、埋め込みではなく注記として数える。
-        1 通に複数付いていても合計で数える (先頭の画像から枠に入る)。"""
+        """上限 (環境変数で 4 を明示) を超える古い画像は、埋め込みではなく注記として
+        数える。1 通に複数付いていても合計で数える (先頭の画像から枠に入る)。"""
+        os.environ["SAIVERSE_ATTACHMENT_LIMIT"] = "4"
         many = self._image_messages(100)
         self.assertEqual(
             sluice._estimate_input_tokens(many, self.VISION),
@@ -3666,6 +3702,7 @@ class SluiceInputEstimateTest(unittest.TestCase):
         )
 
     def test_visual_context_images_are_counted_regardless_of_the_limit(self):
+        os.environ["SAIVERSE_ATTACHMENT_LIMIT"] = "4"
         messages = (
             self._image_messages(10)
             + self._image_messages(3, visual_context=True)
@@ -3890,10 +3927,11 @@ class SluiceInputEstimateTest(unittest.TestCase):
             "est-anthropic-1": (1, "anthropic", True),
             "est-anthropic-0": (0, "anthropic", True),
             "est-anthropic-env": (5, "anthropic", True),
-            "est-openai-zero": (4, "openai", True),
+            # 環境変数も無いので枚数の上限なし (10 枚全部を埋め込む)
+            "est-openai-zero": (10, "openai", True),
             "est-nim": (1, "nvidia_nim", True),
-            "est-nim-zero": (4, "nvidia_nim", True),
-            "est-codex": (4, "openai_codex", True),
+            "est-nim-zero": (10, "nvidia_nim", True),
+            "est-codex": (10, "openai_codex", True),
             "est-xai": (2, "xai", True),
             "est-ollama": (0, "ollama", False),
             "est-protocol": (0, "openai", False),
@@ -4064,6 +4102,44 @@ class SluiceInputEstimateTest(unittest.TestCase):
                         sluice._estimate_input_tokens(messages, model), 4 * 2 + media,
                     )
 
+    def test_gemini_sends_no_media_on_tool_messages(self):
+        """Gemini は role tool と tool_calls を持つメッセージを関数呼び出しの部品に
+        組み、画像・音声を載せない (gemini.py の _convert_messages)。画像は枠だけ
+        使い、埋め込みにも注記にも非常弁の候補にも数えない。OpenAI 互換は同じ
+        メッセージの画像を注記にする。"""
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._role_models()
+        tool_img, call_img, tool_audio, usr = (
+            self._file(name) for name in ("tool-img", "call-img", "tool-audio", "usr")
+        )
+        messages = [
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "image", "path": usr}]}},
+            {"role": "assistant", "content": "", "tool_calls": [], "metadata": {"media": [
+                {"type": "image", "path": call_img}]}},
+            {"role": "tool", "content": "", "metadata": {"media": [
+                {"type": "image", "path": tool_img},
+                {"type": "audio", "path": tool_audio},
+            ]}},
+        ]
+        base = 4 * 3
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, "role-gemini"),
+            base + estimate_image_tokens("gemini"),
+        )
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.VISION),
+            base + self.OPENAI_IMAGE + self._notes([call_img, tool_img, tool_audio]),
+        )
+        # tool の画像も枠は使う: 上限 1 枚なら新しい tool の画像が枠を取り、
+        # 古い user の画像は枠の外で注記になる (クライアントと同じ)。
+        with patch.dict(os.environ, {"SAIVERSE_GEMINI_ATTACHMENT_LIMIT": "1"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, "role-gemini"),
+                base + self._notes([usr]),
+            )
+
     def test_audio_and_video_notes_follow_each_client(self):
         """音声・動画は、対応しないクライアントが注記に置き換える。
 
@@ -4164,6 +4240,9 @@ class SluiceInputEstimateTest(unittest.TestCase):
         messages.append(media_message("gone", missing=True))
         messages.append(media_message("voice", kind="audio", summary_chars=510))
 
+        # 枚数の上限で古い画像が注記になる組み立てと見積もりを突き合わせるので、
+        # 上限を明示する (既定は上限なし)。
+        os.environ["SAIVERSE_OPENAI_ATTACHMENT_LIMIT"] = "4"
         _, _, _, allowed = scan_message_metadata(messages)
         self.assertEqual(len(allowed), 4 + 1)  # 新しい 3 枚 + assistant + 部屋
 
@@ -4203,6 +4282,117 @@ class SluiceInputEstimateTest(unittest.TestCase):
         )
         self.assertEqual(media_estimate, self.OPENAI_IMAGE * sent_images + noted_estimate)
         self.assertGreaterEqual(noted_estimate, sum(len(text) for text in note_texts))
+
+    # -- 会話の途中のシステム通知のメディア (PR #431 の Codex レビュー P2) -----------
+
+    #: head の合言葉 (llm_clients/system_notice.system_notice_passphrase が読む)。
+    PASSPHRASE = "AbCdEf123456"
+
+    def _head(self):
+        """head の system メッセージ (これより後ろの role=system が通知になる)。"""
+        from sai_memory.memory.storage import (
+            HEAD_MESSAGE_KEY,
+            SYSTEM_NOTICE_PASSPHRASE_KEY,
+        )
+
+        return {"role": "system", "content": "head", "metadata": {
+            HEAD_MESSAGE_KEY: True, SYSTEM_NOTICE_PASSPHRASE_KEY: self.PASSPHRASE,
+        }}
+
+    def test_notice_media_note_is_counted_even_without_the_file(self):
+        """ファイルの無い画像を持つ通知も、クライアントが足す説明の文 (保存済みの
+        要約ごと) で数える。Codex の再現: 存在しない画像 + 長い保存済みの要約で、
+        見積もりが説明の文の字数を下回っていた。"""
+        from llm_clients.openai_message_preparer import prepare_openai_messages
+
+        self._role_models()
+        missing = str(self.media_dir / "gone.png")
+        summary = "要" * 5000
+
+        def notice(media):
+            return {"role": "system", "content": "部屋の様子", "metadata": {
+                "media": media,
+            }}
+
+        messages = [self._head(), notice([
+            {"type": "image", "path": missing, "summary": summary},
+        ])]
+        bare = [self._head(), notice([])]
+        note = f"[画像: {missing}] {summary}"
+        for model in (self.VISION, "role-gemini", "role-anthropic", "role-xai"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(messages, model)
+                    - sluice._estimate_input_tokens(bare, model),
+                    len(note) + 1,
+                )
+        # 実物の OpenAI 互換の組み立て (system のまま届ける通知) が送る字数を
+        # 見積もりが下回らない。
+        prepared = prepare_openai_messages(messages, supports_images=True)
+        sent_chars = sum(len(str(msg.get("content") or "")) for msg in prepared)
+        self.assertIn(summary, str(prepared[-1]["content"]))
+        self.assertGreaterEqual(
+            sluice._estimate_input_tokens(messages, self.VISION), sent_chars,
+        )
+
+    def test_embedded_notice_image_counts_both_image_and_note(self):
+        """埋め込める通知の画像は、部品 (画像の見積もり) と説明の文の両方で数える
+        (クライアントはタグの中の説明の文に加えて部品も送る)。"""
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._role_models()
+        path = self._file("notice.png")
+        summary = "窓辺に猫がいる"
+
+        def notice(media):
+            return {"role": "system", "content": "部屋の様子", "metadata": {
+                "media": media,
+            }}
+
+        messages = [self._head(), notice([
+            {"type": "image", "path": path, "summary": summary},
+        ])]
+        bare = [self._head(), notice([])]
+        note = f"[画像: {path}] {summary}"
+        for model, provider in (("role-gemini", "gemini"), ("role-anthropic", "anthropic")):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(messages, model)
+                    - sluice._estimate_input_tokens(bare, model),
+                    estimate_image_tokens(provider) + len(note) + 1,
+                )
+
+    def test_ordinary_message_missing_image_is_still_not_counted(self):
+        """通知でない普通のメッセージの、ファイルの無い画像は従来どおり数えない
+        (クライアントも iter_image_media が落とすので送らない)。head の有無を問わない。"""
+        missing = str(self.media_dir / "gone.png")
+        media = {"media": [{"type": "image", "path": missing, "summary": "要" * 5000}]}
+        message = {"role": "user", "content": "見て", "metadata": media}
+        bare = {"role": "user", "content": "見て"}
+        for prefix in ([], [self._head()]):
+            with self.subTest(head=bool(prefix)):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(prefix + [message], self.VISION),
+                    sluice._estimate_input_tokens(prefix + [bare], self.VISION),
+                )
+
+    def test_headless_notice_mark_still_counts_the_note(self):
+        """head の無い列でも、通知の印を持つメッセージの画像はクライアント
+        (OpenAI 互換・Anthropic・Gemini) が説明の文にするので数える。"""
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+        missing = str(self.media_dir / "gone.png")
+        summary = "要" * 500
+        message = {"role": "user", "content": "見て", "metadata": {
+            SYSTEM_NOTICE_KEY: "building_event",
+            "media": [{"type": "image", "path": missing, "summary": summary}],
+        }}
+        bare = {"role": "user", "content": "見て"}
+        self.assertEqual(
+            sluice._estimate_input_tokens([message], self.VISION)
+            - sluice._estimate_input_tokens([bare], self.VISION),
+            len(f"[画像: {missing}] {summary}") + 1,
+        )
 
     def test_limit_is_ninety_percent_of_context_minus_output_budget(self):
         self._patch_models({

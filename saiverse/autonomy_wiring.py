@@ -783,7 +783,7 @@ def handle_scheduled_judgment(
 ) -> Dict[str, Any]:
     """PersonaSchedule (META_PLAYBOOK=judgment_*) の発火を判断点起動へ変換する。
 
-    通常のスケジュールは「<system> プロンプト + Playbook」の submit_schedule で
+    通常のスケジュールは「スケジュール発火文 + Playbook」の submit_schedule で
     走るが、判断点 Playbook は発火時に judgment_points が組む動的 args
     (situation_text / response_schema) が必須のため、この専用経路を通す。
 
@@ -1256,7 +1256,7 @@ def _engage_recovered_user_conversation(
     帳簿が一致する。
 
     外部イベント用の再構成 (:func:`_dispatch_recovered_event_response`) をここで
-    使ってはいけない —— ユーザーの発話が ``<system>[外部イベント通知]`` として
+    使ってはいけない —— ユーザーの発話が ``[外部イベント通知]`` のシステム通知として
     流し込まれ、応答は届くのに会話の出来事が開かない (2026-08-14 Codex 指摘 F4)。
 
     **既にこの会話区間で応答が出ている**なら何もしない —— ライブ経路が先に応対
@@ -1318,7 +1318,7 @@ def _dispatch_recovered_event_response(
     (組み立て済みの user_input / meta_playbook / args / event_type) をそのまま
     再送する — 初回とまったく同じ入力で応対が走る。envelope の無い古い payload
     (この機構の導入前の行) だけ、``event_text`` から同じ形の
-    ``<system>[外部イベント通知]`` Pulse へ縮退する。建物はペルソナの現在地 —
+    ``[外部イベント通知]`` Pulse へ縮退する。建物はペルソナの現在地 —
     イベント到着時から移動していても、応対は「いま居る場所」で行うのが自然。
 
     submit は型付き経路 (``dispatch_schedule_fire``) で行い、顛末を
@@ -1354,10 +1354,10 @@ def _dispatch_recovered_event_response(
         args = envelope.get("args")
     else:
         event_text = str(context.get("event_text") or "")
-        user_input = f"""<system>
-[外部イベント通知]
-{event_text}
-</system>"""
+        # タグ無しの本文。記録は sea/runtime.py の run_meta_user が role=system で
+        # 残す (docs/intent/system_notice_delivery.md 不変条件 1)。
+        user_input = f"""[外部イベント通知]
+{event_text}"""
         event_type = None
         meta_playbook = "track_user_conversation"
         args = None

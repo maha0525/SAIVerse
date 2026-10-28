@@ -281,7 +281,9 @@ class RoomBundleCompositionTest(_EnvTestBase):
                 patch.object(gvc, "_get_building_image_path", return_value=None):
             msgs = gvc.get_visual_context(building_id="b1")
         self.assertTrue(msgs)
-        self.assertIn("<system>", msgs[0]["content"])
+        self.assertIn("# ビジュアルコンテキスト", msgs[0]["content"])
+        # タグで囲まない (head の自分の姿と同じ — docs/intent/system_notice_delivery.md)
+        self.assertNotIn("system>", msgs[0]["content"])
         self.assertNotIn("あの時の思い出", msgs[0]["content"])
 
 

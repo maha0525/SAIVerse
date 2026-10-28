@@ -1974,8 +1974,9 @@ def _life_boundary_outbox_items(
 
     配送先 (ペルソナの adapter) が無ければ空 — 通知なしで決着する (ペルソナ
     未ロード等は再試行しても届く見込みが無く、失敗扱いにすると節目が永久に
-    閉じない)。様式は Track 切替通知と同じ (``<system>`` ラップの user
-    メッセージ、event_message タグ、キャッシュ無破壊 — life.md §9.3)。
+    閉じない)。様式はシステム通知 (role=system・タグ無し本文 + 識別の印、
+    docs/intent/system_notice_delivery.md 不変条件 1)、event_message タグ、
+    キャッシュ無破壊 (末尾への追記のみ — life.md §9.3)。
     本文・時刻は enqueue 時点で凍結する (台帳 不変条件 6) — 配送が遅延しても
     節目の時刻がずれない。時刻は仮想クロック (clock.now) を尊重しつつ
     tz-aware UTC ISO にする (naive だと adapter が UTC と解釈して ±9h ずれる)。
@@ -1985,12 +1986,17 @@ def _life_boundary_outbox_items(
     if adapter is None or not hasattr(adapter, "append_persona_message"):
         return []
     from datetime import timezone
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     timestamp = clock.now().astimezone(timezone.utc).isoformat()
     message = {
-        "role": "user",
-        "content": f"<system>[システム通知] {text}</system>",
+        "role": "system",
+        "content": f"[システム通知] {text}",
         "timestamp": timestamp,
-        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
+        "metadata": {
+            "tags": ["internal", "event_message", "day_plan"],
+            SYSTEM_NOTICE_KEY: "day_plan",
+        },
     }
     return [{
         "target": "saimemory.append",

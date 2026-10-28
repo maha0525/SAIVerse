@@ -103,7 +103,8 @@ def inject_persona_event(
                 args_json,
             )
 
-    # Build enriched user input with <system> tag
+    # Build enriched user input (system notice body, no tags — the schedule
+    # pulse records it as role=system: docs/intent/system_notice_delivery.md)
     # Extract author info from playbook_args for richer context
     extra_lines = []
     if playbook_args:
@@ -120,15 +121,11 @@ def inject_persona_event(
 
     extra_block = "\n".join(extra_lines)
     if extra_block:
-        user_input = f"""<system>
-[外部イベント通知]
-{extra_block}
-</system>"""
+        user_input = f"""[外部イベント通知]
+{extra_block}"""
     else:
-        user_input = f"""<system>
-[外部イベント通知]
-{event_description}
-</system>"""
+        user_input = f"""[外部イベント通知]
+{event_description}"""
 
     # selected_playbook 指定経路は Phase 3 移行に伴い一時無効化 (旧 meta_user_manual
     # 経路を削除したため)。Phase 3 B 残件 (handoff_2026-05-08 作業 2) で
@@ -148,7 +145,7 @@ def inject_persona_event(
     dispatch_state = {"ok": True}
 
     def _dispatch_direct() -> None:
-        """従来の応対経路: イベントを <system> プロンプト付き Pulse として submit。"""
+        """従来の応対経路: イベントをシステム通知の入力付き schedule Pulse として submit。"""
         ok = dispatcher.dispatch_phenomenon_event(
             persona_id=persona_id,
             building_id=building_id,

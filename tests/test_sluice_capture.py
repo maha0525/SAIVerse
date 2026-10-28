@@ -497,9 +497,8 @@ class CaptureApplyTest(_CaptureTestBase):
         ).fetchone()
         self.assertIsNotNone(row)
         role, content, scope, line_role = row
-        self.assertEqual(role, "user")
-        self.assertTrue(content.startswith("<system>"))
-        self.assertIn("過去の会話の読み返し — スルースの採取判断", content)
+        self.assertEqual(role, "system")
+        self.assertTrue(content.startswith("過去の会話の読み返し — スルースの採取判断"))
         self.assertIn("エアの判断: 読み返して思い出した", content)
         self.assertEqual(scope, "discardable")
         self.assertEqual(line_role, "main_line")
@@ -513,8 +512,8 @@ class CaptureApplyTest(_CaptureTestBase):
         ).fetchall()
         self.assertEqual(len(digest_rows), 1)
         d_role, d_content, d_scope, d_line_role = digest_rows[0]
-        self.assertEqual(d_role, "user")
-        self.assertTrue(d_content.startswith("<system>"))
+        self.assertEqual(d_role, "system")
+        self.assertNotIn("<system", d_content)
         self.assertIn("過去の会話", d_content)
         self.assertIn("読み返し", d_content)
         self.assertIn("手帳のメモ 1 件", d_content)

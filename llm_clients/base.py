@@ -128,11 +128,25 @@ class LLMClient:
         if self.supports_audio and self.supports_video:
             return messages
 
+        from .system_notice import (
+            system_notice_indices,
+            system_notice_media_notes,
+            system_notice_passphrase,
+        )
         from .utils import inject_audio_video_summaries
         from saiverse.media_utils import iter_audio_media, iter_video_media
 
+        # 会話の途中のシステム通知 (この時点ではまだ role=system) の音声・動画は、
+        # その場で要約を生成せず、保存済みの要約か URI だけの説明にする — 生成の
+        # 成否で同じ記録から組む送信本文が揺れないように
+        # (docs/intent/system_notice_delivery.md 不変条件 6、画像と同じ規則)。
+        # 説明の文はこの後の present_system_notices で本文ごと伏せ字とタグの変換を
+        # 通る (この時点では通知の本文の一部として足すので、タグの中に入る)。
+        notice_indices = system_notice_indices(messages)
+        passphrase = system_notice_passphrase(messages)
+
         new_msgs: List[Dict[str, Any]] = []
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 new_msgs.append(msg)
                 continue
@@ -143,11 +157,35 @@ class LLMClient:
 
             audio_items = iter_audio_media(metadata) if not self.supports_audio else []
             video_items = iter_video_media(metadata) if not self.supports_video else []
+            content = msg.get("content", "")
+
+            if idx in notice_indices and isinstance(content, str):
+                # 通知は metadata の記述だけから、metadata の並びの順に説明の文を
+                # 並べる (system_notice_media_notes)。iter_audio_media /
+                # iter_video_media はファイルが無い項目を返さないので、それに頼ると
+                # ファイルの有無で説明の文の数と順序が変わり、音声・動画だけの
+                # 通知は本文の空な通知として消える。
+                new_text = content
+                kinds = tuple(
+                    kind for kind, supported in (
+                        ("audio", self.supports_audio), ("video", self.supports_video),
+                    )
+                    if not supported
+                )
+                for note in system_notice_media_notes(metadata, kinds, passphrase=passphrase):
+                    new_text = f"{new_text}\n{note}" if new_text else note
+                if new_text == content:
+                    new_msgs.append(msg)
+                    continue
+                new_msg = dict(msg)
+                new_msg["content"] = new_text
+                new_msgs.append(new_msg)
+                continue
+
             if not audio_items and not video_items:
                 new_msgs.append(msg)
                 continue
 
-            content = msg.get("content", "")
             if not isinstance(content, str):
                 # Complex content (e.g. tool_calls); skip injection rather than risk
                 # breaking the structure.

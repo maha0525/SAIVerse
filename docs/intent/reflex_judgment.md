@@ -37,7 +37,7 @@ Jev の実験 (docs/intent/auto_recall_jev_rerank.md) で最初の利用者 (自
 | [OpenRouter](https://openrouter.ai/typesafe/jev-1.13) | `/api/alpha/decisions` (alpha) | 正典とほぼ同一 | 同上 | OpenRouter のキー |
 | [localjev](https://github.com/githubnext/localjev) (セルフホスト) | `/v1/systemone` | 正典と互換 | 3 型すべて | 任意 (Bearer、無しも可) |
 | [simple-jev (Featherless)](https://simple-jev.featherless.ai/) | `/v1/classifier` | 中身は近似・応答の欄が異なる | choice のみ確認 | Featherless のキー ($0.03/1M 入力) |
-| [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) (public beta、2026-10-07 追加) | `/v1/decisions` | 異なる — 質問は配列で name 付き、型名 predicate、criteria 欄なし、状況は文字列の input。答えも name 付きの配列 | predicate / choice / score | OpenAI のキー ($0.10/1M 入力、出力は課金なし) |
+| [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) (2026-10-22 正式提供) | `/v1/decisions` | 異なる — 質問は配列で name 付き、型名 predicate、criteria 欄なし、状況は文字列の input。答えも name 付きの配列 | predicate / choice / score | OpenAI のキー (通常入力 $0.10 / キャッシュ読取 $0.01 / 30分書込 $0.125 per 1M、出力は課金なし。長文脈は下記) |
 
 ほかに [vLLM に System One 形式の判定モードを足す PR](https://github.com/vllm-project/vllm/pull/57250)
 が open (DiffusionGemma 系。例示サーバーは `/v1/systemone` 互換)。
@@ -52,6 +52,42 @@ OpenAI Decisions は、リクエストの組み立て方そのものが違う最
 `openai_decisions`) で吸収する。System One の形が本流で、呼び出し側が組む質問と
 状況は変えず、OpenAI へは送る直前に変換し、受け取った答えを System One の形へ
 読み戻す。分岐はこの宣言値だけで行い、提供元の名前や URL では分岐しない。
+
+### Decisions の使用量と料金 (2026-10-23 確認)
+
+利用者が見る反射判断の費用は、応答の使用量 → 方言の読み戻し → 既存の
+`UsageTracker` / `calculate_cost` → 保存済みの費用 → 使用量画面、という経路で決める。
+通常応答も、締切後に届いて答えを使わない応答も、同じ読み戻しで一度だけ記帳する。
+答えの不備や拒否があっても、受け取った使用量は答えの検算より先に記帳する。
+
+- [公式ガイド](https://developers.openai.com/api/docs/guides/decisions#pricing-and-availability)
+  と [API リファレンス](https://developers.openai.com/api/reference/resources/decisions/methods/create)
+  の `usage.input_tokens` はキャッシュ読取・書込を含む総数。
+  `usage.input_tokens_details.cached_tokens` / `cache_write_tokens` だけを既存の会計の
+  同名欄へ展開し、通常入力は `input_tokens - cached_tokens - cache_write_tokens` とする。
+  書込分を総入力へ足したり、通常入力と二重課金したりしない。
+- 同梱の `openai-decisions-gpt-6-luna` に上表の単価を持たせる。Decisions の保持期間は
+  現在 `30m` のみで、通常の Responses にある `12h` は追加しない。
+- ガイドは長文脈の入力料金倍率も適用すると明記している。
+  [GPT-6 Luna の料金](https://developers.openai.com/api/docs/models/gpt-6-luna) に従い、
+  **キャッシュ込みの入力総数が 272,000 を超える**と、リクエスト全体の通常入力・読取・
+  書込はそれぞれ $0.20 / $0.02 / $0.25 per 1M。ちょうど 272,000 は通常料金。
+  出力はゼロのまま。これは会計上の境界で、既存の `context_length: 272000` を広げたり、
+  それを超える要求が実際に受け付けられると保証したりする変更ではない。
+- キャッシュ欄は総数の欄と同じ一つの規則 (bool を除く有限の非負数) で読む。内訳や
+  欄の欠落 (null 含む) はゼロ省略・旧応答として正常に扱い、警告せず従来どおり入力
+  総数で概算する。欠落でない不正値が一つでもあれば警告して内訳全体を捨て、内訳
+  合計が総入力を超えるか総入力が無い場合も内訳を使わない — 壊れていると分かった
+  内訳の残り半分を、正確な記録のように残さない。
+  正しい答えを会計の不備で失敗にせず、読める使用量を従来どおり記帳する。
+  **内訳を欠いた費用は通常入力扱いの概算で、実請求の確定値ではない**。
+  未知の応答欄や不正な値そのものはログに流さない。
+- 既定の役割・利用者のモデル上書き・保存済み `COST_USD` は変えない。地域指定先の
+  追加料金は今回の標準 `api.openai.com` 定義には含めない。
+
+検証は偽 HTTP と隔離 DB で、読取のみ・書込のみ・混在・長文脈の境界・無料の出力・
+締切後の一度だけの記帳・欠落/不正内訳・System One への非波及を確認する。
+本物の Decisions 呼び出しと請求額の照合はしていない。
 
 ## 設計
 
@@ -564,3 +600,8 @@ ID) に `{type, instructions, criteria}` を添える形。
   可能性がある。応答の欄の実物は、本物の API で確かめていない。ガイドの料金が変わったら見直す。
 - 2026-10-08 (PR #378 を develop へマージ、まはーの確認後): 台帳の行は「PR でまはーの確認を
   待っている」から「develop に入った、次はまはーの実機評価」に替えた (台帳の更新は 2026-10-09)。
+- 2026-10-23: 10 月 22 日の正式提供後の公式ガイドと公開 API リファレンスで、
+  キャッシュの読取・30分書込への課金と内訳の欄を確認した。10 月 8 日の保留条件
+  「ガイドの料金が変わったら見直す」に該当するため、通常応答・締切後応答の内訳を
+  共通で取り込み、同梱単価と長文脈の料金帯を追加した。上記「Decisions の使用量と料金」
+  が現在の契約で、10 月 8 日の判断は当時の資料に基づく経緯として残す。

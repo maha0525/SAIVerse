@@ -25,6 +25,10 @@
 
 この上書きは `installer_revision` を `2` に上げて入れた。完了記録の `installer_revision` が一致しない既存の導入は、次の setup・起動で依存を入れ直す。`searxng_pin.json` のコミット自身が修正済みの版を要求するようになったら、その項目を `REQUIREMENT_FLOORS` から外す (2026-10-22 時点で上流 master も certifi 2026.7.22 のまま)。
 
+### ダウンロード時の証明書の切り替え (2026-10-26)
+
+OS の証明書ストアが空の macOS (python.org 版 Python の既知の挙動) では、固定版の ZIP の取得 (`download_searxng_source.py` の urllib) が `CERTIFICATE_VERIFY_FAILED` で失敗する。`searxng_install.py` の `main()` の先頭で `saiverse/tls_trust.py` の `ensure_default_https_trust()` を呼び、その環境でだけ、検証に使う証明書を同梱の certifi へ切り替える。経緯と残りの検証は [../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md)。SearXNG のサーバー本体が TLS で検証に使う証明書 (上の certifi の下限の話) は、この変更では変わらない — サーバーは `run_searxng_server.ps1` / `.sh` から直接起動され、インストーラーで設定した環境変数を引き継がない。画面の Update ボタン経由の再起動が本体 (`main.py`) の `SSL_CERT_FILE` を引き継ぐのは 2026-09-02 からの挙動で、requirements.lock の certifi は上の下限と同じ版。
+
 ## 不変条件と責任
 
 - 既定の取得先に master や可変タグを使わない。明示的な SEARXNG_REF も完全なコミット SHA に限定する。

@@ -10,7 +10,7 @@
 一つのターン（パルス）の中で LLM を二回以上呼ぶとき、二回目以降の呼び出しでは、一回目の応答とその後の往復を送る列の後ろに積んで送る。この「ターン内で積む形」と、次のターンで同じ出来事を履歴（SAIMemory）から復元したときの形が、次の二つの場面で違う。
 
 1. **native tool の往復**: ターン内では、tool 呼び出しの assistant 行（本文が空で `tool_calls` を持つ）と、その結果の tool 行を積む。次のターンで履歴から復元すると、assistant 行は本文が JSON の行になり、tool 結果の行は無くなる。
-2. **自律パルスの通常の LLM ノードの間**: ターン内では、前のノードの発言を assistant 行のまま積む。次のターンで履歴から復元すると、自律の発言は user ロールの自律記録（`<system>[自律行動の記録]…`）になる。
+2. **自律パルスの通常の LLM ノードの間**: ターン内では、前のノードの発言を assistant 行のまま積む。次のターンで履歴から復元すると、自律の発言は自律行動の記録（`[自律行動の記録]…`）になる。2026-10-28 から、この記録は role=system のシステム通知（`__system_notice__` = `autonomous_record`、タグ無し本文 — `sea/runtime_context.py` の `_reframe_autonomous_messages`、[system_notice_delivery.md](../intent/system_notice_delivery.md)）で、それより前は `<system>` で包んだ user ロールだった。形が違うことに変わりはない。
 
 形が違うと、二回目以降の呼び出しで送った列は、次のターンの最初の呼び出しの列の先頭と一致しない。どのモデルでも（`cache.persist_realtime_and_recall` の ON/OFF を問わず）、ターン内の往復の分だけ、次のターンのキャッシュが当たらない。
 

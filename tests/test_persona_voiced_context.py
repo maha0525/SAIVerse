@@ -148,6 +148,9 @@ def test_persona_head_sections_are_fixed():
         # 2026-10-12: アドオンからの案内 (一度リアルタイム情報に載せたが、
         # スペル一覧と同じ head + 差分通知の道へ移した。docs/intent/addon_speak_hooks.md)。
         "addon_guidance",
+        # 2026-10-28: システム通知の読み方 (届き方はモデルで決まるので文面も
+        # モデルごと。docs/intent/system_notice_delivery.md)。
+        "system_notice",
     }
 
 

@@ -55,6 +55,7 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `XAI_API_KEY` | xAI (Grok) |
 | `OPENROUTER_API_KEY` | OpenRouter |
 | `SARASHINA_API_KEY` | Sarashina (SB Intuitions)。[取得・設定方法](../api-keys/sarashina.md) |
+| `META_API_KEY` | Meta (Muse)。Meta の文書が例示する `MODEL_API_KEY` は読まない。[取得・設定方法](../api-keys/meta.md) |
 | `OLLAMA_BASE_URL` | ローカル Ollama サーバー URL（未設定なら `OLLAMA_HOST` を見る） |
 
 プロバイダごとの `api_key_env` は [プロバイダ一覧](providers.md) を参照。Kimi (Moonshot) のようにユーザーが自分で追加するプロバイダのキー名は、そのプロバイダ設定の `api_key_env` に書いた名前がそのまま使われる（組み込みの決め打ちは無い。手順は [custom_providers.md](../custom_providers.md) ケース 3）。
@@ -132,7 +133,9 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
 | `SAIVERSE_REFLEX_JUDGMENT_MODEL` | グローバル設定の反射判断のモデル（未設定なら反射判断は動かない）。詳細は上の「反射判断」節 |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（秒、既定 300、`0` で無制限）。モデル設定に `timeout`（秒）があればそちらが優先 |
-| `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4）。モデル設定 `cache.persist_realtime_and_recall` が `true` のモデルへ送るときは使わない（画像をすべて画像のまま送る — `docs/intent/persist_realtime_and_recall.md` §4.2） |
+| `SAIVERSE_ATTACHMENT_LIMIT` | 送る画像の枚数の上限。**未設定（既定）なら枚数では絞らず、すべての画像を画像のまま送る。** 数を設定したときだけ、新しい順にその枚数を画像のまま送り、それより古い画像を要約の文字に置き換える（新しい画像が来るたびに古い画像が文字に変わるので、キャッシュの前方一致が割れる — [issue](../issues/image_attachment_limit_breaks_cache_prefix.md)）。`0` はすべての画像を要約の文字にする。整数でない値は警告を出して未設定と同じ扱い（枚数の上限なし）。プロバイダごとの `SAIVERSE_{GEMINI,OPENAI,ANTHROPIC,XAI}_ATTACHMENT_LIMIT` が優先。モデル設定 `cache.persist_realtime_and_recall` が `true` のモデルへ送るときは設定しても使わない（`docs/intent/persist_realtime_and_recall.md` §4.2） |
+| `SAIVERSE_ATTACHMENT_BYTE_CEILING` | 画像のバイトの非常弁の天井（バイト、既定 `12582912` = 12MB）。1 回の API 送信に埋め込む画像の合計（base64 後の見積もり）の上限で、プロバイダの要求サイズ上限（Gemini は 1 回の送信で合計約 20MB。本文・音声・動画も同じ枠を使う）に当たらないための余裕。これを超える送信でだけ、古い画像から床まで要約の文字に置き換える。それ一枚で天井を超える画像は、他の画像を巻き込まずにその一枚だけを文字にする。会話の後ろに画像が足されるだけの間は、一度文字にした画像は以後も文字のまま（会話の途中が書き換わったり、天井・床を変えたりすると、置き換える画像は数え直しになる）。枚数の上限の有無や `persist_realtime_and_recall` に関係なく効く。`__visual_context__`・`__realtime_context__`・`__skip_image_summary__`（画像の要約を作るための送信）のメッセージの画像と、音声・動画は数えない。`0` はすべての画像（数えないものを除く）を要約の文字にする。整数でない値・負の値は警告を出して既定値を使う。プロバイダごとの `SAIVERSE_{PROVIDER}_ATTACHMENT_BYTE_CEILING` が優先（`llm_clients/utils.py` の `parse_attachment_byte_bounds`） |
+| `SAIVERSE_ATTACHMENT_BYTE_FLOOR` | 画像のバイトの非常弁の床（バイト、既定 `6291456` = 6MB）。弁が開いたとき、埋め込む画像の合計をここまで下げて、次に開くまでの間隔を稼ぐ。天井より大きい値は天井に揃える。整数でない値・負の値は警告を出して既定値を使う。プロバイダごとの `SAIVERSE_{PROVIDER}_ATTACHMENT_BYTE_FLOOR` が優先 |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |
 | `SAIVERSE_GEMINI_AUTO_CACHE` | Gemini 自動キャッシュ（実験的、既定 `0`）。`1` にすると全ての Gemini 呼び出しで explicit cache を自動作成し、入力トークンをキャッシュ価格にする。UI（グローバル設定 > 環境）からも切替可で、切替は再起動なしで反映される |
 | `SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS` | 自動キャッシュを応答後に何秒残すか（既定 `0`、範囲 0〜3600）。`0` は応答直後に削除（従来挙動。保険 TTL 300 秒で作成し、削除に失敗しても 5 分で消える）。`1` 以上はその秒数を TTL にして作成し、手動削除せず Gemini 側の失効に任せる（残っているあいだキャッシュ保存料金がかかる）。⚠️ TTL 内でのキャッシュ再利用は未実装のため、現状 `1` 以上は保存料金を払うだけで得がない（[issue](../issues/gemini_auto_cache_no_reuse_within_ttl.md)） |

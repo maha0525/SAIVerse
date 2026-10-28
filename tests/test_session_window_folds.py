@@ -52,9 +52,11 @@ class ApplyFoldsTest(unittest.TestCase):
         self.assertIn("消えたのではなく", content)
         self.assertIn("ch:7", content)
         self.assertIn("作業の要約", content)
-        # 機構の声は system 包み — ペルソナの発話と混ざらない
-        self.assertTrue(content.startswith("<system>"))
-        self.assertEqual(out[1]["role"], "user")
+        # 機構の声は role=system のシステム通知 (タグ無し) — ペルソナの発話と
+        # 混ざらない (docs/intent/system_notice_delivery.md)
+        self.assertNotIn("<system>", content)
+        self.assertEqual(out[1]["role"], "system")
+        self.assertEqual(out[1]["metadata"]["__system_notice__"], "fold_digest")
 
     def test_unresolvable_digest_keeps_raw_log(self):
         """あらすじが引けない範囲は生のまま通す (記憶の連続性 > 軽量化)。"""

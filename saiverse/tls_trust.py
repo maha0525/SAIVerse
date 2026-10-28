@@ -34,6 +34,12 @@ openai のクライアントが構築されるより先に環境変数が立つ�
 呼び出し箇所を数え上げて 1 つずつ context を渡す形にしない — 数え落とした
 経路が黙って壊れたままになるため。
 
+``main.py`` の呼び出しは別プロセスには効かないので、setup / 更新から別プロセスで
+走る ``scripts/searxng_install.py`` (SearXNG のソースのダウンロード) と
+``scripts/rebuild_addon_envs.py`` (アドオンのダウンロード) も、それぞれの
+``main()`` の先頭でここを一度呼ぶ。立てた ``SSL_CERT_FILE`` はそのプロセスが
+起動する pip などの子プロセスにも継がれる。
+
 **OS 側が読めているときは何もしない。** 会社や学校のネットワーク、あるいは
 ウイルス対策ソフトが通信を検査している環境では、その中間 CA は OS のストアに
 だけ入っている。無条件に certifi へ差し替えると、**いま繋がっている環境を
@@ -79,15 +85,11 @@ def ensure_default_https_trust() -> Optional[str]:
         # 黙って進まずに理由を残す (この後の HTTPS はすべて失敗する)。
         LOGGER.error(
             "OS の証明書ストアが空で、同梱の証明書束 (certifi) も見つかりません。"
-            "アドオンカタログなど HTTPS を使う機能は失敗します"
+            "この後の HTTPS を使う処理は失敗します"
         )
         return None
 
     cafile = certifi.where()
-
-    # OpenSSL が既定の検証パスを組み立てるときに読む環境変数。この後に作られる
-    # ssl の既定コンテキスト全体に効く。すでに指定があれば利用者の指定を優先する。
-    os.environ.setdefault("SSL_CERT_FILE", cafile)
 
     # urllib が使う既定の opener を、この証明書束で検証するものに差し替える。
     # ``ssl._create_default_https_context`` を差し替えても効かない —
@@ -95,9 +97,25 @@ def ensure_default_https_trust() -> Optional[str]:
     # 後から ssl 側を変えても参照されないため (2026-09-02 テストで実測)。
     # ``urlopen`` も ``urlretrieve`` もこの opener を通るので、アドオン本体の
     # ダウンロードまで一緒に直る。
-    context = ssl.create_default_context(cafile=cafile)
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
-    urllib.request.install_opener(opener)
+    # この関数は呼び出し元を止めない: HTTPS と無関係な処理 (searxng_install.py の
+    # ``source`` など) まで失敗させないため、切り替えに失敗したら (certifi の
+    # ファイルが壊れている等) 理由を残して何もしない。
+    try:
+        context = ssl.create_default_context(cafile=cafile)
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+        urllib.request.install_opener(opener)
+    except Exception:
+        LOGGER.error(
+            "同梱の証明書束 (%s) への切り替えに失敗しました。この後の HTTPS を使う処理は失敗します",
+            cafile, exc_info=True,
+        )
+        return None
+
+    # OpenSSL が既定の検証パスを組み立てるときに読む環境変数。この後に作られる
+    # ssl の既定コンテキスト全体と、このプロセスが起動する子プロセスに効く。
+    # すでに指定があれば利用者の指定を優先する。切り替えが成功したときにだけ
+    # 立てる (壊れた束を子プロセスへ広げないため)。
+    os.environ.setdefault("SSL_CERT_FILE", cafile)
 
     LOGGER.info(
         "OS の証明書ストアが空でした。同梱の証明書束を使います: %s", cafile

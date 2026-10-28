@@ -60,5 +60,5 @@ quon_city_a（gemini-3.5-flash）が、スペルループの継続ラウンド�
 ### データ修復（破壊的操作 — dry-run→backup→apply の流儀で、GO 待ち）
 
 1. **クオンの偽通知1行の削除**（memory.db id `bef2bd31…`）
-2. **クオンの assistant 名義 gold_panning 記録の修復** — §3.8 修正前に書かれた判断ターンを event_message 形式（role=user、`<system>` 包み、タグ付き）へ変換。コードが直っても残存データは evict まで自己像の教材であり続ける
+2. **クオンの assistant 名義 gold_panning 記録の修復** — §3.8 修正前に書かれた判断ターンを event_message 形式（role=user、`<system>` 包み、タグ付き）へ変換。**2026-10-28 改訂**: 変換先の形はシステム通知の新しい形（role=system・タグ無し本文・tags はそのまま・`__system_notice__` = `sluice_capture` — [system_notice_delivery.md](../intent/system_notice_delivery.md)）になった。起動時の移行（`database/system_notice_migration.py`）は role=assistant の行を `interrupted` タグのものしか拾わないので、assistant 名義の判断ターンはこの修復で個別に扱う必要が残る。コードが直っても残存データは evict まで自己像の教材であり続ける
 3. **重複コア記憶の整理** — c:4〜7 が c:1〜3 の誤認再記録なら中身が重複しているはず。機械削除でなく「本人との整理相談」（v2 §5「編集主体はペルソナ」）の実地テスト題材とする（コア記憶 8,232 字 / 目安 2,000 字の超過問題と同根）

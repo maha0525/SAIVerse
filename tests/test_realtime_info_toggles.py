@@ -176,7 +176,10 @@ class RealtimeToggleCombinationTest(unittest.TestCase):
         self.assertTrue(lines[0].startswith("- 現在時刻: "))
         self.assertEqual(lines[1], f"- {EXPECTED_PREV_LINE}")
         self.assertTrue(msg["metadata"]["__realtime_context__"])
-        self.assertEqual(msg["role"], "user")
+        # role=system のシステム通知 (docs/intent/system_notice_delivery.md)
+        self.assertEqual(msg["role"], "system")
+        self.assertEqual(msg["metadata"]["__system_notice__"], "realtime")
+        self.assertTrue(msg["content"].startswith("## リアルタイム情報\n"))
 
     def test_current_time_only(self):
         msg = _build((True, False), _history(EPOCH_SECONDS))

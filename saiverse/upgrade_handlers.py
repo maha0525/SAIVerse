@@ -1393,4 +1393,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.25 -> 0.3.26 (environment replacements are handled by the update engine and setup).",
     ),
+    # ---- v0.3.27 ----
+    # システム通知を system ロールへ一本化する変更。過去の通知の変換は起動時の
+    # 移行 (database/system_notice_migration.py) が記憶 DB と本体 DB に対して行い、
+    # バックアップと全件レポートを残すので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_27",
+        scope="city",
+        from_version="0.3.26",
+        to_version="0.3.27",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.26 -> 0.3.27 (system notice data migration runs at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_27",
+        scope="ai",
+        from_version="0.3.26",
+        to_version="0.3.27",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.26 -> 0.3.27 (system notice data migration runs at startup).",
+    ),
 ]

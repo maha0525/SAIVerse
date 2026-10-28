@@ -108,3 +108,5 @@ def test_schedule_prompt_uses_virtual_clock():
         fake_self, schedule, None, "p1"
     )
     assert "現在の日時: 2026年07月05日 09:00" in prompt
+    # 本文はタグ無し (docs/intent/system_notice_delivery.md 不変条件 1)
+    assert "<system" not in prompt

@@ -310,8 +310,8 @@ def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     取得時フィルタ (2026-07-12 監査 P1): 「実会話」のみ返す —
     ``real_conversation_filter()`` (storage.py で一点管理。Stelis スレッド・
     handy_tool/spell/event_message タグ・sub_line/meta_judgment/nested line_role・
-    scope='discardable'・'<system>' 始まり本文を除外し、role は
-    user/model/assistant に限定) を適用する。embedding の書き込み側は全行分
+    scope='discardable' を除外し、role は user/model/assistant に限定 —
+    role=system のシステム通知もこの role の条件で外れる) を適用する。embedding の書き込み側は全行分
     保持のまま (他用途) — 境界は取得時に引く。
 
     Returns best-scoring chunk per message later; here we return all chunks.

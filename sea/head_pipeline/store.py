@@ -137,6 +137,9 @@ class LineHeadSnapshotStore:
                 "SECTIONS_JSON": sections_json,
                 "LAST_NOTIFIED_JSON": notified_json,
                 "SNAPSHOT_VERSION": snapshot.snapshot_version,
+                # システム通知の合言葉 (snapshot と同じ寿命。空は NULL で保存し、
+                # 読み込み後に ensure_snapshot が head を作り直す)
+                "PASSPHRASE": snapshot.passphrase or None,
                 "CAPTURED_AT": now,
                 "UPDATED_AT": now,
             }
@@ -460,6 +463,10 @@ class LineHeadSnapshotStore:
                 captured_at=captured_at,
                 snapshot_version=row.SNAPSHOT_VERSION or 1,
                 sections=sections,
+                # NULL (合言葉の列ができる前の行) は空文字で返す — 呼び出し側
+                # (integration.ensure_snapshot) が head を作り直す。ここで None を
+                # 返すと B (既読の基準) まで捨てることになるので、行は読む。
+                passphrase=row.PASSPHRASE or "",
             )
             return StoredLineState(
                 snapshot=snapshot,

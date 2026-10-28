@@ -160,3 +160,25 @@ def test_max_bytes_still_applies_after_cap(tmp_path):
     assert mime == "image/jpeg"
     assert len(data) <= max_bytes
     assert max(_open(data).size) < LLM_IMAGE_MAX_LONG_EDGE
+
+
+def test_capped_copies_are_bounded_by_total_bytes(tmp_path, monkeypatch):
+    """縮小済み画像の控えは件数ではなく bytes の合計で切り、超えたら古い順に落とす。"""
+    paths = [
+        _save(_noise_image("RGB", (2600, 1400), seed=10 + i), tmp_path / f"b{i}.png", "PNG")
+        for i in range(3)
+    ]
+    media_utils._LLM_IMAGE_CAP_CACHE.clear()
+    first = load_image_bytes_for_llm(paths[0], "image/png")[0]
+    # 控え 2 枚分よりわずかに小さい上限: 3 枚目を入れたら一番古い 1 枚目が落ちる。
+    monkeypatch.setattr(
+        media_utils, "_LLM_IMAGE_CAP_CACHE_MAX_BYTES", int(len(first) * 2.5),
+    )
+    load_image_bytes_for_llm(paths[1], "image/png")
+    load_image_bytes_for_llm(paths[2], "image/png")
+
+    cached = [key[0] for key in media_utils._LLM_IMAGE_CAP_CACHE]
+    assert cached == [str(paths[1]), str(paths[2])]
+    total = sum(len(item[0]) for item in media_utils._LLM_IMAGE_CAP_CACHE.values())
+    assert total <= media_utils._LLM_IMAGE_CAP_CACHE_MAX_BYTES
+    media_utils._LLM_IMAGE_CAP_CACHE.clear()

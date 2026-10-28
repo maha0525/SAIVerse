@@ -105,12 +105,12 @@ class _Client:
 
 def _add_message(
     adapter, minute, chars, prefix="会話", *, thread=None, metadata=None,
-    content=None,
+    content=None, role="user",
 ):
     """thread: 別スレッドを作る thread_suffix / metadata: tags 等 (機構 E 用)。"""
     mid = adapter.append_persona_message(
         {
-            "role": "user",
+            "role": role,
             "content": (
                 content if content is not None else f"{prefix} " + "あ" * chars
             ),
@@ -421,10 +421,16 @@ class TestStandaloneAndSilentRuns:
         assert plan.silent_message_count == 2
 
     def test_system_notice_rows_do_not_count_as_utterances(self, adapter):
-        """'<system>' 頭の本文 (タグを持たない世代のシステム通知) も発話に
-        数えない — _conversation_exclusion と同じ規則の名指し再利用。"""
+        """role=system のシステム通知 (機構タグを持たないものも) は発話に
+        数えない — _conversation_exclusion と同じ規則の名指し再利用
+        (docs/intent/system_notice_delivery.md 不変条件 1)。"""
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         conn = adapter.conn
-        _add_message(adapter, 0, 0, content="<system>Track を切り替えました")
+        _add_message(
+            adapter, 0, 0, content="Track を切り替えました", role="system",
+            metadata={SYSTEM_NOTICE_KEY: "schedule"},
+        )
         n1 = _add_message(adapter, 10, 300, thread="t2")
         _entry(conn, [n1], start_min=10, end_min=10)
 
@@ -573,12 +579,13 @@ class TestRunAbsorption:
         entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
         recall_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(10),
-            rendered_text="<system>ふと浮かんだ記憶:\n- 灯台の思い出</system>",
+            # 残す文面はタグ無し (docs/intent/system_notice_delivery.md)
+            rendered_text="ふと浮かんだ記憶:\n- 灯台の思い出",
             recalled_keys=[("memopedia", "p1")],
         )
         notice_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(11),
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:11\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:11",
         )
         mark_batches_annexed(conn, [recall_id, notice_id], entry.id)
         conn.commit()
@@ -617,7 +624,7 @@ class TestRunAbsorption:
         ).fetchone()
         kept_id = insert_realtime_and_recall_batch(
             conn, consumed_at=_epoch(0) + 30,
-            rendered_text="<system>ふと浮かんだ記憶:\n- run の想起</system>",
+            rendered_text="ふと浮かんだ記憶:\n- run の想起",
             recalled_keys=[("memopedia", "p9")],
             boundary_created_at=int(created_at), boundary_rowid=int(rowid),
         )

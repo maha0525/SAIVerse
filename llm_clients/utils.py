@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -86,7 +89,26 @@ def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
 # Image attachment helpers (shared across providers)
 # ---------------------------------------------------------------------------
 
-DEFAULT_ATTACHMENT_LIMIT = 4
+#: 画像の枚数の上限は既定では無い (None = 枚数では絞らない)。``SAIVERSE_{PROVIDER}_
+#: ATTACHMENT_LIMIT`` / ``SAIVERSE_ATTACHMENT_LIMIT`` を明示したときだけ、新しい順に
+#: その枚数だけを画像のまま送る (:func:`parse_attachment_limit`)。以前の既定 4 枚は、
+#: 新しい画像が来るたびに一番古い画像を要約の文字へ置き換え、キャッシュの前方一致を
+#: 毎回割っていた (docs/issues/image_attachment_limit_breaks_cache_prefix.md)。
+#: 送る量の歯止めは、枚数ではなくバイトの非常弁 (:func:`select_embedded_attachment_keys`)
+#: が持つ。
+
+#: 天井の既定 (バイト)。主語: 1 回の API 送信に埋め込む画像の合計バイト
+#: (base64 後の見積もり、:func:`estimate_inline_image_bytes`) の上限。プロバイダの
+#: 要求サイズ上限 (Gemini は 1 回の送信で合計約 20MB、本文・音声・動画も同じ枠を
+#: 使う) に当たらないための余裕を残した値。画像の合計がこれを超える送信でだけ、
+#: 非常弁が古い画像を要約の文字へ置き換える。
+DEFAULT_ATTACHMENT_BYTE_CEILING = 12 * 1024 * 1024
+
+#: 床の既定 (バイト)。主語: 非常弁が開いたとき、埋め込む画像の合計バイト (base64
+#: 後の見積もり) をどこまで下げておくか。天井ぎりぎりまでしか下げないと、次の
+#: 画像 1 枚で再び開いて前方一致がまた割れる。床まで下げて、次に開くまでの間隔を
+#: 稼ぐ。
+DEFAULT_ATTACHMENT_BYTE_FLOOR = 6 * 1024 * 1024
 
 #: この列には画像の枚数の上限を使わない、という列ごとの印 (metadata のキー)。
 #: 列の中のどれか一つのメッセージが持てば、その列の画像はすべて画像のまま送る。
@@ -135,12 +157,14 @@ def mark_attachment_limit_off(messages: List[Dict[str, Any]]) -> None:
     messages[0] = {**first, "metadata": new_metadata}
 
 
-def parse_attachment_limit(provider: str = "") -> int:
+def parse_attachment_limit(provider: str = "") -> Optional[int]:
     """Parse image attachment embed limit from environment variables.
 
     Checks ``SAIVERSE_{PROVIDER}_ATTACHMENT_LIMIT`` first, then the
     universal ``SAIVERSE_ATTACHMENT_LIMIT`` as fallback.
-    Returns ``DEFAULT_ATTACHMENT_LIMIT`` (4) when no limit is configured.
+    Returns ``None`` (no count limit) when neither is set, or when the value
+    is not an integer. The byte valve (:func:`select_embedded_attachment_keys`)
+    still applies either way.
     """
     limit_str = None
     if provider:
@@ -148,13 +172,262 @@ def parse_attachment_limit(provider: str = "") -> int:
     if limit_str is None:
         limit_str = os.getenv("SAIVERSE_ATTACHMENT_LIMIT")
     if limit_str is None:
-        return DEFAULT_ATTACHMENT_LIMIT
+        return None
     try:
         val = int(limit_str.strip())
         return max(val, 0)
     except ValueError:
-        _log.warning("Invalid attachment limit '%s'; ignoring", limit_str)
-        return DEFAULT_ATTACHMENT_LIMIT
+        _log.warning("Invalid attachment limit '%s'; ignoring (no count limit)", limit_str)
+        return None
+
+
+def _parse_byte_env(provider: str, suffix: str, default: int) -> int:
+    """``SAIVERSE_{PROVIDER}_{suffix}`` → ``SAIVERSE_{suffix}`` → ``default``。
+
+    読めない値 (整数でない・負) は警告して ``default``。
+    """
+    raw = None
+    if provider:
+        raw = os.getenv(f"SAIVERSE_{provider.upper()}_{suffix}")
+    if raw is None:
+        raw = os.getenv(f"SAIVERSE_{suffix}")
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _log.warning("Invalid %s '%s'; using default %d", suffix, raw, default)
+        return default
+    if value < 0:
+        _log.warning("Negative %s '%s'; using default %d", suffix, raw, default)
+        return default
+    return value
+
+
+def parse_attachment_byte_bounds(provider: str = "") -> Tuple[int, int]:
+    """非常弁の (天井, 床) をバイトで返す。
+
+    天井 = 1 回の API 送信に埋め込む画像の合計バイト (base64 後の見積もり) の
+    上限 (:data:`DEFAULT_ATTACHMENT_BYTE_CEILING`)。床 = 弁が開いたとき、次に
+    開くまでの間隔を稼ぐために下げておく水準 (:data:`DEFAULT_ATTACHMENT_BYTE_FLOOR`)。
+    ``SAIVERSE_{PROVIDER}_ATTACHMENT_BYTE_CEILING`` → ``SAIVERSE_ATTACHMENT_BYTE_
+    CEILING`` (床は ``_FLOOR``) で変えられる。床が天井を超える設定は、床を天井に
+    揃える (弁が開いたら天井以下までは必ず下げる)。
+    """
+    ceiling = _parse_byte_env(provider, "ATTACHMENT_BYTE_CEILING", DEFAULT_ATTACHMENT_BYTE_CEILING)
+    floor = _parse_byte_env(provider, "ATTACHMENT_BYTE_FLOOR", DEFAULT_ATTACHMENT_BYTE_FLOOR)
+    if floor > ceiling:
+        _log.warning(
+            "Attachment byte floor %d exceeds ceiling %d; using the ceiling as the floor",
+            floor, ceiling,
+        )
+        floor = ceiling
+    return ceiling, floor
+
+
+# 画像 1 枚の埋め込みの見積もり (base64 後のバイト) を、ファイルの版ごとに覚えておく。
+# 非常弁は送る列の画像を毎回すべて測るので、測るたびに読み直す (長辺の縮小は
+# 0.3 秒ほどかかる) と、画像の多い会話で毎回の送信が遅くなる。値は整数か None
+# (読めなかった) だけなので、件数を多めに持つ。読めなかった結果も覚える — 壊れた
+# 画像を毎ターン読み直さないため。ファイルが書き換われば版 (mtime・size) が変わり、
+# 測り直す。
+_INLINE_IMAGE_BYTES_CACHE: "OrderedDict[Tuple[str, int, int, str, Optional[int]], Optional[int]]" = OrderedDict()
+_INLINE_IMAGE_BYTES_CACHE_MAX = 4096
+_INLINE_IMAGE_BYTES_CACHE_LOCK = threading.Lock()
+
+
+def estimate_inline_image_bytes(
+    path: Any, mime_type: str, max_bytes: Optional[int] = None,
+) -> Optional[int]:
+    """画像 1 枚を埋め込んだときの送信上のバイト数の見積もり。
+
+    埋め込みと同じ ``load_image_bytes_for_llm`` (長辺の縮小・``max_bytes`` での
+    縮小を含む) で得たバイト列の長さを、base64 で約 4/3 倍になる分だけ増やす
+    (``ceil(len * 4 / 3)``)。読めない画像は None (埋め込まれず注記になるので、
+    合計に入らない)。
+    """
+    from saiverse.media_utils import load_image_bytes_for_llm
+
+    file_path = Path(path)
+    key: Optional[Tuple[str, int, int, str, Optional[int]]] = None
+    try:
+        st = file_path.stat()
+        key = (str(file_path), st.st_mtime_ns, st.st_size, str(mime_type), max_bytes)
+    except OSError:
+        key = None
+    if key is not None:
+        with _INLINE_IMAGE_BYTES_CACHE_LOCK:
+            if key in _INLINE_IMAGE_BYTES_CACHE:
+                _INLINE_IMAGE_BYTES_CACHE.move_to_end(key)
+                return _INLINE_IMAGE_BYTES_CACHE[key]
+    data: Optional[bytes]
+    try:
+        data, _mime = load_image_bytes_for_llm(file_path, mime_type, max_bytes=max_bytes)
+    except Exception:
+        _log.warning("Failed to measure image for the attachment byte valve: %s", path, exc_info=True)
+        data = None
+    estimated: Optional[int] = -(-len(data) * 4 // 3) if data else None
+    if key is not None:
+        with _INLINE_IMAGE_BYTES_CACHE_LOCK:
+            _INLINE_IMAGE_BYTES_CACHE[key] = estimated
+            while len(_INLINE_IMAGE_BYTES_CACHE) > _INLINE_IMAGE_BYTES_CACHE_MAX:
+                _INLINE_IMAGE_BYTES_CACHE.popitem(last=False)
+    return estimated
+
+
+def attachment_positions_to_replace(
+    sizes: Sequence[Optional[int]], ceiling: int, floor: int,
+) -> List[int]:
+    """非常弁: 要約の文字へ置き換える画像の位置 (``sizes`` の番号、昇順)。
+
+    ``sizes`` は埋め込み予定の画像の見積もり (:func:`estimate_inline_image_bytes`)
+    を**古い順**に並べたもの (None は 0 として数える)。
+
+    1. それ一枚で天井を超える画像は、弁の手前で必ず置き換える。他の画像の合計
+       には最初から入れない — 入れると、その一枚のために古い画像が床まで道連れ
+       になる。その画像単体の大きさだけで決まるので、列に何が足されても変わらない。
+    2. 残りの画像 (どれも一枚では天井以下) を、古い順に一枚ずつ会話に入ってきた
+       と見立てて、入るたびに「埋め込む合計が天井を超えたら、古い側から床以下に
+       なるまで置き換える」を繰り返す。2 で置き換えるのは、残りの画像のうち古い
+       側の連続した並び。
+
+    だから
+
+    - 埋め込む合計は必ず天井以下になる。
+    - 列の後ろに画像が足されただけなら、置き換える画像の集まりは広がるだけで
+      縮まない (一度文字にした画像が画像に戻らない)。弁が開かない送信では、
+      埋め込む並びが後ろに伸びるだけなので、キャッシュの前方一致は割れない。
+      前方一致が割れるのは弁が開いた回だけで、そのとき天井から床までの分を
+      まとめて置き換える。
+    - 列の状態だけで決まる (覚えておく状態が無い) ので、再起動しても同じ列には
+      同じ答えを返す。
+
+    一番新しい画像は、それ一枚で天井を超えるときだけ置き換える (床を超えるだけ
+    なら残す)。
+    """
+    values = [max(int(s or 0), 0) for s in sizes]
+    oversized = [pos for pos, size in enumerate(values) if size > ceiling]
+    fitting = [pos for pos, size in enumerate(values) if size <= ceiling]
+    start = 0
+    total = 0
+    for j, pos in enumerate(fitting):
+        total += values[pos]
+        if total <= ceiling:
+            continue
+        # どの画像も一枚では天井以下なので、床以下まで下げるか、いま入った
+        # 一枚だけが残った時点で、合計は天井以下になっている。
+        while total > floor and start < j:
+            total -= values[fitting[start]]
+            start += 1
+    return sorted(oversized + fitting[:start])
+
+
+def _message_metadata_flag(messages: Sequence[Any], idx: int, flag: str) -> bool:
+    if idx < 0 or idx >= len(messages):
+        return False
+    msg = messages[idx]
+    if not isinstance(msg, dict):
+        return False
+    metadata = msg.get("metadata")
+    return isinstance(metadata, dict) and bool(metadata.get(flag))
+
+
+def select_embedded_attachment_keys(
+    attachment_cache: Dict[int, list],
+    max_embeds: Optional[int],
+    exempt_indices: Optional[Set[int]] = None,
+    *,
+    provider: str,
+    messages: Optional[Sequence[Any]] = None,
+    embeddable_indices: Optional[Set[int]] = None,
+    max_image_bytes: Optional[int] = None,
+) -> Optional[Set[Tuple[int, int]]]:
+    """埋め込む画像 ``(msg_idx, att_idx)`` を決める (全クライアント共通の入口)。
+
+    1. 枚数の上限 (``max_embeds``、None = 枚数では絞らない) を
+       :func:`compute_allowed_attachment_keys` で当てる。
+    2. 残った画像のうち、そのクライアントが実際に埋め込むメッセージ
+       (``embeddable_indices``、None = 全部) の画像を古い順に並べ、バイトの
+       非常弁 (:func:`attachment_positions_to_replace`、天井と床は
+       :func:`parse_attachment_byte_bounds` の ``provider``) で置き換えるものを
+       外す。
+
+    ``exempt_indices`` (``__visual_context__``) の画像は枚数にも非常弁にも
+    数えず、常に埋め込む。``messages`` (``attachment_cache`` と同じ番号の列) を
+    渡すと、``__skip_image_summary__`` のメッセージ (saiverse/media_summary.py が
+    画像の要約・説明を作るために送る依頼) の画像も、同じく枚数にも非常弁にも
+    数えず常に埋め込む — 外すと要約のモデルが画像を見ないまま答え、その答え
+    (または「(要約を取得できませんでした)」) が ``.summary.txt`` に保存されて
+    残る。``__realtime_context__`` のメッセージの画像は非常弁には数えず、常に
+    埋め込む — このメッセージは毎ターン作り直されて末尾近くに置かれるので、
+    非常弁に入れると、その画像があるターンだけ弁が開き、次のターンで閉じて
+    置き換えた画像が画像に戻る (前方一致が二回割れる)。数えない分は、天井と
+    プロバイダの要求サイズ上限の間の余裕が受ける。非常弁は画像だけが対象
+    (音声・動画は数えない)。
+    リアルタイム情報と自動想起を残すモデルの列 (:func:`attachment_limit_is_off`)
+    でも非常弁は効く — プロバイダの要求サイズ上限に当たると送信そのものが
+    失敗するので、稀な一回のまとめ置き換えを優先する
+    (docs/intent/persist_realtime_and_recall.md §4.2)。
+
+    返り値は ``compute_allowed_attachment_keys`` と同じ形: None は「全部埋め込む」。
+    """
+    exempt: Set[int] = set(exempt_indices or ())
+    if messages is not None:
+        exempt.update(
+            idx for idx in attachment_cache
+            if _message_metadata_flag(messages, idx, "__skip_image_summary__")
+        )
+    allowed = compute_allowed_attachment_keys(attachment_cache, max_embeds, exempt)
+    if not attachment_cache:
+        return allowed
+    if embeddable_indices is not None and not embeddable_indices:
+        return allowed
+    candidates: List[Tuple[int, int]] = []
+    for msg_idx in sorted(attachment_cache.keys()):
+        if msg_idx in exempt:
+            continue
+        if embeddable_indices is not None and msg_idx not in embeddable_indices:
+            continue
+        if messages is not None and _message_metadata_flag(
+            messages, msg_idx, "__realtime_context__",
+        ):
+            continue
+        for att_idx in range(len(attachment_cache[msg_idx])):
+            key = (msg_idx, att_idx)
+            if allowed is None or key in allowed:
+                candidates.append(key)
+    if not candidates:
+        return allowed
+
+    ceiling, floor = parse_attachment_byte_bounds(provider)
+    sizes: List[Optional[int]] = []
+    for msg_idx, att_idx in candidates:
+        att = attachment_cache[msg_idx][att_idx]
+        sizes.append(
+            estimate_inline_image_bytes(att["path"], att["mime_type"], max_bytes=max_image_bytes)
+        )
+    positions = attachment_positions_to_replace(sizes, ceiling, floor)
+    if not positions:
+        return allowed
+
+    replaced = {candidates[pos] for pos in positions}
+    replaced_positions = set(positions)
+    kept_bytes = sum(
+        int(s or 0) for pos, s in enumerate(sizes) if pos not in replaced_positions
+    )
+    _log.info(
+        "[attachment byte valve] provider=%s replaced %d image(s) with summaries "
+        "(embedded images: %d, ~%d bytes after base64; ceiling=%d floor=%d)",
+        provider or "-", len(replaced), len(candidates) - len(replaced),
+        kept_bytes, ceiling, floor,
+    )
+    if allowed is None:
+        allowed = {
+            (msg_idx, att_idx)
+            for msg_idx, items in attachment_cache.items()
+            for att_idx in range(len(items))
+        }
+    return allowed - replaced
 
 
 def compute_allowed_attachment_keys(

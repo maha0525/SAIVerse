@@ -14,7 +14,6 @@
 
 | | 状態 | 意味 |
 |---|---|---|
-| 🟣 検証待ち | アップデートの作業を、新しいコードで最後まで行う (SearXNG を更新の流れへ / 古い更新処理の取りこぼしを start.bat で一度だけやり直す) | v0.3.26 の main 向け PR が出ていて、§6 の通し確認は隔離環境で済んでいる。次 = まはーが main へマージし、私がタグとリリースノートで発行する。 | まはー (main マージ) | [intent](../intent/update_completes_with_new_code.md) | 2026-10-23 |
 | 🔵 | **設計中** | intent 起草・詰め・レビュー待ち(まだコードを書いていない) |
 | 🟡 | **実装待ち** | 設計確定。コード未着手だが「次にやる」候補 |
 | 🟠 | **実装中** | コードを書いている |
@@ -49,6 +48,11 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | システム通知を system ロールへ一本化し、受け付けないモデルには合言葉付きタグで変換 | 本番へ反映済み (移行 3563 件ゼロエラー、警告バナーの消滅まで確認)。次 = v0.3.27 の main 向け PR をまはーがマージし、タグ・公開・アドオンカタログの署名掲載で締める。 | まはー (main マージ・カタログ署名) | [intent](../intent/system_notice_delivery.md) | 2026-10-29 |
+| 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通る。Contributor 版の追加はブランチ feature/meta-muse-contributor の PR にある。次 = まはーが PR を確認し、会話の途中の system メッセージを user に変換する設定をやめるかを決める。 | まはー (PR 確認と変換の判断) | [intent](../intent/meta_muse_provider.md) | 2026-10-27 |
+| 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
+| 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正はブランチ feature/mac-setup-tls-and-brew-path にあり、まだ develop に入っていない。次 = レビューの消し込みと検収を経て develop に入れ、次のリリースを Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | 私 (レビューと検収) → リリース → Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-10-26 |
+| 🟣 検証待ち | 画像の枚数上限の既定を廃止し、バイトの非常弁で要求サイズ上限を避ける | 実装はブランチ feature/image-attachment-unlimited にあり、まだ develop に入っていない。次 = 検収とレビューを経て develop に入れ、画像の多い Gemini の会話で、全部の画像が画像のまま送られ、新しい画像の回もキャッシュが当たることをログで見る。 | 私 (検収とレビュー) → まはー (実機確認) | [issue](../issues/image_attachment_limit_breaks_cache_prefix.md) | 2026-10-25 |
 | 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 再レビューで指摘された既読記録の蓄積を回収し、同秒の本文編集も通知する修正の確認待ち。次 = PR #406 の修正差分を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (修正差分の確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
 | 🟣 検証待ち | 想起用埋め込みの一括処理のメモリのピーク削減 (2GB の VPS 向け) | 修正は develop に入り、次のバージョンに載る。次 = リリース後、2GB の VPS 利用者に再計算か取り込みで落ちなくなったかを聞く。 | リリース → VPS 利用者 | [intent](../intent/embedding_gemma2_migration.md) | 2026-10-22 |
 | 🟣 検証待ち | 入退室ログの全体・Building 別の表示設定 | develop に入り、「以前のメッセージを読み込む」ボタンの出方はメティスが隔離環境の画面で確かめ済み。次 = まはーが本番の画面で、全体と Building の表示・非表示・継承の切り替えで入退室ログだけが隠れ、会話と別の通知が残ることを見る。 | まはー (実機確認) | [intent](../intent/movement_notice_visibility.md) | 2026-10-09 |

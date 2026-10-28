@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -303,3 +304,228 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
         counts["imported"], counts["updated"], counts["skipped"], counts["pruned"], counts["errors"],
     )
     return counts
+
+
+# ---------------------------------------------------------------------------
+# 利用者の手で直す必要がある Playbook の警告 (自動では書き換えない)
+# ---------------------------------------------------------------------------
+
+#: 本文に書かれた旧形式のシステム通知のタグ (``<system>`` / ``</system>`` /
+#: ``<system pass=...>``)。``<system_prompt>`` のような別の語には当てない。
+_LEGACY_SYSTEM_TAG_RE = re.compile(r"</?system(?:\s|>)", re.IGNORECASE)
+#: テンプレートの差し込み (``{name}`` / ``{name.key}``) の先頭の名前。
+_TEMPLATE_ROOT_RE = re.compile(r"\{([A-Za-z_]\w*)")
+
+
+def _iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+def _tool_result_keys(nodes: List[Any]) -> set:
+    """TOOL / TOOL_CALL ノードの結果が入る state の名前 (``last`` を含む)。
+
+    TOOL / TOOL_CALL ノードが一つも無い Playbook では空 — ``last`` はツールの結果
+    ではない (SET でユーザーの入力を ``last`` に入れて role=user で記録するのは
+    正常な形で、旧形式のシステム通知ではない)。
+    """
+    tool_nodes = [
+        node for node in nodes
+        if isinstance(node, dict) and node.get("type") in ("tool", "tool_call")
+    ]
+    if not tool_nodes:
+        return set()
+    keys = {"last"}
+    for node in tool_nodes:
+        for key in (node.get("output_key"), node.get("id")):
+            if isinstance(key, str) and key:
+                keys.add(key)
+        for key in node.get("output_keys") or []:
+            if isinstance(key, str) and key:
+                keys.add(key)
+    return keys
+
+
+def _creates_legacy_system_notice(nodes: List[Any]) -> bool:
+    """旧形式のシステム通知を作る Playbook か。
+
+    docs/intent/system_notice_delivery.md: システム通知は role=system・タグ無しの
+    本文で記録する。旧形式は (1) 本文に ``<system>`` タグを書く、(2) MEMORIZE が
+    ツールの結果を role=user のまま保存する (タグ無しの機構の文がユーザーの発言
+    として残る)、のどちらか。
+    """
+    if any(_LEGACY_SYSTEM_TAG_RE.search(s) for s in _iter_strings(nodes)):
+        return True
+    tool_keys = _tool_result_keys(nodes)
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "memorize":
+            continue
+        if str(node.get("role") or "").lower() != "user":
+            continue
+        # 実行側 (sea/runtime_engine.py の lg_memorize_node、sea/langgraph_runner.py) と
+        # 同じ既定: action の省略・空文字は ``{last}`` (直前のノードの結果) を記録する。
+        action = node.get("action") or "{last}"
+        if not isinstance(action, str):
+            continue
+        if tool_keys & set(_TEMPLATE_ROOT_RE.findall(action)):
+            return True
+    return False
+
+
+def playbook_compat_alerts(session_factory=None) -> List[Dict[str, Any]]:
+    """有効な Playbook (DB の行) のうち、利用者の手で更新が要るものを startup_alerts の形で返す。
+
+    - 旧形式のシステム通知を作る Playbook (:func:`_creates_legacy_system_notice`)。
+    - TOOL ノードが、いま登録されていないツールを参照している Playbook (実行時と
+      同じ ``canonicalize_tool_name`` で引く。削除したツールに限らない一般の検査)。
+      設定にある MCP サーバーの名前で始まる参照は、サーバーが未接続なだけの
+      可能性があるので別の警告 (``playbook_missing_mcp_tool``) にする。ペルソナ
+      ごとに接続するサーバー (``scope: per_persona``) のツールは起動時に無いのが
+      正常なので、どちらの警告にも出さない。
+
+    どちらも**自動では書き換えない** — 利用者が世界編集や上位層 (user_data /
+    expansion_data) で作った・変えた Playbook を勝手に変えないため。画面に出して
+    編集画面での更新を促すだけ。検査は起動ごと。ツールの一覧が出そろってから
+    (MCP の接続の後で) 呼ぶ。
+    """
+    from database.models import Playbook
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
+
+    if session_factory is None:
+        from database.session import SessionLocal
+        session_factory = SessionLocal
+
+    db = session_factory()
+    try:
+        rows = db.query(Playbook.name, Playbook.nodes_json).all()
+    finally:
+        db.close()
+
+    legacy: List[str] = []
+    missing: List[Tuple[str, str]] = []
+    for name, raw in rows:
+        try:
+            data = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            continue
+        nodes = data.get("nodes") if isinstance(data, dict) else None
+        if not isinstance(nodes, list):
+            continue
+        if _creates_legacy_system_notice(nodes):
+            legacy.append(name)
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("type") != "tool":
+                continue
+            tool = node.get("action")
+            if isinstance(tool, str) and tool and canonicalize_tool_name(tool) not in TOOL_REGISTRY:
+                missing.append((name, tool))
+
+    # MCP のツールは ``<サーバー名>__<ツール名>`` で登録される (tools/mcp_client.py)。
+    # 設定にあるサーバーの名前で始まる参照は、サーバーが起動時に繋がらなかった
+    # だけかもしれないので、本当に存在しないツールとは分けて知らせる。素の名前で
+    # 参照している場合は、未接続の MCP のツールかどうかを見分けられない。
+    # ペルソナごとに接続するサーバー (scope が per_persona) は、起動時に繋がず
+    # 各ペルソナの Pulse の頭でツールを登録するのが設計どおりなので、起動時に
+    # 見つからないのは正常。警告に出すと毎起動必ず出て正常な構成を異常に
+    # 見せるため、どちらの警告にも出さない。scope が instance_template の
+    # サーバーも起動時にツールを登録しない (conn.call_tool で直接呼ぶ —
+    # tools/mcp_client.py) ので同じ扱い。警告するのは global のサーバーだけ。
+    missing_mcp: List[Tuple[str, str]] = []
+    if missing:
+        scopes = _mcp_server_scopes()
+        remaining: List[Tuple[str, str]] = []
+        for name, tool in missing:
+            scope = _mcp_scope_of_tool(tool, scopes)
+            if scope is None:
+                remaining.append((name, tool))
+            elif scope not in ("per_persona", "instance_template"):
+                missing_mcp.append((name, tool))
+        missing = remaining
+
+    alerts: List[Dict[str, Any]] = []
+    if legacy:
+        LOGGER.warning("playbook_sync: playbooks that create legacy system notices: %s", legacy)
+        alerts.append({
+            "id": "playbook_legacy_system_notice",
+            "level": "warning",
+            "title": "旧形式のシステム通知を作る Playbook があります",
+            "message": (
+                "次の Playbook は、システム通知を古い形 (本文を system のタグで囲む形、または"
+                "ツールの結果をユーザーの発言として記録する形) で作ります。自動では"
+                "書き換えていません。Playbook の編集画面で更新してください: "
+                + ", ".join(sorted(legacy))
+            ),
+            "details": {"playbooks": sorted(legacy)},
+        })
+    if missing:
+        LOGGER.warning("playbook_sync: playbooks referencing unregistered tools: %s", missing)
+        alerts.append({
+            "id": "playbook_missing_tool",
+            "level": "warning",
+            "title": "存在しないツールを参照している Playbook があります",
+            "message": (
+                "次の Playbook は、いま登録されていないツールを呼びます (そのノードは実行時に"
+                "失敗します)。Playbook の編集画面で更新してください: "
+                + ", ".join(f"{name} → {tool}" for name, tool in sorted(missing))
+            ),
+            "details": {"references": [{"playbook": n, "tool": t} for n, t in sorted(missing)]},
+        })
+    if missing_mcp:
+        LOGGER.warning(
+            "playbook_sync: playbooks referencing tools of MCP servers that are not connected: %s",
+            missing_mcp,
+        )
+        alerts.append({
+            "id": "playbook_missing_mcp_tool",
+            "level": "warning",
+            "title": "MCP サーバーのツールが見つからない Playbook があります",
+            "message": (
+                "次の Playbook は、いま登録されていない MCP サーバーのツールを呼びます。"
+                "MCP サーバーが未接続なだけの可能性があります。サーバーを接続できる状態に"
+                "して起動し直しても、まだこの警告が出る場合だけ、Playbook の編集画面で"
+                "更新してください: "
+                + ", ".join(f"{name} → {tool}" for name, tool in sorted(missing_mcp))
+            ),
+            "details": {
+                "references": [{"playbook": n, "tool": t} for n, t in sorted(missing_mcp)],
+            },
+        })
+    return alerts
+
+
+def _mcp_server_scopes() -> Dict[str, str]:
+    """設定にある MCP サーバーの名前と、その接続の種別 (``scope``)。
+
+    サーバー名は tools/mcp_config.load_mcp_configs のキー (アドオンのサーバーは
+    ``<アドオン名>__`` 付き) で、ツールはその後ろに ``__<ツール名>`` を付けて
+    登録される。種別は tools/mcp_client.MCPClientManager の起動処理と同じく
+    ``scope`` を小文字にして読み、無ければ ``global``。設定を読めなければ空
+    (どの参照も MCP のものとみなさない)。
+    """
+    try:
+        from tools.mcp_config import load_mcp_configs
+
+        return {
+            server: str((cfg or {}).get("scope", "global")).lower()
+            for server, cfg in load_mcp_configs().items()
+        }
+    except Exception:
+        LOGGER.warning("playbook_sync: could not read MCP server configs", exc_info=True)
+        return {}
+
+
+def _mcp_scope_of_tool(tool: str, scopes: Dict[str, str]) -> Optional[str]:
+    """ツール名 ``<サーバー名>__<ツール名>`` が属するサーバーの種別。属さなければ None。
+
+    名前が前方で重なるサーバー (``foo`` と ``foo__bar``) は長い方を採る。
+    """
+    matches = [server for server in scopes if tool.startswith(f"{server}__")]
+    if not matches:
+        return None
+    return scopes[max(matches, key=len)]

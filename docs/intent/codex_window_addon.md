@@ -154,8 +154,8 @@ ephemeral mode では artifact 抽出後に cwd を削除。workspace mode で�
 
 `codex_exec` ツールの戻り値はそのまま LLM に渡さず、ペルソナの会話 playbook が以下を順に処理:
 
-1. Codex の `agent_message` を `<system>` タグ付きの「道具からの出力」として user role でメッセージに挿入
-2. 生成された artifact のサマリ (kind と簡易説明) を同じ `<system>` メッセージに含める
+1. Codex の `agent_message` を「道具からの出力」としてシステム通知 (role=system・タグ無し本文 + 識別用の metadata `__system_notice__`) でメッセージに挿入する。起草時は `<system>` タグ付きの user role としていたが、2026-10-28 にシステム通知の形を role=system へ一本化した ([system_notice_delivery.md](system_notice_delivery.md))。会話の途中の system を受け取れないモデルへは、クライアント層が送る直前に合言葉付きタグの user に変える
+2. 生成された artifact のサマリ (kind と簡易説明) を同じシステム通知に含める
 3. ペルソナのキャラクターを保った応答生成を LLM に依頼
 4. 画像 artifact がある場合、ペルソナ応答に attachment として添付
 

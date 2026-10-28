@@ -797,13 +797,15 @@ def _perception(text, **metadata):
     """送信直前に差し込まれる知覚ブロック (部屋の様子・通知) を 1 枚作る。
 
     実物 (sea/runtime_context.py::list_presented_perception_blocks) と同じ形 —
-    role="user" / content は ``<system>`` 包み / metadata に
-    ``CONSUMED_PERCEPTION_KEY``。
+    role="system" のシステム通知 / content はタグ無し / metadata に
+    ``__system_notice__`` と ``CONSUMED_PERCEPTION_KEY``
+    (docs/intent/system_notice_delivery.md)。
     """
     meta = {"tags": ["internal", "event_message", "perception"],
+            "__system_notice__": "perception",
             CONSUMED_PERCEPTION_KEY: True}
     meta.update(metadata)
-    return {"role": "user", "content": f"<system>{text}</system>", "metadata": meta}
+    return {"role": "system", "content": text, "metadata": meta}
 
 
 class TestPerceptionBlockDoesNotHijackQuery(AutoRecallBase):
@@ -864,19 +866,44 @@ class TestPerceptionBlockDoesNotHijackQuery(AutoRecallBase):
         self.assertEqual(auto_recall.build_query([]), "")
 
     def test_plain_system_notice_is_still_a_conversational_message(self):
-        """metadata に目印の無い ``<system>`` 通知 (スケジュール等) は従来どおり種になる。
+        """知覚の目印の無いシステム通知 (スケジュール等) は従来どおり種になる。
 
-        知覚ブロックではなく普通の user メッセージとして履歴に入るので、この修正の
-        影響を受けない。
+        role=system (``__system_notice__`` を持つ) の通知は、以前 ``<system>``
+        タグ付きの user として履歴に入っていたときと同じく会話本文に数える
+        (docs/intent/auto_recall_jev_rerank.md の現行の決定、
+        docs/intent/system_notice_delivery.md)。
         """
         messages = [
             {"role": "user", "content": "十条の話"},
-            {"role": "user", "content": "<system>スケジュールの実行時刻です</system>"},
+            {"role": "system", "content": "スケジュールの実行時刻です",
+             "metadata": {"__system_notice__": "schedule"}},
         ]
         self.assertEqual(
             auto_recall.build_query(messages),
-            "<system>スケジュールの実行時刻です</system>",
+            "スケジュールの実行時刻です",
         )
+        # ユーザーのターンとしても数える (種は通知そのもの)
+        self.assertTrue(auto_recall._seed_is_user_utterance(messages))
+
+    def test_attachment_note_is_not_a_conversational_message(self):
+        """添付アイテム作成の注記 (発言の直後の独立した通知) は種にならない —
+        以前は発言の本文に連結され、発言の言葉 (足す前の本文) だけが読まれていた。"""
+        messages = [
+            {"role": "user", "content": "見て"},
+            {"role": "system", "content": "添付アイテム作成: 画像「a.png」",
+             "metadata": {"__system_notice__": "attachment_note"}},
+        ]
+        self.assertEqual(auto_recall.build_query(messages), "見て")
+        self.assertIs(auto_recall._latest_user_message(messages), messages[0])
+        self.assertTrue(auto_recall._seed_is_user_utterance(messages))
+
+    def test_head_system_message_is_not_a_conversational_message(self):
+        """head の system メッセージ (人格指示) は種にならない。"""
+        messages = [
+            {"role": "system", "content": "あなたは…", "metadata": {"__head__": True}},
+            {"role": "user", "content": "こんにちは"},
+        ]
+        self.assertEqual(auto_recall.build_query(messages), "こんにちは")
 
     def test_entity_trigger_reads_the_utterance_not_the_block(self):
         """エンティティトリガーの「最新ユーザー発話」も乗っ取られない。"""

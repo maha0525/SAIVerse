@@ -21,7 +21,7 @@
 `sea/runtime.py:2380` にある `_build_realtime_context` は、既に「キャッシュを壊さない位置に動的情報を載せる」枠組みとして確立されている:
 
 - 末尾近く (current prompt の手前) に挿入
-- role="user" + `<system>...</system>` ラッピング (Gemini 互換)
+- role="user" + `<system>...</system>` ラッピング (Gemini 互換) — 起草時の形。2026-10-28 から、リアルタイム情報は role=system のシステム通知 (タグ無し本文、`__system_notice__` = `realtime`) で、会話の途中の system を受け取れないモデルへはクライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](system_notice_delivery.md))
 - `metadata: {"__realtime_context__": True}` でマーク
 - キャッシュを壊さない位置に置く設計が明示済み (関数 docstring 参照)
 

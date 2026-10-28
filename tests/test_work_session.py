@@ -504,11 +504,12 @@ def test_malformed_args_fed_back_and_retried(session_factory, persona):
     assert len(created_ids) == 1
     assert result.artifacts == created_ids
     # 差し戻しエラーが LLM の次ラウンド入力に載っている
+    # スペルの結果は role=system のシステム通知 (docs/intent/system_notice_delivery.md)
     retry_inputs = [
         str(msg.get("content") or "")
         for call in client.calls
         for msg in call
-        if msg.get("role") == "user"
+        if msg.get("role") == "system"
     ]
     assert any(
         f"[Spell Error: {SPELL_NAME}]" in c and "読み取れなかった" in c

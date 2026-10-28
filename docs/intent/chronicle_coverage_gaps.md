@@ -188,6 +188,16 @@ arasuji_levels §3-2 の境界② — 実装と同じコミットで §3-2 を�
   line_role 除外も `<system>` 頭も持たない行)。role だけで判定してはならない —
   機構の記録は role=user で保存されており、捏造を生んだ当の対象 (入室通知だけの
   run) が「発話あり」に化ける。
+  **2026-10-28 の改訂**: この前提は変わった。システム通知は role=system・タグ無し本文で
+  保存する形に正規化され、保存済みの旧形式の行も起動時の移行で role=system に書き換わる
+  ([system_notice_delivery.md](system_notice_delivery.md))。だから実会話フィルタ
+  (`_conversation_exclusion`) は、本文の `<system>` 頭の判定をやめ、role (user/model/assistant
+  に限る)・機構タグ・line_role で判定する形になった — 発話の判定では role の判定が
+  成立するようになった側である。一方、あらすじの機構名義の判定
+  (`sai_memory/arasuji/generator.py` の `is_mechanism_message`) は tags だけで判定する
+  形のまま据え置いた。role の判定に切り替えると、`event_message` などの印を持たない
+  通知 (スケジュールの発火文・子ラインの報告・TOOL の結果など) が機構名義に入り、
+  材料の量の勘定の主語が変わるため (未解決の独立した設計判断)。
 - **発話ゼロの run (機構の記録だけの孤立) は自動では書かせない**。跨ぎ統合 (A) が
   入るため、これが残っても統合は詰まらず、機構 B の不明期間として正直に数えられ
   続ける。解消の道はユーザーに返す — 第二段の修復 UI の「この期間をあらすじにする」
