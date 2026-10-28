@@ -2080,6 +2080,18 @@ def _coerce_spell_args(tool_name: str, tool_args: dict) -> dict:
     return coerced
 
 
+def _value_shape_for_log(value: Any) -> str:
+    """ツールの引数一つ分をログに書くときの形 (型と長さだけ。中身は書かない)。
+
+    引数を一つずつ別のレコードに書くと、合言葉を復唱した文字列が複数の欄に
+    分かれてログの伏せ字に掛からない (docs/intent/system_notice_delivery.md
+    不変条件 3)。引数全体は「Tool call detected」の 1 レコードに載る。
+    """
+    if isinstance(value, (str, list, dict, tuple)):
+        return f"{type(value).__name__}, length={len(value)}"
+    return type(value).__name__
+
+
 def _normalize_spell_line(tool_name: str, tool_args: dict, quick: bool = False) -> str:
     """Produce the canonical /spell line for a given tool name and args dict.
 
@@ -6531,7 +6543,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if isinstance(result["tool_args"], dict):
                                 for arg_name, arg_value in result["tool_args"].items():
                                     state[f"{function_call_key}.args.{arg_name}"] = arg_value
-                                    LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                                    LOGGER.debug("[sea] Stored %s.args.%s (%s)", function_call_key, arg_name, _value_shape_for_log(arg_value))
                         # Set conditional_next flags
                         state["tool_called"] = True
                         state["has_speak_content"] = False
@@ -6545,7 +6557,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if isinstance(result["tool_args"], dict):
                             for key, value in result["tool_args"].items():
                                 state[f"tool_arg_{key}"] = value
-                                LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+                                LOGGER.debug("[sea] Expanded tool_arg_%s (%s)", key, _value_shape_for_log(value))
 
                     # Record tool call info for message protocol (function calling)
                     _tc_id = _resolve_tool_call_id(result)
@@ -6583,7 +6595,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if isinstance(result["tool_args"], dict):
                                 for arg_name, arg_value in result["tool_args"].items():
                                     state[f"{function_call_key}.args.{arg_name}"] = arg_value
-                                    LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                                    LOGGER.debug("[sea] Stored %s.args.%s (%s)", function_call_key, arg_name, _value_shape_for_log(arg_value))
                         # Set conditional_next flags
                         state["tool_called"] = True
                         state["has_speak_content"] = bool(text_key)
@@ -6598,7 +6610,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if isinstance(result["tool_args"], dict):
                             for key, value in result["tool_args"].items():
                                 state[f"tool_arg_{key}"] = value
-                                LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+                                LOGGER.debug("[sea] Expanded tool_arg_%s (%s)", key, _value_shape_for_log(value))
 
                     # Record tool call info for message protocol (function calling)
                     _tc_id = _resolve_tool_call_id(result)

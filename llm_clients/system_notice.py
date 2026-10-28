@@ -37,7 +37,7 @@ import string
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sai_memory.memory.storage import (
     HEAD_MESSAGE_KEY,
@@ -156,6 +156,28 @@ def redact_passphrase(text: str, passphrase: str) -> str:
     if not passphrase or not isinstance(text, str):
         return text
     return text.replace(passphrase, "*" * len(passphrase))
+
+
+def redact_passphrase_in_value(value: Any, passphrase: str) -> Any:
+    """JSON にできる値 (辞書・並び・文字列) の、すべての文字列 (辞書の鍵も) から合言葉を伏せた写し。
+
+    構造のまま送られる値 (Gemini の FunctionCall の引数・FunctionResponse の
+    結果) に使う。送るときに JSON の文字列になり、その中に合言葉が現れうるのは
+    一つの文字列 (鍵か値) の中だけなので、全部の文字列を伏せれば足りる。
+    """
+    if not passphrase:
+        return value
+    if isinstance(value, str):
+        return redact_passphrase(value, passphrase)
+    if isinstance(value, dict):
+        return {
+            redact_passphrase(k, passphrase) if isinstance(k, str) else k:
+            redact_passphrase_in_value(v, passphrase)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_passphrase_in_value(v, passphrase) for v in value]
+    return value
 
 
 #: このプロセスで送る形に差し込んだ合言葉と、最後に差し込んだ時刻
@@ -424,6 +446,24 @@ def system_notice_media_entries(metadata: Any, kind: str) -> List[Dict[str, Any]
     return out
 
 
+def system_notice_media_notes(
+    metadata: Any, kinds: Tuple[str, ...], *, passphrase: str,
+) -> List[str]:
+    """通知の metadata にある ``kinds`` の項目すべての説明の文 (metadata の並びの順)。
+
+    タグ化した通知のタグの中の本文 (:func:`tag_presented_system_notice`) に足す
+    説明の文はこれで組む。ファイルが読めたか・埋め込めたか (非対応のモデル・
+    枚数の上限・サイズ) にかかわらず、metadata の記述だけから決まるので、同じ
+    記録から組むタグの中の本文が読み込みの成否で揺れない (不変条件 6)。埋め込め
+    た項目は、説明の文に加えて部品としても送られる (重複は受け入れる)。
+    """
+    return [
+        system_notice_media_note(entry, metadata, kind, passphrase=passphrase)
+        for kind in kinds
+        for entry in system_notice_media_entries(metadata, kind)
+    ]
+
+
 def system_notice_image_entries(metadata: Any) -> List[Dict[str, Any]]:
     """記録の metadata にある画像の項目 (:func:`system_notice_media_entries` の画像版)。"""
     return system_notice_media_entries(metadata, "image")
@@ -500,8 +540,9 @@ def tag_system_notice(body: str, passphrase: str) -> str:
 
 
 #: タグ化した通知の写しの metadata に置く、タグで包む前の本文
-#: (:func:`present_system_notices` の ``keep_notice_body``)。記録には保存されない
-#: 写しだけに付く。
+#: (:func:`present_system_notices` が付ける)。記録には保存されない写しだけに付き、
+#: 送信の本文には載らない (各クライアントは metadata を API の欄へ写さない。
+#: metadata ごと送っていた Ollama も API の欄だけに組み直す — llm_clients/ollama.py)。
 _NOTICE_BODY_KEY = "__system_notice_body__"
 
 
@@ -513,13 +554,13 @@ def tag_presented_system_notice(metadata: Any, notes: List[str], passphrase: str
     後ろではなくタグの中へ入れる — 閉じタグの後ろに足すと、画像だけの通知では
     証明されたタグの中身が空で、説明は合言葉の外の普通の user の文章になる。
     ``notes`` が空なら :func:`present_system_notices` が組んだ本文と一字一致する。
-    写しは ``keep_notice_body=True`` で :func:`present_system_notices` を通した
-    ものでなければならない (無ければ例外 — タグの外へ説明を足す形へ黙って戻らない)。
+    写しは :func:`present_system_notices` でタグ化した通知でなければならない
+    (本文の写しが無ければ例外 — タグの外へ説明を足す形へ黙って戻らない)。
     """
     meta = metadata if isinstance(metadata, dict) else {}
     if _NOTICE_BODY_KEY not in meta:
         raise ValueError(
-            "tag_presented_system_notice needs a notice presented with keep_notice_body=True",
+            "tag_presented_system_notice needs a notice tagged by present_system_notices",
         )
     body = meta[_NOTICE_BODY_KEY]
     for note in notes:
@@ -527,18 +568,15 @@ def tag_presented_system_notice(metadata: Any, notes: List[str], passphrase: str
     return tag_system_notice(body, passphrase)
 
 
-def present_system_notices(
-    messages: List[Any], *, accepts_mid_system: bool, keep_notice_body: bool = False,
-) -> List[Any]:
+def present_system_notices(messages: List[Any], *, accepts_mid_system: bool) -> List[Any]:
     """messages 列を、送り先のモデルへ送る直前の形にする (新しい列を返す。入力は変えない)。
 
     ``accepts_mid_system`` はそのモデルが会話の途中の role=system を受け取れるか
     (:func:`accepts_mid_conversation_system`)。規則はモジュールの説明を参照。
 
-    ``keep_notice_body`` が真なら、タグ化した通知の写しの metadata に、タグで包む
-    前の本文を残す。画像などの説明の文を足してからタグで包み直すクライアント
-    (:func:`tag_presented_system_notice`) が使う。metadata ごと送るクライアント
-    (Ollama) では、本文の写しがリクエストに載らないよう偽のまま使う。
+    タグ化した通知の写しの metadata には、タグで包む前の本文を残す。画像などの
+    説明の文を足してからタグで包み直すクライアント (:func:`tag_presented_system_notice`)
+    が使う。
     """
     head = _head_index(messages)
     if head is None:
@@ -582,8 +620,7 @@ def present_system_notices(
                 body = _content_text(msg.get("content"))
                 new_msg["role"] = "user"
                 new_msg["content"] = tag_system_notice(body, passphrase)
-                if keep_notice_body:
-                    notice_meta[_NOTICE_BODY_KEY] = body
+                notice_meta[_NOTICE_BODY_KEY] = body
             out.append(new_msg)
             continue
         new_msg = _without_passphrase(msg)
@@ -616,11 +653,13 @@ __all__ = [
     "present_system_notices",
     "redact_known_passphrases",
     "redact_passphrase",
+    "redact_passphrase_in_value",
     "system_notice_image_entries",
     "system_notice_image_note",
     "system_notice_indices",
     "system_notice_media_entries",
     "system_notice_media_note",
+    "system_notice_media_notes",
     "system_notice_passphrase",
     "tag_presented_system_notice",
     "tag_system_notice",

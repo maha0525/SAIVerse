@@ -110,6 +110,13 @@ OLLAMA_ALLOWED_REQUEST_PARAMS = {
 }
 
 
+#: Ollama の API (/api/chat と /v1/chat/completions) がメッセージに定義する欄のうち、
+#: SAIVerse が送るもの。これ以外の欄 (metadata など SAIVerse の内部の欄) は送らない。
+_OLLAMA_MESSAGE_FIELDS = (
+    "role", "content", "images", "tool_calls", "tool_call_id", "name", "tool_name",
+)
+
+
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
 
@@ -167,18 +174,28 @@ class OllamaClient(LLMClient):
         self.chat_url = f"{self.base}/api/chat"
 
     @staticmethod
-    def _present_system_notices(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """会話の途中のシステム通知を合言葉付きタグの user にする (送る直前の変換)。
+    def _request_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """送る直前の messages 列: システム通知の変換をして、API の欄だけに組み直す。
 
-        Ollama はチャットテンプレート次第で途中の system が落ちうるので、タグで
-        囲む側に倒す (llm_clients/system_notice.py の判定)。この変換は metadata の
-        合言葉も剥がす — Ollama へは messages を metadata ごと送るので、剥がさないと
-        合言葉の値がリクエストに載る。head の印が無い列は変わらない。
+        会話の途中のシステム通知は合言葉付きタグの user にする — Ollama はチャット
+        テンプレート次第で途中の system が落ちうるので、タグで囲む側に倒す
+        (llm_clients/system_notice.py の判定)。head の印が無い列は変換で変わらない。
+
+        そのうえで、各メッセージを Ollama の API が定義する欄
+        (:data:`_OLLAMA_MESSAGE_FIELDS`) だけの新しい dict にする。SAIVerse の
+        messages は内部の metadata (思考・出力の分け方・通知の印や本文の写しなど)
+        を持っていて、それをそのまま HTTP の本文に載せると、API の外の欄として
+        中身ごとサーバーへ届く。
         """
-        return present_system_notices(
+        presented = present_system_notices(
             messages,
             accepts_mid_system=accepts_mid_conversation_system("ollama_compat", None),
         )
+        return [
+            {key: msg[key] for key in _OLLAMA_MESSAGE_FIELDS if key in msg}
+            if isinstance(msg, dict) else msg
+            for msg in presented
+        ]
 
     @classmethod
     def reset_probe_cache(cls) -> None:
@@ -256,7 +273,7 @@ class OllamaClient(LLMClient):
             Dict: Tool detection result when tools is provided
         """
         messages = self._inject_unsupported_media_summaries(messages)
-        messages = self._present_system_notices(messages)
+        messages = self._request_messages(messages)
         tools_spec = tools or []
         use_tools = bool(tools_spec)
 
@@ -573,7 +590,7 @@ class OllamaClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         messages = self._inject_unsupported_media_summaries(messages)
-        messages = self._present_system_notices(messages)
+        messages = self._request_messages(messages)
         # For structured output, use non-streaming to get complete JSON
         # Priority: /api/chat (native, widely supported) -> /v1/chat/completions (fallback)
         if response_schema:

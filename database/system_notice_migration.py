@@ -300,6 +300,11 @@ class Skipped:
 
 #: :func:`strip_system_tags` が包みの形を決められなかった行の理由。
 AMBIGUOUS_TAGS_REASON = "タグの対応が曖昧"
+#: 確認待ちの印 (``SYSTEM_NOTICE_REVIEW_KEY``) の値: タグ入り本文だが系統を判定
+#: できなかった行。
+UNCLASSIFIED_REASON = "系統を判定できなかった"
+#: 確認待ちの印の値: 印の無い role=system 行で系統を推定できなかった行。
+UNKNOWN_SYSTEM_REASON = "系統を推定できなかった role=system"
 
 
 @dataclass
@@ -328,6 +333,9 @@ class StoreResult:
     restored_counts: Optional[Dict[Tuple[str, str], int]] = None
     #: この起動でこの結果をレポートの材料 (結果の JSON) に書いたか。JSON には載せない。
     result_saved: bool = False
+    #: この起動でこの結果を材料に書こうとして失敗したか (レポートから詳細が欠ける)。
+    #: JSON には載せない。
+    result_save_failed: bool = False
 
     def counts(self) -> Dict[Tuple[str, str], int]:
         if self.restored_counts is not None:
@@ -469,6 +477,40 @@ def _col_or_null(cols: set, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _mark_for_review(
+    result: StoreResult, row_id: Any, raw_meta: Any, metadata: Dict[str, Any], reason: str,
+) -> None:
+    """レポート送りにした messages の行へ、確認待ちの印を付ける UPDATE を積む。
+
+    印 (``SYSTEM_NOTICE_REVIEW_KEY``) は本文と role を変えず、その行を「実会話」
+    (sai_memory/memory/storage.py の ``_conversation_exclusion``) から外す。既に
+    印がある行には積まない (印を消して流し直しても二度書かない)。metadata が
+    辞書として読めない行 (壊れた JSON・配列) には付けない — 印だけの metadata に
+    置き換えると元の metadata が失われる。metadata の列が無い古いスキーマでは
+    書けないので、呼び出し側が呼ばない。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
+
+    if raw_meta and _parse_json_object(raw_meta) is None:
+        return
+    if metadata.get(SYSTEM_NOTICE_REVIEW_KEY):
+        return
+    new_meta = dict(metadata)
+    new_meta[SYSTEM_NOTICE_REVIEW_KEY] = reason
+    result.updates.append((
+        "UPDATE messages SET metadata = ? WHERE id = ?",
+        (_dump_json(new_meta), row_id),
+    ))
+
+
+def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
 
@@ -487,6 +529,8 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         # 判定に要る列が無い DB は対象が無い (変換もしない)
         return
     meta_col = _col_or_null(cols, "metadata")
+    # 確認待ちの印は metadata の列に書く (列の無い古いスキーマでは付けない)
+    can_mark = "metadata" in cols
     order = "created_at, rowid" if "created_at" in cols else "rowid"
     rows = conn.execute(
         f"SELECT id, role, content, {meta_col} FROM messages "
@@ -506,6 +550,11 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                     sorted(_tags_of(metadata)), _head(content),
                     reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
                 ))
+                if can_mark:
+                    _mark_for_review(
+                        result, row_id, raw_meta, metadata,
+                        UNCLASSIFIED_REASON if kind is None else AMBIGUOUS_TAGS_REASON,
+                    )
                 continue
             new_meta = dict(metadata)
             new_meta[SYSTEM_NOTICE_KEY] = kind
@@ -526,6 +575,8 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                     "messages", str(row_id), str(role),
                     sorted(_tags_of(metadata)), _head(content),
                 ))
+            if can_mark:
+                _mark_for_review(result, row_id, raw_meta, metadata, UNKNOWN_SYSTEM_REASON)
             continue
         new_meta = dict(metadata)
         new_meta[SYSTEM_NOTICE_KEY] = kind
@@ -1050,6 +1101,8 @@ def migrate_main_db(
 
 
 def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) -> str:
+    from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
+
     lines: List[str] = [
         "# システム通知の移行レポート",
         "",
@@ -1084,6 +1137,13 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
             lines.append(
                 f"### 変換しなかった <system> 始まりの行 (全 {len(res.skipped)} 件)"
             )
+            if res.persona and any(s.table == "messages" for s in res.skipped):
+                lines.append(
+                    f"(messages の行には確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を metadata に付け、"
+                    "会話の手本・想起・あらすじの発話の判定から外した。本文と role は"
+                    "そのまま。metadata が辞書として読めない行には付けていない。行を直したら"
+                    "この印を消す)"
+                )
             for s in res.skipped:
                 reason = f" 理由={s.reason}" if s.reason else ""
                 lines.append(
@@ -1093,7 +1153,8 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
             lines.append("")
             lines.append(
                 f"### 系統を推定できなかった role=system の行 (全 {res.unknown_system_count} 件、"
-                f"先頭 {len(res.unknown_system_samples)} 件を表示。印は付けていない)"
+                f"先頭 {len(res.unknown_system_samples)} 件を表示。通知の印は付けず、"
+                f"確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を付けた。metadata が読めない行を除く)"
             )
             for s in res.unknown_system_samples:
                 lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
@@ -1149,7 +1210,9 @@ def _save_last_leftovers(
 ) -> None:
     state = dict(previous)
     for r in results:
-        if r.error or r.already_done:
+        if r.error or r.already_done or r.result_save_failed:
+            # 材料を保存できなかった回は前回比較を進めない — 進めると、同じ行が
+            # 次の起動で「前回と同じ」として報告されずに終わる。
             continue
         if not r.has_leftovers and r.path not in state:
             continue
@@ -1159,12 +1222,21 @@ def _save_last_leftovers(
 
 
 def _try_write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
-    """結果の JSON を書く。書けなくてもログに残すだけで、他の DB も移行の確定も止めない。"""
+    """結果の JSON を書く。書けなくても他の DB も移行の確定も止めない。
+
+    書けなかったら ``result_save_failed`` を立てる — 起動の入口
+    (:func:`run_startup_system_notice_migration`) がそれを画面の警告にし、本体 DB の
+    前回比較 (:func:`_save_last_leftovers`) を更新しない。レポートから欠ける詳細の
+    代わりに、残した行の同定 (表と行 id。本文は書かない) をログに残す。
+    """
     try:
         _write_result_json(results_dir, key, result)
     except Exception:  # noqa: BLE001
+        result.result_save_failed = True
         LOGGER.error(
-            "[system-notice-migration] could not write the result of %s", result.label,
+            "[system-notice-migration] could not write the result of %s "
+            "(converted=%d, rows needing review: %s)",
+            result.label, len(result.changes), result.leftover_keys(),
             exc_info=True,
         )
 
@@ -1366,7 +1438,31 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
     # レポートの材料 (結果の JSON) に書いた DB の分だけ数える — 本体 DB の残りは
     # 前回と同じ行ならレポートの材料にしないので、毎起動で知らせない。
     saved = [r for r in results if r.result_saved]
-    review_rows = sum(sum(r.leftover_counts()) for r in saved)
+    # 材料に書けなかった DB の分も、この起動の手元の結果から数える
+    unsaved = [r for r in results if r.result_save_failed]
+    review_rows = sum(sum(r.leftover_counts()) for r in saved + unsaved)
+    if unsaved:
+        alerts.append({
+            "id": "system_notice_migration_result_unsaved",
+            "level": "warning",
+            "title": "システム通知の記録の移行結果を一部保存できず、レポートに詳細が欠けています",
+            "message": (
+                "移行の結果をレポートの材料に保存できなかった記録があります: "
+                + "、".join(r.label for r in unsaved) + "。"
+                + (
+                    "ペルソナの記憶は移行の完了の印が立っているので、次の起動で走査し"
+                    "直されず、この記録の詳細はレポートに載りません (変換した件数と確認が"
+                    "要る行の id はこの起動のログにあります)。"
+                    if any(r.persona for r in unsaved) else ""
+                )
+                + (
+                    "本体 DB の確認が要る行は次の起動でもう一度報告します。"
+                    if any(not r.persona for r in unsaved) else ""
+                )
+                + (f"確認が要る行: {review_rows} 件。" if review_rows else "")
+            ),
+            "details": {"unsaved": [r.label for r in unsaved]},
+        })
     if saved and report is None:
         # 材料は書けたのにレポートが書けなかった。移行の成否と確認が要る行の
         # 件数は分かっているので、レポートを待たずに知らせる (レポートは次の

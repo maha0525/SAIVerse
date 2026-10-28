@@ -327,8 +327,10 @@ from .system_notice import (
     is_presented_system_notice,
     present_system_notices,
     redact_passphrase,
+    redact_passphrase_in_value,
     system_notice_image_note,
     system_notice_media_note,
+    system_notice_media_notes,
     system_notice_passphrase,
     tag_presented_system_notice,
     unresolved_system_notice_images,
@@ -1572,7 +1574,6 @@ class GeminiClient(LLMClient):
         msgs = present_system_notices(
             msgs,
             accepts_mid_system=accepts_mid_conversation_system("gemini_native", None),
-            keep_notice_body=True,
         )
         system_lines: List[str] = []
         # 境目の印が付いたメッセージの番号 (複数あれば最後のもの) と、各メッセージの
@@ -1678,6 +1679,10 @@ class GeminiClient(LLMClient):
                     fn_name = fn.get("name", "")
                     fn_args_raw = fn.get("arguments", "{}")
                     fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                    # 辞書のまま渡ってきた引数は伏せ字 (present_system_notices は文字列
+                    # だけを伏せる) を通っていない。送るときに JSON の文字列になるので、
+                    # 中の文字列を全部伏せる (不変条件 3)。伏せ済みの文字列は変わらない。
+                    fn_args = redact_passphrase_in_value(fn_args, passphrase)
                     fn_id = tc.get("id") if isinstance(tc, dict) else None
                     fc_part = types.Part(
                         function_call=types.FunctionCall(id=fn_id or None, name=fn_name, args=fn_args)
@@ -1703,6 +1708,8 @@ class GeminiClient(LLMClient):
                     response_data = {"result": fn_content}
                 if not isinstance(response_data, dict):
                     response_data = {"result": response_data}
+                # 辞書のまま渡ってきた結果も同じく伏せる (引数と同じ理由)
+                response_data = redact_passphrase_in_value(response_data, passphrase)
                 contents.append(types.Content(
                     role="user",
                     parts=[types.Part(
@@ -1733,7 +1740,7 @@ class GeminiClient(LLMClient):
             # 本文の後ろに続く。
             tag_notice = is_notice and notices_tagged
             text_content = "" if tag_notice else text
-            if is_notice:
+            if is_notice and not tag_notice:
                 for entry in unresolved_system_notice_images(
                     message.get("metadata"), attachments,
                 ):
@@ -1920,12 +1927,22 @@ class GeminiClient(LLMClient):
                     note = f"[動画: {attachment['uri']}] {summary_note}"
                     text_content = f"{text_content}\n{note}" if text_content else note
 
-            # タグ化した通知は、説明の文を本文に足した全体をタグで包む。それ以外の
-            # 発言は、伏せ字 (present_system_notices) の後で足した生成した要約を
-            # その送信の合言葉で伏せる (伏せ字は文字数を変えない置換で、二度掛けても同じ)。
+            # タグ化した通知は、説明の文を本文に足した全体をタグで包む。タグの中の
+            # 本文は、画像・音声・動画を埋め込めたかどうかにかかわらず「元の本文 +
+            # metadata の全項目の説明の文」で固定する — 上の各分岐が読み込みの成否で
+            # 足した説明の文 (text_content) は使わない (読み込みの成否で送信本文が
+            # 揺れないように。不変条件 6)。説明と埋め込みの重複は受け入れる。
+            # それ以外の発言は、伏せ字 (present_system_notices) の後で足した生成した
+            # 要約をその送信の合言葉で伏せる (伏せ字は文字数を変えない置換で、二度
+            # 掛けても同じ)。
             if tag_notice:
                 text_content = tag_presented_system_notice(
-                    message.get("metadata"), [text_content] if text_content else [], passphrase,
+                    message.get("metadata"),
+                    system_notice_media_notes(
+                        message.get("metadata"), ("image", "audio", "video"),
+                        passphrase=passphrase,
+                    ),
+                    passphrase,
                 )
             else:
                 text_content = redact_passphrase(text_content, passphrase)

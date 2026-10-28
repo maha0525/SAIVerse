@@ -133,10 +133,13 @@ def build_message_content_with_attachments(
     or URI only, never generated on the spot), and ``unresolved_notice_images``
     (images whose file cannot be read) are described the same way instead of
     disappearing. When ``notice_tagged`` (the notice went through
-    ``present_system_notices(..., keep_notice_body=True)`` and became a tagged
-    user message), those notes are part of the notice, so they go inside the
-    passphrase tag (:func:`llm_clients.system_notice.tag_presented_system_notice`);
-    embedded image parts follow the tagged text.
+    ``present_system_notices`` and became a tagged
+    user message), the notes are part of the notice, so they go inside the
+    passphrase tag (:func:`llm_clients.system_notice.tag_presented_system_notice`).
+    The tagged text always carries a note for every image in the metadata
+    (:func:`llm_clients.system_notice.system_notice_media_notes`), whether or
+    not the image could be embedded, so it does not change with file
+    availability; embedded image parts follow the tagged text.
 
     ``passphrase`` is this request's head passphrase. A summary generated here
     for an ordinary message is appended after the passphrase masking of
@@ -146,6 +149,7 @@ def build_message_content_with_attachments(
     from .system_notice import (
         redact_passphrase,
         system_notice_image_note,
+        system_notice_media_notes,
         tag_presented_system_notice,
     )
 
@@ -170,9 +174,14 @@ def build_message_content_with_attachments(
 
     text = content_to_text(original_content)
     if is_notice and notice_tagged:
-        # 説明の文はタグの中へ入れる。埋め込む画像は部品なのでタグで包めず、
-        # タグ付きの本文の後ろに続く。
-        notes: List[str] = []
+        # 説明の文はタグの中へ入れる。タグの中の本文は、画像を埋め込めたかどうかに
+        # かかわらず「元の本文 + 全部の画像の説明の文」で固定する — 埋め込みの
+        # 成否 (ファイルの読み込み・サイズ) で本文が変わると、同じ記録から組む
+        # 送信本文が揺れて前方一致が割れる (不変条件 6)。説明と埋め込みの重複は
+        # 受け入れる。説明の文は metadata の記述だけから metadata の並びの順に組む
+        # (ファイルが読めない画像の説明も同じ位置に入る)。埋め込めた画像は部品
+        # なのでタグで包めず、タグ付きの本文の後ろに続く。
+        notes = system_notice_media_notes(notice_metadata, ("image",), passphrase=passphrase)
         image_parts: List[Dict[str, Any]] = []
         for att_idx, att in enumerate(attachments):
             embedded = None
@@ -183,9 +192,6 @@ def build_message_content_with_attachments(
                 embedded = _image_url_part(att, max_image_bytes)
             if embedded is not None:
                 image_parts.append(embedded)
-            else:
-                notes.append(_note_for(att))
-        notes.extend(_note_for(entry) for entry in unresolved)
         tagged = tag_presented_system_notice(notice_metadata, notes, passphrase)
         if image_parts:
             return [{"type": "text", "text": tagged}, *image_parts]
@@ -303,7 +309,7 @@ def prepare_openai_messages(
     passphrase = system_notice_passphrase(messages)
     # system のまま送る途中のシステム通知の位置 (画像を説明の文に置き換える)。
     direct_notice_indices: Set[int] = set()
-    # 列が present_system_notices (keep_notice_body=True) を通ったか — タグ化した
+    # 列が present_system_notices を通ったか — タグ化した
     # 通知の説明の文をタグの中へ入れて包み直せるのはこのときだけ。
     notices_presented = any(is_head_system_message(m) for m in messages)
     if notices_presented:
@@ -312,7 +318,7 @@ def prepare_openai_messages(
             else convert_system_notices
         )
         messages = present_system_notices(
-            messages, accepts_mid_system=not convert_notices, keep_notice_body=True,
+            messages, accepts_mid_system=not convert_notices,
         )
         if not convert_notices:
             direct_notice_indices = system_notice_indices(messages)

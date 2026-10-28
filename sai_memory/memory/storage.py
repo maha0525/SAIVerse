@@ -1292,6 +1292,16 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
 #: (サーバーだけが書ける)。
 SYSTEM_NOTICE_KEY = "__system_notice__"
 
+#: 起動時の移行 (database/system_notice_migration.py) が、システム通知か発話かを
+#: 決められずにレポート送りにした行 (タグの対応が曖昧な行・系統を判定できなかった
+#: 行) の metadata に付ける印。値は残した理由の文字列。本文と role は変えない。
+#: この印を持つ行は「実会話」(``_conversation_exclusion``) から外れ、コア記憶の
+#: scene・自動想起・Chronicle の発話の判定に混ざらない。レポートを見て行を手で
+#: 直したら (発話なら発話のまま、通知なら role=system と ``SYSTEM_NOTICE_KEY`` に
+#: して)、この鍵を metadata から消せば普通の行の扱いに戻る。``__`` で始まるので
+#: ``SYSTEM_NOTICE_KEY`` と同じくサーバーだけが書ける。
+SYSTEM_NOTICE_REVIEW_KEY = "__system_notice_review__"
+
 #: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
 #: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
 #: ``_compose_messages`` が人格指示の system メッセージの metadata に ``True`` で
@@ -2741,6 +2751,10 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     編纂 (``chronicle_eligibility_filter``) が 2026-08-29 裁定でタグ除外を
     やめたのとは独立の境界で、口調のアンカー (scene) に機構の定型文を
     混ぜない目的は変わらないため。
+
+    移行が確認待ちとしてレポート送りにした行 (``SYSTEM_NOTICE_REVIEW_KEY`` の印を
+    持つ行) も除外する — role=user のまま残るので role の条件では外れないが、
+    中身は機構の文でありうるため。
     """
     tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
@@ -2751,6 +2765,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             SELECT 1 FROM json_each(metadata, '$.tags')
             WHERE json_each.value IN ({tag_placeholders})
         )
+        AND json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEW_KEY}"') IS NULL
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES

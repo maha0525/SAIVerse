@@ -329,11 +329,20 @@ def _iter_strings(value: Any):
 
 
 def _tool_result_keys(nodes: List[Any]) -> set:
-    """TOOL / TOOL_CALL ノードの結果が入る state の名前 (``last`` を含む)。"""
+    """TOOL / TOOL_CALL ノードの結果が入る state の名前 (``last`` を含む)。
+
+    TOOL / TOOL_CALL ノードが一つも無い Playbook では空 — ``last`` はツールの結果
+    ではない (SET でユーザーの入力を ``last`` に入れて role=user で記録するのは
+    正常な形で、旧形式のシステム通知ではない)。
+    """
+    tool_nodes = [
+        node for node in nodes
+        if isinstance(node, dict) and node.get("type") in ("tool", "tool_call")
+    ]
+    if not tool_nodes:
+        return set()
     keys = {"last"}
-    for node in nodes:
-        if not isinstance(node, dict) or node.get("type") not in ("tool", "tool_call"):
-            continue
+    for node in tool_nodes:
         for key in (node.get("output_key"), node.get("id")):
             if isinstance(key, str) and key:
                 keys.add(key)

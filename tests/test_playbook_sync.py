@@ -333,6 +333,26 @@ def test_memorize_with_omitted_action_is_judged_with_the_runtime_default():
     )
 
 
+def test_memorize_of_last_without_any_tool_node_is_not_legacy():
+    """TOOL / TOOL_CALL ノードの無い Playbook の ``{last}`` はツールの結果ではない (Codex 4 巡目)。
+
+    SET でユーザーの入力を ``last`` に入れて role=user で記録するのは正常な形。
+    """
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+
+    set_node = {"id": "n1", "type": "set", "assignments": {"last": "{input}"}}
+    for memorize in (
+        {"id": "n2", "type": "memorize", "role": "user", "action": "{last}"},
+        {"id": "n2", "type": "memorize", "role": "user"},
+    ):
+        assert not _creates_legacy_system_notice([set_node, memorize]), memorize
+    # TOOL_CALL ノードが一つでもあれば、{last} はツールの結果でありうる
+    tool_call = {"id": "n0", "type": "tool_call", "call_source": "fc"}
+    assert _creates_legacy_system_notice(
+        [tool_call, set_node, {"id": "n2", "type": "memorize", "role": "user"}],
+    )
+
+
 def test_compat_alerts_separate_tools_of_unconnected_mcp_servers(session_factory, monkeypatch):
     """設定にある MCP サーバーの名前で始まる参照は、未接続の可能性として別の警告に出す。"""
     from saiverse.playbook_sync import playbook_compat_alerts

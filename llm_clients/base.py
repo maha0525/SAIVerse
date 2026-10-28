@@ -130,9 +130,8 @@ class LLMClient:
 
         from .system_notice import (
             system_notice_indices,
-            system_notice_media_note,
+            system_notice_media_notes,
             system_notice_passphrase,
-            unresolved_system_notice_media,
         )
         from .utils import inject_audio_video_summaries
         from saiverse.media_utils import iter_audio_media, iter_video_media
@@ -161,23 +160,20 @@ class LLMClient:
             content = msg.get("content", "")
 
             if idx in notice_indices and isinstance(content, str):
-                # iter_audio_media / iter_video_media はファイルが無い項目を返さない
-                # ので、通知は metadata の記述からも並べ、ファイルが消えていても
-                # 説明の文で残す (画像の unresolved_system_notice_images と同じ形)。
-                # 残さないと、音声・動画だけの通知は本文の空な通知として消える。
+                # 通知は metadata の記述だけから、metadata の並びの順に説明の文を
+                # 並べる (system_notice_media_notes)。iter_audio_media /
+                # iter_video_media はファイルが無い項目を返さないので、それに頼ると
+                # ファイルの有無で説明の文の数と順序が変わり、音声・動画だけの
+                # 通知は本文の空な通知として消える。
                 new_text = content
-                for kind, items, supported in (
-                    ("audio", audio_items, self.supports_audio),
-                    ("video", video_items, self.supports_video),
-                ):
-                    if supported:
-                        continue
-                    missing = unresolved_system_notice_media(metadata, items, kind)
-                    for att in list(items) + missing:
-                        note = system_notice_media_note(
-                            att, metadata, kind, passphrase=passphrase,
-                        )
-                        new_text = f"{new_text}\n{note}" if new_text else note
+                kinds = tuple(
+                    kind for kind, supported in (
+                        ("audio", self.supports_audio), ("video", self.supports_video),
+                    )
+                    if not supported
+                )
+                for note in system_notice_media_notes(metadata, kinds, passphrase=passphrase):
+                    new_text = f"{new_text}\n{note}" if new_text else note
                 if new_text == content:
                     new_msgs.append(msg)
                     continue

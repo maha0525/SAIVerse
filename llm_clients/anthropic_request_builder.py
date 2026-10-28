@@ -15,6 +15,7 @@ from .system_notice import (
     present_system_notices,
     redact_passphrase,
     system_notice_image_note,
+    system_notice_media_notes,
     system_notice_passphrase,
     tag_presented_system_notice,
     unresolved_system_notice_images,
@@ -152,7 +153,7 @@ def _build_anthropic_content_blocks(
 
     ``passphrase`` はその送信の head の合言葉。通常の発言に足す生成した画像の
     要約は合言葉の伏せ字 (present_system_notices) の後で足されるので、ここで伏せる。
-    ``tag_notice`` は、このメッセージが ``keep_notice_body=True`` で合言葉付きタグに
+    ``tag_notice`` は、このメッセージが present_system_notices で合言葉付きタグに
     変えた通知であること (説明の文をタグの中へ入れて包み直す)。
     """
     tag_notice = is_notice and tag_notice
@@ -171,7 +172,13 @@ def _build_anthropic_content_blocks(
     unresolved: List[Dict[str, Any]] = (
         unresolved_system_notice_images(metadata, attachments) if is_notice else []
     )
-    notice_notes: List[str] = []
+    # タグの中の本文は、画像を埋め込めたかどうかにかかわらず「元の本文 + metadata の
+    # 全部の画像の説明の文」で固定する (読み込みの成否で送信本文が揺れないように。
+    # 不変条件 6)。説明と埋め込みの重複は受け入れる。
+    notice_notes: List[str] = (
+        system_notice_media_notes(metadata, ("image",), passphrase=passphrase)
+        if tag_notice else []
+    )
 
     def _note_for(att: Dict[str, Any]) -> str:
         if is_notice:
@@ -203,13 +210,10 @@ def _build_anthropic_content_blocks(
                 continue
             logging.warning("Image file not found or unreadable: %s", att.get("uri") or att.get("path"))
 
-        if tag_notice:
-            notice_notes.append(_note_for(att))
-        else:
+        if not tag_notice:
             content_blocks.append({"type": "text", "text": _note_for(att)})
 
     if tag_notice:
-        notice_notes.extend(_note_for(entry) for entry in unresolved)
         content_blocks.append({
             "type": "text",
             "text": tag_presented_system_notice(metadata, notice_notes, passphrase),
@@ -255,7 +259,7 @@ def _prepare_anthropic_messages(
     notices_tagged: bool = False,
 ) -> List[Dict[str, Any]]:
     """``passphrase`` はその送信の head の合言葉、``notices_tagged`` は列が
-    ``keep_notice_body=True`` の present_system_notices を通ったこと
+    present_system_notices を通ったこと
     (build_request_params が渡す)。"""
     attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys = _collect_attachment_state(
         messages, max_image_embeds=max_image_embeds,
@@ -361,7 +365,6 @@ def build_request_params(
     messages = present_system_notices(
         messages,
         accepts_mid_system=accepts_mid_conversation_system("anthropic_native", None),
-        keep_notice_body=True,
     )
     system_blocks, remaining_messages = _prepare_anthropic_system(messages, enable_cache=enable_cache, cache_ttl=cache_ttl)
     prepared_messages = _prepare_anthropic_messages(

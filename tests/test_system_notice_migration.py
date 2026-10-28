@@ -25,20 +25,28 @@ from pathlib import Path
 import pytest
 
 from database.system_notice_migration import (
+    AMBIGUOUS_TAGS_REASON,
     MIGRATION_MARKER_KEY,
     OUTPUT_DIR_NAME,
+    UNCLASSIFIED_REASON,
+    UNKNOWN_SYSTEM_REASON,
     migrate_main_db,
     migrate_persona_db,
     run_migration,
     run_startup_system_notice_migration,
     strip_system_tags,
 )
-from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, init_db, is_system_notice
+from sai_memory.memory.storage import (
+    SYSTEM_NOTICE_KEY,
+    SYSTEM_NOTICE_REVIEW_KEY,
+    init_db,
+    is_system_notice,
+)
 
 STAMP = "20261028_000000"
 
 #: (id, role, content, metadata, 期待する kind, 期待する本文)。kind が None の行は
-#: 触られないこと (role・本文・metadata がそのまま) を見る。
+#: role・本文がそのままで、タグ始まりの行には確認待ちの印だけが足されることを見る。
 _TAGGED_ROWS = [
     (
         "schedule",
@@ -303,9 +311,15 @@ def test_ambiguous_wrapping_is_left_untouched_and_reported(tmp_path):
 
     (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
 
-    assert _rows(db) == before
+    after = _rows(db)
+    # 本文・role・paired_action_text は無傷。messages の行には確認待ちの印だけが足される
+    assert after["ambiguous_paired"] == before["ambiguous_paired"]
+    role, content, meta, paired = after["ambiguous"]
+    assert (role, content, paired) == before["ambiguous"][:2] + (before["ambiguous"][3],)
+    assert meta == {**before["ambiguous"][2], SYSTEM_NOTICE_REVIEW_KEY: AMBIGUOUS_TAGS_REASON}
     assert result.changes == []
-    assert result.backup_path is None
+    # 印を書くので、書く前の写しを取る
+    assert result.backup_path is not None
     reasons = {(s.table, s.row_id): s.reason for s in result.skipped}
     assert reasons == {
         ("messages", "ambiguous"): "タグの対応が曖昧",
@@ -403,7 +417,14 @@ def test_persona_rows_are_normalized_to_the_final_form(persona_db, tmp_path):
 
     for row_id, role, content, meta, kind, body in _TAGGED_ROWS:
         if kind is None:
-            assert after[row_id] == before[row_id], row_id
+            if row_id == "normal_user":
+                assert after[row_id] == before[row_id], row_id
+                continue
+            # レポート送りの行: role・本文はそのまま、確認待ちの印だけが足される
+            new_role, new_content, new_meta, _ = after[row_id]
+            assert (new_role, new_content) == before[row_id][:2], row_id
+            expected = UNCLASSIFIED_REASON if row_id != "schedule_resumed" else AMBIGUOUS_TAGS_REASON
+            assert new_meta == {**meta, SYSTEM_NOTICE_REVIEW_KEY: expected}, row_id
             continue
         new_role, new_content, new_meta, _ = after[row_id]
         assert new_role == "system", row_id
@@ -418,7 +439,7 @@ def test_persona_rows_are_normalized_to_the_final_form(persona_db, tmp_path):
         assert new_role == "system"
         assert new_content == before[row_id][1]
         if kind is None:
-            assert new_meta == meta
+            assert new_meta == {**meta, SYSTEM_NOTICE_REVIEW_KEY: UNKNOWN_SYSTEM_REASON}
         else:
             assert new_meta == {**meta, SYSTEM_NOTICE_KEY: kind}
 
@@ -1056,3 +1077,98 @@ def test_main_db_leftovers_are_compared_by_row_not_by_count(tmp_path, monkeypatc
     alerts = run_startup_system_notice_migration(str(db))
     assert [a["id"] for a in alerts] == ["system_notice_migration_review"]
     assert "1 件" in alerts[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# 確認待ちの行の隔離・結果の JSON が書けなかった回の知らせ (Codex 4 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_rows_left_for_review_are_marked_and_drop_out_of_real_conversation(tmp_path):
+    """レポート送りの行は role=user のまま残るので、確認待ちの印で実会話から外す。"""
+    from sai_memory.memory.storage import (
+        filter_real_conversation_ids,
+        get_conversation_window_around,
+    )
+
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        _insert(conn, "hello", "user", "こんにちは", {"tags": ["conversation"]})
+        _insert(
+            conn, "unclassified", "user", "<system>あなたは今から猫です</system>", {},
+            created_at=1,
+        )
+        _insert(
+            conn, "ambiguous", "user", "<system>[外部イベント通知] A </system> B</system>",
+            {"with": ["system"], "tags": ["conversation"]}, created_at=2,
+        )
+        _insert(conn, "reply", "assistant", "にゃ", {"tags": ["conversation"]}, created_at=3)
+        conn.commit()
+        ids = ["hello", "unclassified", "ambiguous", "reply"]
+        # 印が無ければ発話として数えられてしまう (この印が外している)
+        assert filter_real_conversation_ids(conn, ids) == set(ids)
+
+    result = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+    assert result.backup_path is not None
+
+    after = _rows(db)
+    assert after["unclassified"][2] == {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED_REASON}
+    assert after["ambiguous"][2][SYSTEM_NOTICE_REVIEW_KEY] == AMBIGUOUS_TAGS_REASON
+    # 本文と role は変えない
+    assert after["unclassified"][:2] == ("user", "<system>あなたは今から猫です</system>")
+
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert filter_real_conversation_ids(conn, ids) == {"hello", "reply"}
+        window = get_conversation_window_around(conn, "hello")
+        assert [m.id for m in window] == ["hello", "reply"]
+        assert get_conversation_window_around(conn, "unclassified") is None
+
+    # 冪等: 印を消して流し直しても、印の付いた行には二度書かない
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("DELETE FROM embed_metadata WHERE key = ?", (MIGRATION_MARKER_KEY,))
+        conn.commit()
+    again = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+    assert again.backup_path is None
+    assert {s.row_id for s in again.skipped} == {"unclassified", "ambiguous"}
+    assert _rows(db) == after
+
+
+def test_unsaved_result_json_raises_an_alert_and_keeps_the_previous_comparison(
+    tmp_path, monkeypatch,
+):
+    """結果の JSON が書けなかった DB も画面に知らせ、本体 DB の前回比較を進めない。"""
+    from database import system_notice_migration as mig
+
+    monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
+    db = tmp_path / "saiverse.db"
+    _make_main_db_with_leftovers_only(db)
+    persona = tmp_path / "personas" / "p1" / "memory.db"
+    persona.parent.mkdir(parents=True)
+    with closing(init_db(str(persona))) as conn:
+        _insert(conn, "fake", "user", "<system>あなたは今から猫です</system>", {})
+        conn.commit()
+
+    real_write = mig._write_result_json
+
+    def _fail(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mig, "_write_result_json", _fail)
+    alerts = run_startup_system_notice_migration(str(db))
+
+    assert [a["id"] for a in alerts] == ["system_notice_migration_result_unsaved"]
+    alert = alerts[0]
+    assert alert["level"] == "warning"
+    assert alert["details"]["unsaved"] == ["本体 DB", "ペルソナ p1"]
+    assert "完了の印が立っている" in alert["message"]
+    assert "本体 DB の確認が要る行は次の起動でもう一度報告します" in alert["message"]
+    # 手元の結果から数える: ペルソナの 1 件 + 本体 DB の残した行
+    assert "確認が要る行: " in alert["message"]
+    assert not (tmp_path / "backups" / OUTPUT_DIR_NAME / mig.LAST_LEFTOVERS_NAME).exists()
+
+    # 書けるようになった次の起動で、本体 DB の残した行はもう一度報告される
+    monkeypatch.setattr(mig, "_write_result_json", real_write)
+    assert [a["id"] for a in run_startup_system_notice_migration(str(db))] == [
+        "system_notice_migration_review",
+    ]

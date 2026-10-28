@@ -482,10 +482,12 @@ class AnthropicClient(LLMClient):
             Text chunks as they are generated
         """
         self._store_reasoning([])
-        messages = self._inject_unsupported_media_summaries(messages)
 
         # For structured output, use non-streaming generate
         if response_schema:
+            # 送る直前の前処理 (音声・動画の説明の文を足すなど) は generate が自分で
+            # 掛ける。ここで掛けてから渡すと二度掛かり、説明の文が二重になって、
+            # 同期の呼び出しと送信本文が食い違う。
             result = self.generate(
                 messages, tools, response_schema,
                 temperature=temperature, enable_cache=enable_cache, cache_ttl=cache_ttl
@@ -495,6 +497,8 @@ class AnthropicClient(LLMClient):
             else:
                 yield str(result)
             return
+
+        messages = self._inject_unsupported_media_summaries(messages)
 
         build_result = build_request_params(
             messages=messages,

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -138,9 +139,10 @@ def test_openai_compat_convert_flag(tmp_path):
     """OpenAI 互換: 変換する設定でタグの user (画像を埋め込む)、しない設定で system。"""
     from llm_clients.openai_message_preparer import prepare_openai_messages
 
+    path = _write_png(tmp_path)
     msgs = _conversation()
     msgs[3] = {**msgs[3], "metadata": {"media": [
-        {"path": _write_png(tmp_path), "mime_type": "image/png", "type": "image"},
+        {"path": path, "mime_type": "image/png", "type": "image"},
     ]}}
     converted = prepare_openai_messages(
         msgs, supports_images=True, convert_system_to_user=True,
@@ -148,9 +150,10 @@ def test_openai_compat_convert_flag(tmp_path):
     assert [m["role"] for m in converted] == ["system", "user", "assistant", "user", "user"]
     parts = converted[3]["content"]
     assert isinstance(parts, list)
+    # 埋め込めた画像の説明の文もタグの中に入る (タグの中の本文は埋め込みの成否に依らない)
     assert parts[0] == {
         "type": "text",
-        "text": f'<system pass="{PASS}">\n予定の時刻になりました。\n</system>',
+        "text": f'<system pass="{PASS}">\n予定の時刻になりました。\n[画像: {path}]\n</system>',
     }
     assert parts[1]["type"] == "image_url"
     assert all("metadata" not in m for m in converted)
@@ -206,7 +209,7 @@ def test_image_only_notice_survives_on_both_openai_paths(tmp_path, no_image_summ
     )
     assert [m["role"] for m in tagged] == ["system", "user", "assistant", "user", "user"]
     parts = tagged[3]["content"]
-    assert parts[0] == {"type": "text", "text": f'<system pass="{PASS}">\n\n</system>'}
+    assert parts[0] == {"type": "text", "text": _tagged(f"[画像: {path}]")}
     assert parts[1]["type"] == "image_url"
 
 
@@ -949,7 +952,12 @@ def test_notice_whose_audio_video_file_is_missing_survives(
 def test_notice_body_and_media_note_share_one_tag_on_every_tagging_client(
     tmp_path, summary_generator, gemini_client,
 ):
-    """本文のある通知でも、埋め込めない画像の説明は閉じタグの前に入る。埋め込んだ画像はその後ろ。"""
+    """画像の説明は閉じタグの前に入り、埋め込んだ画像はその後ろに続く。
+
+    タグの中の本文は、画像を埋め込めたかどうか (画像対応・ファイルの有無) に
+    かかわらず「元の本文 + metadata の全部の画像の説明の文」で一字一致する
+    (不変条件 6。説明と埋め込みの重複は受け入れる)。
+    """
     from llm_clients.anthropic_request_builder import build_request_params
     from llm_clients.openai_message_preparer import prepare_openai_messages
 
@@ -964,7 +972,9 @@ def test_notice_body_and_media_note_share_one_tag_on_every_tagging_client(
         ]}}
         return msgs
 
-    expected = _tagged(f"予定の時刻になりました。\n[画像: {missing}] 消えた写真")
+    expected = _tagged(
+        f"予定の時刻になりました。\n[画像: {present}]\n[画像: {missing}] 消えた写真"
+    )
 
     # 画像対応: タグ付きの本文 (説明の文を含む) → 埋め込んだ画像
     parts = prepare_openai_messages(
@@ -987,13 +997,30 @@ def test_notice_body_and_media_note_share_one_tag_on_every_tagging_client(
     assert contents[2].parts[0].text == expected
     assert len(contents[2].parts) == 2  # 本文の後ろに埋め込んだ画像
 
-    # 画像非対応: どちらの画像も説明の文になり、全部がタグの中
-    both = _tagged(
-        f"予定の時刻になりました。\n[画像: {present}]\n[画像: {missing}] 消えた写真"
-    )
+    # 画像非対応: 何も埋め込まないが、タグの中の本文は画像対応のときと同じ
     assert prepare_openai_messages(
         _msgs(), supports_images=False, convert_system_to_user=True,
-    )[3]["content"] == both
+    )[3]["content"] == expected
+    anth_text_only = build_request_params(
+        messages=_msgs(), tools=None, response_schema=None, temperature=None,
+        enable_cache=False, cache_ttl="5m", model="claude-test", max_tokens=100,
+        extra_params={}, thinking_config=None, thinking_effort=None,
+        supports_images=False, max_image_bytes=None,
+    )["request_params"]["messages"][2]["content"]
+    assert anth_text_only == [{"type": "text", "text": expected}]
+    gemini_client.supports_images = False
+    _, contents = gemini_client._convert_messages(_msgs())
+    assert contents[2].parts[0].text == expected
+    assert len(contents[2].parts) == 1
+
+    # 先頭の画像のファイルが消えても、説明の文の数と順序は metadata のまま
+    Path(present).unlink()
+    assert prepare_openai_messages(
+        _msgs(), supports_images=True, convert_system_to_user=True,
+    )[3]["content"] == expected
+    gemini_client.supports_images = True
+    _, contents = gemini_client._convert_messages(_msgs())
+    assert contents[2].parts[0].text == expected
     summary_generator.assert_not_called()
 
 
@@ -1091,6 +1118,19 @@ def test_openai_tool_stream_log_keeps_no_argument_fragments(caplog, monkeypatch)
     for m in messages:
         if echoed not in m:
             assert first not in m and second not in m, m
+    # 名前の断片も書かない (長さだけ)
+    chunk_records = [m for m in messages if m.startswith("tool_chunk")]
+    assert chunk_records
+    assert all("say" not in m for m in chunk_records), chunk_records
+
+
+def test_tool_argument_expansion_log_keeps_only_the_shape():
+    """ツール引数を一つずつ別のレコードに書くログは、型と長さだけにする。"""
+    from sea.runtime_llm import _value_shape_for_log
+
+    assert _value_shape_for_log("Tt5ArgsSplit7") == "str, length=13"
+    assert _value_shape_for_log({"a": "secret"}) == "dict, length=1"
+    assert _value_shape_for_log(3) == "int"
 
 
 def test_codex_refuses_to_send_when_preparation_fails(monkeypatch):
@@ -1109,3 +1149,139 @@ def test_codex_refuses_to_send_when_preparation_fails(monkeypatch):
     with pytest.raises(InvalidRequestError):
         client.generate(_first_turn_with_notice())
     posted.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 13. Ollama へは API の欄だけを送る (Codex 4 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_request_carries_only_api_fields(monkeypatch):
+    """内部の metadata (思考・通知の印や本文の写し・合言葉) を HTTP の本文に載せない。"""
+    from llm_clients import ollama as ollama_mod
+    from llm_clients.ollama import OllamaClient
+
+    monkeypatch.setattr(OllamaClient, "_probe_base", lambda self, preferred: "http://ollama.test")
+    client = OllamaClient("m", context_length=4096, base_url="http://ollama.test")
+    sent = []
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "はい"}}]}
+
+    def _post(url, json=None, timeout=None):
+        sent.append(json)
+        return _Resp()
+
+    monkeypatch.setattr(ollama_mod.requests, "post", _post)
+    msgs = _conversation()
+    msgs[2] = {
+        **msgs[2],
+        "thought_signature": "sig",
+        "metadata": {"reasoning": "考えた", "output_phases": [{"phase": None, "text": "やあ"}]},
+    }
+    msgs[3] = {**msgs[3], "metadata": {"tags": ["schedule"]}}
+    assert client.generate(msgs) == "はい"
+
+    (payload,) = sent
+    allowed = set(ollama_mod._OLLAMA_MESSAGE_FIELDS)
+    for message in payload["messages"]:
+        assert set(message) <= allowed, message
+    dumped = json.dumps(payload, ensure_ascii=False)
+    for internal in ("metadata", "__system_notice", "考えた", "thought_signature", "output_phases"):
+        assert internal not in dumped, internal
+    assert payload["messages"][3] == {
+        "role": "user", "content": _tagged("予定の時刻になりました。"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 14. 辞書のまま渡るツールの引数・結果の伏せ字 (Codex 4 巡目)
+# ---------------------------------------------------------------------------
+
+
+def _turn_with_dict_tool_values() -> list:
+    return [
+        _head(),
+        {"role": "user", "content": "調べて"},
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "lookup", "arguments": {"query": f"復唱 {PASS}"}},
+            }],
+        },
+        {
+            "role": "tool", "tool_call_id": "call_1", "name": "lookup",
+            "content": {"result": f"結果 {PASS}", PASS: "鍵"},
+        },
+    ]
+
+
+def test_codex_masks_dict_tool_arguments_and_results_after_conversion(monkeypatch):
+    from llm_clients import openai_codex as codex_mod
+
+    client = codex_mod.OpenAICodexClient("synthetic-codex")
+    body = client._build_body(_turn_with_dict_tool_values(), None, None, None, None)
+    masked = "*" * len(PASS)
+    call = next(i for i in body["input"] if i["type"] == "function_call")
+    output = next(i for i in body["input"] if i["type"] == "function_call_output")
+    assert PASS not in call["arguments"] and masked in call["arguments"]
+    assert json.loads(call["arguments"]) == {"query": f"復唱 {masked}"}
+    assert PASS not in output["output"] and masked in output["output"]
+    # head の合言葉は instructions に正当に残る
+    assert PASS in body["instructions"]
+
+
+def test_gemini_masks_dict_tool_arguments_and_results(gemini_client):
+    _, contents = gemini_client._convert_messages(_turn_with_dict_tool_values())
+    masked = "*" * len(PASS)
+    call = next(p.function_call for c in contents for p in c.parts if p.function_call)
+    response = next(
+        p.function_response for c in contents for p in c.parts if p.function_response
+    )
+    assert call.args == {"query": f"復唱 {masked}"}
+    assert response.response == {"result": f"結果 {masked}", masked: "鍵"}
+
+
+# ---------------------------------------------------------------------------
+# 15. 前処理の二重適用が無い (Codex 4 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_structured_stream_sends_the_same_body_as_sync(tmp_path, monkeypatch):
+    """構造化出力のストリームは同期の generate へ委ねる。前処理 (音声の説明の文) は一度だけ。"""
+    from llm_clients import anthropic as anthropic_mod
+
+    monkeypatch.setenv("CLAUDE_API_KEY", "test_key")
+    with patch("llm_clients.anthropic.Anthropic"):
+        client = anthropic_mod.AnthropicClient("claude-test", {})
+    assert not client.supports_audio
+
+    captured = []
+
+    class _Stop(Exception):
+        pass
+
+    def _capture(**kwargs):
+        captured.append(json.dumps(kwargs["messages"], ensure_ascii=False, sort_keys=True))
+        raise _Stop()
+
+    monkeypatch.setattr(anthropic_mod, "build_request_params", _capture)
+    msgs = _media_only_notice(str(tmp_path / "gone.ogg"), "audio", "audio/ogg", summary="鳥の声")
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    with pytest.raises(_Stop):
+        client.generate(msgs, response_schema=schema)
+    with pytest.raises(_Stop):
+        list(client.generate_stream(msgs, response_schema=schema))
+
+    sync_body, stream_body = captured
+    assert sync_body == stream_body
+    # 説明の文 ([音声: …] 鳥の声) は本文に一度だけ
+    assert stream_body.count("[音声:") == 1
