@@ -10,7 +10,9 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
    行だけを、タグを剥がして role=system + ``__system_notice__`` にする
    (AND 判定、不変条件 2・4)。識別用 metadata の無いタグ始まりの行は触らない
    (外部由来の偽物は role=user のまま残れば、合言葉の規則のもとで「ただの
-   文章」として読まれる)。
+   文章」として読まれる)。例外は、本番の写しの dry-run レポートで系統を確定した
+   旧世代のスケジュール発火文・外部イベント通知で、書き出しと発火の記録の
+   metadata の個別条件で拾う (:func:`legacy_schedule_notice_body`)。
 2. 旧世界で role=system・タグ無しで保存された行 (スペルの結果・TOOL の結果・
    Handy Tool・権限拒否など)。``__system_notice__`` が無いので
    ``is_system_notice`` が偽になり、自動想起の種などから外れる。tags から系統を
@@ -259,6 +261,54 @@ def classify_tagged_message(
         if (strip_system_tags(content) or "").startswith(_SUBLINE_REPORT_PREFIX):
             return "subline_report"
         return "playbook_memorize"
+    return None
+
+
+#: 系統の印 (``with:["system"]`` / ``event_message`` など) を持たない旧世代の
+#: スケジュール発火文の書き出し。旧 schedule_manager は二つの文面を使った
+#: (現行は前者 — saiverse/schedule_manager.py)。
+_LEGACY_SCHEDULE_PREFIXES = ("スケジュールの実行時刻です", "スケジュールが実行されました")
+#: 同じく、旧世代の外部イベント通知 (X のメンションなど) の書き出し。現行は
+#: saiverse/autonomy_wiring.py が ``source="external_event"`` 付きで組む。
+_LEGACY_EXTERNAL_EVENT_PREFIX = "[外部イベント通知]"
+#: レポートの件数とサンプルで、印で拾った ``schedule`` と区別する表記。行に書く
+#: ``__system_notice__`` の値は ``schedule`` のまま。
+LEGACY_SCHEDULE_LABEL = "schedule(旧世代)"
+
+
+def legacy_schedule_notice_body(
+    role: Any, content: Any, metadata: Dict[str, Any],
+) -> Optional[str]:
+    """系統の印を持たない旧世代のスケジュール発火文・外部イベント通知なら、剥がした本文。
+
+    docs/intent/system_notice_delivery.md「移行」の旧世代の個別条件。本番の写しの
+    dry-run レポートで系統を確定した二つだけを拾う。条件は全部の AND:
+
+    - role=user、tags が ``conversation`` だけ (``pulse:`` を除く)
+    - タグの剥がしが成立する (完全な組が一つ)
+    - 剥がした本文の先頭が発火文の書き出しで、その発火の記録として供給側が付けた
+      metadata を持つ — スケジュールは ``schedule_id``、外部イベントは
+      ``source="external_event"``
+
+    書き出しは剥がした本文の先頭でだけ見る (中断の再開文が元の発火文を引用して
+    いる行は、先頭が再開文なので拾わない)。X の投稿指示・音声入力の通知など、
+    出自の確度が足りない形はここで拾わない。:func:`classify_tagged_message` が
+    系統を決められなかった行にだけ使う (印があるものはそちらが優先)。
+    """
+    if not isinstance(role, str) or role.lower() != "user":
+        return None
+    if not starts_with_system_tag(content):
+        return None
+    tags = {t for t in _tags_of(metadata) if not t.startswith("pulse:")}
+    if tags != {"conversation"}:
+        return None
+    body = strip_system_tags(content)
+    if body is None:
+        return None
+    if body.startswith(_LEGACY_SCHEDULE_PREFIXES):
+        return body if metadata.get("schedule_id") is not None else None
+    if body.startswith(_LEGACY_EXTERNAL_EVENT_PREFIX):
+        return body if metadata.get("source") == "external_event" else None
     return None
 
 
@@ -536,7 +586,8 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
 def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
 
-    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`) と、
+    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`、
+      決められなければ旧世代の個別条件 :func:`legacy_schedule_notice_body`) と、
       印の無い role=system 行 (:func:`classify_unmarked_system_message`)。
     - messages.paired_action_text: 列そのものが機構だけが書く指示文の控えなので、
       タグで始まる値は剥がす。
@@ -568,6 +619,13 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         if starts_with_system_tag(content):
             kind = classify_tagged_message(role, content, metadata)
             body = strip_system_tags(content) if kind is not None else None
+            label = kind
+            if kind is None:
+                # 印で系統を決められなかった行のうち、旧世代の発火文の個別条件に
+                # 当たるもの (確認待ちの印は付けない)
+                body = legacy_schedule_notice_body(role, content, metadata)
+                if body is not None:
+                    kind, label = "schedule", LEGACY_SCHEDULE_LABEL
             if kind is None or body is None:
                 result.skipped.append(Skipped(
                     "messages", str(row_id), str(role),
@@ -589,7 +647,7 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 "WHERE id = ?",
                 (body, _dump_json(new_meta), row_id),
             ))
-            result.changes.append(Change("messages", str(row_id), kind, content, body))
+            result.changes.append(Change("messages", str(row_id), label, content, body))
             continue
         if role_s != "system" or metadata.get(SYSTEM_NOTICE_KEY):
             continue
@@ -1081,7 +1139,8 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
 
     - building_messages: 音声通話の痕跡 (role=user + タグ + event_message +
       ``voice_call``) を、今の形 (role=host・タグ無し、saiverse/voice_call.py の
-      ``_building_entry``) にする。
+      ``_building_entry``) にする。印の無い旧世代のスケジュール発火文・外部
+      イベント通知 (:func:`legacy_schedule_notice_body`) も同じ形にする。
     - execution_ledger: on_event の prepared 行の ``dispatch_envelope.user_input``
       (回収で応対の入力として送り直される) と、スルースの applied / completed
       行の結果の ``prompt`` (再適用で記録の paired_action_text になる)。
@@ -1103,13 +1162,19 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 and metadata.get("voice_call") is True
             )
             body = strip_system_tags(content) if is_voice_call else None
+            label = "voice_call"
+            if not is_voice_call:
+                # 印の無い旧世代のスケジュール発火文・外部イベント通知 (記憶 DB と同じ
+                # 個別条件)。今の建物の出来事の行と同じ role=host・タグ無しにする。
+                body = legacy_schedule_notice_body(role, content, metadata)
+                label = LEGACY_SCHEDULE_LABEL
             if body is not None:
                 result.updates.append((
                     "UPDATE building_messages SET role = 'host', content = ? WHERE id = ?",
                     (body, row_id),
                 ))
                 result.changes.append(Change(
-                    "building_messages", str(row_id), "voice_call", content, body,
+                    "building_messages", str(row_id), label, content, body,
                 ))
                 continue
             result.skipped.append(Skipped(
