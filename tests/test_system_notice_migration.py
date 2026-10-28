@@ -1354,3 +1354,110 @@ def test_an_uncommitted_staged_result_is_discarded(tmp_path, marker):
     assert mig.regenerate_pending_reports(tmp_path) == []
     assert not staged.exists() and not main_staged.exists()
     assert not any(run_dir.glob("*.json"))
+
+
+def _leave_committed_staged_result(persona_db, tmp_path, monkeypatch):
+    """コミットの後、付け替えの前に止まった起動を作り、その仮の JSON を返す。"""
+    from database import system_notice_migration as mig
+
+    monkeypatch.setattr(mig, "_publish_staged_result", lambda staged, result: None)
+    run_migration(db_path=None, saiverse_home=tmp_path)
+    monkeypatch.undo()
+    (run_dir,) = (tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME).iterdir()
+    (staged,) = run_dir.glob("*.json.tmp")
+    return run_dir, staged
+
+
+def test_an_unreadable_staged_result_is_kept_for_the_next_start(
+    persona_db, tmp_path, monkeypatch,
+):
+    """仮の JSON の読み取りが失敗した (一時的な I/O・権限) ら、捨てずに残して次の起動で決める (Codex 6 巡目)。"""
+    from database import system_notice_migration as mig
+
+    run_dir, staged = _leave_committed_staged_result(persona_db, tmp_path, monkeypatch)
+
+    real_read_bytes = Path.read_bytes
+
+    def _flaky(self):
+        if self == staged:
+            raise PermissionError("locked by another process")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _flaky)
+    assert mig.regenerate_pending_reports(tmp_path) == []
+    assert staged.exists()
+    assert not (run_dir / "persona_p1.json").exists()
+
+    # 読めるようになった次の起動で、印と突き合わせて採用する
+    monkeypatch.setattr(Path, "read_bytes", real_read_bytes)
+    (regenerated,) = mig.regenerate_pending_reports(tmp_path)
+    assert not staged.exists()
+    assert (run_dir / "persona_p1.json").exists()
+    assert "変換した件数" in regenerated.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("content", [b'{"label": "\xe3\x83', b"\xff\xfe\x00"])
+def test_a_half_written_staged_result_is_discarded(tmp_path, content):
+    """読めたのに JSON として壊れている仮の JSON は書きかけ — 捨てる。"""
+    from database import system_notice_migration as mig
+
+    run_dir = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME / "20261028_000000_x"
+    run_dir.mkdir(parents=True)
+    staged = run_dir / "persona_p1.json.tmp"
+    staged.write_bytes(content)
+
+    assert mig.regenerate_pending_reports(tmp_path) == []
+    assert not staged.exists()
+
+
+def test_the_staged_result_is_flushed_to_disk_before_the_commit(
+    persona_db, tmp_path, monkeypatch,
+):
+    """仮の JSON の中身とフォルダの項目は、完了の印のコミットより前に fsync される (Codex 6 巡目)。
+
+    付け替えの後もフォルダの項目を fsync する。
+    """
+    from database import system_notice_migration as mig
+
+    events = []
+    real_fsync = mig.os.fsync
+
+    def _fsync(fd):
+        events.append(("file", _marker(persona_db)))
+        real_fsync(fd)
+
+    def _fsync_dir(directory):
+        events.append(("dir", _marker(persona_db), sorted(p.name for p in directory.iterdir())))
+
+    monkeypatch.setattr(mig.os, "fsync", _fsync)
+    monkeypatch.setattr(mig, "_fsync_dir", _fsync_dir)
+    (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert result.result_saved
+    marker = _marker(persona_db)
+    assert marker is not None
+    # 仮の JSON の中身 → フォルダの項目 (どちらも印のコミット前) → 付け替え後のフォルダ
+    assert events[0] == ("file", None)
+    assert events[1][:2] == ("dir", None) and "persona_p1.json.tmp" in events[1][2]
+    assert events[2][:2] == ("dir", marker) and "persona_p1.json" in events[2][2]
+    assert "persona_p1.json.tmp" not in events[2][2]
+
+
+def test_a_failed_flush_rolls_back_and_leaves_no_staged_result(
+    persona_db, tmp_path, monkeypatch,
+):
+    """仮の JSON を OS に確定させられなければ、巻き戻して印を立てず、仮の JSON も残さない。"""
+    from database import system_notice_migration as mig
+
+    def _fail(_fd):
+        raise OSError("I/O error")
+
+    monkeypatch.setattr(mig.os, "fsync", _fail)
+    before = _rows(persona_db)
+    (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert result.error and "保存できなかった" in result.error
+    assert _rows(persona_db) == before
+    assert _marker(persona_db) is None
+    results_root = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME
+    assert not any(results_root.rglob("*.json.tmp"))

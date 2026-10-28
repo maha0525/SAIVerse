@@ -1211,36 +1211,48 @@ def _ollama_client(monkeypatch, *, supports_images: bool):
 
 
 @pytest.mark.parametrize("supports_images", [True, False])
-def test_ollama_image_only_notice_keeps_image_and_description(
-    tmp_path, monkeypatch, supports_images,
-):
-    """画像だけの通知: 対応モデルでは images 欄 + タグ内の説明、非対応では説明だけ (Codex 5 巡目)。
+def test_ollama_image_only_notice_is_described_only(tmp_path, monkeypatch, supports_images):
+    """画像だけの通知は、画像対応のモデルでもタグ内の説明の文だけで届く (Codex 6 巡目の裁定)。
 
-    API の欄だけに組み直すと metadata の画像が消えるので、組み直しの前に扱う。
-    タグの中の本文は埋め込みの有無に依らず同じ (不変条件 6)。
+    Ollama のクライアントは通常のユーザーの発言の画像も送らないので、通知の画像も
+    ``images`` 欄へ埋め込まない。API の欄だけに組み直すと metadata が消えるので、
+    説明の文は組み直しの前に足す (通知ごと落ちない)。
     """
-    import base64
-
     path = _write_png(tmp_path)
     client = _ollama_client(monkeypatch, supports_images=supports_images)
     sent = client._request_messages(_image_only_notice(path))
-
-    notice = sent[3]
-    assert notice["role"] == "user"
-    assert notice["content"] == _tagged(f"[画像: {path}]")
-    if supports_images:
-        assert notice["images"] == [base64.b64encode(Path(path).read_bytes()).decode("ascii")]
-    else:
-        assert "images" not in notice
-    assert "metadata" not in notice
+    assert sent[3] == {"role": "user", "content": _tagged(f"[画像: {path}]")}
 
 
-def test_ollama_unreadable_notice_image_is_described_only(tmp_path, monkeypatch):
-    """ファイルが読めない画像は、対応モデルでも説明の文だけで届く (通知ごと落ちない)。"""
-    missing = str(tmp_path / "gone.png")
+def test_ollama_notice_media_reach_as_descriptions_only(tmp_path, monkeypatch):
+    """画像・音声・動画を持つ通知は、送る直前の前処理を通すと説明の文だけになる。
+
+    generate / generate_stream と同じ順 (``_inject_unsupported_media_summaries`` →
+    ``_request_messages``) で通し、どのメッセージにも ``images`` 欄が無いことを固定する。
+    """
+    path = _write_png(tmp_path)
+    audio = str(tmp_path / "gone.ogg")
+    video = str(tmp_path / "gone.mp4")
+    msgs = _conversation()
+    msgs[3] = {
+        "role": "system",
+        "content": "届きました。",
+        "metadata": {"media": [
+            {"path": path, "mime_type": "image/png", "type": "image"},
+            {"path": audio, "mime_type": "audio/ogg", "type": "audio"},
+            {"path": video, "mime_type": "video/mp4", "type": "video"},
+        ]},
+    }
     client = _ollama_client(monkeypatch, supports_images=True)
-    sent = client._request_messages(_image_only_notice(missing))
-    assert sent[3] == {"role": "user", "content": _tagged(f"[画像: {missing}]")}
+    sent = client._request_messages(client._inject_unsupported_media_summaries(msgs))
+
+    assert sent[3] == {
+        "role": "user",
+        "content": _tagged(
+            f"届きました。\n[音声: {audio}]\n[動画: {video}]\n[画像: {path}]",
+        ),
+    }
+    assert all("images" not in m for m in sent)
 
 
 def test_ollama_masks_dict_tool_arguments_and_results(monkeypatch):

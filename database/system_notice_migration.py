@@ -847,13 +847,42 @@ def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResul
     (:func:`_publish_staged_result`) — コミットの前に止まった起動の仮の JSON は、
     次の起動の :func:`regenerate_pending_reports` が DB の完了の印と突き合わせて
     捨てるので、確定していない変換がレポートの材料にならない。
+
+    書いた中身とフォルダの項目は ``os.fsync`` で OS に確定させてから返す。確定
+    させずにコミットすると、電源断で「印はコミット済み・仮の JSON は空か書きかけ」
+    が残り、変換した行の目視の材料が失われる。確定に失敗したら仮の JSON を消して
+    例外を送る (呼び出し側が巻き戻して印を立てない)。
     """
     if results_dir is None:
         return None
     _write_run_info(results_dir)
     staged = results_dir / f"{key}.json{STAGED_SUFFIX}"
-    staged.write_text(json.dumps(result.to_json(), ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        with open(staged, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(result.to_json(), ensure_ascii=False, indent=1))
+            fh.flush()
+            os.fsync(fh.fileno())
+        _fsync_dir(results_dir)
+    except BaseException:
+        _discard_staged(staged)
+        raise
     return staged
+
+
+def _fsync_dir(directory: Path) -> None:
+    """フォルダの項目 (作成・付け替え) を OS に確定させる。
+
+    Windows では ``os.open`` がフォルダを開けない (PermissionError) ので、フォルダの
+    確定はできず何もしない (ファイルの中身の確定だけになる)。それ以外の OS で
+    失敗したら例外を送る。
+    """
+    if os.name == "nt":
+        return
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _discard_staged(staged: Optional[Path]) -> None:
@@ -872,6 +901,11 @@ def _publish_staged_result(staged: Optional[Path], result: StoreResult) -> None:
     付け替えられなければ ``result_save_failed`` を立てる (起動の入口が画面へ
     知らせる)。仮の JSON は残り、次の起動の :func:`regenerate_pending_reports` が
     DB の完了の印を確かめてから採用する。
+
+    付け替えた後はフォルダの項目を OS に確定させる (:func:`_fsync_dir`)。確定に
+    失敗しても警告だけにする — 付け替えは済んでいて、電源断で付け替えが失われ
+    ても、残る仮の JSON は中身を確定させてあるので次の起動が印と突き合わせて
+    採用する。
     """
     if staged is None:
         return
@@ -884,6 +918,15 @@ def _publish_staged_result(staged: Optional[Path], result: StoreResult) -> None:
             "[system-notice-migration] could not finalize the result of %s; "
             "%s will be taken up on the next start",
             result.label, staged, exc_info=True,
+        )
+        return
+    try:
+        _fsync_dir(staged.parent)
+    except OSError:
+        LOGGER.warning(
+            "[system-notice-migration] could not flush the folder entry of %s; "
+            "if it is lost, the staged result is taken up on the next start",
+            staged.parent, exc_info=True,
         )
 
 
@@ -1437,15 +1480,27 @@ def _settle_staged_results(run_dir: Path) -> int:
     コミットされているので正式な名前へ付け替えて採用する。一致しない・印が無い・
     印を持たない結果 (本体 DB、印を見送ったペルソナ) は、変換が確定したと
     確かめられないので捨てる — 確定していない変換をレポートの材料にしない。
-    DB が読めない (ロックなど) ときは決めずに残し、次の起動でまた試す。
+    DB が読めない (ロックなど) ときと、仮の JSON そのものが読めない (一時的な
+    I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
+    して壊れている仮の JSON は書きかけで止まったもので、捨てる — 仮の JSON は
+    OS に確定させてからコミットする (:func:`_stage_result_json`) ので、コミット
+    された取引の仮の JSON が書きかけで残ることはない。
     """
     from sai_memory.memory.storage import get_embed_metadata_strict
 
     adopted = 0
     for staged in sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}")):
         try:
-            data = json.loads(staged.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = staged.read_bytes()  # 復号の失敗 (書きかけ) は読み取りの失敗と分けて下で扱う
+        except OSError:
+            LOGGER.warning(
+                "[system-notice-migration] could not read %s to settle it; "
+                "will retry on the next start", staged, exc_info=True,
+            )
+            continue
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
             data = None  # 書きかけで止まった — 確定した結果ではない
         expected = data.get("marker_value") if isinstance(data, dict) else None
         keep = False

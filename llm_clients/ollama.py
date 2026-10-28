@@ -1,7 +1,6 @@
 """Ollama client."""
 from __future__ import annotations
 
-import base64
 import copy
 import json
 import logging
@@ -10,8 +9,6 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests
-
-from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .base import LLMClient, ToolSpecFormat
 from .exceptions import EmptyResponseError
@@ -192,8 +189,8 @@ class OllamaClient(LLMClient):
         テンプレート次第で途中の system が落ちうるので、タグで囲む側に倒す
         (llm_clients/system_notice.py の判定)。head の印が無い列は変換で変わらない。
 
-        通知の画像は metadata にしか無いので、metadata を捨てる前に扱う
-        (:meth:`_present_notice_images`)。
+        通知の画像は metadata にしか無いので、metadata を捨てる前に説明の文として
+        本文に足す (:meth:`_present_notice_images`。画像そのものは送らない)。
 
         そのうえで、各メッセージを Ollama の API が定義する欄
         (:data:`_OLLAMA_MESSAGE_FIELDS`) だけの新しい dict にする。SAIVerse の
@@ -231,17 +228,19 @@ class OllamaClient(LLMClient):
             out.append(clean)
         return out
 
-    def _present_notice_images(self, msg: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
-        """タグ化した通知の写しに、metadata の画像を Ollama の形で載せる (新しい dict)。
+    @staticmethod
+    def _present_notice_images(msg: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
+        """タグ化した通知の写しの本文に、metadata の画像の説明の文を足す (新しい dict)。
 
-        - タグの中の本文は「元の本文 + metadata の全部の画像の説明の文」で固定する
-          (:func:`system_notice_media_notes` と :func:`tag_presented_system_notice`)。
-          画像を埋め込めたかどうか (非対応のモデル・ファイルが読めない) で本文を
-          変えない — 同じ記録から組む送信本文が揺れないように (不変条件 6)。説明と
-          埋め込みの重複は受け入れる (他のクライアントと同じ固定形)。
-        - 画像に対応するモデル (``supports_images``) では、読める画像を Ollama の
-          API のメッセージの ``images`` 欄 (base64 の文字列の並び) へ積む。読めない
-          画像は説明の文だけになる。
+        タグの中の本文は「元の本文 + metadata の全部の画像の説明の文」
+        (:func:`system_notice_media_notes` と :func:`tag_presented_system_notice`)。
+        音声・動画の説明の文は、この前の ``_inject_unsupported_media_summaries`` が
+        通知の本文に足し済み。
+
+        画像そのものは送らない (``images`` 欄へ埋め込まない)。Ollama のクライアントは
+        通常のユーザーの発言の画像も送っておらず、通知の画像も送らずに説明の文だけで
+        届ける — 通知だけ埋め込むと、送り先の形式 (/v1 は ``images`` 欄を読まない)・
+        共通の枚数とバイトの上限・スルースの見積もりとずれる (Codex 6 巡目の裁定)。
         """
         metadata = msg.get("metadata")
         notes = system_notice_media_notes(metadata, ("image",), passphrase=passphrase)
@@ -249,20 +248,6 @@ class OllamaClient(LLMClient):
             return msg
         new_msg = dict(msg)
         new_msg["content"] = tag_presented_system_notice(metadata, notes, passphrase)
-        if self.supports_images:
-            encoded: List[str] = []
-            for att in iter_image_media(metadata):
-                data, _mime = load_image_bytes_for_llm(att["path"], att["mime_type"])
-                if data:
-                    encoded.append(base64.b64encode(data).decode("ascii"))
-                else:
-                    logging.warning(
-                        "[ollama] notice image unreadable, sending its description only: %s",
-                        att.get("uri") or att.get("path"),
-                    )
-            if encoded:
-                existing = msg.get("images")
-                new_msg["images"] = [*(existing if isinstance(existing, list) else []), *encoded]
         return new_msg
 
     @classmethod
