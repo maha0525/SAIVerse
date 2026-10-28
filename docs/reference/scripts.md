@@ -83,7 +83,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 `migrate_building_logs_to_db.py` (旧 log.json → building_messages) と `migrate_conscious_log_to_db.py` (旧 conscious_log.json → persona_pulse_cursor) は 2026-08-16 から実体が `saiverse/legacy_log_import.py` にあり、バージョンアップグレード (`0.3.0.dev5`) で自動実行される。スクリプトは個別復旧・再実行用の入口。スキップ判定は「現物のファイルが読めるか」だけで行い、`log.json.corrupted_*` マーカーの有無では判定しない。取り込み漏れは毎起動の検算が UI バナーに出す (詳細: `docs/intent/building_memory_unified.md` の「過去ログ取り込みの自動化と検算」)。`migrate_building_logs_to_db.py` を部屋の指定 (`--building-id`) なしで実行したときは、DB に登録された部屋の ID からファイルの場所を決める。DB に登録されていない部屋のフォルダにある log.json は取り込まず、buildings の直下のフォルダにあるものはログに WARNING を出す (2026-09-11 — フォルダ名を部屋 ID に使うと、macOS でフォルダ名が濁点の分解された形のとき、DB の部屋と別の部屋 ID で書き込むため)。
 
-システム通知の旧形式データの移行 (`database/system_notice_migration.py`、docs/intent/system_notice_delivery.md「移行」) は起動時に自動で走る (本体 DB は毎起動の冪等ステップ、ペルソナの記憶 DB は `embed_metadata` の印で一回限り。印には規則の版が入り、版の古い DB は後から足した規則だけで走査し直す)。書き換える前の写しと結果のレポートは `~/.saiverse/backups/system_notice_migration/` に残る。`--home` に存在しないフォルダ、`--db` に存在しないファイルを渡すと、何も作らずにエラーで止まる。本番へ当てる前にコピーで試すときは:
+システム通知の旧形式データの移行 (`database/system_notice_migration.py`、docs/intent/system_notice_delivery.md「移行」) は起動時に自動で走る (本体 DB は毎起動の冪等ステップ、ペルソナの記憶 DB は `embed_metadata` の印で一回限り)。書き換える前の写しと結果のレポートは `~/.saiverse/backups/system_notice_migration/` に残る。`--home` に存在しないフォルダ、`--db` に存在しないファイルを渡すと、何も作らずにエラーで止まる。本番へ当てる前にコピーで試すときは:
 
 ```bash
 python -m database.system_notice_migration --home <SAIVERSE_HOME の写し> --dry-run   # 読み取り専用でレポートだけ書く
