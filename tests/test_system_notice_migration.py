@@ -1150,25 +1150,207 @@ def test_unsaved_result_json_raises_an_alert_and_keeps_the_previous_comparison(
         conn.commit()
 
     real_write = mig._write_result_json
+    real_stage = mig._stage_result_json
+    before = _rows(persona)
 
     def _fail(*_a, **_k):
         raise OSError("disk full")
 
     monkeypatch.setattr(mig, "_write_result_json", _fail)
+    monkeypatch.setattr(mig, "_stage_result_json", _fail)
     alerts = run_startup_system_notice_migration(str(db))
 
-    assert [a["id"] for a in alerts] == ["system_notice_migration_result_unsaved"]
+    assert [a["id"] for a in alerts] == [
+        "system_notice_migration_result_unsaved", "system_notice_migration_failed",
+    ]
     alert = alerts[0]
     assert alert["level"] == "warning"
     assert alert["details"]["unsaved"] == ["本体 DB", "ペルソナ p1"]
-    assert "完了の印が立っている" in alert["message"]
     assert "本体 DB の確認が要る行は次の起動でもう一度報告します" in alert["message"]
-    # 手元の結果から数える: ペルソナの 1 件 + 本体 DB の残した行
-    assert "確認が要る行: " in alert["message"]
+    # 材料を保存できなかったペルソナの記憶は移行しない (巻き戻し、完了の印も立てない)
+    assert alerts[1]["details"]["failed"] == ["ペルソナ p1"]
+    assert _rows(persona) == before
+    with closing(sqlite3.connect(str(persona))) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM embed_metadata WHERE key = ?", (MIGRATION_MARKER_KEY,),
+        ).fetchone() is None
     assert not (tmp_path / "backups" / OUTPUT_DIR_NAME / mig.LAST_LEFTOVERS_NAME).exists()
 
-    # 書けるようになった次の起動で、本体 DB の残した行はもう一度報告される
+    # 書けるようになった次の起動で、ペルソナは移行され、本体 DB の残した行も
+    # もう一度報告される
     monkeypatch.setattr(mig, "_write_result_json", real_write)
+    monkeypatch.setattr(mig, "_stage_result_json", real_stage)
     assert [a["id"] for a in run_startup_system_notice_migration(str(db))] == [
         "system_notice_migration_review",
     ]
+    assert _rows(persona)["fake"][2] == {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED_REASON}
+
+
+# ---------------------------------------------------------------------------
+# 旧スキーマで印を見送る・結果の JSON をコミットの前に仮の名前で書く (Codex 5 巡目)
+# ---------------------------------------------------------------------------
+
+
+def _marker(path: Path):
+    with closing(sqlite3.connect(str(path))) as conn:
+        try:
+            row = conn.execute(
+                "SELECT value FROM embed_metadata WHERE key = ?", (MIGRATION_MARKER_KEY,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return row[0] if row else None
+
+
+def test_strip_refuses_a_body_that_still_starts_with_a_wrapper():
+    """剥がした結果がまた変換の条件を満たす行は剥がさない (走査し直しても二重に剥がれない)。"""
+    assert strip_system_tags("<system><system>A</system></system>") is None
+    assert strip_system_tags("<system>\n<system>A</system> B\n</system>") is None
+
+
+def test_old_schema_defers_the_marker_until_review_marks_can_be_written(tmp_path, monkeypatch):
+    """metadata の列が無い DB は、変換だけをして完了の印を立てず、列が揃った次の起動で印を付ける。"""
+    monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, "
+            "content TEXT, resource_id TEXT, created_at INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO messages VALUES (?, 't', ?, ?, 'p1', ?)",
+            [("a", "user", "<system>古い通知</system>", 1), ("b", "system", "古い結果", 2),
+             ("c", "user", "こんにちは", 3)],
+        )
+        conn.execute(
+            "CREATE TABLE perception_batches (id INTEGER PRIMARY KEY, consumed_at INTEGER, "
+            "rendered_text TEXT, kind TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text, kind) VALUES "
+            "(1, '<system>\n現在時刻: 09:00\n</system>', 'realtime_and_recall')"
+        )
+        conn.commit()
+    no_main = str(tmp_path / "no_main.db")
+
+    # 1 回目: 変換 (rendered_text) だけをコミットし、完了の印は立てない
+    alerts = run_startup_system_notice_migration(no_main)
+    assert [a["id"] for a in alerts] == ["system_notice_migration_done"]
+    assert "次の起動で印を付け直します" in alerts[0]["message"]
+    assert _marker(db) is None
+    assert _batches(db) == {"realtime_and_recall": "現在時刻: 09:00"}
+    (report,) = (tmp_path / "backups" / OUTPUT_DIR_NAME).glob("report_*.md")
+    assert "印を付けられなかった" in report.read_text(encoding="utf-8")
+
+    # 通常の初期化が metadata の列を足す
+    init_db(str(db)).close()
+
+    # 2 回目: 確認待ちの印を付けて完了の印を立てる。変換済みの行は二重に変換しない
+    alerts = run_startup_system_notice_migration(no_main)
+    assert [a["id"] for a in alerts] == ["system_notice_migration_review"]
+    assert "印を付け直します" not in alerts[0]["message"]
+    assert _marker(db) is not None
+    assert _batches(db) == {"realtime_and_recall": "現在時刻: 09:00"}
+    rows = _rows(db)
+    assert rows["a"][:3] == (
+        "user", "<system>古い通知</system>", {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED_REASON},
+    )
+    assert rows["b"][2] == {SYSTEM_NOTICE_REVIEW_KEY: UNKNOWN_SYSTEM_REASON}
+    assert rows["c"][2] == {}
+
+    # 3 回目: 完了の印が立っているので走査もしない
+    assert run_startup_system_notice_migration(no_main) == []
+
+
+def test_persona_is_not_migrated_when_the_result_cannot_be_staged(
+    persona_db, tmp_path, monkeypatch,
+):
+    """コミットの前に結果の JSON を書けなければ、その DB は巻き戻して印も立てない。"""
+    from database import system_notice_migration as mig
+
+    def _fail(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mig, "_stage_result_json", _fail)
+    before = _rows(persona_db)
+    (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    assert result.error and "保存できなかった" in result.error
+    assert _rows(persona_db) == before
+    assert _marker(persona_db) is None
+
+
+def test_main_db_is_not_migrated_when_the_result_cannot_be_staged(tmp_path, monkeypatch):
+    from database import system_notice_migration as mig
+
+    def _fail(*_a, **_k):
+        raise OSError("disk full")
+
+    db = tmp_path / "saiverse.db"
+    _make_main_db(db)
+    with closing(sqlite3.connect(str(db))) as conn:
+        before = conn.execute("SELECT id, role, content FROM building_messages").fetchall()
+
+    monkeypatch.setattr(mig, "_stage_result_json", _fail)
+    result = migrate_main_db(
+        db, output_dir=tmp_path / "out", stamp=STAMP, results_dir=tmp_path / "out" / "r",
+    )
+
+    assert result.error and "保存できなかった" in result.error
+    with closing(sqlite3.connect(str(db))) as conn:
+        assert conn.execute("SELECT id, role, content FROM building_messages").fetchall() == before
+
+
+def test_a_committed_result_left_under_its_staged_name_is_taken_up(
+    persona_db, tmp_path, monkeypatch,
+):
+    """コミットの後、付け替えの前に止まった起動の仮の JSON は、DB の印と一致すれば採用する。"""
+    from database import system_notice_migration as mig
+
+    monkeypatch.setattr(mig, "_publish_staged_result", lambda staged, result: None)
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+    assert report is None  # 正式な名前の材料が無いので、この起動ではレポートを書けない
+    (run_dir,) = (tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME).iterdir()
+    (staged,) = run_dir.glob("*.json.tmp")
+    assert json.loads(staged.read_text(encoding="utf-8"))["marker_value"] == _marker(persona_db)
+
+    (regenerated,) = mig.regenerate_pending_reports(tmp_path)
+    assert not staged.exists()
+    assert (run_dir / "persona_p1.json").exists()
+    assert "変換した件数" in regenerated.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("marker", [None, "2000-01-01T00:00:00+00:00"])
+def test_an_uncommitted_staged_result_is_discarded(tmp_path, marker):
+    """DB の印が無い・仮の JSON に書いた値と違う (= その取引はコミットされていない) なら捨てる。"""
+    from database import system_notice_migration as mig
+
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    _make_persona_db(db)
+    if marker is not None:
+        with closing(sqlite3.connect(str(db))) as conn:
+            conn.execute(
+                "INSERT INTO embed_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+                (MIGRATION_MARKER_KEY, marker, marker),
+            )
+            conn.commit()
+    run_dir = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME / "20261028_000000_x"
+    run_dir.mkdir(parents=True)
+    staged_result = mig.StoreResult(
+        label="ペルソナ p1", path=str(db), persona=True,
+        marker_value="2026-10-28T00:00:00+00:00",
+        changes=[mig.Change("messages", "x", "schedule", "<system>a</system>", "a")],
+    )
+    staged = run_dir / "persona_p1.json.tmp"
+    staged.write_text(json.dumps(staged_result.to_json(), ensure_ascii=False), encoding="utf-8")
+    main_staged = run_dir / "main.json.tmp"
+    main_staged.write_text(
+        json.dumps(mig.StoreResult(label="本体 DB", path="saiverse.db").to_json()),
+        encoding="utf-8",
+    )
+
+    assert mig.regenerate_pending_reports(tmp_path) == []
+    assert not staged.exists() and not main_staged.exists()
+    assert not any(run_dir.glob("*.json"))

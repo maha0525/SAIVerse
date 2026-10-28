@@ -32,8 +32,10 @@ role=user + タグで載った世代)、``execution_ledger`` / ``execution_outbo
 起動時バックアップは数が上限を超えると古いものから消えるので、この写しは
 別の置き場に置く)。移行の結果は同じ置き場にレポートとして書き出す — 本番へ
 当てたあとに人の目で確かめるためのもの。レポートの材料は DB ごとの結果の
-JSON (``results/<時刻>_<pid>_<乱数>/``) で、書き換えのコミットの後に書くので、
-レポートの書き出しが失敗しても次の起動で作り直せる。
+JSON (``results/<時刻>_<pid>_<乱数>/``)。書き換えを伴う DB の JSON は、
+コミットの前に仮の名前で書き (書けなければその DB を巻き戻して完了の印を
+立てない)、コミットの後に正式な名前へ付け替える。レポートの書き出しが失敗
+しても次の起動で JSON 群から作り直せる。
 
 コピーで試すときは CLI を使う::
 
@@ -127,6 +129,12 @@ def strip_system_tags(text: str, *, pairs: Union[int, Tuple[int, ...]] = 1) -> O
     - 閉じられていない開きタグ (途中で切れた形、``<system>A <system>B</system>``)
     - 組の外に空白以外の文字がある (``<system>A</system> B``)
     - 完全な組の数が ``pairs`` と違う
+    - 剥がした結果がまだ ``<system>`` で始まる (``<system><system>A</system></system>``)。
+      二重の包みか、本文の先頭の引用かを決められない。加えて、剥がした結果が
+      また変換の条件 (``<system>`` で始まる) を満たすと、次の走査でもう一度
+      剥がされる — 完了の印を持たない本体 DB と、印を見送ったペルソナの記憶 DB
+      (:func:`migrate_persona_db`) は毎起動で走査し直すので、変換の結果が変換の
+      条件から外れることが冪等の前提になる。
     """
     segments: List[str] = []
     current: List[str] = []
@@ -162,7 +170,10 @@ def strip_system_tags(text: str, *, pairs: Union[int, Tuple[int, ...]] = 1) -> O
     allowed = (pairs,) if isinstance(pairs, int) else tuple(pairs)
     if len(segments) not in allowed:
         return None  # 置き場が期待する組の数と違う (引用か正当な複数の組か決められない)
-    return "\n\n".join(s.strip() for s in segments if s.strip())
+    body = "\n\n".join(s.strip() for s in segments if s.strip())
+    if starts_with_system_tag(body):
+        return None  # 剥がしてもまだ包みで始まる (二重の包みか引用か決められない)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +340,13 @@ class StoreResult:
     updates: List[Tuple[str, tuple]] = field(default_factory=list)
     already_done: bool = False
     error: Optional[str] = None
+    #: 確認待ちの印を付けるべき行があるのに、metadata の列が無い古いスキーマなので
+    #: 付けられなかったか。真なら完了の印を立てない (:func:`migrate_persona_db`)。
+    review_marks_deferred: bool = False
+    #: この結果のコミットで立てた完了の印の値 (立てていなければ None)。孤児の
+    #: 仮の結果の JSON を採用してよいかを、DB の印と突き合わせて決めるのに使う
+    #: (:func:`regenerate_pending_reports`)。
+    marker_value: Optional[str] = None
     #: 結果の JSON から読み戻したときの系統別件数 (``changes`` はサンプルだけになる)。
     restored_counts: Optional[Dict[Tuple[str, str], int]] = None
     #: この起動でこの結果をレポートの材料 (結果の JSON) に書いたか。JSON には載せない。
@@ -389,6 +407,8 @@ class StoreResult:
             "backup_path": self.backup_path,
             "already_done": self.already_done,
             "error": self.error,
+            "review_marks_deferred": self.review_marks_deferred,
+            "marker_value": self.marker_value,
             "counts": [[t, k, n] for (t, k), n in sorted(self.counts().items())],
             "samples": [asdict(c) for c in _sample_changes(self.changes)],
             "skipped": [asdict(s) for s in self.skipped],
@@ -407,6 +427,8 @@ class StoreResult:
             backup_path=data.get("backup_path"),
             already_done=bool(data.get("already_done")),
             error=data.get("error"),
+            review_marks_deferred=bool(data.get("review_marks_deferred")),
+            marker_value=data.get("marker_value"),
             restored_counts={(t, k): n for t, k, n in data.get("counts") or []},
             changes=[Change(**c) for c in data.get("samples") or []],
             skipped=[Skipped(**s) for s in data.get("skipped") or []],
@@ -529,7 +551,9 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         # 判定に要る列が無い DB は対象が無い (変換もしない)
         return
     meta_col = _col_or_null(cols, "metadata")
-    # 確認待ちの印は metadata の列に書く (列の無い古いスキーマでは付けない)
+    # 確認待ちの印は metadata の列に書く。列の無い古いスキーマでは付けられないので、
+    # 付けるべき行があれば ``review_marks_deferred`` を立てる — 完了の印を見送り、
+    # 通常の初期化 (init_db) が列を足した後の起動で走査し直して印を付ける。
     can_mark = "metadata" in cols
     order = "created_at, rowid" if "created_at" in cols else "rowid"
     rows = conn.execute(
@@ -555,6 +579,8 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                         result, row_id, raw_meta, metadata,
                         UNCLASSIFIED_REASON if kind is None else AMBIGUOUS_TAGS_REASON,
                     )
+                else:
+                    result.review_marks_deferred = True
                 continue
             new_meta = dict(metadata)
             new_meta[SYSTEM_NOTICE_KEY] = kind
@@ -577,6 +603,8 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 ))
             if can_mark:
                 _mark_for_review(result, row_id, raw_meta, metadata, UNKNOWN_SYSTEM_REASON)
+            else:
+                result.review_marks_deferred = True
             continue
         new_meta = dict(metadata)
         new_meta[SYSTEM_NOTICE_KEY] = kind
@@ -793,16 +821,70 @@ def _run_in_progress(run_dir: Path) -> bool:
 def _write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
     """一つの DB の結果を ``results_dir/<key>.json`` に書く (レポートの材料)。
 
-    書き換えのコミットの後に書く — コミットより前に書くと、コミットの前に
-    止まった起動の JSON が「変換した」という確定していない結果として、次の起動の
-    :func:`regenerate_pending_reports` に報告される。レポートの書き出しが
-    失敗しても、次の起動でこの JSON 群からレポートだけを作り直せる。
+    書き換えの取引を伴わない結果 (失敗・残した行だけの本体 DB) に使う。書き換えを
+    コミットする結果は :func:`_stage_result_json` と :func:`_publish_staged_result`
+    の二段で書く。レポートの書き出しが失敗しても、次の起動でこの JSON 群から
+    レポートだけを作り直せる。
     """
     if results_dir is None:
         return
     _write_run_info(results_dir)
     _write_json_atomic(results_dir / f"{key}.json", result.to_json())
     result.result_saved = True
+
+
+#: コミットの前に書く結果の JSON の仮の名前の末尾 (``<key>.json.tmp``)。
+STAGED_SUFFIX = ".tmp"
+
+
+def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> Optional[Path]:
+    """書き換えのコミットの**前**に、結果の JSON を仮の名前 (``<key>.json.tmp``) で書く。
+
+    書けなければ例外を送る — 呼び出し側はその DB の取引を巻き戻し、完了の印を
+    立てない (次の起動で再試行)。コミットの後に書く順序だと、書き出しの失敗で
+    「変換したのに目視の材料が無い」DB が残り、完了の印のために二度と走査されない。
+    正式な名前 (``<key>.json``) にするのはコミットの後
+    (:func:`_publish_staged_result`) — コミットの前に止まった起動の仮の JSON は、
+    次の起動の :func:`regenerate_pending_reports` が DB の完了の印と突き合わせて
+    捨てるので、確定していない変換がレポートの材料にならない。
+    """
+    if results_dir is None:
+        return None
+    _write_run_info(results_dir)
+    staged = results_dir / f"{key}.json{STAGED_SUFFIX}"
+    staged.write_text(json.dumps(result.to_json(), ensure_ascii=False, indent=1), encoding="utf-8")
+    return staged
+
+
+def _discard_staged(staged: Optional[Path]) -> None:
+    """巻き戻した DB の仮の JSON を消す (消せなくても次の起動で印と突き合わせて捨てる)。"""
+    if staged is None:
+        return
+    try:
+        staged.unlink(missing_ok=True)
+    except OSError:
+        LOGGER.warning("[system-notice-migration] could not remove %s", staged, exc_info=True)
+
+
+def _publish_staged_result(staged: Optional[Path], result: StoreResult) -> None:
+    """コミットの後に、仮の JSON を正式な名前へ付け替える。
+
+    付け替えられなければ ``result_save_failed`` を立てる (起動の入口が画面へ
+    知らせる)。仮の JSON は残り、次の起動の :func:`regenerate_pending_reports` が
+    DB の完了の印を確かめてから採用する。
+    """
+    if staged is None:
+        return
+    try:
+        os.replace(staged, staged.with_name(staged.name[: -len(STAGED_SUFFIX)]))
+        result.result_saved = True
+    except Exception:  # noqa: BLE001 — 移行は確定している。材料は次の起動で採用し直す
+        result.result_save_failed = True
+        LOGGER.error(
+            "[system-notice-migration] could not finalize the result of %s; "
+            "%s will be taken up on the next start",
+            result.label, staged, exc_info=True,
+        )
 
 
 def migrate_persona_db(
@@ -826,10 +908,19 @@ def migrate_persona_db(
     ``init_db`` は呼ばない (:func:`_set_persona_marker`) — 写しは DB に何も
     触る前の中身になる。
 
-    ``results_dir`` を渡すと、見るべきものがあるとき結果を JSON でコミットの
-    後に書く (:func:`_write_result_json`)。``dry_run`` は読み取り専用で開き、
-    何も書かない。
+    確認待ちの印を付けるべき行があるのに metadata の列が無くて付けられない DB
+    (``review_marks_deferred``) では、変換だけをコミットして完了の印を立てない。
+    次の起動では通常の初期化が列を足しているので、走査し直して印を付ける
+    (変換済みの行は変換の条件から外れているので二重に変換しない —
+    :func:`strip_system_tags`)。
+
+    ``results_dir`` を渡すと、見るべきものがあるとき結果を JSON に書く — コミットの
+    前に仮の名前で書き (書けなければ巻き戻して印を立てない)、コミットの後に
+    正式な名前へ付け替える (:func:`_stage_result_json`)。``dry_run`` は読み取り
+    専用で開き、何も書かない。
     """
+    from sai_memory.memory.storage import get_embed_metadata
+
     result = StoreResult(label=f"ペルソナ {persona_id}", path=str(db_path), persona=True)
     with closing(_open_readonly(db_path)) as conn:
         if _persona_marker_set(conn):
@@ -839,6 +930,7 @@ def migrate_persona_db(
             scan_persona_conn(conn, result)
             return result
 
+    staged: Optional[Path] = None
     with closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -867,15 +959,41 @@ def migrate_persona_db(
                     return failed
                 result.backup_path = str(backup)
             _apply(conn, result.updates)
-            _set_persona_marker(conn)
+            if result.review_marks_deferred:
+                LOGGER.warning(
+                    "[system-notice-migration] %s has no metadata column, so rows needing "
+                    "review cannot be marked yet; the completion marker is left unset and "
+                    "the rows will be marked on the next start",
+                    db_path,
+                )
+            else:
+                _set_persona_marker(conn)
+                # 取引の中で書いた印の値 (孤児の仮の JSON の採否の突き合わせに使う)
+                result.marker_value = get_embed_metadata(conn, MIGRATION_MARKER_KEY)
+            if result.has_findings or result.backup_path:
+                try:
+                    staged = _stage_result_json(results_dir, f"persona_{persona_id}", result)
+                except Exception as exc:  # noqa: BLE001 — 材料が無いまま変換を確定させない
+                    LOGGER.error(
+                        "[system-notice-migration] could not save the result of %s before "
+                        "committing; skipping its migration", db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path, persona=True,
+                        error=(
+                            "移行の結果 (レポートの材料) を保存できなかったので、この DB は"
+                            f"移行していません。次の起動で再試行します: {exc}"
+                        ),
+                    )
+                    _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
+                    return failed
             conn.commit()
         except Exception:
             conn.rollback()
+            _discard_staged(staged)
             raise
-    if result.has_findings or result.backup_path:
-        # コミットの後に結果を残す (レポートが書けなくても作り直せるように)。
-        # 書けなくても移行は確定しているので、失敗扱いにはしない。
-        _try_write_result_json(results_dir, f"persona_{persona_id}", result)
+    _publish_staged_result(staged, result)
     return result
 
 
@@ -1042,10 +1160,14 @@ def migrate_main_db(
     pre_upgrade バックアップは数が上限を超えると消えるので別に取る。写しと
     書き換えの間に別のプロセスが書けない — :func:`migrate_persona_db` と同じ順序)。
 
-    ``results_dir`` を渡すと、変換があるとき (書き換えのコミットの後) と、
-    残した行が前回 (``last_leftovers`` — :meth:`StoreResult.leftover_keys`) と
-    違うときに結果を JSON で書く — 本体 DB は毎起動で走査され、残した行は
-    毎回同じものが見えるので、同じ行のままならレポートの材料にしない。
+    ``results_dir`` を渡すと、変換があるときと、残した行が前回
+    (``last_leftovers`` — :meth:`StoreResult.leftover_keys`) と違うときに結果を
+    JSON で書く — 本体 DB は毎起動で走査され、残した行は毎回同じものが見える
+    ので、同じ行のままならレポートの材料にしない。書き換えを伴う結果は
+    :func:`migrate_persona_db` と同じく、コミットの前に仮の名前で書き (書けなければ
+    巻き戻す)、コミットの後に正式な名前へ付け替える。本体 DB は完了の印を持た
+    ないので、付け替えの前に止まった起動の仮の JSON は次の起動で採用できず
+    捨てる (:func:`regenerate_pending_reports`)。
     """
     result = StoreResult(label="本体 DB", path=str(db_path))
     if not db_path.exists():
@@ -1060,6 +1182,8 @@ def migrate_main_db(
         return result
 
     applied = StoreResult(label=result.label, path=result.path)
+    staged: Optional[Path] = None
+    report_it = False
     with closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -1083,14 +1207,39 @@ def migrate_main_db(
                 applied.backup_path = str(backup)
             # 変換が無ければ (同時に起動した別のプロセスが先に終えた) 何も書かない
             _apply(conn, applied.updates)
+            report_it = bool(applied.changes) or (
+                applied.has_leftovers and applied.leftover_keys() != last_leftovers
+            )
+            if report_it and applied.updates:
+                # 書き換える結果はコミットの前に仮の名前で書く (ペルソナと同じ。
+                # 書けなければ巻き戻し、次の起動で再試行する)
+                try:
+                    staged = _stage_result_json(results_dir, "main", applied)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.error(
+                        "[system-notice-migration] could not save the result of %s before "
+                        "committing; skipping its migration", db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path,
+                        error=(
+                            "移行の結果 (レポートの材料) を保存できなかったので、本体 DB は"
+                            f"移行していません。次の起動で再試行します: {exc}"
+                        ),
+                    )
+                    _try_write_result_json(results_dir, "main", failed)
+                    return failed
             conn.commit()
         except Exception:
             conn.rollback()
+            _discard_staged(staged)
             raise
-    if applied.changes or (
-        applied.has_leftovers and applied.leftover_keys() != last_leftovers
-    ):
-        # コミットの後に結果を残す。書けなくても移行は確定しているので失敗扱いにしない。
+    if staged is not None:
+        _publish_staged_result(staged, applied)
+    elif report_it:
+        # 書き換えが無かった (同時に起動した別のプロセスが先に終えた) — 残した行の
+        # 結果だけなので、コミットとの順序は無い
         _try_write_result_json(results_dir, "main", applied)
     return applied
 
@@ -1119,6 +1268,12 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
             lines.append(f"- 移行前の写し: {res.backup_path}")
         if res.error:
             lines.append(f"- エラー: {res.error}")
+        if res.review_marks_deferred:
+            lines.append(
+                "- 確認待ちの印: この記憶 DB は metadata の列が無い古い形なので、確認が要る行に"
+                "印を付けられなかった。移行の完了の印を立てずにおき、次の起動 (通常の初期化が"
+                "列を足した後) で走査し直して印を付け直す"
+            )
         counts = res.counts()
         if counts:
             lines.append("")
@@ -1137,7 +1292,10 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
             lines.append(
                 f"### 変換しなかった <system> 始まりの行 (全 {len(res.skipped)} 件)"
             )
-            if res.persona and any(s.table == "messages" for s in res.skipped):
+            if (
+                res.persona and not res.review_marks_deferred
+                and any(s.table == "messages" for s in res.skipped)
+            ):
                 lines.append(
                     f"(messages の行には確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を metadata に付け、"
                     "会話の手本・想起・あらすじの発話の判定から外した。本文と role は"
@@ -1151,10 +1309,13 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
                 )
         if res.unknown_system_count:
             lines.append("")
+            marked = (
+                "確認待ちの印は次の起動で付ける" if res.review_marks_deferred
+                else f"確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を付けた。metadata が読めない行を除く"
+            )
             lines.append(
                 f"### 系統を推定できなかった role=system の行 (全 {res.unknown_system_count} 件、"
-                f"先頭 {len(res.unknown_system_samples)} 件を表示。通知の印は付けず、"
-                f"確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を付けた。metadata が読めない行を除く)"
+                f"先頭 {len(res.unknown_system_samples)} 件を表示。通知の印は付けず、{marked})"
             )
             for s in res.unknown_system_samples:
                 lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
@@ -1266,13 +1427,71 @@ def _write_run_report(run_dir: Path, report_path: Path, *, stamp: str) -> Option
     return report_path
 
 
+def _settle_staged_results(run_dir: Path) -> int:
+    """終わった起動のフォルダに残った仮の結果の JSON (``*.json.tmp``) の採否を決める。採用した数を返す。
+
+    仮の JSON はコミットの前に書くので、残っているのは「コミットの前に止まった」
+    か「コミットの後、正式な名前へ付け替える前に止まった (付け替えに失敗した)」
+    かのどちらか。区別は DB の完了の印で付ける: その DB の印が、仮の JSON に
+    書いた値 (``marker_value`` — 書いた取引で立てた印) と一致すれば、その取引は
+    コミットされているので正式な名前へ付け替えて採用する。一致しない・印が無い・
+    印を持たない結果 (本体 DB、印を見送ったペルソナ) は、変換が確定したと
+    確かめられないので捨てる — 確定していない変換をレポートの材料にしない。
+    DB が読めない (ロックなど) ときは決めずに残し、次の起動でまた試す。
+    """
+    from sai_memory.memory.storage import get_embed_metadata_strict
+
+    adopted = 0
+    for staged in sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}")):
+        try:
+            data = json.loads(staged.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None  # 書きかけで止まった — 確定した結果ではない
+        expected = data.get("marker_value") if isinstance(data, dict) else None
+        keep = False
+        if isinstance(expected, str) and data.get("persona") and data.get("path"):
+            db = Path(data["path"])
+            if db.is_file():
+                try:
+                    with closing(_open_readonly(db)) as conn:
+                        actual = get_embed_metadata_strict(conn, MIGRATION_MARKER_KEY)
+                except sqlite3.Error:
+                    LOGGER.warning(
+                        "[system-notice-migration] could not read %s to settle %s; "
+                        "will retry on the next start", db, staged, exc_info=True,
+                    )
+                    continue
+                keep = actual == expected
+        final = staged.with_name(staged.name[: -len(STAGED_SUFFIX)])
+        try:
+            if keep:
+                os.replace(staged, final)
+                adopted += 1
+                LOGGER.info("[system-notice-migration] took up the committed result %s", final)
+            else:
+                staged.unlink()
+                LOGGER.info(
+                    "[system-notice-migration] discarded %s (its migration was not committed)",
+                    staged,
+                )
+        except OSError:
+            LOGGER.warning(
+                "[system-notice-migration] could not settle %s", staged, exc_info=True,
+            )
+    return adopted
+
+
 def regenerate_pending_reports(saiverse_home: Path) -> List[Path]:
     """前の起動で結果の JSON を書いたのにレポートを書けなかった分を、JSON 群から作り直す。
 
-    DB には触らない (完了の印はそのまま尊重する)。作り直したレポートのパスを返す。
+    DB には書かない (完了の印はそのまま尊重する)。作り直したレポートのパスを返す。
     まだ走っている起動のフォルダ (:func:`_run_in_progress` — 同時に起動した別の
     プロセスが移行の途中) は対象にしない。その起動が自分でレポートを書くか、
     書けずに終われば次の起動で作り直される。
+
+    終わった起動のフォルダに仮の結果の JSON が残っていれば、先に採否を決める
+    (:func:`_settle_staged_results`)。採用した JSON があれば、レポートを書き
+    終えた起動のフォルダでもレポートを作り直す。
     """
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
     results_root = output_dir / RESULTS_DIR_NAME
@@ -1280,11 +1499,20 @@ def regenerate_pending_reports(saiverse_home: Path) -> List[Path]:
         return []
     written: List[Path] = []
     for run_dir in sorted(results_root.iterdir()):
-        if not run_dir.is_dir() or (run_dir / REPORTED_MARKER_NAME).exists():
+        if not run_dir.is_dir():
             continue
-        if not any(run_dir.glob("*.json")):
+        has_staged = any(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+        reported = (run_dir / REPORTED_MARKER_NAME).exists()
+        if reported and not has_staged:
+            continue
+        if not has_staged and not any(run_dir.glob("*.json")):
             continue
         if _run_in_progress(run_dir):
+            continue
+        adopted = _settle_staged_results(run_dir) if has_staged else 0
+        if reported and not adopted:
+            continue
+        if not any(run_dir.glob("*.json")):
             continue
         try:
             path = _write_run_report(
@@ -1315,8 +1543,9 @@ def run_migration(
     (変換した行・変換しなかったタグ始まりの行・推定できなかった role=system 行・
     旧 MEMORIZE の結果の候補・エラー) があるとき、DB を一つ処理するたびに
     ``results/<時刻>_<pid>_<乱数>/`` へ JSON で書き、レポートはその JSON 群から組む
-    (JSON は書き換えのコミットの後に書く。レポートが書けなくても次の起動で
-    :func:`regenerate_pending_reports` が作り直せる)。本体 DB の残した行は、
+    (書き換えを伴う DB の JSON はコミットの前に仮の名前で書き、コミットの後に
+    正式な名前へ付け替える — :func:`_stage_result_json`。レポートが書けなくても
+    次の起動で :func:`regenerate_pending_reports` が作り直せる)。本体 DB の残した行は、
     前回と同じ行なら材料にしない。``dry_run`` は JSON を書かず、見るべきものが
     あればその場の結果からレポートを書く。
     """
@@ -1441,6 +1670,12 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
     # 材料に書けなかった DB の分も、この起動の手元の結果から数える
     unsaved = [r for r in results if r.result_save_failed]
     review_rows = sum(sum(r.leftover_counts()) for r in saved + unsaved)
+    # 古いスキーマで確認待ちの印を付けられず、完了の印を見送った記憶
+    deferred_note = (
+        " 一部の記憶は古い形のため確認待ちの印を付けられなかったので、移行を完了扱いに"
+        "せず、次の起動で印を付け直します。"
+        if any(r.review_marks_deferred and not r.error for r in results) else ""
+    )
     if unsaved:
         alerts.append({
             "id": "system_notice_migration_result_unsaved",
@@ -1450,13 +1685,17 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
                 "移行の結果をレポートの材料に保存できなかった記録があります: "
                 + "、".join(r.label for r in unsaved) + "。"
                 + (
-                    "ペルソナの記憶は移行の完了の印が立っているので、次の起動で走査し"
-                    "直されず、この記録の詳細はレポートに載りません (変換した件数と確認が"
-                    "要る行の id はこの起動のログにあります)。"
-                    if any(r.persona for r in unsaved) else ""
+                    "移行を済ませたペルソナの記憶の結果は仮の名前で残してあり、次の起動で"
+                    "レポートに載せ直します。"
+                    if any(r.persona and not r.error for r in unsaved) else ""
                 )
                 + (
-                    "本体 DB の確認が要る行は次の起動でもう一度報告します。"
+                    "本体 DB の確認が要る行は次の起動でもう一度報告します"
+                    + (
+                        " (変換した件数はこの起動のログにあります)"
+                        if any(not r.persona and r.changes for r in unsaved) else ""
+                    )
+                    + "。"
                     if any(not r.persona for r in unsaved) else ""
                 )
                 + (f"確認が要る行: {review_rows} 件。" if review_rows else "")
@@ -1498,7 +1737,7 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "message": f"移行前の写しと結果のレポートを保存しました: {report}" + (
                 f" 変換せずに残した、確認が要る行が {review_rows} 件あります (レポートに一覧があります)。"
                 if review_rows else ""
-            ),
+            ) + deferred_note,
             "details": {},
         })
     elif report is not None and review_rows:
@@ -1509,6 +1748,7 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "message": (
                 f"変換せずに残した行・種類を推定できなかった行が {review_rows} 件あります。"
                 f"一覧はレポートにあります: {report}"
+                + deferred_note
             ),
             "details": {},
         })

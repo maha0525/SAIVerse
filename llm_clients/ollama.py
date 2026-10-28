@@ -1,6 +1,7 @@
 """Ollama client."""
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import logging
@@ -10,9 +11,20 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
+from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
+
 from .base import LLMClient, ToolSpecFormat
 from .exceptions import EmptyResponseError
-from .system_notice import accepts_mid_conversation_system, present_system_notices
+from .system_notice import (
+    accepts_mid_conversation_system,
+    is_head_system_message,
+    is_presented_system_notice,
+    present_system_notices,
+    redact_passphrase_in_value,
+    system_notice_media_notes,
+    system_notice_passphrase,
+    tag_presented_system_notice,
+)
 from .utils import positive_token_count
 
 
@@ -173,29 +185,85 @@ class OllamaClient(LLMClient):
         self.url = f"{self.base}/v1/chat/completions"
         self.chat_url = f"{self.base}/api/chat"
 
-    @staticmethod
-    def _request_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _request_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """送る直前の messages 列: システム通知の変換をして、API の欄だけに組み直す。
 
         会話の途中のシステム通知は合言葉付きタグの user にする — Ollama はチャット
         テンプレート次第で途中の system が落ちうるので、タグで囲む側に倒す
         (llm_clients/system_notice.py の判定)。head の印が無い列は変換で変わらない。
 
+        通知の画像は metadata にしか無いので、metadata を捨てる前に扱う
+        (:meth:`_present_notice_images`)。
+
         そのうえで、各メッセージを Ollama の API が定義する欄
         (:data:`_OLLAMA_MESSAGE_FIELDS`) だけの新しい dict にする。SAIVerse の
         messages は内部の metadata (思考・出力の分け方・通知の印や本文の写しなど)
         を持っていて、それをそのまま HTTP の本文に載せると、API の外の欄として
         中身ごとサーバーへ届く。
+
+        組み直した後の値のうち、ツール呼び出し (``tool_calls``) と、文字列でも部品の
+        並びでもない本文 (辞書のまま渡るツールの結果) は、すべての文字列から合言葉を
+        伏せる (``redact_passphrase_in_value``)。present_system_notices が伏せるのは
+        文字列の本文と文字列の ``function.arguments`` だけで、辞書の引数・結果は
+        そのまま JSON の値としてサーバーへ届く (Codex / Gemini と同じ手当て)。
+        head の本文は合言葉を正当に運ぶので伏せない (head は tool_calls を持たない)。
         """
+        passphrase = system_notice_passphrase(messages)
         presented = present_system_notices(
             messages,
             accepts_mid_system=accepts_mid_conversation_system("ollama_compat", None),
         )
-        return [
-            {key: msg[key] for key in _OLLAMA_MESSAGE_FIELDS if key in msg}
-            if isinstance(msg, dict) else msg
-            for msg in presented
-        ]
+        out: List[Any] = []
+        for msg in presented:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            if is_presented_system_notice(msg):
+                msg = self._present_notice_images(msg, passphrase)
+            is_head = is_head_system_message(msg)
+            clean = {key: msg[key] for key in _OLLAMA_MESSAGE_FIELDS if key in msg}
+            if passphrase and not is_head:
+                if "tool_calls" in clean:
+                    clean["tool_calls"] = redact_passphrase_in_value(clean["tool_calls"], passphrase)
+                content = clean.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    clean["content"] = redact_passphrase_in_value(content, passphrase)
+            out.append(clean)
+        return out
+
+    def _present_notice_images(self, msg: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
+        """タグ化した通知の写しに、metadata の画像を Ollama の形で載せる (新しい dict)。
+
+        - タグの中の本文は「元の本文 + metadata の全部の画像の説明の文」で固定する
+          (:func:`system_notice_media_notes` と :func:`tag_presented_system_notice`)。
+          画像を埋め込めたかどうか (非対応のモデル・ファイルが読めない) で本文を
+          変えない — 同じ記録から組む送信本文が揺れないように (不変条件 6)。説明と
+          埋め込みの重複は受け入れる (他のクライアントと同じ固定形)。
+        - 画像に対応するモデル (``supports_images``) では、読める画像を Ollama の
+          API のメッセージの ``images`` 欄 (base64 の文字列の並び) へ積む。読めない
+          画像は説明の文だけになる。
+        """
+        metadata = msg.get("metadata")
+        notes = system_notice_media_notes(metadata, ("image",), passphrase=passphrase)
+        if not notes:
+            return msg
+        new_msg = dict(msg)
+        new_msg["content"] = tag_presented_system_notice(metadata, notes, passphrase)
+        if self.supports_images:
+            encoded: List[str] = []
+            for att in iter_image_media(metadata):
+                data, _mime = load_image_bytes_for_llm(att["path"], att["mime_type"])
+                if data:
+                    encoded.append(base64.b64encode(data).decode("ascii"))
+                else:
+                    logging.warning(
+                        "[ollama] notice image unreadable, sending its description only: %s",
+                        att.get("uri") or att.get("path"),
+                    )
+            if encoded:
+                existing = msg.get("images")
+                new_msg["images"] = [*(existing if isinstance(existing, list) else []), *encoded]
+        return new_msg
 
     @classmethod
     def reset_probe_cache(cls) -> None:

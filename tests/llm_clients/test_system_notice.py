@@ -1201,6 +1201,62 @@ def test_ollama_request_carries_only_api_fields(monkeypatch):
     }
 
 
+def _ollama_client(monkeypatch, *, supports_images: bool):
+    from llm_clients.ollama import OllamaClient
+
+    monkeypatch.setattr(OllamaClient, "_probe_base", lambda self, preferred: "http://ollama.test")
+    return OllamaClient(
+        "m", context_length=4096, base_url="http://ollama.test", supports_images=supports_images,
+    )
+
+
+@pytest.mark.parametrize("supports_images", [True, False])
+def test_ollama_image_only_notice_keeps_image_and_description(
+    tmp_path, monkeypatch, supports_images,
+):
+    """画像だけの通知: 対応モデルでは images 欄 + タグ内の説明、非対応では説明だけ (Codex 5 巡目)。
+
+    API の欄だけに組み直すと metadata の画像が消えるので、組み直しの前に扱う。
+    タグの中の本文は埋め込みの有無に依らず同じ (不変条件 6)。
+    """
+    import base64
+
+    path = _write_png(tmp_path)
+    client = _ollama_client(monkeypatch, supports_images=supports_images)
+    sent = client._request_messages(_image_only_notice(path))
+
+    notice = sent[3]
+    assert notice["role"] == "user"
+    assert notice["content"] == _tagged(f"[画像: {path}]")
+    if supports_images:
+        assert notice["images"] == [base64.b64encode(Path(path).read_bytes()).decode("ascii")]
+    else:
+        assert "images" not in notice
+    assert "metadata" not in notice
+
+
+def test_ollama_unreadable_notice_image_is_described_only(tmp_path, monkeypatch):
+    """ファイルが読めない画像は、対応モデルでも説明の文だけで届く (通知ごと落ちない)。"""
+    missing = str(tmp_path / "gone.png")
+    client = _ollama_client(monkeypatch, supports_images=True)
+    sent = client._request_messages(_image_only_notice(missing))
+    assert sent[3] == {"role": "user", "content": _tagged(f"[画像: {missing}]")}
+
+
+def test_ollama_masks_dict_tool_arguments_and_results(monkeypatch):
+    """辞書のまま渡るツールの引数・結果も、組み直した後の値で伏せ字になる (Codex 5 巡目)。"""
+    client = _ollama_client(monkeypatch, supports_images=False)
+    sent = client._request_messages(_turn_with_dict_tool_values())
+    masked = "*" * len(PASS)
+    call = sent[2]["tool_calls"][0]["function"]
+    assert call["arguments"] == {"query": f"復唱 {masked}"}
+    assert sent[3]["content"] == {"result": f"結果 {masked}", masked: "鍵"}
+    dumped = json.dumps(sent[1:], ensure_ascii=False)
+    assert PASS not in dumped
+    # head の合言葉は head の本文に正当に残る
+    assert PASS in sent[0]["content"]
+
+
 # ---------------------------------------------------------------------------
 # 14. 辞書のまま渡るツールの引数・結果の伏せ字 (Codex 4 巡目)
 # ---------------------------------------------------------------------------
