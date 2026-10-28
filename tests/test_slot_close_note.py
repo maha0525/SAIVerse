@@ -316,7 +316,11 @@ def test_close_prompt_grounding_and_prior_ref(manager, persona, adapter):
     # 締めプロンプトの直前 = セッションの最終応答 (spell ループは積まないので締めが積む)
     assert messages[-2] == {"role": "assistant", "content": "できたよ。"}
     prompt = messages[-1]["content"]
-    assert messages[-1]["role"] == "user"
+    # 締めの指示は role=system のシステム通知 (タグ無し —
+    # docs/intent/system_notice_delivery.md)
+    assert messages[-1]["role"] == "system"
+    assert messages[-1]["metadata"]["__system_notice__"] == "slot_close"
+    assert "<system>" not in prompt
     assert "実際にやったこと" in prompt                    # 接地条件
     assert "空のままでかまいません" in prompt              # 充填の禁忌
     assert "task:1" in prompt and "序文の下書き" in prompt  # 選択肢一覧 (題つき)

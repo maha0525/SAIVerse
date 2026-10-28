@@ -171,6 +171,13 @@ class LineHeadSnapshot:
     # 「None Section を欠損と認識しない」穴の根治)。永続化はしない: DB 上は
     # key 不在がそのまま欠損を表し、load 後の ensure_snapshot が再 capture する。
     capture_failures: dict[str, str] = field(default_factory=dict)
+    # システム通知の合言葉 (docs/intent/system_notice_delivery.md 不変条件 3, 6)。
+    # head を作り直す (:meth:`HeadPipeline.capture_all`) たびにランダムに生成し、
+    # 一部の Section だけを撮り直す経路 (recapture_missing / capture_for_event) は
+    # 同じ値を引き継ぐ — 同じ head を使い続けている間は同じ値。snapshot と一緒に
+    # 永続化する (session_head_snapshot.PASSPHRASE)。空 = 合言葉を持たない旧行で、
+    # ensure_snapshot が head を作り直す。
+    passphrase: str = ""
 
 
 @runtime_checkable
@@ -186,7 +193,8 @@ class HeadSection(Protocol):
 
     任意属性 ``required: bool`` (既定 False、Protocol には含めない):
     True の Section は人格の同一性を担う (common_prompt / persona_self /
-    core_memory)。capture / render / persist の失敗時は LLM を実行しない
+    core_memory) か、欠けると送る形と説明が食い違う (system_notice — システム
+    通知の読み方)。capture / render / persist の失敗時は LLM を実行しない
     (fail-closed、W6 / SEA 監査 S6)。False の Section の失敗は警告つきで
     degrade し、次 Pulse の再 capture で自己回復する。
     「空を render する」のは失敗ではない — 空の snapshot が正しく capture

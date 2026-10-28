@@ -628,6 +628,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `SECTIONS_JSON` | TEXT | NOT NULL |  |
 | `LAST_NOTIFIED_JSON` | TEXT | NOT NULL |  |
 | `SNAPSHOT_VERSION` | INTEGER | NOT NULL, default=1 |  |
+| `PASSPHRASE` | VARCHAR(64) | — |  |
 | `CAPTURED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 

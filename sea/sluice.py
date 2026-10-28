@@ -754,11 +754,48 @@ def _estimate_input_tokens(
       にも関係なくそのまま送る (openai_message_preparer.py は ``metadata`` に
       画像の無いメッセージの ``content`` を触らない)。保存された会話から組む
       メッセージはこの形を作らないので、多めの側に倒しておく。
+
+    会話の途中のシステム通知 (:func:`llm_clients.system_notice.is_presented_system_notice`
+    — metadata の ``__system_notice__``) のメディアは、クライアントが通知の本文に
+    足す説明の文 (:func:`llm_clients.system_notice.system_notice_media_notes`) で
+    数える。説明の文はファイルの有無を問わず metadata の全項目ぶん作られ、保存済みの
+    要約を丸ごと含むので、ファイルの無い項目も数える。三種類 (画像・音声・動画)
+    全部を数えるのは Gemini のタグ化した通知に合わせた形で、他のクライアントでは
+    同じか多め。埋め込む画像は説明の文に加えて部品としても送られるので、画像の
+    見積もりも従来どおり数える (非常弁が置き換える通知の画像は、説明の文が既に
+    数えてあるので足さない)。head のある列で変換された通知
+    (:func:`llm_clients.system_notice.system_notice_indices`) は、どのクライアントも
+    説明の文だけを使うので、注記 (:func:`_media_note_tokens`) は数えない。head の
+    無い列で通知の印を持つメッセージは、クライアントによって説明の文
+    (OpenAI 互換・Anthropic・Gemini の画像、Gemini の音声・動画) と生成した要約の
+    注記 (基底の音声・動画、xAI の画像) が分かれるので、両方を数えて多めの側に倒す。
     """
+    from llm_clients.system_notice import (
+        is_presented_system_notice,
+        model_accepts_mid_conversation_system,
+        present_system_notices,
+        system_notice_indices,
+        system_notice_media_notes,
+        system_notice_passphrase,
+    )
     from saiverse.model_configs import get_model_config
     from saiverse.token_estimator import estimate_image_tokens
 
     model = str(model)
+    # 通知の説明の文の伏せ字に使う合言葉と、head のある列で変換される通知の位置は、
+    # 変換の前の列から読む (変換は head の写しから合言葉を外す。列の長さは変わら
+    # ないので位置はそのまま使える)。クライアントと同じ出どころ。
+    notice_passphrase = system_notice_passphrase(messages)
+    presented_notice_positions = system_notice_indices(messages)
+    # 会話の途中のシステム通知 (role=system) は、クライアントが送る直前に送り先の
+    # モデルに合わせた形 (そのまま、または合言葉付きタグの user) に変える
+    # (llm_clients/system_notice.py)。役割ごとのメディアの扱い
+    # (:func:`_media_rules`) はその後の役割で決まるので、同じ変換を通してから
+    # 数える (docs/intent/system_notice_delivery.md)。head の無い列は変わらない。
+    messages = present_system_notices(
+        messages,
+        accepts_mid_system=model_accepts_mid_conversation_system(model),
+    )
     image_tokens = estimate_image_tokens(
         str(get_model_config(model).get("provider", "ollama")),
     )
@@ -774,8 +811,9 @@ def _estimate_input_tokens(
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
     total = _response_schema_tokens(response_schema)
     # 埋め込む画像は、非常弁が置き換えるかを全部見てから数える:
-    # (メッセージの番号, 画像の番号, 項目, 役割, 非常弁で数えるか)。
-    embedded: List[Tuple[int, int, Dict[str, Any], str, bool]] = []
+    # (メッセージの番号, 画像の番号, 項目, 役割, 非常弁で数えるか,
+    #  置き換えたときに注記を数えるか)。
+    embedded: List[Tuple[int, int, Dict[str, Any], str, bool, bool]] = []
     # 枠は新しいメッセージから順に埋まるので、末尾から数える。
     for msg_pos in range(len(messages) - 1, -1, -1):
         msg = messages[msg_pos]
@@ -799,6 +837,15 @@ def _estimate_input_tokens(
         if not isinstance(metadata, dict):
             continue
         role = _role_class(msg.get("role"))
+        # 通知の説明の文 (docstring の最後の段落)。改行の 1 字は、クライアントが
+        # 本文と説明の文をつなぐ ``\n`` の分。
+        if is_presented_system_notice(msg):
+            for note in system_notice_media_notes(
+                metadata, ("image", "audio", "video"), passphrase=notice_passphrase,
+            ):
+                total += len(note) + 1
+        # head のある列で変換された通知は、説明の文だけで送られるので注記を数えない。
+        counts_notes = msg_pos not in presented_notice_positions
         # ``__visual_context__`` と ``__skip_image_summary__`` の画像は、クライアントと
         # 同じく枠も非常弁も使わない (llm_clients/utils.select_embedded_attachment_keys)。
         always_embedded = bool(
@@ -821,13 +868,15 @@ def _estimate_input_tokens(
             if not sends_media:
                 continue
             if within_limit and role in rules.image_embed_roles:
-                embedded.append((msg_pos, item_pos, item, role, valve_counts))
-            elif role in rules.image_note_roles:
+                embedded.append(
+                    (msg_pos, item_pos, item, role, valve_counts, counts_notes),
+                )
+            elif counts_notes and role in rules.image_note_roles:
                 total += _media_note_tokens(item)
-        if sends_media and role in rules.audio_note_roles:
+        if counts_notes and sends_media and role in rules.audio_note_roles:
             for item in _metadata_media_items(metadata, "audio"):
                 total += _media_note_tokens(item)
-        if sends_media and role in rules.video_note_roles:
+        if counts_notes and sends_media and role in rules.video_note_roles:
             for item in _metadata_media_items(metadata, "video"):
                 total += _media_note_tokens(item)
 
@@ -858,10 +907,10 @@ def _estimate_input_tokens(
             (valve_entries[pos][0], valve_entries[pos][1])
             for pos in attachment_positions_to_replace(sizes, ceiling, floor)
         }
-    for msg_pos, item_pos, item, role, _valve_counts in embedded:
+    for msg_pos, item_pos, item, role, _valve_counts, counts_notes in embedded:
         if (msg_pos, item_pos) not in replaced:
             total += image_tokens
-        elif role in rules.image_note_roles:
+        elif counts_notes and role in rules.image_note_roles:
             total += _media_note_tokens(item)
     return total
 
@@ -1196,7 +1245,13 @@ def _build_sluice_prompt(
     today_memos: Optional[List[Tuple[str, str, str]]] = None,
     scope_sentence: Optional[str] = None,
 ) -> str:
-    """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
+    """末尾に足す注入プロンプトの本文を組む (keepalive の末尾通知と同じ面)。
+
+    本文はタグで囲まない。定常のスルース (head を組む列) では role=system の
+    システム通知として足し (:func:`_call_sluice_llm`)、同じ本文を採取記録の
+    paired_action_text に残す。head を組まない後からの採取では
+    :func:`_capture_instruction_message` が形を決める
+    (docs/intent/system_notice_delivery.md)。
 
     ``core_memories`` / ``total_chars`` は :func:`_read_core_state` の読みを
     呼び出し元から受け取る (CAS スナップショットと同じ姿を見せるため)。
@@ -1250,7 +1305,6 @@ def _build_sluice_prompt(
         today_block = ""
 
     prompt = (
-        "<system>\n"
         "## 記憶整理の節目 — スルース\n"
         "まもなく古い会話が記憶整理で押し出されます。この機会に、残しておきたい\n"
         "ことがあれば、いま記録できます。押し出された後ではこの会話は手元から\n"
@@ -1294,8 +1348,7 @@ def _build_sluice_prompt(
         f"{activity_block}\n"
         "\n"
         "### 手帳の約束の欄（開いている約束・依頼）\n"
-        f"{task_block}\n"
-        "</system>"
+        f"{task_block}"
     )
     return prompt
 
@@ -1398,7 +1451,7 @@ def _apply_core_ops(
             )
         applied += 1
         alive_contents[content] = new_id
-        # 記録は <system> 包みのシステム通知として SAIMemory に残る
+        # 記録はシステム通知 (role=system) として SAIMemory に残る
         # (_persist_record 参照)。省略・切り詰めは採取事実の改変になるため、
         # 本文は全文を書く (不変条件 §5-8 / 2026-07-07 まはー指摘)。
         lines.append(f"コア記憶 core:{new_id} に採取: {content}")
@@ -2097,10 +2150,11 @@ def _persist_record(
     は過程を本線の context に載せない (入口は一本 — ダイジェスト一行だけが
     committed で立つ) ため、採取ありでも 'discardable' を渡す。
 
-    role は "user"、``record_text`` は呼び出し側で ``<system>…</system>`` に
-    包んだシステム通知形式で渡る (event_message の確立形式)。プロンプト無しの
+    role は "system"、``record_text`` はタグ無しのシステム通知の本文で渡る
+    (docs/intent/system_notice_delivery.md 不変条件 1)。プロンプト無しの
     ``role="assistant"`` メッセージは「自分は普段こう喋る」という few-shot 汚染源に
     なるため、ペルソナ発話ではなくナレーションとして残す (2026-07-07 まはー指摘)。
+    ``paired_action_text`` (``prompt_snapshot``) の形はここでは変えない。
 
     書き込み失敗は握り潰さず送出する (Codex 第六巡 修正 2) — finalize 失敗として
     台帳が applied のまま残り、次回の再適用 → 再 finalize で回収される。
@@ -2119,8 +2173,10 @@ def _persist_record(
     except Exception:
         pulse_id = None  # pulse 文脈は任意メタ — 取得失敗は記録を止めない
 
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
     adapter.append_persona_message({
-        "role": "user",
+        "role": "system",
         "content": record_text,
         # tz-aware UTC ISO 文字列必須 (naive だと adapter が system TZ 解釈で
         # created_at が ±9h ずれる)。
@@ -2128,7 +2184,10 @@ def _persist_record(
         # internal/event_message タグは機構名義の印 (storage.MECHANISM_TAGS)。
         # scene 切り出し・会話キーワード検索からは自動除外される。Chronicle
         # 編纂には 2026-08-29 裁定から材料として入る (長文は決定論の一行に縮む)。
-        "metadata": {"tags": ["internal", "event_message", "sluice"]},
+        "metadata": {
+            "tags": ["internal", "event_message", "sluice"],
+            SYSTEM_NOTICE_KEY: "sluice_capture",
+        },
         "line_role": "main_line",
         "scope": scope_override or (
             "committed" if applied_total > 0 else "discardable"
@@ -3071,7 +3130,13 @@ def _call_sluice_llm(
     # 廃止した — 入らない量の窓はそもそも呼び出し元 (run_metabolism) の量判定が
     # 走らせない。本物のコンテキスト超過を含むあらゆる失敗は送出し、呼び出し元の
     # 退場停止 → 次回再試行に乗る。
-    messages = context_messages + [{"role": "user", "content": prompt}]
+    # 注入プロンプトは role=system のシステム通知として足す (head を組んだ列
+    # なので、送り先のモデルに合わせた変換はクライアント層が行う —
+    # docs/intent/system_notice_delivery.md)。記録の paired_action_text には
+    # 同じ本文が残り、次のターン以降の展開も同じ形の通知を組み直す。
+    from sai_memory.memory.storage import system_notice_message
+
+    messages = context_messages + [system_notice_message(prompt, "paired_action")]
     # 送る中身がそのモデルに入るか (docs/issues/sluice_skip_ignores_model_context.md)。
     # 比べるのは実際に使うモデル (構造化出力の都合で差し替わった後) の上限で、
     # 応答の枠はそのクライアントが送る上限、答えの形の指定も入力に数える。
@@ -3504,7 +3569,8 @@ def run_sluice(
     applied_total = ops_applied + memos_applied + promises_applied
     result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
 
-    # 5. 記録テキスト。event_message 形式のシステム通知として <system> に包む
+    # 5. 記録テキスト。event_message 形式のシステム通知 (role=system・タグ無し本文、
+    #    _persist_record) として残す
     #    (ペルソナ発話ではなくナレーション。few-shot 汚染回避、2026-07-07 まはー指摘)。
     #    判断 (reflection) と適用結果行を全文載せる (省略・切り詰め禁止、不変条件 §5-8)。
     persona_name = getattr(persona, "persona_name", None) or persona_id or "assistant"
@@ -3515,7 +3581,7 @@ def run_sluice(
         body_lines.extend(result_lines)
     if applied_total == 0 and not result_lines:
         body_lines.append("今回は採取しませんでした。")
-    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+    record_text = "\n".join(body_lines)
 
     # 6. 確定クロージャ (Codex 第五巡 修正 2)。適用は済んでいるが、
     #    ①台帳を閉じる (applied → completed) ②判断ターン記録の永続 ③完了通知
@@ -3617,15 +3683,31 @@ def run_sluice(
 #: システムプロンプトの直後に置かれ、いま読んでいるものが進行中の会話ではなく
 #: 過去の読み返しであることを本人に伝える。
 _CAPTURE_SELF_RECOGNITION = (
-    "<system>\n"
     "## 過去の会話の読み返し\n"
     "これは、いま進行中の会話ではありません。あなたの過去の会話のうち、\n"
     "記憶整理の採取（スルース）をまだ通っていない期間を、あなた自身の目で\n"
     "読み返すための時間です。\n"
     "この後に、その期間の会話の写しが当時のまま続きます。読み終えたところで、\n"
-    "残しておきたいことがあれば記録できます。\n"
-    "</system>"
+    "残しておきたいことがあれば記録できます。"
 )
+
+
+def _capture_instruction_message(prompt: str) -> Dict[str, Any]:
+    """後からの採取 (本人モード) で末尾に足す注入プロンプトのメッセージ。
+
+    この呼び出しは head を組まない (前置きの system + 会話の写し + 注入
+    プロンプト) ので、クライアント層のシステム通知の変換が働かない
+    (llm_clients/system_notice.py は head の印を持つ列だけを変換する)。
+    role=system で足すと Gemini / Anthropic では先頭の system 欄へまとめられて
+    末尾から消えるので、従来と同じ「``<system>`` で囲んだ role=user」の形に
+    する。囲み方はクライアント層と同じ一枚 (:func:`tag_system_notice`、合言葉
+    無し) を使う (docs/intent/system_notice_delivery.md)。刻みの見積もり
+    (:func:`_capture_input_fit`) と LLM 呼び出し (:func:`_call_capture_llm`) が
+    同じこの一枚を通る。
+    """
+    from llm_clients.system_notice import tag_system_notice
+
+    return {"role": "user", "content": tag_system_notice(prompt, "")}
 
 
 class SluiceCaptureSpanUnreadableError(RuntimeError):
@@ -3858,7 +3940,7 @@ def _capture_input_fit(
         fixed = _estimate_input_tokens(
             [
                 {"role": "system", "content": _build_capture_preamble(persona)},
-                {"role": "user", "content": instruction["prompt"]},
+                _capture_instruction_message(instruction["prompt"]),
             ],
             model,
             response_schema=_RESPONSE_SCHEMA,
@@ -3884,7 +3966,7 @@ def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any
     """記録された範囲 [start, end] の実会話メッセージを正典順で読む。
 
     読みは :func:`sai_memory.memory.storage.get_conversation_messages_between`
-    — 機構名義の行 (event_message / handy_tool / spell) と ``<system>`` 頭の
+    — 機構名義の行 (event_message / handy_tool / spell) と role=system の
     通知は対象に入れない。本人の目で読み返して採取する材料は発話であって、
     機構の定型文ではない。端の行が無い・thread が食い違うときは None (呼び出し
     側が fail-closed で止める)。
@@ -4073,7 +4155,7 @@ def _call_capture_llm(
     messages = (
         [{"role": "system", "content": _build_capture_preamble(persona)}]
         + history
-        + [{"role": "user", "content": prompt}]
+        + [_capture_instruction_message(prompt)]
     )
 
     _ensure_input_fits(
@@ -4332,7 +4414,7 @@ def _run_capture_chunk(
         body_lines.extend(result_lines)
     if applied_total == 0 and not result_lines:
         body_lines.append("今回は採取しませんでした。")
-    record_text = "<system>" + "\n".join(body_lines) + "\n</system>"
+    record_text = "\n".join(body_lines)
 
     # 永続が先、completed が最後 (run_sluice の finalize と同じ順序)。
     # 読み返しの過程は本線の context に載せない (入口は一本 — 走行の締めに
@@ -4853,8 +4935,9 @@ def _append_capture_digest(
     (day_close の _collect_today_session_digests) がタグで拾う既存の読み手に、
     「今日、過去の会話を読み返した」という事実がそのまま乗る。
     role は作業セッションの digest (assistant = 本人の言葉) と違って
-    user + ``<system>`` 包み — この一行は件数から機械が組んだ文で、機構の
-    代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
+    system (タグ無し本文のシステム通知 — docs/intent/system_notice_delivery.md
+    不変条件 1) — この一行は件数から機械が組んだ文で、機構の代筆を本人名義
+    (assistant) にしない (発話の尊厳の規律)。
     書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
     失敗として報告し、記録の欠けを黙って飲まない。
 
@@ -4868,12 +4951,17 @@ def _append_capture_digest(
         raise SluiceStorageUnavailableError(
             "sai_memory adapter is missing; cannot append the capture digest"
         )
-    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    metadata: Dict[str, Any] = {
+        "tags": [DIGEST_TAG, "sluice"],
+        SYSTEM_NOTICE_KEY: "sluice_digest",
+    }
     if nonce:
         metadata["capture_digest_nonce"] = nonce
     message_id = adapter.append_persona_message({
-        "role": "user",
-        "content": f"<system>{digest_text}</system>",
+        "role": "system",
+        "content": digest_text,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "metadata": metadata,
         "line_role": "main_line",

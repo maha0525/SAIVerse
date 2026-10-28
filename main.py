@@ -402,6 +402,15 @@ def main():
     except Exception:
         logging.warning("Building Memory schema sync failed (will rely on needs_migration path)", exc_info=True)
 
+    # システム通知の旧形式データの正規化 (docs/intent/system_notice_delivery.md「移行」):
+    # 本文に <system> を埋め込んだ行・印の無い role=system 行を、role=system +
+    # 識別の印の形へ揃える。ペルソナの記憶 DB を開く前 (= SAIVerseManager の初期化
+    # より前) に走らせる。本体 DB は冒頭の pre_upgrade バックアップの後、各記憶 DB は
+    # 書き換える前にこの処理自身が写しを取る。記憶 DB ごとに印で一回限り、本体 DB は
+    # 変換すると条件から外れる冪等ステップ。失敗は起動を止めず、バナーで知らせる。
+    from database.system_notice_migration import run_startup_system_notice_migration
+    system_notice_migration_alerts = run_startup_system_notice_migration(str(db_path))
+
     # Version-aware upgrade: run before SAIVerseManager initialization (= before personas
     # are loaded). Each City and AI compares its LAST_KNOWN_VERSION against the current
     # SAIVerse version and runs the necessary upgrade handlers. NULL version is treated
@@ -444,6 +453,7 @@ def main():
     # Failures of the package reinstall before this start and of setup's addon env rebuild are shown in the banner.
     from saiverse.environment_alerts import environment_alerts
     manager.startup_alerts.extend(environment_alerts(Path(__file__).parent.resolve()))
+    manager.startup_alerts.extend(system_notice_migration_alerts)
 
     # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
     # Performs diff-based update: new files are imported, changed files are updated,
@@ -476,6 +486,14 @@ def main():
             logging.info("Composite actions: registered %d action spell(s)", _action_count)
     except Exception:
         logging.warning("Composite actions initialization failed (non-fatal)", exc_info=True)
+
+    # Playbooks the user must update by hand (legacy system notices, tools that are
+    # not registered). Checked after MCP / addon tools are registered; never rewritten.
+    try:
+        from saiverse.playbook_sync import playbook_compat_alerts
+        manager.startup_alerts.extend(playbook_compat_alerts(manager.SessionLocal))
+    except Exception:
+        logging.warning("Playbook compatibility check failed (non-fatal)", exc_info=True)
 
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,

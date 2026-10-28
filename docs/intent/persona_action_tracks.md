@@ -1595,6 +1595,8 @@ if final_state.get("report_to_parent"):
 
 system タグ付き user メッセージとする理由: 既存の `inject_persona_event` パターン (Intent B v0.4 で確定) と整合させるため。親モデル側からは「自分への通知」として認識される (不変条件 11)。
 
+> **現状 (2026-10-28)**: 形は role=system のシステム通知 (`__system_notice__` = `subline_report`、本文はタグ無し) に改めた。「自分への通知」として認識される目的は変わらない。会話の途中の system を受け取れないモデルへは、クライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](system_notice_delivery.md))。上のコード例と理由は v0.11 当時の記録。
+
 ## Spell loop の保存方針 （v0.11 で新規）
 
 handoff 経路 A (`sea/runtime_llm.py:430-442`) で観測された「Spell loop 内で `tags=["conversation"]` がハードコードされている」問題への対応。Intent A v0.14 の **「呼んだラインの記録レイヤーに従う」原則**を実装に反映する。
@@ -2023,7 +2025,7 @@ Intent A の不変条件 11 項を継承した上で、B として追加：
 - 「重量級は混合キャッシュ」の方針を踏まえ、分離しない方向が素直か（`pulse_logs` に track_id ではなく `meta_layer` 識別子で記録する案）
 
 ### A 継続時の `notify_to_track` の挿入形式
-- `inject_persona_event` 経由（system タグ付き user message）が既存パターンと整合
+- `inject_persona_event` 経由（当時は system タグ付き user message。2026-10-28 から role=system のシステム通知 — [system_notice_delivery.md](system_notice_delivery.md)）が既存パターンと整合
 - これで決定の方向、実装段階で確定
 
 ### サブエージェント実行との関係
@@ -2062,7 +2064,7 @@ Intent A の不変条件 11 項を継承した上で、B として追加：
 - `SubPlayNodeDef.line: "main"|"sub"` フィールド追加 (デフォルト "main")
 - 最初に呼ばれる Playbook はメインライン強制
 - サブライン分岐 = 親 messages のコピー (完全独立ではない)、軽量モデル実行
-- サブライン完了時に `report_to_main` がメインラインに system タグ付き user メッセージとして append (v0.11 で `report_to_parent` に改名)
+- サブライン完了時に `report_to_main` がメインラインに system タグ付き user メッセージとして append (v0.11 で `report_to_parent` に改名。2026-10-28 から形は role=system のシステム通知 — [system_notice_delivery.md](system_notice_delivery.md))
 - `output_schema` の `report_to_main` を `can_run_in_sub_line=true` の Playbook で必須化 (v0.11 で `report_to_parent` / `can_run_as_child` に改名)
 - サブ Playbook の最後にサマリ生成専用 LLM ノードを置く推奨パターン
 - 旧 `context_profile` / `model_type` / `exclude_pulse_id` を段階的に廃止 (C-2a → C-2b → C-2c)

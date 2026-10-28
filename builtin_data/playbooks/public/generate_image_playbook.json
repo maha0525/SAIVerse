@@ -140,7 +140,7 @@
       "id": "record",
       "type": "memorize",
       "action": "{text}",
-      "role": "user",
+      "role": "system",
       "tags": [
         "generate_image",
         "playbook_result"

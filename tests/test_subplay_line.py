@@ -223,8 +223,10 @@ def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
     asyncio.run(node_fn(state))
 
     # (1) state["_messages"] に append された
+    # 子ラインの結果報告は role=system のシステム通知
+    # (docs/intent/system_notice_delivery.md)
     assert any(
-        msg["role"] == "user" and "検索結果のまとめ。" in msg["content"]
+        msg["role"] == "system" and "検索結果のまとめ。" in msg["content"]
         for msg in state["_messages"]
     ), "report_to_parent should be in state['_messages']"
 
@@ -234,7 +236,7 @@ def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
         f"report_to_parent should be appended to parent PulseContext exactly once "
         f"(got {len(appended_in_pulse)})"
     )
-    assert appended_in_pulse[0].role == "user"
+    assert appended_in_pulse[0].role == "system"
 
     # state["report_to_parent"] はクリアされる
     assert "report_to_parent" not in state
@@ -282,18 +284,33 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata():
     # _store_memory が line_role='main_line' + scope='committed' + 現在の pulse_id で 1 回呼ばれる
     runtime._store_memory.assert_called_once()
     call_kwargs = runtime._store_memory.call_args.kwargs
-    assert call_kwargs["role"] == "user"
+    # システム通知は role=system・タグ無し本文 + 識別の印で保存する
+    # (docs/intent/system_notice_delivery.md 不変条件 1)
+    from sai_memory.memory.storage import (
+        SYSTEM_NOTICE_KEY,
+        presented_system_record_content,
+    )
+
+    assert call_kwargs["role"] == "system"
+    assert call_kwargs["metadata"] == {SYSTEM_NOTICE_KEY: "subline_report"}
     # Phase 3 段階 4-B: タグハードコードを line メタデータに置換
     assert call_kwargs["line_role"] == "main_line"
     assert call_kwargs["scope"] == "committed"
     # 意味分類タグは渡さない (playbook:{name} は _store_memory 内で自動付与される)
     assert "tags" not in call_kwargs or not call_kwargs.get("tags")
     assert call_kwargs["pulse_id"] == "test-pulse-xyz"
-    # content は formatted な system タグ付きメッセージ
     call_args = runtime._store_memory.call_args.args
-    formatted_text = call_args[1]
-    assert "重要なまとめ" in formatted_text
-    assert "<system>" in formatted_text
+    stored_text = call_args[1]
+    assert stored_text == "サブ Playbook 'dummy_sub' の実行結果:\n重要なまとめ"
+    assert "<system" not in stored_text
+    # この Pulse の中で送る列へ足した分は、次のターンに記録から復元される
+    # 形 (role=system・同じ印・同じ本文) と一字も違わない
+    restored = presented_system_record_content(stored_text)
+    assert state["_messages"] == [{
+        "role": "system", "content": restored,
+        "metadata": {SYSTEM_NOTICE_KEY: "subline_report"},
+    }]
+    assert [e.content for e in pulse_ctx.logs if e.role == "system"] == [restored]
 
 
 def test_subplay_line_main_does_not_call_store_memory():

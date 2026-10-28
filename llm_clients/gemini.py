@@ -107,6 +107,33 @@ class _AttemptCounter:
         self._repeat = True
 
 
+def _stream_chunk_summary(chunk: Any) -> str:
+    """ストリームの 1 チャンクをログに書くときの要約 (本文を含まない)。
+
+    チャンクの本文は応答の断片なので、チャンクごとに書くと、合言葉を復唱した
+    応答の断片が別々のログ行に残り、行ごとの伏せ字に掛からないまま連結で実際の
+    値に戻せてしまう (docs/intent/system_notice_delivery.md 不変条件 3)。
+    本文の全文は組み立て終わった後に 1 レコードで書く。
+    """
+    candidates = getattr(chunk, "candidates", None) or []
+    descr: List[str] = []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        parts = (getattr(content, "parts", None) or []) if content else []
+        text_chars = sum(len(getattr(p, "text", None) or "") for p in parts)
+        descr.append(
+            f"index={getattr(cand, 'index', None)} finish_reason={getattr(cand, 'finish_reason', None)} "
+            f"parts={len(parts)} text_chars={text_chars}"
+        )
+    usage = getattr(chunk, "usage_metadata", None)
+    pf = getattr(chunk, "prompt_feedback", None)
+    return (
+        f"candidates={len(candidates)} [{'; '.join(descr)}] "
+        f"usage={'yes' if usage else 'no'} "
+        f"block_reason={getattr(pf, 'block_reason', None) if pf else None}"
+    )
+
+
 def _install_gemini_stream_patch() -> None:
     disable_flag = os.getenv("SAIVERSE_DISABLE_GEMINI_SSE_PATCH")
     if disable_flag and disable_flag.lower() not in {"0", "false", "off"}:
@@ -196,19 +223,23 @@ def _install_gemini_stream_patch() -> None:
     original_segments = HttpResponse.segments
     original_async_segments = HttpResponse.async_segments
 
+    # SSE の各 payload の本文はログに書かない (大きさだけ書く)。応答が複数の
+    # payload に割れて届くと、合言葉を復唱した応答の断片が別々の行に残り、ハンドラの
+    # 伏せ字 (行ごとの一致) に掛からないまま、行の連結で実際の値に戻せてしまう
+    # (docs/intent/system_notice_delivery.md 不変条件 3)。応答の全文は組み立て
+    # 終わった後に 1 レコードで書く。
     def _yield_json_chunks(iterator: Iterator[str]) -> Iterator[Any]:
         _sse_logger = logging.getLogger("saiverse.llm")
         acc = _SSEAccumulator()
         for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            _sse_logger.debug("Gemini SSE raw line: %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                _sse_logger.debug("Gemini SSE payload: %s", combined)
+                _sse_logger.debug("Gemini SSE payload: %d chars", len(combined))
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            _sse_logger.debug("Gemini SSE final payload: %s", final)
+            _sse_logger.debug("Gemini SSE final payload: %d chars", len(final))
             yield json.loads(final)
         # After all lines consumed, check for any buffered error payload (e.g. 504 DEADLINE_EXCEEDED)
         acc.flush_remaining()
@@ -218,14 +249,13 @@ def _install_gemini_stream_patch() -> None:
         acc = _SSEAccumulator()
         async for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            _sse_logger.debug("Gemini SSE raw line (async): %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                _sse_logger.debug("Gemini SSE payload (async): %s", combined)
+                _sse_logger.debug("Gemini SSE payload (async): %d chars", len(combined))
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            _sse_logger.debug("Gemini SSE final payload (async): %s", final)
+            _sse_logger.debug("Gemini SSE final payload (async): %d chars", len(final))
 
     def _patched_segments(self) -> Iterator[Any]:
         if isinstance(self.response_stream, list) or self.response_stream is None:
@@ -291,6 +321,21 @@ from saiverse.llm_router import route
 
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, ToolSpecFormat, get_llm_logger
 from saiverse.logging_config import log_timeout_event
+from .system_notice import (
+    accepts_mid_conversation_system,
+    is_head_system_message,
+    is_presented_system_notice,
+    present_system_notices,
+    redact_passphrase,
+    redact_passphrase_in_value,
+    system_notice_image_note,
+    system_notice_media_note,
+    system_notice_media_notes,
+    system_notice_passphrase,
+    tag_presented_system_notice,
+    unresolved_system_notice_images,
+    unresolved_system_notice_media,
+)
 from .utils import (
     CACHE_BOUNDARY_METADATA_KEY,
     content_to_text,
@@ -1512,7 +1557,24 @@ class GeminiClient(LLMClient):
         一致しない — 印の付いたメッセージが**実際に落ちた contents の番号**を返す
         (印が無い・そのメッセージが contents を作らなかったなら None)。印そのものは
         metadata にあるだけで、Content には載らない。
+
+        会話の途中のシステム通知 (head より後ろの role=system) は、Gemini が
+        contents の途中に system を置けないので、最初に元の位置で合言葉付きタグの
+        user にする (llm_clients/system_notice.py、
+        docs/intent/system_notice_delivery.md 不変条件 5)。残る system (head と
+        その前の指示) だけが system_instruction へまとまる。列の長さは変わらない
+        ので、境目の印の番号はそのまま使える。
         """
+        # その送信の head の合言葉。present_system_notices の後で本文へ足す説明の
+        # 文・生成した要約を伏せ、タグ化した通知を説明の文ごと包み直すのに使う。
+        passphrase = system_notice_passphrase(msgs)
+        notices_tagged = any(
+            isinstance(m, dict) and is_head_system_message(m) for m in msgs
+        )
+        msgs = present_system_notices(
+            msgs,
+            accepts_mid_system=accepts_mid_conversation_system("gemini_native", None),
+        )
         system_lines: List[str] = []
         # 境目の印が付いたメッセージの番号 (複数あれば最後のもの) と、各メッセージの
         # 変換を始めた時点の contents の長さ。
@@ -1617,6 +1679,10 @@ class GeminiClient(LLMClient):
                     fn_name = fn.get("name", "")
                     fn_args_raw = fn.get("arguments", "{}")
                     fn_args = json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                    # 辞書のまま渡ってきた引数は伏せ字 (present_system_notices は文字列
+                    # だけを伏せる) を通っていない。送るときに JSON の文字列になるので、
+                    # 中の文字列を全部伏せる (不変条件 3)。伏せ済みの文字列は変わらない。
+                    fn_args = redact_passphrase_in_value(fn_args, passphrase)
                     fn_id = tc.get("id") if isinstance(tc, dict) else None
                     fc_part = types.Part(
                         function_call=types.FunctionCall(id=fn_id or None, name=fn_name, args=fn_args)
@@ -1642,6 +1708,8 @@ class GeminiClient(LLMClient):
                     response_data = {"result": fn_content}
                 if not isinstance(response_data, dict):
                     response_data = {"result": response_data}
+                # 辞書のまま渡ってきた結果も同じく伏せる (引数と同じ理由)
+                response_data = redact_passphrase_in_value(response_data, passphrase)
                 contents.append(types.Content(
                     role="user",
                     parts=[types.Part(
@@ -1655,12 +1723,41 @@ class GeminiClient(LLMClient):
                 continue
 
             text = content_to_text(message.get("content", "")) or ""
-            text_content = text
             g_role = "user" if role == "user" else "model"
             attachments = attachment_cache.get(idx, [])
             audio_attachments = audio_cache.get(idx, [])
             video_attachments = video_cache.get(idx, [])
             media_parts: List[types.Part] = []
+            # タグ化したシステム通知 (is_presented_system_notice) の画像は、文字で
+            # 送るときに生成した要約ではなく保存済みの要約か URI だけの説明にし
+            # (送信本文が要約の生成の成否で揺れないように)、ファイルが読めない
+            # 画像も説明の文で残す (llm_clients/system_notice.py の
+            # system_notice_image_note)。
+            is_notice = is_presented_system_notice(message)
+            # タグ化した通知では、説明の文は通知の本文の一部なのでタグの中へ入れる。
+            # ここでは説明の文だけを集め、最後に本文と一緒にタグで包み直す
+            # (tag_presented_system_notice)。埋め込む画像などは部品なので、タグ付きの
+            # 本文の後ろに続く。
+            tag_notice = is_notice and notices_tagged
+            text_content = "" if tag_notice else text
+            if is_notice and not tag_notice:
+                for entry in unresolved_system_notice_images(
+                    message.get("metadata"), attachments,
+                ):
+                    note = system_notice_image_note(
+                        entry, message.get("metadata"), passphrase=passphrase,
+                    )
+                    text_content = f"{text_content}\n{note}" if text_content else note
+                # 音声・動画も同じ — iter_audio_media / iter_video_media はファイルが
+                # 無い項目を返さないので、metadata の記述から説明の文で残す
+                for kind, resolved in (("audio", audio_attachments), ("video", video_attachments)):
+                    for entry in unresolved_system_notice_media(
+                        message.get("metadata"), resolved, kind,
+                    ):
+                        note = system_notice_media_note(
+                            entry, message.get("metadata"), kind, passphrase=passphrase,
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
 
             # === Image processing ===
             if attachments and self.supports_images:
@@ -1689,8 +1786,13 @@ class GeminiClient(LLMClient):
                     len(skipped_attachments),
                 )
                 for attachment in skipped_attachments:
-                    summary = _summary_for(attachment) or "(要約を取得できませんでした)"
-                    note = f"[画像参照のみ: {attachment['uri']}] {summary}"
+                    if is_notice:
+                        note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
+                    else:
+                        summary = _summary_for(attachment) or "(要約を取得できませんでした)"
+                        note = f"[画像参照のみ: {attachment['uri']}] {summary}"
                     text_content = f"{text_content}\n{note}" if text_content else note
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
@@ -1703,8 +1805,13 @@ class GeminiClient(LLMClient):
                         )
                         # 読めなかった画像も黙って捨てず、説明の文で届ける
                         # (Anthropic・OpenAI 互換・xAI と同じ扱い)
-                        summary = _summary_for(attachment) or "(要約を取得できませんでした)"
-                        note = f"[画像: {attachment['uri']}] {summary}"
+                        if is_notice:
+                            note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
+                        else:
+                            summary = _summary_for(attachment) or "(要約を取得できませんでした)"
+                            note = f"[画像: {attachment['uri']}] {summary}"
                         text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     logging.debug(
@@ -1724,6 +1831,12 @@ class GeminiClient(LLMClient):
                     self.supports_images,
                 )
                 for attachment in attachments:
+                    if is_notice:
+                        note = system_notice_image_note(
+                            attachment, message.get("metadata"), passphrase=passphrase,
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                        continue
                     if idx in skip_summary_indices:
                         summary = None
                     else:
@@ -1746,12 +1859,25 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load audio for Gemini payload: %s", attachment["uri"]
                         )
+                        if is_notice:
+                            # 通知の音声は画像と同じく説明の文で残す (生成はしない)
+                            note = system_notice_media_note(
+                                attachment, message.get("metadata"), "audio", passphrase=passphrase,
+                            )
+                            text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
             elif audio_attachments:
                 # supports_audio=False: inject audio summaries as text only
                 skip_audio_summary = idx in skip_audio_summary_indices
                 for attachment in audio_attachments:
+                    if is_notice:
+                        # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
+                        note = system_notice_media_note(
+                            attachment, message.get("metadata"), "audio", passphrase=passphrase,
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                        continue
                     summary = (
                         None if skip_audio_summary
                         else ensure_audio_summary(attachment["path"], attachment["mime_type"])
@@ -1774,12 +1900,25 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load video for Gemini payload: %s", attachment["uri"]
                         )
+                        if is_notice:
+                            # 通知の動画は画像と同じく説明の文で残す (生成はしない)
+                            note = system_notice_media_note(
+                                attachment, message.get("metadata"), "video", passphrase=passphrase,
+                            )
+                            text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     media_parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
             elif video_attachments:
                 # supports_video=False: inject video summaries as text only
                 skip_video_summary = idx in skip_video_summary_indices
                 for attachment in video_attachments:
+                    if is_notice:
+                        # 通知は保存済みの要約か URI だけ (画像と同じ規則、不変条件 6)
+                        note = system_notice_media_note(
+                            attachment, message.get("metadata"), "video", passphrase=passphrase,
+                        )
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                        continue
                     summary = (
                         None if skip_video_summary
                         else ensure_video_summary(attachment["path"], attachment["mime_type"])
@@ -1787,6 +1926,26 @@ class GeminiClient(LLMClient):
                     summary_note = summary or "(要約を取得できませんでした)"
                     note = f"[動画: {attachment['uri']}] {summary_note}"
                     text_content = f"{text_content}\n{note}" if text_content else note
+
+            # タグ化した通知は、説明の文を本文に足した全体をタグで包む。タグの中の
+            # 本文は、画像・音声・動画を埋め込めたかどうかにかかわらず「元の本文 +
+            # metadata の全項目の説明の文」で固定する — 上の各分岐が読み込みの成否で
+            # 足した説明の文 (text_content) は使わない (読み込みの成否で送信本文が
+            # 揺れないように。不変条件 6)。説明と埋め込みの重複は受け入れる。
+            # それ以外の発言は、伏せ字 (present_system_notices) の後で足した生成した
+            # 要約をその送信の合言葉で伏せる (伏せ字は文字数を変えない置換で、二度
+            # 掛けても同じ)。
+            if tag_notice:
+                text_content = tag_presented_system_notice(
+                    message.get("metadata"),
+                    system_notice_media_notes(
+                        message.get("metadata"), ("image", "audio", "video"),
+                        passphrase=passphrase,
+                    ),
+                    passphrase,
+                )
+            else:
+                text_content = redact_passphrase(text_content, passphrase)
 
             # === Final assembly: text first, then media parts ===
             final_parts: List[types.Part] = []
@@ -2127,7 +2286,7 @@ class GeminiClient(LLMClient):
                     for chunk in stream:
                         last_chunk = chunk
                         saw_any_chunk = True
-                        get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                        get_llm_logger().debug("Gemini stream chunk: %s", _stream_chunk_summary(chunk))
 
                         # Check prompt-level block (PROHIBITED_CONTENT etc.)
                         pf = getattr(chunk, "prompt_feedback", None)
@@ -2224,18 +2383,31 @@ class GeminiClient(LLMClient):
                                 cached_tokens=cached,
                             )
 
-                    # Debug: log what's in all_parts before processing
+                    # Debug: log what's in all_parts before processing. 各部品は
+                    # チャンクごとの断片なので本文は書かず長さだけ書く
+                    # (_stream_chunk_summary と同じ理由)。
                     for i, part in enumerate(all_parts):
                         logging.info(
-                            "[gemini] all_parts[%d]: type=%s, thought=%s, text=%r, attrs=%s",
+                            "[gemini] all_parts[%d]: type=%s, thought=%s, text_chars=%d, attrs=%s",
                             i,
                             type(part).__name__,
                             getattr(part, "thought", "N/A"),
-                            (getattr(part, "text", None) or "")[:100] if getattr(part, "text", None) else None,
+                            len(getattr(part, "text", None) or ""),
                             [a for a in dir(part) if not a.startswith("_")]
                         )
 
                     text, reasoning_entries, text_thought_sig = self._separate_parts(all_parts)
+                    # 応答の全文は組み立て終わったここで 1 レコードで書く。思考も
+                    # 断片を連結した一続きの文字列で書く (断片を区切って並べると、
+                    # 行の中でも伏せ字の一致に掛からない)。
+                    get_llm_logger().debug(
+                        "Gemini stream response text (%d chars):\n%s\nthoughts:\n%s",
+                        len(text), text,
+                        "".join(
+                            getattr(p, "text", None) or "" for p in all_parts
+                            if is_truthy_flag(getattr(p, "thought", None))
+                        ),
+                    )
                     self._store_reasoning(reasoning_entries)
                     # 2026-05-20: text part の thought_signature を保持。
                     # 次ターンで echo するために SEA runtime が consume する。
@@ -2733,7 +2905,9 @@ class GeminiClient(LLMClient):
             for chunk in stream:
                 chunk_count += 1
                 last_chunk = chunk
-                get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                get_llm_logger().debug(
+                    "Gemini stream chunk #%d: %s", chunk_count, _stream_chunk_summary(chunk),
+                )
                 if finish_reason_time is not None:
                     post_finish_chunk_count += 1
                 # プロンプト段階のブロック (PROHIBITED_CONTENT 等)。この時 candidates は
@@ -2756,7 +2930,6 @@ class GeminiClient(LLMClient):
                 if not chunk.candidates:
                     continue
                 candidate = chunk.candidates[0]
-                get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
                 saw_chunks = True
 
                 # Check for safety filter block in streaming
@@ -2789,7 +2962,8 @@ class GeminiClient(LLMClient):
                 candidate_index = getattr(candidate, "index", 0)
                 for part_idx, part in enumerate(candidate.content.parts):
                     if getattr(part, "function_call", None) and fcall is None:
-                        get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
+                        # 呼び出しの中身はチャンクの途中では書かず、ストリームの後で
+                        # 採った一つを 1 レコードで書く (_stream_chunk_summary と同じ理由)
                         fcall = part.function_call
                         # Capture thought_signature for thinking-enabled models (required by Gemini API)
                         _ts = getattr(part, "thought_signature", None)
@@ -2848,7 +3022,6 @@ class GeminiClient(LLMClient):
                     logging.debug("[gemini_stream] First text chunk at +%.2fs", now - stream_start)
                 last_text_chunk_time = now
 
-                get_llm_logger().debug("Gemini text delta: %s", new_text)
                 stream_state["emitted"] = True
                 if not prefix_yielded and history_snippets:
                     yield "\n".join(history_snippets) + "\n"
@@ -2878,6 +3051,14 @@ class GeminiClient(LLMClient):
             finish_reason_value,
             (finish_reason_time - stream_start) if finish_reason_time else -1,
             post_finish_chunk_count, post_finish_wait,
+        )
+        # 応答の全文は組み立て終わったここで 1 レコードで書く (チャンクごとの本文は
+        # 書かない — _stream_chunk_summary)。
+        get_llm_logger().debug(
+            "Gemini stream response text (%d chars):\n%s\nthoughts:\n%s",
+            sum(len(t) for t in seen_stream_texts.values()),
+            "".join(seen_stream_texts.values()),
+            "".join(reasoning_chunks),
         )
 
         # Check if SSE patch detected a server error (e.g. 504 DEADLINE_EXCEEDED)
@@ -2932,6 +3113,7 @@ class GeminiClient(LLMClient):
 
         # Store tool detection result if function call was detected
         if fcall is not None:
+            get_llm_logger().debug("Gemini stream function_call: %s", fcall)
             # Collect all text that was yielded
             all_text = "".join(seen_stream_texts.values())
             fcall_name = getattr(fcall, "name", None)

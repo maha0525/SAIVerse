@@ -427,7 +427,7 @@ Track 内必要情報の維持と再開時の文脈呼び戻しは、**Track Chr
 
 - **書き込み**: Metabolism 時に押し出し対象を Track ごとに分けて Chronicle DB (`arasuji_entries` の `origin_track_id` 紐付き) に entry 追加。「中断時に専用サマリを作る」という挙動はない (= 旧 `pause_summary` 機構は廃止、Track Chronicle で置換)
 - **読み込み (head 配置)**: アクティブ Track の Chronicle を Memory Weave context として head に載せる。Metabolism のたびに head が新アクティブ Track のものに入れ替わる
-- **読み込み (history 末尾近く挿入)**: Track 切り替え時、メタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (role='user' + `<system>` ラップ) として history 末尾近くに INSERT
+- **読み込み (history 末尾近く挿入)**: Track 切り替え時、メタ判断独白の committed 昇格直後に切り替え先 Track の Chronicle を独立メッセージ (当時は role='user' + `<system>` ラップ。Track ランタイムは退役済みで、保存済みの行は 2026-10-28 の移行で role=system のシステム通知 `track_chronicle_insert` に正規化される — [system_notice_delivery.md](../system_notice_delivery.md)) として history 末尾近くに INSERT
 - **時刻アンカー**: Metabolism 時、最古残存メッセージ直前に揮発で時刻メタを 1 件挿入
 
 ### Note と再開フローの関係
@@ -565,16 +565,14 @@ def validate_child_playbook(playbook: PlaybookSchema) -> None:
 子 Playbook 完了時:
 
 ```python
-if final_state.get("report_to_parent"):
-    report = final_state["report_to_parent"]
-    formatted = f"<system>子 Playbook '{playbook.name}' の実行結果:\n{report}</system>"
-    parent_state["_messages"].append({
-        "role": "user",
-        "content": formatted,
-    })
+# sea/runtime_nodes.py (2026-10-28 時点の形)
+notice_text = f"サブ Playbook '{sub_name}' の実行結果:\n{report_text}"
+formatted = presented_system_record_content(notice_text)
+state["_messages"].append(system_notice_message(formatted, "subline_report"))
+# 記録にも role=system・metadata {"__system_notice__": "subline_report"} で残す
 ```
 
-system タグ付き user メッセージとする理由: 既存の `inject_persona_event` パターンと整合させるため。親モデル側からは「自分への通知」として認識される (不変条件 11)。
+報告は role=system のシステム通知 (`__system_notice__` = `subline_report`) として親の列へ足し、記録にも同じ形で残す。目的は変わらず、親モデル側からは「自分への通知」として認識される (不変条件 11)。送り先のモデルが会話の途中の system を受け取れないときは、クライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](../system_notice_delivery.md))。2026-10-27 までは `<system>` タグ付きの user メッセージにしていた (当時の理由は既存の `inject_persona_event` パターンとの整合)。
 
 ### 子ラインの messages コピー仕様
 

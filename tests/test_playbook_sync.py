@@ -252,3 +252,197 @@ def test_hash_change_updates_content(session_factory, tmp_path, monkeypatch):
         assert pb.source_file == str(new_src)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 利用者の手で更新が要る Playbook の警告 (docs/intent/system_notice_delivery.md)
+# ---------------------------------------------------------------------------
+
+
+def _add_rows(session_factory, playbooks):
+    db = session_factory()
+    try:
+        for name, nodes in playbooks.items():
+            db.add(Playbook(
+                name=name, scope="public",
+                schema_json=json.dumps({"name": name}),
+                nodes_json=json.dumps({"name": name, "start_node": "n1", "nodes": nodes}),
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_compat_alerts_flag_legacy_notices_and_missing_tools(session_factory, monkeypatch):
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools
+
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "known_tool", lambda: None)
+    monkeypatch.setitem(tools.TOOL_REGISTRY, "myaddon__addon_tool", lambda: None)
+    _add_rows(session_factory, {
+        "tagged_memorize": [
+            {"id": "n1", "type": "memorize", "action": "<system>{last}</system>", "role": "user"},
+        ],
+        "user_role_tool_result": [
+            {"id": "n1", "type": "tool", "action": "known_tool", "output_key": "found"},
+            {"id": "n2", "type": "memorize", "action": "結果: {found.title}", "role": "user"},
+        ],
+        "missing_tool": [
+            {"id": "n1", "type": "tool", "action": "get_situation_snapshot"},
+            {"id": "n2", "type": "tool", "action": "addon_tool"},  # 素名でアドオンのツールに解決
+        ],
+        "new_form": [
+            {"id": "n1", "type": "tool", "action": "known_tool"},
+            {"id": "n2", "type": "memorize", "action": "{last}", "role": "system"},
+            # ユーザーの入力を user で記録するのは旧形式ではない
+            {"id": "n3", "type": "memorize", "action": "{input}", "role": "user"},
+            {"id": "n4", "type": "llm", "action": "<system_prompt> は別の語"},
+        ],
+    })
+    before = {
+        pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()
+    }
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_legacy_system_notice"]["details"]["playbooks"] == [
+        "tagged_memorize", "user_role_tool_result",
+    ]
+    assert alerts["playbook_missing_tool"]["details"]["references"] == [
+        {"playbook": "missing_tool", "tool": "get_situation_snapshot"},
+    ]
+    assert "missing_tool → get_situation_snapshot" in alerts["playbook_missing_tool"]["message"]
+    # 自動では書き換えない
+    assert {pb.name: pb.nodes_json for pb in session_factory().query(Playbook).all()} == before
+
+
+def test_memorize_with_omitted_action_is_judged_with_the_runtime_default():
+    """action の省略・空文字は実行側と同じく ``{last}`` として判定する (Codex 3 巡目)。"""
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+
+    tool = {"id": "n1", "type": "tool", "action": "known_tool"}
+    for memorize in (
+        {"id": "n2", "type": "memorize", "role": "user"},
+        {"id": "n2", "type": "memorize", "role": "user", "action": ""},
+        {"id": "n2", "type": "memorize", "role": "user", "action": None},
+    ):
+        assert _creates_legacy_system_notice([tool, memorize]), memorize
+    # role=system なら新しい形 (action を省略しても同じ)
+    assert not _creates_legacy_system_notice(
+        [tool, {"id": "n2", "type": "memorize", "role": "system"}],
+    )
+
+
+def test_memorize_of_last_without_any_tool_node_is_not_legacy():
+    """TOOL / TOOL_CALL ノードの無い Playbook の ``{last}`` はツールの結果ではない (Codex 4 巡目)。
+
+    SET でユーザーの入力を ``last`` に入れて role=user で記録するのは正常な形。
+    """
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+
+    set_node = {"id": "n1", "type": "set", "assignments": {"last": "{input}"}}
+    for memorize in (
+        {"id": "n2", "type": "memorize", "role": "user", "action": "{last}"},
+        {"id": "n2", "type": "memorize", "role": "user"},
+    ):
+        assert not _creates_legacy_system_notice([set_node, memorize]), memorize
+    # TOOL_CALL ノードが一つでもあれば、{last} はツールの結果でありうる
+    tool_call = {"id": "n0", "type": "tool_call", "call_source": "fc"}
+    assert _creates_legacy_system_notice(
+        [tool_call, set_node, {"id": "n2", "type": "memorize", "role": "user"}],
+    )
+
+
+def test_compat_alerts_separate_tools_of_unconnected_mcp_servers(session_factory, monkeypatch):
+    """設定にある MCP サーバーの名前で始まる参照は、未接続の可能性として別の警告に出す。"""
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {"weather": {}, "someaddon__elyth": {}},
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [
+            {"id": "n1", "type": "tool", "action": "weather__forecast"},
+            {"id": "n2", "type": "tool", "action": "someaddon__elyth__post"},
+        ],
+        "uses_gone_tool": [
+            {"id": "n1", "type": "tool", "action": "unknown_server__tool"},
+            {"id": "n2", "type": "tool", "action": "forecast"},  # 素の名前は見分けられない
+        ],
+    })
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_missing_mcp_tool"]["details"]["references"] == [
+        {"playbook": "uses_mcp", "tool": "someaddon__elyth__post"},
+        {"playbook": "uses_mcp", "tool": "weather__forecast"},
+    ]
+    assert "MCP サーバーが未接続なだけの可能性" in alerts["playbook_missing_mcp_tool"]["message"]
+    assert alerts["playbook_missing_tool"]["details"]["references"] == [
+        {"playbook": "uses_gone_tool", "tool": "forecast"},
+        {"playbook": "uses_gone_tool", "tool": "unknown_server__tool"},
+    ]
+
+
+def test_compat_alerts_skip_tools_of_per_persona_mcp_servers(session_factory, monkeypatch):
+    """ペルソナごとに接続するサーバーのツールは起動時に無いのが正常なので、どちらの警告にも出さない。"""
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {
+            "weather": {"scope": "global"},
+            "someaddon__elyth": {"scope": "Per_Persona"},  # 起動処理と同じく小文字で読む
+            # 名前が前方で重なるときは長い方のサーバーの種別で判定する
+            "someaddon": {},
+        },
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [
+            {"id": "n1", "type": "tool", "action": "weather__forecast"},
+            {"id": "n2", "type": "tool", "action": "someaddon__elyth__post"},
+            {"id": "n3", "type": "tool", "action": "someaddon__other"},
+        ],
+    })
+
+    alerts = {a["id"]: a for a in playbook_compat_alerts(session_factory)}
+
+    assert alerts["playbook_missing_mcp_tool"]["details"]["references"] == [
+        {"playbook": "uses_mcp", "tool": "someaddon__other"},
+        {"playbook": "uses_mcp", "tool": "weather__forecast"},
+    ]
+    assert "playbook_missing_tool" not in alerts
+
+
+def test_compat_alerts_are_quiet_when_only_per_persona_mcp_tools_are_missing(session_factory, monkeypatch):
+    from saiverse.playbook_sync import playbook_compat_alerts
+    import tools.mcp_config
+
+    monkeypatch.setattr(
+        tools.mcp_config, "load_mcp_configs",
+        lambda: {"someaddon__elyth": {"scope": "per_persona"}},
+    )
+    _add_rows(session_factory, {
+        "uses_mcp": [{"id": "n1", "type": "tool", "action": "someaddon__elyth__post"}],
+    })
+
+    assert playbook_compat_alerts(session_factory) == []
+
+
+def test_compat_alerts_are_quiet_for_the_builtin_playbooks(session_factory):
+    """同梱の public Playbook は、旧形式も存在しないツールの参照も持たない。"""
+    from saiverse.playbook_sync import _creates_legacy_system_notice
+    from tools import TOOL_REGISTRY, canonicalize_tool_name
+
+    builtin = Path(__file__).resolve().parent.parent / "builtin_data" / "playbooks" / "public"
+    for path in sorted(builtin.glob("*.json")):
+        nodes = json.loads(path.read_text(encoding="utf-8")).get("nodes") or []
+        assert not _creates_legacy_system_notice(nodes), path.name
+        for node in nodes:
+            if node.get("type") == "tool":
+                assert canonicalize_tool_name(node["action"]) in TOOL_REGISTRY, (
+                    path.name, node["action"],
+                )

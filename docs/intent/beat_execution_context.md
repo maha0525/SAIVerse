@@ -56,6 +56,7 @@ execution_ledger §2.3 で定義した「関所（pending flush）→ コンテ�
   - **実装帰結（§6-3 設計 2026-07-17）**: (a) migration は PK 書き換え型の全書換ではなく**新テーブル + 冪等 backfill + 旧読み口の廃止**（note→theme 移行の先例。全書換は Windows のファイルハンドル risk があり、追加系パスで表現できる）。(b) 記帳先 model の正は **usage.model（実際に応答した model、`UsageInfo.model`）** — ExecutionContext.model_key は「宣言」であり、structured-output fallback 等で実行 model が変わった場合も usage が真実を運ぶ（§2.1 の「実 model 側の Session に記帳」の実装形）。
 - **TTL/keep-alive watchdog の予約キー**にも model を含め、Session ごとに独立監視する。
 - **diff 通知の既読状態（last_notified）**も `(persona_id, model_key)` で分離する — 各 Session が「自分がまだ知らない変化」を独立に受け取るため。
+- **システム通知の合言葉（2026-10-28 追記）**: `session_head_snapshot` には `PASSPHRASE` 列があり、システム通知の合言葉を持つ（[system_notice_delivery.md](system_notice_delivery.md) 不変条件 3）。合言葉は head の作り直し（`HeadPipeline.capture_all`）のたびにランダムに生成し直し、一部の Section だけを撮り直す経路（`recapture_missing` など）では同じ値を引き継ぐ。つまり合言葉の寿命は snapshot と同じで、再起動を跨いで head が生きる限り同じ値が続く。合言葉を保存してよいのはこの列だけ。列ができる前の行（NULL）を読み込んだときは head を作り直す。
 
 ### 3.2 Metabolism の二層分離 — 編纂は persona に一度、退役は model ごと
 

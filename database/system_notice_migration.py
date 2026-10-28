@@ -1,0 +1,2095 @@
+"""システム通知の旧形式データを新形式へ正規化する一回限りの移行。
+
+docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 束) と提示
+(第 3 束) は、システム通知を role=system・タグ無し本文 + 識別用の metadata
+``__system_notice__`` (``sai_memory.memory.storage.SYSTEM_NOTICE_KEY``) で扱う。
+それより前に保存された行には二つの旧形式が残っている:
+
+1. 本文に ``<system>`` タグを埋め込んだ role=user (一部 role=assistant) の行。
+   **本文が ``<system>`` で始まる** かつ **その系統の識別用 metadata を持つ**
+   行だけを、タグを剥がして role=system + ``__system_notice__`` にする
+   (AND 判定、不変条件 2・4)。識別用 metadata の無いタグ始まりの行は触らない
+   (外部由来の偽物は role=user のまま残れば、合言葉の規則のもとで「ただの
+   文章」として読まれる)。例外は、本番の写しの dry-run レポートで系統を確定した
+   旧世代のスケジュール発火文・外部イベント通知で、書き出しと発火の記録の
+   metadata と、ユーザーの発言ではないことの来歴の個別条件で拾う
+   (:func:`legacy_notice`)。
+2. 旧世界で role=system・タグ無しで保存された行 (スペルの結果・TOOL の結果・
+   Handy Tool・権限拒否など)。``__system_notice__`` が無いので
+   ``is_system_notice`` が偽になり、自動想起の種などから外れる。tags から系統を
+   推定できるものに印を付ける。推定できない行は触らない。
+
+ほかに、同じ本文の形を持つ列・表を最終形へ揃える: messages の
+``paired_action_text`` 列、``perception_batches`` (kind=``realtime_and_recall``)
+の ``rendered_text``、本体 DB の ``building_messages`` (音声通話の痕跡が
+role=user + タグで載った世代)、``execution_ledger`` / ``execution_outbox`` に
+凍結された本文 (まだ送り直し・記録し直しがありうる行だけ)。
+
+「本文が ``<system>`` で始まるか」を意味の判定に使うのはこの移行の一回だけ
+(不変条件 2 の例外)。常設のコードからこのモジュールを呼ばない。
+
+起動時の入口は :func:`run_startup_system_notice_migration` (main.py が
+ペルソナの読み込みより前に呼ぶ)。ペルソナごとの記憶 DB は ``embed_metadata``
+の :data:`MIGRATION_MARKER_KEY` で一回限りにし、書き換える前にその DB の
+写しを ``<SAIVERSE_HOME>/backups/system_notice_migration/`` に取る (通常の
+起動時バックアップは数が上限を超えると古いものから消えるので、この写しは
+別の置き場に置く)。移行の結果は同じ置き場にレポートとして書き出す — 本番へ
+当てたあとに人の目で確かめるためのもの。レポートの材料は DB ごとの結果の
+JSON (``results/<時刻>_<pid>_<乱数>/``)。書き換えを伴う DB の JSON は、
+コミットの前に仮の名前で書き (書けなければその DB を巻き戻して完了の印を
+立てない)、コミットの後に正式な名前へ付け替える。レポートの書き出しが失敗
+しても次の起動で JSON 群から作り直せる。
+
+コピーで試すときは CLI を使う::
+
+    python -m database.system_notice_migration --home <SAIVERSE_HOME の写し> --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sqlite3
+import uuid
+from contextlib import closing
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+LOGGER = logging.getLogger(__name__)
+
+SYSTEM_OPEN = "<system>"
+SYSTEM_CLOSE = "</system>"
+
+#: ペルソナの記憶 DB の ``embed_metadata`` に書く「この移行は済んだ」の印。
+#: 値は ``"v<規則の版> <完了時刻 (ISO)>"`` (:func:`_marker_value`)。版 1 の印は
+#: 版を書く前の形で、値が完了時刻だけ。置き場は saiverse/v3_shape_migration.py の
+#: ``MARKER_KEY`` と同じ流儀 — 書き込み先と同じ DB に置くので、memory.db を
+#: 差し替え・復元しても「移行したか」と中身がずれない。
+MIGRATION_MARKER_KEY = "system_notice_migration_done"
+
+#: 移行の規則の版。済んだ DB にも当て直す必要のある規則を足したときに上げる。
+#: 印の版がこれより古い DB は、足した規則だけで走査し直す (:func:`migrate_persona_db`)。
+#:
+#: - 版 1: 印の AND 判定・印の無い role=system の推定・列と表の剥がし
+#: - 版 2: 旧世代のスケジュール発火文・外部イベント通知の個別条件
+#:   (:func:`legacy_notice`)
+MIGRATION_RULES_VERSION = 2
+
+
+def _marker_value() -> str:
+    return f"v{MIGRATION_RULES_VERSION} {datetime.now(timezone.utc).isoformat()}"
+
+
+def marker_rules_version(value: Optional[str]) -> Optional[int]:
+    """完了の印の値が表す規則の版。印が無ければ None。
+
+    版を書いていない値 (完了時刻だけ — 版 1 の形) と、読めない値は版 1 として
+    扱う — 古い側に倒せば、走査し直しは変換済みの行を素通りするだけで済む。
+    """
+    if value is None:
+        return None
+    head = str(value).split(" ", 1)[0]
+    if head.startswith("v") and head[1:].isdigit():
+        return int(head[1:])
+    return 1
+
+#: 写しとレポートの置き場 (``<SAIVERSE_HOME>/backups/`` の下)。
+OUTPUT_DIR_NAME = "system_notice_migration"
+
+#: レポートに載せる系統ごとのサンプル数・本文の冒頭の長さ。
+SAMPLES_PER_KIND = 3
+HEAD_CHARS = 160
+#: 推定できなかった role=system 行をレポートに並べる上限 (件数は全数を出す)。
+UNKNOWN_SYSTEM_LIST_LIMIT = 50
+
+#: 作業セッションのダイジェストのタグ (sea/work_session.py の ``DIGEST_TAG``)。
+#: 旧データの判定なので、保存された当時の値をここに固定する。
+_DIGEST_TAG = "session_digest"
+
+#: 子ラインの結果報告の旧本文の書き出し (sea/runtime_nodes.py の
+#: ``lg_subplay_node`` が組んでいた ``サブ Playbook '{name}' の実行結果:``)。
+_SUBLINE_REPORT_PREFIX = "サブ Playbook '"
+
+
+# ---------------------------------------------------------------------------
+# 本文のタグを剥がす
+# ---------------------------------------------------------------------------
+
+
+def starts_with_system_tag(text: Any) -> bool:
+    return isinstance(text, str) and text.startswith(SYSTEM_OPEN)
+
+
+def strip_system_tags(text: str, *, pairs: Union[int, Tuple[int, ...]] = 1) -> Optional[str]:
+    """外側の ``<system>…</system>`` の包みを外した本文。包みの形が曖昧なら None。
+
+    剥がすのは、本文全体が「完全な ``<system>…</system>`` の組を空白だけを
+    挟んで、``pairs`` のどれかの個数だけ並べたもの」になっている行だけ
+    (``pairs`` は個数一つか、受け付ける個数の組)。各組の中身の前後の空白を
+    落として空行 (``\\n\\n``) で繋ぐ。
+
+    組の数は置き場ごとに呼び出し側が縛る。一つの包みの中に ``</system><system>``
+    を含む引用が入った行 (旧外部イベントの通知が引用を包んだ形) と、正当に組を
+    二つ並べた行は、文字の並びでは区別できない — 期待と違う数の組に見える行は
+    決め打ちで剥がさず、曖昧としてレポートへ回す。
+
+    - messages・paired_action_text・実行台帳・送信トレイ・building_messages は
+      一つの通知を一つの包みで保存していたので ``pairs=1``。
+    - ``perception_batches`` の ``rendered_text`` (kind=realtime_and_recall) は
+      リアルタイム情報と想起の組を ``\\n`` で繋いだ旧形式で、旧
+      ``build_turn_realtime_and_recall_message`` は片方しか無いターンでも
+      その一つの組だけで保存した。だから ``pairs=(1, 2)``。剥がした結果は
+      第 3 束の提示の最終形 (sea/runtime_context.
+      compose_turn_realtime_and_recall_content — ある本文だけを ``\\n\\n`` で
+      繋ぐ) と同じ形になる。
+
+    組の中で開きと閉じが同数そろって入れ子になっているタグ (中断の再開文が元の
+    発火文を引用している世代など) は本文の一部としてそのまま残す — 送るときに
+    クライアント層が無害化する (llm_clients/system_notice.py)。
+
+    次の形は None を返す (呼び出し側は変換せずレポートへ回す)。どれも、外部
+    由来の本文 (建物のイベント文・メンションなど) に ``</system>`` や
+    ``<system>`` が混ざっていた可能性があり、どこまでが包みかを機械的に決め
+    られない — 決め打ちで剥がすと本文が変わる:
+
+    - 対の無い閉じタグ (``<system>A </system> B</system>``)
+    - 閉じられていない開きタグ (途中で切れた形、``<system>A <system>B</system>``)
+    - 組の外に空白以外の文字がある (``<system>A</system> B``)
+    - 完全な組の数が ``pairs`` と違う
+    - 剥がした結果がまだ ``<system>`` で始まる (``<system><system>A</system></system>``)。
+      二重の包みか、本文の先頭の引用かを決められない。加えて、剥がした結果が
+      また変換の条件 (``<system>`` で始まる) を満たすと、次の走査でもう一度
+      剥がされる — 完了の印を持たない本体 DB と、印を見送ったペルソナの記憶 DB
+      (:func:`migrate_persona_db`) は毎起動で走査し直すので、変換の結果が変換の
+      条件から外れることが冪等の前提になる。
+    """
+    segments: List[str] = []
+    current: List[str] = []
+    depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith(SYSTEM_OPEN, i):
+            if depth > 0:
+                current.append(SYSTEM_OPEN)
+            depth += 1
+            i += len(SYSTEM_OPEN)
+            continue
+        if text.startswith(SYSTEM_CLOSE, i):
+            if depth == 0:
+                return None  # 対の無い閉じタグ
+            depth -= 1
+            if depth == 0:
+                segments.append("".join(current))
+                current = []
+            else:
+                current.append(SYSTEM_CLOSE)
+            i += len(SYSTEM_CLOSE)
+            continue
+        if depth == 0:
+            if not text[i].isspace():
+                return None  # 組の外の地の文
+        else:
+            current.append(text[i])
+        i += 1
+    if depth != 0 or not segments:
+        return None  # 閉じられていない開きタグ
+    allowed = (pairs,) if isinstance(pairs, int) else tuple(pairs)
+    if len(segments) not in allowed:
+        return None  # 置き場が期待する組の数と違う (引用か正当な複数の組か決められない)
+    body = "\n\n".join(s.strip() for s in segments if s.strip())
+    if starts_with_system_tag(body):
+        return None  # 剥がしてもまだ包みで始まる (二重の包みか引用か決められない)
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 系統の判定
+# ---------------------------------------------------------------------------
+
+
+def _tags_of(metadata: Dict[str, Any]) -> set:
+    raw = metadata.get("tags")
+    if not isinstance(raw, list):
+        return set()
+    return {t for t in raw if isinstance(t, str)}
+
+
+def _semantic_tags(tags: set) -> set:
+    """判定に使うタグ (全行に付く ``conversation`` と ``pulse:`` / ``playbook:`` を除く)。"""
+    return {
+        t for t in tags
+        if t != "conversation" and not t.startswith("pulse:") and not t.startswith("playbook:")
+    }
+
+
+def _has_playbook_tag(tags: set) -> bool:
+    return any(t.startswith("playbook:") for t in tags)
+
+
+def classify_tagged_message(
+    role: Any, content: Any, metadata: Dict[str, Any],
+) -> Optional[str]:
+    """タグ入り本文の行の系統名 (``__system_notice__`` の値)。対象外は None。
+
+    判定は「本文が ``<system>`` で始まる」かつ「その系統の識別用 metadata」の
+    AND (docs/handoff/2026-10-27_system_notice_survey.md「別枠: 13 系統」の表と、
+    git 履歴に残る旧世代の供給側)。上から順に最初に当たった規則で決める。
+    """
+    if not starts_with_system_tag(content):
+        return None
+    role_s = role.lower() if isinstance(role, str) else ""
+    tags = _tags_of(metadata)
+    semantic = _semantic_tags(tags)
+
+    if role_s in ("assistant", "model"):
+        # 中断の記録 (2026-08 に撤去された機構) は role=assistant で
+        # ``<system>(中断: …)</system>`` を書いていた。機構の文を本人の発言として
+        # 残さない (発話の尊厳)。
+        if "interrupted" in tags:
+            return "interrupted"
+        return None
+    if role_s != "user":
+        return None
+
+    if "event_message" in tags:
+        if "sluice" in tags:
+            return "sluice_capture"
+        if "day_plan" in tags:
+            return "day_plan"
+        if "curation" in tags:
+            return "curation"
+        if "perception" in tags:
+            # W14 (知覚レンダリング) より前の知覚の行。今の知覚のまとめと同じ系統名。
+            return "perception"
+        if "version_upgrade" in tags:
+            return "version_upgrade"
+        if metadata.get("voice_call") is True:
+            return "voice_call"
+        if semantic == {"internal", "event_message"}:
+            return "building_event"
+        # event_message を持つが上のどれでもない世代。系統名は印のタグそのもの。
+        return "event_message"
+    if "sluice" in tags and _DIGEST_TAG in tags:
+        return "sluice_digest"
+    if "track_context" in tags:
+        # Track 切替通知 (Track ランタイムの退役 2026-08 より前。event_message を
+        # 持たない世代)。
+        return "track_context"
+    if "track_chronicle_insert" in tags:
+        return "track_chronicle_insert"
+    if "situation_change" in tags:
+        return "situation_change"
+    if metadata.get("with") == ["system"]:
+        return "schedule"
+    if _has_playbook_tag(tags):
+        if (strip_system_tags(content) or "").startswith(_SUBLINE_REPORT_PREFIX):
+            return "subline_report"
+        return "playbook_memorize"
+    return None
+
+
+#: 系統の印 (``with:["system"]`` / ``event_message`` など) を持たない旧世代の
+#: スケジュール発火文の書き出し。旧 schedule_manager は二つの文面を使った
+#: (現行は前者 — saiverse/schedule_manager.py)。
+_LEGACY_SCHEDULE_PREFIXES = ("スケジュールの実行時刻です", "スケジュールが実行されました")
+#: 同じく、旧世代の外部イベント通知 (X のメンションなど) の書き出し。現行は
+#: saiverse/autonomy_wiring.py が ``source="external_event"`` 付きで組む。
+_LEGACY_EXTERNAL_EVENT_PREFIX = "[外部イベント通知]"
+#: レポートの件数とサンプルで、印で拾った ``schedule`` と区別する表記。行に書く
+#: ``__system_notice__`` の値はどちらも ``schedule`` (外部イベントの応対は
+#: スケジュールと同じ入口から起動していた)。
+LEGACY_SCHEDULE_LABEL = "schedule(旧世代)"
+LEGACY_EXTERNAL_EVENT_LABEL = "external_event(旧世代)"
+#: 旧世代の通知が記憶 DB に書かれたときの系統名 (``__system_notice__`` の値)。
+LEGACY_NOTICE_KIND = "schedule"
+
+#: 建物履歴から記憶への転記が行の metadata に刻む来歴のキー
+#: (builtin_data/tools/get_building_messages.py の ``BUILDING_MSG_REF_KEY``)。
+#: 旧データの判定なので、保存された当時の値をここに固定する。
+_BUILDING_MSG_REF_KEY = "building_msg_ref"
+
+
+def legacy_notice(
+    role: Any, content: Any, metadata: Dict[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """系統の印を持たない旧世代のスケジュール発火文・外部イベント通知なら (レポートの表記, 剥がした本文)。
+
+    docs/intent/system_notice_delivery.md「移行」の旧世代の個別条件。本番の写しの
+    dry-run レポートで系統を確定した二つだけを拾う。条件は全部の AND:
+
+    - role=user、tags が ``conversation`` だけ (``pulse:`` を除く)
+    - ユーザーの発言の来歴を持たない — 建物履歴からの転記の印
+      (``building_msg_ref``) も、通話の文字起こしの印 (``voice_call`` /
+      ``voice_transcript``) も無い
+    - タグの剥がしが成立する (完全な組が一つ)
+    - 剥がした本文の先頭が発火文の書き出しで、その発火の記録として供給側が付けた
+      metadata を持つ — スケジュールは ``schedule_id``、外部イベントは
+      ``source="external_event"``
+
+    ``schedule_id`` と ``source`` は、送り手 (チャットの送信 API) も metadata に
+    書ける。だから本文と metadata だけでは、ユーザーが発火文の形を打った発言と
+    区別できない。来歴の条件はそれを縛る: 今のコードでユーザーの発言が記憶に
+    入る経路は、建物履歴からの転記 (2026-07-21 から必ず ``building_msg_ref`` を
+    刻む) と通話の文字起こしだけ (本番の写しでは正規の旧発火文 306 件のどれも
+    これらの印を持たない)。建物履歴の行の来歴は列で縛る (:func:`scan_main_conn`
+    — 呼び出し側の条件)。
+
+    書き出しは剥がした本文の先頭でだけ見る (中断の再開文が元の発火文を引用して
+    いる行は、先頭が再開文なので拾わない)。X の投稿指示・音声入力の通知など、
+    出自の確度が足りない形はここで拾わない。:func:`classify_tagged_message` が
+    系統を決められなかった行にだけ使う (印があるものはそちらが優先)。
+    """
+    if not isinstance(role, str) or role.lower() != "user":
+        return None
+    if not starts_with_system_tag(content):
+        return None
+    tags = {t for t in _tags_of(metadata) if not t.startswith("pulse:")}
+    if tags != {"conversation"}:
+        return None
+    if _BUILDING_MSG_REF_KEY in metadata or metadata.get("voice_call") or metadata.get(
+        "voice_transcript"
+    ):
+        return None
+    body = strip_system_tags(content)
+    if body is None:
+        return None
+    if body.startswith(_LEGACY_SCHEDULE_PREFIXES):
+        return (LEGACY_SCHEDULE_LABEL, body) if metadata.get("schedule_id") is not None else None
+    if body.startswith(_LEGACY_EXTERNAL_EVENT_PREFIX):
+        if metadata.get("source") == "external_event":
+            return LEGACY_EXTERNAL_EVENT_LABEL, body
+        return None
+    return None
+
+
+def classify_unmarked_system_message(metadata: Dict[str, Any]) -> Optional[str]:
+    """印 (``__system_notice__``) の無い role=system 行の系統名。推定できなければ None。"""
+    tags = _tags_of(metadata)
+    if "spell" in tags or "pre_spell" in tags:
+        return "spell_result"
+    if "handy_tool" in tags:
+        return "handy_tool"
+    if {"permission", "denied"} <= tags:
+        return "playbook_permission"
+    if {"error", "exec"} <= tags:
+        return "playbook_exec_error"
+    if "tool" in tags:
+        return "tool_result"
+    if _has_playbook_tag(tags):
+        return "playbook_memorize"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 結果の器
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Change:
+    """一行の変換 (レポートのサンプル用)。"""
+
+    table: str
+    row_id: str
+    kind: str
+    before: str
+    after: str
+
+
+@dataclass
+class Skipped:
+    """変換しなかったタグ始まりの行 (レポートに全件出す)。"""
+
+    table: str
+    row_id: str
+    role: str
+    tags: List[str]
+    head: str
+    #: 変換しなかった理由 (空 = 系統を判定できなかった)。
+    reason: str = ""
+
+
+#: :func:`strip_system_tags` が包みの形を決められなかった行の理由。
+AMBIGUOUS_TAGS_REASON = "タグの対応が曖昧"
+#: 確認待ちの印 (``SYSTEM_NOTICE_REVIEW_KEY``) の値: タグ入り本文だが系統を判定
+#: できなかった行。
+UNCLASSIFIED_REASON = "系統を判定できなかった"
+#: 確認待ちの印の値: 印の無い role=system 行で系統を推定できなかった行。
+UNKNOWN_SYSTEM_REASON = "系統を推定できなかった role=system"
+
+
+@dataclass
+class StoreResult:
+    """一つの DB の移行結果。"""
+
+    label: str
+    path: str
+    #: ペルソナの記憶 DB なら True (本体 DB は False)。
+    persona: bool = False
+    backup_path: Optional[str] = None
+    changes: List[Change] = field(default_factory=list)
+    skipped: List[Skipped] = field(default_factory=list)
+    unknown_system_count: int = 0
+    unknown_system_samples: List[Skipped] = field(default_factory=list)
+    #: タグ無し本文の role=user で ``playbook:`` タグを持ち ``conversation`` タグの
+    #: 無い行 (旧世界の MEMORIZE の結果の候補)。変換はせず、人の目で確かめる
+    #: ためにレポートへ出す。
+    untagged_memorize_count: int = 0
+    untagged_memorize_samples: List[Skipped] = field(default_factory=list)
+    #: 当てる UPDATE 文 (SQL, 引数)。走査は読むだけで、書くのは :func:`_apply`。
+    updates: List[Tuple[str, tuple]] = field(default_factory=list)
+    already_done: bool = False
+    error: Optional[str] = None
+    #: 確認待ちの印を付けるべき行があるのに、metadata の列が無い古いスキーマなので
+    #: 付けられなかったか。真なら完了の印を立てない (:func:`migrate_persona_db`)。
+    review_marks_deferred: bool = False
+    #: 古い版の規則で移行を済ませた記憶 DB を、新しい版で足した規則だけで走査し
+    #: 直したとき、その印の版 (:data:`MIGRATION_RULES_VERSION`)。全体を走査したら None。
+    rescan_from_version: Optional[int] = None
+    #: この結果のコミットで立てた完了の印の値 (立てていなければ None)。孤児の
+    #: 仮の結果の JSON を採用してよいかを、DB の印と突き合わせて決めるのに使う
+    #: (:func:`regenerate_pending_reports`)。
+    marker_value: Optional[str] = None
+    #: 結果の JSON から読み戻したときの系統別件数 (``changes`` はサンプルだけになる)。
+    restored_counts: Optional[Dict[Tuple[str, str], int]] = None
+    #: この起動でこの結果をレポートの材料 (結果の JSON) に書いたか。JSON には載せない。
+    result_saved: bool = False
+    #: この起動でこの結果を材料に書こうとして失敗したか (レポートから詳細が欠ける)。
+    #: JSON には載せない。
+    result_save_failed: bool = False
+
+    def counts(self) -> Dict[Tuple[str, str], int]:
+        if self.restored_counts is not None:
+            return dict(self.restored_counts)
+        out: Dict[Tuple[str, str], int] = {}
+        for c in self.changes:
+            out[(c.table, c.kind)] = out.get((c.table, c.kind), 0) + 1
+        return out
+
+    @property
+    def has_findings(self) -> bool:
+        return bool(
+            self.changes or self.skipped or self.unknown_system_count
+            or self.untagged_memorize_count or self.error
+        )
+
+    @property
+    def has_leftovers(self) -> bool:
+        """変換しなかった行・推定できなかった行・旧 MEMORIZE の候補があるか (人の確認が要る行)。"""
+        return bool(self.skipped or self.unknown_system_count or self.untagged_memorize_count)
+
+    def leftover_counts(self) -> List[int]:
+        return [len(self.skipped), self.unknown_system_count, self.untagged_memorize_count]
+
+    def leftover_keys(self) -> List[str]:
+        """残した行の同定 (表・行 id・role・残した理由) の並び。前回との比較に使う。
+
+        件数だけで比べると、一行が片づいて別の一行が増えた入れ替わりを見逃す。
+        推定できなかった行と旧 MEMORIZE の候補は先頭の一覧に載る分だけを行で
+        同定し、件数も並びに含める。
+        """
+        keys = [
+            f"skipped|{s.table}|{s.row_id}|{s.role}|{s.reason}" for s in self.skipped
+        ]
+        keys += [f"unknown_system|{s.table}|{s.row_id}" for s in self.unknown_system_samples]
+        keys += [f"memorize|{s.table}|{s.row_id}" for s in self.untagged_memorize_samples]
+        keys += [
+            f"count|unknown_system|{self.unknown_system_count}",
+            f"count|memorize|{self.untagged_memorize_count}",
+        ]
+        return sorted(keys)
+
+    def to_json(self) -> Dict[str, Any]:
+        """レポートを組み直せるだけの中身 (件数・サンプル・残した行) を JSON にできる形で。"""
+        from dataclasses import asdict
+
+        return {
+            "label": self.label,
+            "path": self.path,
+            "persona": self.persona,
+            "backup_path": self.backup_path,
+            "already_done": self.already_done,
+            "error": self.error,
+            "review_marks_deferred": self.review_marks_deferred,
+            "rescan_from_version": self.rescan_from_version,
+            "marker_value": self.marker_value,
+            "counts": [[t, k, n] for (t, k), n in sorted(self.counts().items())],
+            "samples": [asdict(c) for c in _sample_changes(self.changes)],
+            "skipped": [asdict(s) for s in self.skipped],
+            "unknown_system_count": self.unknown_system_count,
+            "unknown_system_samples": [asdict(s) for s in self.unknown_system_samples],
+            "untagged_memorize_count": self.untagged_memorize_count,
+            "untagged_memorize_samples": [asdict(s) for s in self.untagged_memorize_samples],
+        }
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "StoreResult":
+        return cls(
+            label=data["label"],
+            path=data["path"],
+            persona=bool(data.get("persona")),
+            backup_path=data.get("backup_path"),
+            already_done=bool(data.get("already_done")),
+            error=data.get("error"),
+            review_marks_deferred=bool(data.get("review_marks_deferred")),
+            rescan_from_version=data.get("rescan_from_version"),
+            marker_value=data.get("marker_value"),
+            restored_counts={(t, k): n for t, k, n in data.get("counts") or []},
+            changes=[Change(**c) for c in data.get("samples") or []],
+            skipped=[Skipped(**s) for s in data.get("skipped") or []],
+            unknown_system_count=int(data.get("unknown_system_count") or 0),
+            unknown_system_samples=[Skipped(**s) for s in data.get("unknown_system_samples") or []],
+            untagged_memorize_count=int(data.get("untagged_memorize_count") or 0),
+            untagged_memorize_samples=[
+                Skipped(**s) for s in data.get("untagged_memorize_samples") or []
+            ],
+        )
+
+
+def _sample_changes(changes: Sequence[Change]) -> List[Change]:
+    """レポートに載せるサンプル (表と系統の組ごとに先頭 :data:`SAMPLES_PER_KIND` 件)。"""
+    seen: Dict[Tuple[str, str], int] = {}
+    out: List[Change] = []
+    for c in changes:
+        key = (c.table, c.kind)
+        if seen.get(key, 0) >= SAMPLES_PER_KIND:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        out.append(c)
+    return out
+
+
+def _head(text: Any) -> str:
+    s = str(text or "").replace("\r", "")
+    s = s.replace("\n", "\\n")
+    return s if len(s) <= HEAD_CHARS else s[:HEAD_CHARS] + "…"
+
+
+def _load_json(raw: Any) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _dump_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _col_or_null(cols: set, name: str) -> str:
+    """SELECT に書く列の式。古いスキーマで列が無ければ NULL として読む。
+
+    移行の判定は読み取り専用で init_db (列の追加) より前に走るので、列の足りない
+    古い記憶 DB でも走査が例外にならないようにする。
+    """
+    return name if name in cols else f"NULL AS {name}"
+
+
+# ---------------------------------------------------------------------------
+# ペルソナの記憶 DB
+# ---------------------------------------------------------------------------
+
+
+def _mark_for_review(
+    result: StoreResult, row_id: Any, raw_meta: Any, metadata: Dict[str, Any], reason: str,
+) -> None:
+    """レポート送りにした messages の行へ、確認待ちの印を付ける UPDATE を積む。
+
+    印 (``SYSTEM_NOTICE_REVIEW_KEY``) は本文と role を変えず、その行を「実会話」
+    (sai_memory/memory/storage.py の ``_conversation_exclusion``) から外す。既に
+    印がある行には積まない (印を消して流し直しても二度書かない)。metadata が
+    辞書として読めない行 (壊れた JSON・配列) には付けない — 印だけの metadata に
+    置き換えると元の metadata が失われる。metadata の列が無い古いスキーマでは
+    書けないので、呼び出し側が呼ばない。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
+
+    if raw_meta and _parse_json_object(raw_meta) is None:
+        return
+    if metadata.get(SYSTEM_NOTICE_REVIEW_KEY):
+        return
+    new_meta = dict(metadata)
+    new_meta[SYSTEM_NOTICE_REVIEW_KEY] = reason
+    result.updates.append((
+        "UPDATE messages SET metadata = ? WHERE id = ?",
+        (_dump_json(new_meta), row_id),
+    ))
+
+
+def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _notice_metadata(metadata: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """通知に変換する行の新しい metadata (通知の印を足す)。
+
+    前の走査が「系統を判定できなかった」として付けた確認待ちの印は外す — 版 1 の
+    移行で確認待ちにした旧世代の発火文を、版 2 の走査し直しで通知にするとき、
+    印が残ると「まだ確認が要る行」に見え続ける。他の理由の確認待ちの印は、この
+    変換が解消するものではないので残す。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, SYSTEM_NOTICE_REVIEW_KEY
+
+    new_meta = dict(metadata)
+    new_meta[SYSTEM_NOTICE_KEY] = kind
+    if new_meta.get(SYSTEM_NOTICE_REVIEW_KEY) == UNCLASSIFIED_REASON:
+        del new_meta[SYSTEM_NOTICE_REVIEW_KEY]
+    return new_meta
+
+
+def _scan_legacy_rescan(conn: sqlite3.Connection, result: StoreResult, order: str) -> None:
+    """版 1 で移行を済ませた記憶 DB に、版 2 で足した旧世代の判定だけを当てる (書かない)。
+
+    版 1 の走査で印の判定 (:func:`classify_tagged_message`) が系統を決めた行は
+    変換済みか曖昧として確認待ちにしてあるので見ない。変換済みの行はタグで
+    始まらないので、そもそも読まれない (二重に変換しない)。変換しない行は版 1 の
+    レポートに載っていて確認待ちの印も付いているので、ここでは数えない。
+    """
+    rows = conn.execute(
+        "SELECT id, role, content, metadata FROM messages "
+        f"WHERE substr(content, 1, ?) = ? ORDER BY {order}",
+        (len(SYSTEM_OPEN), SYSTEM_OPEN),
+    ).fetchall()
+    for row_id, role, content, raw_meta in rows:
+        metadata = _load_json(raw_meta)
+        if classify_tagged_message(role, content, metadata) is not None:
+            continue
+        legacy = legacy_notice(role, content, metadata)
+        if legacy is None:
+            continue
+        label, body = legacy
+        result.updates.append((
+            "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
+            (body, _dump_json(_notice_metadata(metadata, LEGACY_NOTICE_KIND)), row_id),
+        ))
+        result.changes.append(Change("messages", str(row_id), label, content, body))
+
+
+def scan_persona_conn(
+    conn: sqlite3.Connection, result: StoreResult, *, legacy_only: bool = False,
+) -> None:
+    """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
+
+    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`、
+      決められなければ旧世代の個別条件 :func:`legacy_notice`) と、
+      印の無い role=system 行 (:func:`classify_unmarked_system_message`)。
+    - messages.paired_action_text: 列そのものが機構だけが書く指示文の控えなので、
+      タグで始まる値は剥がす。
+    - perception_batches (kind=realtime_and_recall).rendered_text。
+
+    ``legacy_only`` は版 1 で移行を済ませた DB の走査し直し
+    (:func:`_scan_legacy_rescan`)。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    if not _table_exists(conn, "messages"):
+        return
+    cols = _columns(conn, "messages")
+    if not {"id", "role", "content"} <= cols:
+        # 判定に要る列が無い DB は対象が無い (変換もしない)
+        return
+    if legacy_only:
+        if "metadata" in cols:  # metadata の無い行は旧世代の条件に当たらない
+            _scan_legacy_rescan(
+                conn, result, "created_at, rowid" if "created_at" in cols else "rowid",
+            )
+        return
+    meta_col = _col_or_null(cols, "metadata")
+    # 確認待ちの印は metadata の列に書く。列の無い古いスキーマでは付けられないので、
+    # 付けるべき行があれば ``review_marks_deferred`` を立てる — 完了の印を見送り、
+    # 通常の初期化 (init_db) が列を足した後の起動で走査し直して印を付ける。
+    can_mark = "metadata" in cols
+    order = "created_at, rowid" if "created_at" in cols else "rowid"
+    rows = conn.execute(
+        f"SELECT id, role, content, {meta_col} FROM messages "
+        "WHERE substr(content, 1, ?) = ? OR role = 'system' "
+        f"ORDER BY {order}",
+        (len(SYSTEM_OPEN), SYSTEM_OPEN),
+    ).fetchall()
+    for row_id, role, content, raw_meta in rows:
+        metadata = _load_json(raw_meta)
+        role_s = role.lower() if isinstance(role, str) else ""
+        if starts_with_system_tag(content):
+            kind = classify_tagged_message(role, content, metadata)
+            body = strip_system_tags(content) if kind is not None else None
+            label = kind
+            if kind is None:
+                # 印で系統を決められなかった行のうち、旧世代の発火文の個別条件に
+                # 当たるもの (確認待ちの印は付けない)
+                legacy = legacy_notice(role, content, metadata)
+                if legacy is not None:
+                    kind = LEGACY_NOTICE_KIND
+                    label, body = legacy
+            if kind is None or body is None:
+                result.skipped.append(Skipped(
+                    "messages", str(row_id), str(role),
+                    sorted(_tags_of(metadata)), _head(content),
+                    reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
+                ))
+                if can_mark:
+                    _mark_for_review(
+                        result, row_id, raw_meta, metadata,
+                        UNCLASSIFIED_REASON if kind is None else AMBIGUOUS_TAGS_REASON,
+                    )
+                else:
+                    result.review_marks_deferred = True
+                continue
+            result.updates.append((
+                "UPDATE messages SET role = 'system', content = ?, metadata = ? "
+                "WHERE id = ?",
+                (body, _dump_json(_notice_metadata(metadata, kind)), row_id),
+            ))
+            result.changes.append(Change("messages", str(row_id), label, content, body))
+            continue
+        if role_s != "system" or metadata.get(SYSTEM_NOTICE_KEY):
+            continue
+        kind = classify_unmarked_system_message(metadata)
+        if kind is None:
+            result.unknown_system_count += 1
+            if len(result.unknown_system_samples) < UNKNOWN_SYSTEM_LIST_LIMIT:
+                result.unknown_system_samples.append(Skipped(
+                    "messages", str(row_id), str(role),
+                    sorted(_tags_of(metadata)), _head(content),
+                ))
+            if can_mark:
+                _mark_for_review(result, row_id, raw_meta, metadata, UNKNOWN_SYSTEM_REASON)
+            else:
+                result.review_marks_deferred = True
+            continue
+        new_meta = dict(metadata)
+        new_meta[SYSTEM_NOTICE_KEY] = kind
+        result.updates.append((
+            "UPDATE messages SET metadata = ? WHERE id = ?",
+            (_dump_json(new_meta), row_id),
+        ))
+        result.changes.append(Change(
+            "messages(印の付与)", str(row_id), kind, str(content or ""), str(content or ""),
+        ))
+
+    # 旧世界の MEMORIZE の結果 (building_move / document_create / document_search /
+    # generate_image など) は role=user・タグ無しの本文で保存された世代がある。
+    # 発話でないことの来歴を機械的に確定できないので変換はせず、候補を数えて
+    # レポートに出す。
+    memorize_rows = conn.execute(
+        "SELECT id, content, metadata FROM messages "
+        "WHERE role = 'user' AND metadata LIKE '%playbook:%' "
+        f"ORDER BY {order}",
+    ).fetchall() if "metadata" in cols else []
+    for row_id, content, raw_meta in memorize_rows:
+        if starts_with_system_tag(content):
+            continue
+        tags = _tags_of(_load_json(raw_meta))
+        if not _has_playbook_tag(tags) or "conversation" in tags:
+            continue
+        result.untagged_memorize_count += 1
+        if len(result.untagged_memorize_samples) < UNKNOWN_SYSTEM_LIST_LIMIT:
+            result.untagged_memorize_samples.append(Skipped(
+                "messages", str(row_id), "user", sorted(tags), _head(content),
+            ))
+
+    if "paired_action_text" in cols:
+        for row_id, text in conn.execute(
+            "SELECT id, paired_action_text FROM messages "
+            "WHERE substr(paired_action_text, 1, ?) = ?",
+            (len(SYSTEM_OPEN), SYSTEM_OPEN),
+        ).fetchall():
+            body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "messages.paired_action_text", str(row_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
+            result.updates.append((
+                "UPDATE messages SET paired_action_text = ? WHERE id = ?",
+                (body, row_id),
+            ))
+            result.changes.append(Change(
+                "messages.paired_action_text", str(row_id), "paired_action", text, body,
+            ))
+
+    if _table_exists(conn, "perception_batches") and {"id", "rendered_text"} <= _columns(
+        conn, "perception_batches",
+    ):
+        batch_cols = _columns(conn, "perception_batches")
+        kind_expr = "kind" if "kind" in batch_cols else "'perception'"
+        for batch_id, batch_kind, text in conn.execute(
+            f"SELECT id, {kind_expr}, rendered_text FROM perception_batches "
+            "WHERE substr(rendered_text, 1, ?) = ?",
+            (len(SYSTEM_OPEN), SYSTEM_OPEN),
+        ).fetchall():
+            if batch_kind != "realtime_and_recall":
+                result.skipped.append(Skipped(
+                    "perception_batches", str(batch_id), str(batch_kind), [], _head(text),
+                ))
+                continue
+            # リアルタイム情報と想起の組を並べた形 (片方だけのターンは組が一つ) を剥がす
+            body = strip_system_tags(text, pairs=(1, 2))
+            if body is None:
+                result.skipped.append(Skipped(
+                    "perception_batches", str(batch_id), str(batch_kind), [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
+            result.updates.append((
+                "UPDATE perception_batches SET rendered_text = ? WHERE id = ?",
+                (body, batch_id),
+            ))
+            result.changes.append(Change(
+                "perception_batches", str(batch_id), "realtime_and_recall", text, body,
+            ))
+
+
+def _persona_done_version(conn: sqlite3.Connection) -> Optional[int]:
+    """完了の印の規則の版 (:func:`marker_rules_version`)。印が無ければ None。"""
+    from sai_memory.memory.storage import get_embed_metadata
+
+    return marker_rules_version(get_embed_metadata(conn, MIGRATION_MARKER_KEY))
+
+
+def _set_persona_marker(conn: sqlite3.Connection) -> None:
+    """取引の中で完了の印を書く (コミットは呼び出し側)。
+
+    ``embed_metadata`` の無い古い記憶 DB では、表を同じ形で作る (sai_memory/
+    memory/storage.py の init_db の ``CREATE TABLE IF NOT EXISTS embed_metadata``
+    と同じ定義)。init_db は呼ばない — init_db は列の追加と既存行の埋め直しを
+    自分でコミットするので、書き込みのロックの中では呼べず、ロックの外で呼ぶと
+    写しが「触る前」の状態でなくなる。
+    """
+    from sai_memory.memory.storage import set_embed_metadata
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS embed_metadata ("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    set_embed_metadata(conn, MIGRATION_MARKER_KEY, _marker_value(), commit=False)
+
+
+def _apply(conn: sqlite3.Connection, updates: Sequence[Tuple[str, tuple]]) -> None:
+    for sql, params in updates:
+        conn.execute(sql, params)
+
+
+def _snapshot(src: Path, dest: Path) -> None:
+    """SQLite のバックアップ API で ``src`` の写しを ``dest`` に作る。
+
+    ``dest`` は新しく作る (既にあれば FileExistsError) — 同じ秒に起動した別の
+    プロセスの写しを上書きしない。
+
+    呼び出し側は ``src`` の書き込みの取引 (``BEGIN IMMEDIATE``) をまだ何も
+    書かないうちに握ったまま呼ぶ。写しは別の接続で読む — 書き込みのロックは
+    他の接続の読み取りを止めない (rollback journal でも WAL でも。
+    tests/test_system_notice_migration.py で両方を確かめている) ので、写しは
+    「このロックを取った時点のコミット済みの中身」になり、写しを取った後に
+    別のプロセスが書いた行が、写しに無いまま移行されることがない。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "xb"):
+        pass
+    with closing(sqlite3.connect(str(src))) as s, closing(sqlite3.connect(str(dest))) as d:
+        s.backup(d)
+
+
+def _unique_suffix() -> str:
+    """秒の時刻に足して、同時に起動したプロセス同士・同じ秒の二回の実行で名前が重ならない印。"""
+    return f"{os.getpid()}_{uuid.uuid4().hex[:6]}"
+
+
+def _snapshot_name(prefix: str, stamp: str) -> str:
+    """写しのファイル名 (秒の時刻だけだと同時に起動した二つのプロセスで重なる)。"""
+    return f"{prefix}.pre_migration_{stamp}_{_unique_suffix()}.bak"
+
+
+def _open_readonly(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+#: 起動ごとのフォルダに、最初の結果の JSON と一緒に置く「この起動」の素性
+#: (pid とプロセスの開始時刻)。:func:`regenerate_pending_reports` が、まだ走って
+#: いる起動のフォルダを作り直しの対象から外すのに使う。
+RUN_INFO_NAME = "RUN"
+
+
+def _process_created_at(pid: int) -> Optional[float]:
+    try:
+        import psutil
+
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001 — 取れなければ照合しない
+        return None
+
+
+def _write_run_info(results_dir: Path) -> None:
+    path = results_dir / RUN_INFO_NAME
+    if path.exists():
+        return
+    _write_json_atomic(path, {
+        "pid": os.getpid(),
+        "process_created_at": _process_created_at(os.getpid()),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _run_in_progress(run_dir: Path) -> bool:
+    """その起動のフォルダを書いたプロセスがまだ走っているか (素性の無い古いフォルダは偽)。
+
+    pid が生きていて開始時刻も一致すれば走っている。開始時刻を照合できない
+    (psutil で取れない) ときは、pid が生きていれば走っている側に倒す —
+    走っている起動の途中の結果からレポートを作ると、確定していない移行を確定
+    結果として報告することになる。プロセスが終わった後の起動で作り直される。
+    """
+    try:
+        info = json.loads((run_dir / RUN_INFO_NAME).read_text(encoding="utf-8"))
+        pid = int(info["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if pid == os.getpid():
+        # このプロセス自身の起動 — 移行は順に走るので、ここを読む時点では返り終えている
+        return False
+    try:
+        import psutil
+
+        if not psutil.pid_exists(pid):
+            return False
+    except Exception:  # noqa: BLE001 — 生死を確かめられなければ走っている側に倒す
+        return True
+    expected = info.get("process_created_at")
+    actual = _process_created_at(pid)
+    if isinstance(expected, (int, float)) and actual is not None:
+        return abs(float(expected) - actual) <= 0.01
+    return True
+
+
+def _write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
+    """一つの DB の結果を ``results_dir/<key>.json`` に書く (レポートの材料)。
+
+    書き換えの取引を伴わない結果 (失敗・残した行だけの本体 DB) に使う。書き換えを
+    コミットする結果は :func:`_stage_result_json` と :func:`_publish_staged_result`
+    の二段で書く。レポートの書き出しが失敗しても、次の起動でこの JSON 群から
+    レポートだけを作り直せる。
+    """
+    if results_dir is None:
+        return
+    _write_run_info(results_dir)
+    _write_json_atomic(results_dir / f"{key}.json", result.to_json())
+    result.result_saved = True
+
+
+#: コミットの前に書く結果の JSON の仮の名前の末尾 (``<key>.json.tmp``)。
+STAGED_SUFFIX = ".tmp"
+
+
+def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> Optional[Path]:
+    """書き換えのコミットの**前**に、結果の JSON を仮の名前 (``<key>.json.tmp``) で書く。
+
+    書けなければ例外を送る — 呼び出し側はその DB の取引を巻き戻し、完了の印を
+    立てない (次の起動で再試行)。コミットの後に書く順序だと、書き出しの失敗で
+    「変換したのに目視の材料が無い」DB が残り、完了の印のために二度と走査されない。
+    正式な名前 (``<key>.json``) にするのはコミットの後
+    (:func:`_publish_staged_result`) — コミットの前に止まった起動の仮の JSON は、
+    次の起動の :func:`regenerate_pending_reports` が DB の完了の印と突き合わせて
+    捨てるので、確定していない変換がレポートの材料にならない。
+
+    書いた中身とフォルダの項目は ``os.fsync`` で OS に確定させてから返す。確定
+    させずにコミットすると、電源断で「印はコミット済み・仮の JSON は空か書きかけ」
+    が残り、変換した行の目視の材料が失われる。確定に失敗したら仮の JSON を消して
+    例外を送る (呼び出し側が巻き戻して印を立てない)。
+    """
+    if results_dir is None:
+        return None
+    _write_run_info(results_dir)
+    staged = results_dir / f"{key}.json{STAGED_SUFFIX}"
+    try:
+        with open(staged, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(result.to_json(), ensure_ascii=False, indent=1))
+            fh.flush()
+            os.fsync(fh.fileno())
+        _fsync_dir(results_dir)
+        # 起動ごとのフォルダは今回の実行で新しく作られる (初回は results/ と
+        # backups/system_notice_migration/、環境によっては backups/ も新規)。
+        # フォルダ自身を確定させても、その名前の項目は親に載っているので、
+        # 新規作成されうる各階層の親を、既存が保証される祖先 (SAIVERSE_HOME)
+        # まで確定させないと、電源断でフォルダ名ごと消えて、コミット済みの
+        # 完了の印だけが残りうる (Codex 7〜8 巡目)。
+        # 止まる位置は、この移行が実際に使っているホーム。環境変数のホーム
+        # (get_saiverse_home) を見ると、CLI の --home で別の場所を移行している
+        # とき指定先を越えて祖先へ fsync に行き、読めない親で移行ごと巻き戻る
+        # (Codex 9 巡目)。results_dir の構成はこのモジュールが決めている
+        # (<home>/backups/<OUTPUT_DIR_NAME>/<RESULTS_DIR_NAME>/<run_id>) ので、
+        # ホームは相対で確定できる。
+        home = results_dir.parents[3] if len(results_dir.parents) > 3 else results_dir.parent
+        current = results_dir.parent
+        for _ in range(8):  # 安全弁 (実際の深さは 3 段)
+            _fsync_dir(current)
+            if current == home or current.parent == current:
+                break
+            current = current.parent
+    except BaseException:
+        _discard_staged(staged)
+        raise
+    return staged
+
+
+def _fsync_dir(directory: Path) -> None:
+    """フォルダの項目 (作成・付け替え) を OS に確定させる。
+
+    Windows では ``os.open`` がフォルダを開けない (PermissionError) ので、フォルダの
+    確定はできず何もしない (ファイルの中身の確定だけになる)。それ以外の OS で
+    失敗したら例外を送る。
+    """
+    if os.name == "nt":
+        return
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _discard_staged(staged: Optional[Path]) -> None:
+    """巻き戻した DB の仮の JSON を消す (消せなくても次の起動で印と突き合わせて捨てる)。"""
+    if staged is None:
+        return
+    try:
+        staged.unlink(missing_ok=True)
+    except OSError:
+        LOGGER.warning("[system-notice-migration] could not remove %s", staged, exc_info=True)
+
+
+def _publish_staged_result(staged: Optional[Path], result: StoreResult) -> None:
+    """コミットの後に、仮の JSON を正式な名前へ付け替える。
+
+    付け替えられなければ ``result_save_failed`` を立てる (起動の入口が画面へ
+    知らせる)。仮の JSON は残り、次の起動の :func:`regenerate_pending_reports` が
+    DB の完了の印を確かめてから採用する。
+
+    付け替えた後はフォルダの項目を OS に確定させる (:func:`_fsync_dir`)。確定に
+    失敗しても警告だけにする — 付け替えは済んでいて、電源断で付け替えが失われ
+    ても、残る仮の JSON は中身を確定させてあるので次の起動が印と突き合わせて
+    採用する。
+    """
+    if staged is None:
+        return
+    try:
+        os.replace(staged, staged.with_name(staged.name[: -len(STAGED_SUFFIX)]))
+        result.result_saved = True
+    except Exception:  # noqa: BLE001 — 移行は確定している。材料は次の起動で採用し直す
+        result.result_save_failed = True
+        LOGGER.error(
+            "[system-notice-migration] could not finalize the result of %s; "
+            "%s will be taken up on the next start",
+            result.label, staged, exc_info=True,
+        )
+        return
+    try:
+        _fsync_dir(staged.parent)
+    except OSError:
+        LOGGER.warning(
+            "[system-notice-migration] could not flush the folder entry of %s; "
+            "if it is lost, the staged result is taken up on the next start",
+            staged.parent, exc_info=True,
+        )
+
+
+def migrate_persona_db(
+    db_path: Path,
+    *,
+    persona_id: str,
+    output_dir: Path,
+    dry_run: bool = False,
+    stamp: str,
+    results_dir: Optional[Path] = None,
+) -> StoreResult:
+    """一つのペルソナの記憶 DB を移行する。
+
+    今の版 (:data:`MIGRATION_RULES_VERSION`) の印 (:data:`MIGRATION_MARKER_KEY`) が
+    立っていれば何もしない。古い版の印なら、その後の版で足した規則だけで走査し
+    直し (``legacy_only`` — 変換済みの行は条件から外れているので素通りする)、
+    印を今の版に書き換える。印が無ければ全体を走査する。どちらも
+    書き込みの取引 (``BEGIN IMMEDIATE`` — 他のプロセスの書き込みを止める) を
+    取り、その中で印をもう一度確かめ (別のプロセスが先に終えていれば何も
+    せずに終える)、変換する行を走査し、変換する行があれば写しを
+    ``output_dir/<persona_id>/`` へ取ってから (写しが取れなければ書き換えない)
+    書き換えと印をコミットする。写しを取ってから書き換えるまでの間に別の
+    プロセスが行を書けないので、写しに無い行が移行されることはない。
+    ``init_db`` は呼ばない (:func:`_set_persona_marker`) — 写しは DB に何も
+    触る前の中身になる。
+
+    確認待ちの印を付けるべき行があるのに metadata の列が無くて付けられない DB
+    (``review_marks_deferred``) では、変換だけをコミットして完了の印を立てない。
+    次の起動では通常の初期化が列を足しているので、走査し直して印を付ける
+    (変換済みの行は変換の条件から外れているので二重に変換しない —
+    :func:`strip_system_tags`)。
+
+    ``results_dir`` を渡すと、見るべきものがあるとき結果を JSON に書く — コミットの
+    前に仮の名前で書き (書けなければ巻き戻して印を立てない)、コミットの後に
+    正式な名前へ付け替える (:func:`_stage_result_json`)。``dry_run`` は読み取り
+    専用で開き、何も書かない。
+    """
+    from sai_memory.memory.storage import get_embed_metadata
+
+    result = StoreResult(label=f"ペルソナ {persona_id}", path=str(db_path), persona=True)
+    with closing(_open_readonly(db_path)) as conn:
+        done = _persona_done_version(conn)
+        if done is not None and done >= MIGRATION_RULES_VERSION:
+            result.already_done = True
+            return result
+        if dry_run:
+            result.rescan_from_version = done
+            scan_persona_conn(conn, result, legacy_only=done is not None)
+            return result
+
+    staged: Optional[Path] = None
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            done = _persona_done_version(conn)
+            if done is not None and done >= MIGRATION_RULES_VERSION:
+                # 同時に起動した別のプロセスが、こちらの読み取りの後に移行を
+                # 終えた。何も書かずに終える。
+                conn.rollback()
+                result.already_done = True
+                return result
+            # 古い版の印がある DB は、その後の版で足した規則だけで走査し直す
+            # (版 1 → 2 で足したのは旧世代の個別条件だけ)
+            result.rescan_from_version = done
+            scan_persona_conn(conn, result, legacy_only=done is not None)
+            if result.updates:
+                backup = output_dir / persona_id / _snapshot_name("memory.db", stamp)
+                try:
+                    _snapshot(db_path, backup)
+                except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
+                    LOGGER.error(
+                        "[system-notice-migration] could not back up %s; skipping its migration",
+                        db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path, persona=True,
+                        error=f"移行前の写しを取れなかったので、この DB は移行していません: {exc}",
+                    )
+                    _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
+                    return failed
+                result.backup_path = str(backup)
+            _apply(conn, result.updates)
+            if result.review_marks_deferred:
+                LOGGER.warning(
+                    "[system-notice-migration] %s has no metadata column, so rows needing "
+                    "review cannot be marked yet; the completion marker is left unset and "
+                    "the rows will be marked on the next start",
+                    db_path,
+                )
+            else:
+                _set_persona_marker(conn)
+                # 取引の中で書いた印の値 (孤児の仮の JSON の採否の突き合わせに使う)
+                result.marker_value = get_embed_metadata(conn, MIGRATION_MARKER_KEY)
+            if result.has_findings or result.backup_path:
+                try:
+                    staged = _stage_result_json(results_dir, f"persona_{persona_id}", result)
+                except Exception as exc:  # noqa: BLE001 — 材料が無いまま変換を確定させない
+                    LOGGER.error(
+                        "[system-notice-migration] could not save the result of %s before "
+                        "committing; skipping its migration", db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path, persona=True,
+                        error=(
+                            "移行の結果 (レポートの材料) を保存できなかったので、この DB は"
+                            f"移行していません。次の起動で再試行します: {exc}"
+                        ),
+                    )
+                    _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
+                    return failed
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            _discard_staged(staged)
+            raise
+    _publish_staged_result(staged, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 本体 DB (saiverse.db)
+# ---------------------------------------------------------------------------
+
+#: 回収で応対が送り直される判断 (on_event) の台帳の kind (saiverse/
+#: autonomy_wiring.py の ``f"judgment.{kind}"``、判断点の on_event)。
+_ON_EVENT_LEDGER_KIND = "judgment.on_event"
+#: スルースの台帳の kind (sea/sluice.py の ``_LEDGER_KIND``)。記録済みの結果の
+#: ``prompt`` は再適用のときに記録の paired_action_text になる。
+_SLUICE_LEDGER_KIND = "sluice.pan"
+#: 記憶への追記を運ぶ送信トレイの宛先 (saiverse/execution_ledger_wiring.py)。
+_SAIMEMORY_APPEND_TARGETS = ("saimemory.append", "saimemory.append_digest")
+
+
+def _written_by_old_writer(legacy_seq: Any, legacy_message_id: Any, client_message_id: Any) -> bool:
+    """建物履歴の行が、旧世代の発火文を書きえた書き手の行か (来歴の条件)。
+
+    建物履歴には書き手が機構かユーザーかを持つ列が無い (旧世代の発火文も
+    ユーザーの発言も role=user・persona_id 無しで載る)。代わりに、書いた経路の
+    世代が列に残る:
+
+    - ``legacy_seq`` / ``legacy_message_id``: 旧ログの取り込みと、ペルソナ側の
+      番号を持ち込んでいた世代の書き込みだけが埋める。本番の写しでは正規の
+      旧発火文 171 件の全部が持ち、2026-09-06 より後に書かれた行は一つも
+      持たない。
+    - ``client_message_id``: 画面からの送信が必ず付ける。正規の旧発火文は
+      どれも持たない (本番の写しで画面から送られた 1039 件は全部持つ)。
+
+    両方を満たす行だけを旧世代の判定に回す。今の画面からの送信は
+    ``client_message_id`` を持つので外れ、今の書き込み経路の行は旧世代の列が空
+    なので外れる。ただし旧世代の列は、書き込み (database/building_messages.py の
+    ``insert_building_message``) が呼び出し側の渡した seq / message_id を写す
+    作りなので、列の契約ではなく、本番の写しで確かめた分かれ方に立っている。
+    """
+    return (legacy_seq is not None or legacy_message_id is not None) and not client_message_id
+
+
+def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
+    """本体 DB を読んで、変換を ``result`` に積む (書かない)。
+
+    凍結された本文は「まだ送り直し・記録し直しがありうる行」だけを直す — 送り
+    終えた行の凍結は崩さない (送信トレイの不変条件 6 の例外を最小にする):
+
+    - building_messages: 音声通話の痕跡 (role=user + タグ + event_message +
+      ``voice_call``) を、今の形 (role=host・タグ無し、saiverse/voice_call.py の
+      ``_building_entry``) にする。印の無い旧世代のスケジュール発火文・外部
+      イベント通知 (:func:`legacy_notice`。書き手の世代の列で来歴を縛る —
+      :func:`_written_by_old_writer`) も同じ形にする。
+    - execution_ledger: on_event の prepared 行の ``dispatch_envelope.user_input``
+      (回収で応対の入力として送り直される) と、スルースの applied / completed
+      行の結果の ``prompt`` (再適用で記録の paired_action_text になる)。
+    - execution_outbox: 未配送 (pending / dead) の記憶への追記の ``message``。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    if _table_exists(conn, "building_messages"):
+        bm_cols = _columns(conn, "building_messages")
+        for row_id, role, content, raw_meta, legacy_seq, legacy_mid, client_mid in conn.execute(
+            "SELECT id, role, content, metadata_json, "
+            f"{_col_or_null(bm_cols, 'legacy_seq')}, "
+            f"{_col_or_null(bm_cols, 'legacy_message_id')}, "
+            f"{_col_or_null(bm_cols, 'client_message_id')} FROM building_messages "
+            "WHERE substr(content, 1, ?) = ? ORDER BY id",
+            (len(SYSTEM_OPEN), SYSTEM_OPEN),
+        ).fetchall():
+            metadata = _load_json(raw_meta)
+            tags = _tags_of(metadata)
+            is_voice_call = (
+                role == "user"
+                and "event_message" in tags
+                and metadata.get("voice_call") is True
+            )
+            body = strip_system_tags(content) if is_voice_call else None
+            label = "voice_call"
+            if not is_voice_call and _written_by_old_writer(legacy_seq, legacy_mid, client_mid):
+                # 印の無い旧世代のスケジュール発火文・外部イベント通知 (記憶 DB と同じ
+                # 個別条件)。今の建物の出来事の行と同じ role=host・タグ無しにする。
+                legacy = legacy_notice(role, content, metadata)
+                if legacy is not None:
+                    label, body = legacy
+            if body is not None:
+                result.updates.append((
+                    "UPDATE building_messages SET role = 'host', content = ? WHERE id = ?",
+                    (body, row_id),
+                ))
+                result.changes.append(Change(
+                    "building_messages", str(row_id), label, content, body,
+                ))
+                continue
+            result.skipped.append(Skipped(
+                "building_messages", str(row_id), str(role), sorted(tags), _head(content),
+                reason=AMBIGUOUS_TAGS_REASON if is_voice_call else "",
+            ))
+
+    if _table_exists(conn, "execution_ledger"):
+        for exec_id, raw_payload in conn.execute(
+            "SELECT EXECUTION_ID, PAYLOAD_JSON FROM execution_ledger "
+            "WHERE KIND = ? AND STATUS = 'prepared'",
+            (_ON_EVENT_LEDGER_KIND,),
+        ).fetchall():
+            payload = _load_json(raw_payload)
+            envelope = payload.get("dispatch_envelope")
+            if not isinstance(envelope, dict):
+                continue
+            text = envelope.get("user_input")
+            if not starts_with_system_tag(text):
+                continue
+            body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "execution_ledger(on_event)", str(exec_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
+            envelope = dict(envelope, user_input=body)
+            payload = dict(payload, dispatch_envelope=envelope)
+            result.updates.append((
+                "UPDATE execution_ledger SET PAYLOAD_JSON = ? WHERE EXECUTION_ID = ?",
+                (_dump_json(payload), exec_id),
+            ))
+            result.changes.append(Change(
+                "execution_ledger(on_event)", str(exec_id), "schedule", text, body,
+            ))
+        for exec_id, raw_result in conn.execute(
+            "SELECT EXECUTION_ID, RESULT_JSON FROM execution_ledger "
+            "WHERE KIND = ? AND STATUS IN ('applied', 'completed')",
+            (_SLUICE_LEDGER_KIND,),
+        ).fetchall():
+            recorded = _load_json(raw_result)
+            text = recorded.get("prompt")
+            if not starts_with_system_tag(text):
+                continue
+            body = strip_system_tags(text)
+            if body is None:
+                result.skipped.append(Skipped(
+                    "execution_ledger(sluice)", str(exec_id), "", [], _head(text),
+                    reason=AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
+            recorded = dict(recorded, prompt=body)
+            result.updates.append((
+                "UPDATE execution_ledger SET RESULT_JSON = ? WHERE EXECUTION_ID = ?",
+                (_dump_json(recorded), exec_id),
+            ))
+            result.changes.append(Change(
+                "execution_ledger(sluice)", str(exec_id), "paired_action", text, body,
+            ))
+
+    if _table_exists(conn, "execution_outbox"):
+        placeholders = ",".join("?" for _ in _SAIMEMORY_APPEND_TARGETS)
+        for outbox_id, raw_payload in conn.execute(
+            "SELECT OUTBOX_ID, PAYLOAD_JSON FROM execution_outbox "
+            f"WHERE TARGET IN ({placeholders}) AND STATUS IN ('pending', 'dead')",
+            _SAIMEMORY_APPEND_TARGETS,
+        ).fetchall():
+            payload = _load_json(raw_payload)
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not starts_with_system_tag(content):
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            kind = classify_tagged_message(message.get("role"), content, metadata)
+            body = strip_system_tags(content) if kind is not None else None
+            if kind is None or body is None:
+                result.skipped.append(Skipped(
+                    "execution_outbox", str(outbox_id), str(message.get("role")),
+                    sorted(_tags_of(metadata)), _head(content),
+                    reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
+                ))
+                continue
+            new_meta = dict(metadata)
+            new_meta[SYSTEM_NOTICE_KEY] = kind
+            message = dict(message, role="system", content=body, metadata=new_meta)
+            payload = dict(payload, message=message)
+            result.updates.append((
+                "UPDATE execution_outbox SET PAYLOAD_JSON = ? WHERE OUTBOX_ID = ?",
+                (_dump_json(payload), outbox_id),
+            ))
+            result.changes.append(Change(
+                "execution_outbox", str(outbox_id), kind, content, body,
+            ))
+
+
+def migrate_main_db(
+    db_path: Path, *, output_dir: Path, dry_run: bool = False, stamp: str,
+    results_dir: Optional[Path] = None,
+    last_leftovers: Optional[List[str]] = None,
+) -> StoreResult:
+    """本体 DB を移行する。
+
+    印は持たない — 変換の条件 (タグで始まる・未配送・prepared) を満たす行は
+    変換すると条件から外れるので、毎起動で呼んでも二度目以降は何も書かない。
+    書き換える行があるときは、書き込みの取引 (``BEGIN IMMEDIATE``) の中で
+    走査し直し、書き換える前に写しを ``output_dir`` に取る (起動時の
+    pre_upgrade バックアップは数が上限を超えると消えるので別に取る。写しと
+    書き換えの間に別のプロセスが書けない — :func:`migrate_persona_db` と同じ順序)。
+
+    ``results_dir`` を渡すと、変換があるときと、残した行が前回
+    (``last_leftovers`` — :meth:`StoreResult.leftover_keys`) と違うときに結果を
+    JSON で書く — 本体 DB は毎起動で走査され、残した行は毎回同じものが見える
+    ので、同じ行のままならレポートの材料にしない。書き換えを伴う結果は
+    :func:`migrate_persona_db` と同じく、コミットの前に仮の名前で書き (書けなければ
+    巻き戻す)、コミットの後に正式な名前へ付け替える。本体 DB は完了の印を持た
+    ないので、付け替えの前に止まった起動の仮の JSON は次の起動で採用できず
+    捨てる (:func:`regenerate_pending_reports`)。
+    """
+    result = StoreResult(label="本体 DB", path=str(db_path))
+    if not db_path.exists():
+        return result
+    with closing(_open_readonly(db_path)) as conn:
+        scan_main_conn(conn, result)
+    if dry_run:
+        return result
+    if not result.updates:
+        if result.has_leftovers and result.leftover_keys() != last_leftovers:
+            _try_write_result_json(results_dir, "main", result)
+        return result
+
+    applied = StoreResult(label=result.label, path=result.path)
+    staged: Optional[Path] = None
+    report_it = False
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            scan_main_conn(conn, applied)
+            if applied.updates:
+                backup = output_dir / _snapshot_name("saiverse.db", stamp)
+                try:
+                    _snapshot(db_path, backup)
+                except Exception as exc:  # noqa: BLE001 — 写しが取れなければ書き換えない
+                    LOGGER.error(
+                        "[system-notice-migration] could not back up %s; skipping its migration",
+                        db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path,
+                        error=f"移行前の写しを取れなかったので、本体 DB は移行していません: {exc}",
+                    )
+                    _try_write_result_json(results_dir, "main", failed)
+                    return failed
+                applied.backup_path = str(backup)
+            # 変換が無ければ (同時に起動した別のプロセスが先に終えた) 何も書かない
+            _apply(conn, applied.updates)
+            report_it = bool(applied.changes) or (
+                applied.has_leftovers and applied.leftover_keys() != last_leftovers
+            )
+            if report_it and applied.updates:
+                # 書き換える結果はコミットの前に仮の名前で書く (ペルソナと同じ。
+                # 書けなければ巻き戻し、次の起動で再試行する)
+                try:
+                    staged = _stage_result_json(results_dir, "main", applied)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.error(
+                        "[system-notice-migration] could not save the result of %s before "
+                        "committing; skipping its migration", db_path, exc_info=True,
+                    )
+                    conn.rollback()
+                    failed = StoreResult(
+                        label=result.label, path=result.path,
+                        error=(
+                            "移行の結果 (レポートの材料) を保存できなかったので、本体 DB は"
+                            f"移行していません。次の起動で再試行します: {exc}"
+                        ),
+                    )
+                    _try_write_result_json(results_dir, "main", failed)
+                    return failed
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            _discard_staged(staged)
+            raise
+    if staged is not None:
+        _publish_staged_result(staged, applied)
+    elif report_it:
+        # 書き換えが無かった (同時に起動した別のプロセスが先に終えた) — 残した行の
+        # 結果だけなので、コミットとの順序は無い
+        _try_write_result_json(results_dir, "main", applied)
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# レポート
+# ---------------------------------------------------------------------------
+
+
+def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) -> str:
+    from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
+
+    lines: List[str] = [
+        "# システム通知の移行レポート",
+        "",
+        f"- 実行: {stamp}" + (" (dry-run: 何も書き換えていない)" if dry_run else ""),
+        "- 設計: docs/intent/system_notice_delivery.md「移行」",
+        "",
+    ]
+    for res in results:
+        if not res.has_findings and not res.backup_path:
+            continue
+        lines.append(f"## {res.label}")
+        lines.append(f"- DB: {res.path}")
+        if res.backup_path:
+            lines.append(f"- 移行前の写し: {res.backup_path}")
+        if res.error:
+            lines.append(f"- エラー: {res.error}")
+        if res.rescan_from_version is not None:
+            lines.append(
+                f"- 走査し直し: 規則の版 {res.rescan_from_version} で移行を済ませた記憶なので、"
+                f"版 {MIGRATION_RULES_VERSION} までに足した規則 (旧世代のスケジュール発火文・"
+                "外部イベント通知) だけを当て直した。前の版で変換しなかった行は、前の版の"
+                "レポートと確認待ちの印にある"
+            )
+        if res.review_marks_deferred:
+            lines.append(
+                "- 確認待ちの印: この記憶 DB は metadata の列が無い古い形なので、確認が要る行に"
+                "印を付けられなかった。移行の完了の印を立てずにおき、次の起動 (通常の初期化が"
+                "列を足した後) で走査し直して印を付け直す"
+            )
+        counts = res.counts()
+        if counts:
+            lines.append("")
+            lines.append("### 変換した件数 (表 / 系統)")
+            for (table, kind), count in sorted(counts.items()):
+                lines.append(f"- {table} / {kind}: {count}")
+            lines.append("")
+            lines.append(f"### サンプル (系統ごとに最大 {SAMPLES_PER_KIND} 件)")
+            for c in _sample_changes(res.changes):
+                lines.append(f"- [{c.table} / {c.kind}] id={c.row_id}")
+                lines.append(f"  - 前: {_head(c.before)}")
+                if c.before != c.after:
+                    lines.append(f"  - 後: {_head(c.after)}")
+        if res.skipped:
+            lines.append("")
+            lines.append(
+                f"### 変換しなかった <system> 始まりの行 (全 {len(res.skipped)} 件)"
+            )
+            if (
+                res.persona and not res.review_marks_deferred
+                and any(s.table == "messages" for s in res.skipped)
+            ):
+                lines.append(
+                    f"(messages の行には確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を metadata に付け、"
+                    "会話の手本・想起・あらすじの発話の判定から外した。本文と role は"
+                    "そのまま。metadata が辞書として読めない行には付けていない。行を直したら"
+                    "この印を消す)"
+                )
+            for s in res.skipped:
+                reason = f" 理由={s.reason}" if s.reason else ""
+                lines.append(
+                    f"- [{s.table}] id={s.row_id} role={s.role} tags={s.tags}{reason}: {s.head}"
+                )
+        if res.unknown_system_count:
+            lines.append("")
+            marked = (
+                "確認待ちの印は次の起動で付ける" if res.review_marks_deferred
+                else f"確認待ちの印 `{SYSTEM_NOTICE_REVIEW_KEY}` を付けた。metadata が読めない行を除く"
+            )
+            lines.append(
+                f"### 系統を推定できなかった role=system の行 (全 {res.unknown_system_count} 件、"
+                f"先頭 {len(res.unknown_system_samples)} 件を表示。通知の印は付けず、{marked})"
+            )
+            for s in res.unknown_system_samples:
+                lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
+        if res.untagged_memorize_count:
+            lines.append("")
+            lines.append(
+                "### タグ無しの role=user で playbook: タグがあり conversation タグの無い行 "
+                f"(旧 MEMORIZE の結果の候補。全 {res.untagged_memorize_count} 件、"
+                f"先頭 {len(res.untagged_memorize_samples)} 件を表示。変換はしていない)"
+            )
+            for s in res.untagged_memorize_samples:
+                lines.append(f"- id={s.row_id} tags={s.tags}: {s.head}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 入口
+# ---------------------------------------------------------------------------
+
+
+def _iter_persona_dbs(saiverse_home: Path) -> Iterable[Tuple[str, Path]]:
+    personas_dir = saiverse_home / "personas"
+    if not personas_dir.is_dir():
+        return
+    for child in sorted(personas_dir.iterdir()):
+        db = child / "memory.db"
+        if child.is_dir() and db.is_file():
+            yield child.name, db
+
+
+#: DB ごとの結果の JSON の置き場 (``output_dir`` の下に、起動ごとのフォルダ
+#: ``<時刻>_<pid>_<乱数>`` を作る)。
+RESULTS_DIR_NAME = "results"
+#: レポートを書き終えた起動のフォルダに置く印のファイル (中身はレポートのパス)。
+REPORTED_MARKER_NAME = "REPORTED"
+#: DB ごとの、前回の走査で残した行の同定 (``{DB のパス: StoreResult.leftover_keys()}``)。
+#: 本体 DB は毎起動で走査されるので、同じ行が残っているだけでは毎回レポートを
+#: 書かない (件数ではなく行で比べる — 件数が同じままの入れ替わりも報告する)。
+LAST_LEFTOVERS_NAME = "last_leftovers.json"
+
+
+def _load_last_leftovers(output_dir: Path) -> Dict[str, List[str]]:
+    try:
+        data = json.loads((output_dir / LAST_LEFTOVERS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_last_leftovers(
+    output_dir: Path, results: Sequence[StoreResult], previous: Dict[str, List[str]],
+) -> None:
+    state = dict(previous)
+    for r in results:
+        if r.error or r.already_done or r.result_save_failed:
+            # 材料を保存できなかった回は前回比較を進めない — 進めると、同じ行が
+            # 次の起動で「前回と同じ」として報告されずに終わる。
+            continue
+        if not r.has_leftovers and r.path not in state:
+            continue
+        state[r.path] = r.leftover_keys()
+    if state != previous:
+        _write_json_atomic(output_dir / LAST_LEFTOVERS_NAME, state)
+
+
+def _try_write_result_json(results_dir: Optional[Path], key: str, result: StoreResult) -> None:
+    """結果の JSON を書く。書けなくても他の DB も移行の確定も止めない。
+
+    書けなかったら ``result_save_failed`` を立てる — 起動の入口
+    (:func:`run_startup_system_notice_migration`) がそれを画面の警告にし、本体 DB の
+    前回比較 (:func:`_save_last_leftovers`) を更新しない。レポートから欠ける詳細の
+    代わりに、残した行の同定 (表と行 id。本文は書かない) をログに残す。
+    """
+    try:
+        _write_result_json(results_dir, key, result)
+    except Exception:  # noqa: BLE001
+        result.result_save_failed = True
+        LOGGER.error(
+            "[system-notice-migration] could not write the result of %s "
+            "(converted=%d, rows needing review: %s)",
+            result.label, len(result.changes), result.leftover_keys(),
+            exc_info=True,
+        )
+
+
+def _load_run_results(run_dir: Path) -> List[StoreResult]:
+    out: List[StoreResult] = []
+    for path in sorted(run_dir.glob("*.json")):
+        try:
+            out.append(StoreResult.from_json(json.loads(path.read_text(encoding="utf-8"))))
+        except (OSError, ValueError, KeyError, TypeError):
+            LOGGER.warning(
+                "[system-notice-migration] unreadable result file %s", path, exc_info=True,
+            )
+    # 本体 DB を先に、ペルソナは名前の順に
+    out.sort(key=lambda r: (r.persona, r.label))
+    return out
+
+
+def _write_run_report(run_dir: Path, report_path: Path, *, stamp: str) -> Optional[Path]:
+    """一回の起動の結果の JSON 群からレポートを書き、その起動のフォルダに書き終えた印を置く。"""
+    results = _load_run_results(run_dir)
+    if not results:
+        return None
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(render_report(results, dry_run=False, stamp=stamp), encoding="utf-8")
+    (run_dir / REPORTED_MARKER_NAME).write_text(str(report_path), encoding="utf-8")
+    return report_path
+
+
+def _settle_staged_results(run_dir: Path) -> int:
+    """終わった起動のフォルダに残った仮の結果の JSON (``*.json.tmp``) の採否を決める。採用した数を返す。
+
+    仮の JSON はコミットの前に書くので、残っているのは「コミットの前に止まった」
+    か「コミットの後、正式な名前へ付け替える前に止まった (付け替えに失敗した)」
+    かのどちらか。区別は DB の完了の印で付ける: その DB の印が、仮の JSON に
+    書いた値 (``marker_value`` — 書いた取引で立てた印) と一致すれば、その取引は
+    コミットされているので正式な名前へ付け替えて採用する。一致しない・印が無い・
+    印を持たない結果 (本体 DB、印を見送ったペルソナ) は、変換が確定したと
+    確かめられないので捨てる — 確定していない変換をレポートの材料にしない。
+    DB が読めない (ロックなど) ときと、仮の JSON そのものが読めない (一時的な
+    I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
+    して壊れている仮の JSON は書きかけで止まったもので、捨てる — 仮の JSON は
+    OS に確定させてからコミットする (:func:`_stage_result_json`) ので、コミット
+    された取引の仮の JSON が書きかけで残ることはない。
+    """
+    from sai_memory.memory.storage import get_embed_metadata_strict
+
+    adopted = 0
+    for staged in sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}")):
+        try:
+            raw = staged.read_bytes()  # 復号の失敗 (書きかけ) は読み取りの失敗と分けて下で扱う
+        except OSError:
+            LOGGER.warning(
+                "[system-notice-migration] could not read %s to settle it; "
+                "will retry on the next start", staged, exc_info=True,
+            )
+            continue
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            data = None  # 書きかけで止まった — 確定した結果ではない
+        expected = data.get("marker_value") if isinstance(data, dict) else None
+        keep = False
+        if isinstance(expected, str) and data.get("persona") and data.get("path"):
+            db = Path(data["path"])
+            if db.is_file():
+                try:
+                    with closing(_open_readonly(db)) as conn:
+                        actual = get_embed_metadata_strict(conn, MIGRATION_MARKER_KEY)
+                except sqlite3.Error:
+                    LOGGER.warning(
+                        "[system-notice-migration] could not read %s to settle %s; "
+                        "will retry on the next start", db, staged, exc_info=True,
+                    )
+                    continue
+                keep = actual == expected
+        final = staged.with_name(staged.name[: -len(STAGED_SUFFIX)])
+        try:
+            if keep:
+                os.replace(staged, final)
+                adopted += 1
+                LOGGER.info("[system-notice-migration] took up the committed result %s", final)
+            else:
+                staged.unlink()
+                LOGGER.info(
+                    "[system-notice-migration] discarded %s (its migration was not committed)",
+                    staged,
+                )
+        except OSError:
+            LOGGER.warning(
+                "[system-notice-migration] could not settle %s", staged, exc_info=True,
+            )
+    return adopted
+
+
+def regenerate_pending_reports(saiverse_home: Path) -> List[Path]:
+    """前の起動で結果の JSON を書いたのにレポートを書けなかった分を、JSON 群から作り直す。
+
+    DB には書かない (完了の印はそのまま尊重する)。作り直したレポートのパスを返す。
+    まだ走っている起動のフォルダ (:func:`_run_in_progress` — 同時に起動した別の
+    プロセスが移行の途中) は対象にしない。その起動が自分でレポートを書くか、
+    書けずに終われば次の起動で作り直される。
+
+    終わった起動のフォルダに仮の結果の JSON が残っていれば、先に採否を決める
+    (:func:`_settle_staged_results`)。採用した JSON があれば、レポートを書き
+    終えた起動のフォルダでもレポートを作り直す。
+    """
+    output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
+    results_root = output_dir / RESULTS_DIR_NAME
+    if not results_root.is_dir():
+        return []
+    written: List[Path] = []
+    for run_dir in sorted(results_root.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        has_staged = any(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+        reported = (run_dir / REPORTED_MARKER_NAME).exists()
+        if reported and not has_staged:
+            continue
+        if not has_staged and not any(run_dir.glob("*.json")):
+            continue
+        if _run_in_progress(run_dir):
+            continue
+        adopted = _settle_staged_results(run_dir) if has_staged else 0
+        if reported and not adopted:
+            continue
+        if not any(run_dir.glob("*.json")):
+            continue
+        try:
+            path = _write_run_report(
+                run_dir, output_dir / f"report_{run_dir.name}.md", stamp=run_dir.name,
+            )
+        except Exception:  # noqa: BLE001 — 作り直せなければ次の起動でまた試す
+            LOGGER.error(
+                "[system-notice-migration] could not regenerate the report for %s", run_dir,
+                exc_info=True,
+            )
+            continue
+        if path is not None:
+            LOGGER.info("[system-notice-migration] report regenerated: %s", path)
+            written.append(path)
+    return written
+
+
+def run_migration(
+    *,
+    db_path: Optional[Path],
+    saiverse_home: Path,
+    dry_run: bool = False,
+    report_path: Optional[Path] = None,
+) -> Tuple[List[StoreResult], Optional[Path]]:
+    """本体 DB と全ペルソナの記憶 DB を移行し、見るべきものがあればレポートを書く。
+
+    返り値は (DB ごとの結果, レポートのパス)。各 DB の結果は、見るべきもの
+    (変換した行・変換しなかったタグ始まりの行・推定できなかった role=system 行・
+    旧 MEMORIZE の結果の候補・エラー) があるとき、DB を一つ処理するたびに
+    ``results/<時刻>_<pid>_<乱数>/`` へ JSON で書き、レポートはその JSON 群から組む
+    (書き換えを伴う DB の JSON はコミットの前に仮の名前で書き、コミットの後に
+    正式な名前へ付け替える — :func:`_stage_result_json`。レポートが書けなくても
+    次の起動で :func:`regenerate_pending_reports` が作り直せる)。本体 DB の残した行は、
+    前回と同じ行なら材料にしない。``dry_run`` は JSON を書かず、見るべきものが
+    あればその場の結果からレポートを書く。
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = f"{stamp}_{_unique_suffix()}"
+    output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
+    results_dir = None if dry_run else output_dir / RESULTS_DIR_NAME / run_id
+    last_leftovers = {} if dry_run else _load_last_leftovers(output_dir)
+    results: List[StoreResult] = []
+
+    if db_path is not None:
+        try:
+            results.append(migrate_main_db(
+                db_path, output_dir=output_dir, dry_run=dry_run, stamp=stamp,
+                results_dir=results_dir, last_leftovers=last_leftovers.get(str(db_path)),
+            ))
+        except Exception as exc:  # noqa: BLE001 — 一つの DB の失敗で他を止めない
+            LOGGER.error("[system-notice-migration] main DB migration failed", exc_info=True)
+            failed = StoreResult(
+                label="本体 DB", path=str(db_path), error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
+            )
+            results.append(failed)
+            _try_write_result_json(results_dir, "main", failed)
+
+    for persona_id, persona_db in _iter_persona_dbs(saiverse_home):
+        try:
+            results.append(migrate_persona_db(
+                persona_db, persona_id=persona_id, output_dir=output_dir,
+                dry_run=dry_run, stamp=stamp, results_dir=results_dir,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "[system-notice-migration] persona %s migration failed", persona_id,
+                exc_info=True,
+            )
+            failed = StoreResult(
+                label=f"ペルソナ {persona_id}", path=str(persona_db), persona=True,
+                error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
+            )
+            results.append(failed)
+            _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
+
+    written: Optional[Path] = None
+    if results_dir is None:
+        if any(r.has_findings for r in results):
+            written = report_path or output_dir / f"report_{stamp}_dry_run.md"
+            written.parent.mkdir(parents=True, exist_ok=True)
+            written.write_text(render_report(results, dry_run=True, stamp=stamp), encoding="utf-8")
+    else:
+        report_ok = True
+        if results_dir.is_dir() and any(results_dir.glob("*.json")):
+            try:
+                written = _write_run_report(
+                    results_dir, report_path or output_dir / f"report_{run_id}.md", stamp=stamp,
+                )
+            except Exception:  # noqa: BLE001 — 次の起動で JSON 群から作り直す
+                LOGGER.error(
+                    "[system-notice-migration] could not write the report; it will be "
+                    "regenerated from %s on the next start", results_dir, exc_info=True,
+                )
+                written = None
+                report_ok = False
+        if report_ok:
+            try:
+                _save_last_leftovers(output_dir, results, last_leftovers)
+            except Exception:  # noqa: BLE001
+                LOGGER.error(
+                    "[system-notice-migration] could not save the leftover counts", exc_info=True,
+                )
+    for res in results:
+        if res.changes or res.error:
+            LOGGER.info(
+                "[system-notice-migration] %s: converted=%d skipped=%d unknown_system=%d error=%s",
+                res.label, len(res.changes), len(res.skipped),
+                res.unknown_system_count, res.error,
+            )
+    if written is not None:
+        LOGGER.info("[system-notice-migration] report written: %s", written)
+    return results, written
+
+
+def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
+    """起動時の入口 (main.py がペルソナの読み込みより前に呼ぶ)。
+
+    返り値は画面のバナーへ積む警告・知らせ (``manager.startup_alerts`` の形)。
+    移行の失敗はここで握って起動は止めない — 失敗した DB は印が立たないので
+    次の起動で再試行される。
+    """
+    from saiverse.data_paths import get_saiverse_home
+
+    home = get_saiverse_home()
+    alerts: List[Dict[str, Any]] = []
+    try:
+        regenerated = regenerate_pending_reports(home)
+    except Exception:  # noqa: BLE001
+        LOGGER.error("[system-notice-migration] report regeneration failed", exc_info=True)
+        regenerated = []
+    if regenerated:
+        alerts.append({
+            "id": "system_notice_migration_report_regenerated",
+            "level": "info",
+            "title": "前回書けなかったシステム通知の移行のレポートを作り直しました",
+            "message": "レポート: " + ", ".join(str(p) for p in regenerated),
+            "details": {},
+        })
+    try:
+        results, report = run_migration(db_path=Path(db_path), saiverse_home=home)
+    except Exception:  # noqa: BLE001
+        LOGGER.error("[system-notice-migration] migration aborted", exc_info=True)
+        return alerts + [{
+            "id": "system_notice_migration_failed",
+            "level": "warning",
+            "title": "システム通知の記録の移行に失敗しました",
+            "message": "起動時の移行が途中で止まりました。次の起動で再試行します。ログを確認してください。",
+            "details": {},
+        }]
+    failed = [r for r in results if r.error]
+    # 人の確認が要る行 (変換しなかった行・推定できなかった行・旧 MEMORIZE の候補)。
+    # レポートの材料 (結果の JSON) に書いた DB の分だけ数える — 本体 DB の残りは
+    # 前回と同じ行ならレポートの材料にしないので、毎起動で知らせない。
+    saved = [r for r in results if r.result_saved]
+    # 材料に書けなかった DB の分も、この起動の手元の結果から数える
+    unsaved = [r for r in results if r.result_save_failed]
+    review_rows = sum(sum(r.leftover_counts()) for r in saved + unsaved)
+    # 古いスキーマで確認待ちの印を付けられず、完了の印を見送った記憶
+    deferred_note = (
+        " 一部の記憶は古い形のため確認待ちの印を付けられなかったので、移行を完了扱いに"
+        "せず、次の起動で印を付け直します。"
+        if any(r.review_marks_deferred and not r.error for r in results) else ""
+    )
+    if unsaved:
+        alerts.append({
+            "id": "system_notice_migration_result_unsaved",
+            "level": "warning",
+            "title": "システム通知の記録の移行結果を一部保存できず、レポートに詳細が欠けています",
+            "message": (
+                "移行の結果をレポートの材料に保存できなかった記録があります: "
+                + "、".join(r.label for r in unsaved) + "。"
+                + (
+                    "移行を済ませたペルソナの記憶の結果は仮の名前で残してあり、次の起動で"
+                    "レポートに載せ直します。"
+                    if any(r.persona and not r.error for r in unsaved) else ""
+                )
+                + (
+                    "本体 DB の確認が要る行は次の起動でもう一度報告します"
+                    + (
+                        " (変換した件数はこの起動のログにあります)"
+                        if any(not r.persona and r.changes for r in unsaved) else ""
+                    )
+                    + "。"
+                    if any(not r.persona for r in unsaved) else ""
+                )
+                + (f"確認が要る行: {review_rows} 件。" if review_rows else "")
+            ),
+            "details": {"unsaved": [r.label for r in unsaved]},
+        })
+    if saved and report is None:
+        # 材料は書けたのにレポートが書けなかった。移行の成否と確認が要る行の
+        # 件数は分かっているので、レポートを待たずに知らせる (レポートは次の
+        # 起動で材料から作り直す — regenerate_pending_reports)。
+        converted = any(r.changes for r in saved)
+        alerts.append({
+            "id": "system_notice_migration_report_failed",
+            "level": "warning",
+            "title": "システム通知の記録の移行のレポートを書き出せませんでした",
+            "message": (
+                ("移行は完了しましたが、" if converted and not failed else "")
+                + "結果のレポートの書き出しに失敗しました (次の起動で作り直します)。"
+                + f"確認が要る行: {review_rows} 件。"
+            ),
+            "details": {},
+        })
+    if failed:
+        alerts.append({
+            "id": "system_notice_migration_failed",
+            "level": "warning",
+            "title": "システム通知の記録の移行が一部の記録でできませんでした",
+            "message": (
+                "移行できなかった記録は元のまま残っていて、次の起動で再試行します。"
+                + (f" 詳細: {report}" if report else "")
+            ),
+            "details": {"failed": [r.label for r in failed]},
+        })
+    elif report is not None and any(r.changes for r in results):
+        alerts.append({
+            "id": "system_notice_migration_done",
+            "level": "info",
+            "title": "システム通知の記録を新しい形式へ移行しました",
+            "message": f"移行前の写しと結果のレポートを保存しました: {report}" + (
+                f" 変換せずに残した、確認が要る行が {review_rows} 件あります (レポートに一覧があります)。"
+                if review_rows else ""
+            ) + deferred_note,
+            "details": {},
+        })
+    elif report is not None and review_rows:
+        alerts.append({
+            "id": "system_notice_migration_review",
+            "level": "warning",
+            "title": "システム通知の記録の移行で、確認が要る行があります",
+            "message": (
+                f"変換せずに残した行・種類を推定できなかった行が {review_rows} 件あります。"
+                f"一覧はレポートにあります: {report}"
+                + deferred_note
+            ),
+            "details": {},
+        })
+    return alerts
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="システム通知の旧形式データを新形式へ正規化する (コピーで試すこと)",
+    )
+    parser.add_argument("--home", required=True, help="SAIVERSE_HOME (personas/ を含むフォルダ)")
+    parser.add_argument(
+        "--db", default=None,
+        help="本体 DB のパス (省略時は <home>/user_data/database/saiverse.db、無ければ本体 DB は飛ばす)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="読み取り専用で開き、レポートだけ書く")
+    parser.add_argument("--report", default=None, help="レポートの書き出し先")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO)
+    home = Path(args.home)
+    # 指定の打ち間違いで、何も無い場所にレポートや結果の置き場を作り「移行するものが
+    # 無かった」と見える結果を出さない。移行を始める前に拒否する。
+    if not home.is_dir():
+        parser.error(f"--home {home} はフォルダとして存在しません (何も作らずに止めます)")
+    if args.db and not Path(args.db).is_file():
+        parser.error(f"--db {args.db} はファイルとして存在しません (何も作らずに止めます)")
+    db = Path(args.db) if args.db else home / "user_data" / "database" / "saiverse.db"
+    if not args.dry_run:
+        for regenerated in regenerate_pending_reports(home):
+            print(f"regenerated report: {regenerated}")
+    results, report = run_migration(
+        db_path=db if db.exists() else None,
+        saiverse_home=home,
+        dry_run=args.dry_run,
+        report_path=Path(args.report) if args.report else None,
+    )
+    for res in results:
+        print(f"{res.label}: converted={len(res.changes)} skipped={len(res.skipped)} "
+              f"unknown_system={res.unknown_system_count} done_before={res.already_done} "
+              f"rescan_from_version={res.rescan_from_version} error={res.error}")
+    print(f"report: {report}")
+    return 0 if not any(r.error for r in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

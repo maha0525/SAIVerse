@@ -411,6 +411,24 @@ class BuildingIngestM8Test(unittest.TestCase):
             # 開いている出来事が無ければ origin_episode は付けない
             self.assertNotIn("origin_episode", entry.get("metadata") or {}, needle)
 
+    def test_building_event_is_stored_as_role_system_notice(self):
+        """建物の出来事 (host 行) はシステム通知として role=system・タグ無し
+        本文 + 識別の印で記憶へ入る (docs/intent/system_notice_delivery.md
+        不変条件 1)。role=system の行を記憶へ書かない HistoryManager の除外を、
+        識別の印を持つ行は通る。"""
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+        self._insert("host", "<b>識別テストの世界イベント</b>")
+        count = auto_ingest_building_messages(self.persona, self.manager)
+        self.assertEqual(count, 1)
+        entry = self._appended_by_needle("識別テストの世界イベント")
+        self.assertEqual(entry["role"], "system")
+        self.assertEqual(entry["content"], f"[{self.BID}] 識別テストの世界イベント")
+        meta = entry.get("metadata") or {}
+        self.assertEqual(meta.get(SYSTEM_NOTICE_KEY), "building_event")
+        self.assertIn("event_message", meta.get("tags") or [])
+        self.assertIn("internal", meta.get("tags") or [])
+
     # test_transcription_stamps_open_episode は削除 (2026-08-22、束 6c /
     # autonomous_behavior_v3.md §7): 転記 entry へ「開いている出来事」を刻む
     # 帰属タグ (origin_episode) は、エピソードという専用の記録行の退役と一緒に

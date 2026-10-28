@@ -21,7 +21,11 @@ from llm_clients.output_phases import (
     coerce_output_phases,
     output_phases_for_text,
 )
-from sai_memory.memory.storage import presented_system_record_content
+from sai_memory.memory.storage import (
+    SYSTEM_NOTICE_KEY,
+    presented_system_record_content,
+    system_notice_message,
+)
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -64,6 +68,25 @@ from tools.fuzzy import find_close_matches
 from sea.mode_spell_permissions import check_spell_permission
 
 LOGGER = logging.getLogger(__name__)
+
+#: スペルの結果 (通常のスペルの周・事前スペル) のシステム通知の系統名
+#: (``SYSTEM_NOTICE_KEY`` の値。docs/intent/system_notice_delivery.md)。
+_SPELL_RESULT_NOTICE = "spell_result"
+
+
+def _spell_result_record_metadata(
+    media: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """スペルの結果を role=system で保存するときの metadata (識別用の印 + 画像)。
+
+    送る列の結果のメッセージ (:func:`system_notice_message`) と同じ印を持たせる —
+    記録から復元したときも同じ系統の通知として読める。
+    """
+    meta: Dict[str, Any] = {SYSTEM_NOTICE_KEY: _SPELL_RESULT_NOTICE}
+    if media:
+        meta["media"] = [dict(m) for m in media]
+    return meta
+
 
 #: 「この発言は言い切っていない」の印。中断された生成の部分文に立てる。
 #:
@@ -346,7 +369,8 @@ class BeatExecution:
     # ── ①準備の成果物 ──
     messages: List[Dict[str, Any]] = field(default_factory=list)
     prompt: Optional[str] = None
-    """action テンプレートを展開したもの（``<system>`` タグ wrap 済み）。"""
+    """action テンプレートを展開したもの（タグ無し。送る列には role=system の
+    システム通知として足し、記録には paired_action_text として残す）。"""
 
     # ── ②③生成・Spell の成果物 ──
     continuation: Any = ""
@@ -1393,10 +1417,11 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     _pulse_ctx = state.get("_pulse_context")
     if _pulse_ctx:
         from sea.pulse_context import PulseLogEntry
-        # Record the prompt (user message)
+        # Record the prompt (the action text — a role=system notice in the
+        # sent list, docs/intent/system_notice_delivery.md)
         if prompt:
             _pulse_ctx.append(PulseLogEntry(
-                role="user", content=prompt,
+                role="system", content=prompt,
                 node_id=node_id, playbook_name=playbook.name))
         # Record the assistant response (with optional tool_calls)
         _tc_list = None
@@ -2055,6 +2080,18 @@ def _coerce_spell_args(tool_name: str, tool_args: dict) -> dict:
     return coerced
 
 
+def _value_shape_for_log(value: Any) -> str:
+    """ツールの引数一つ分をログに書くときの形 (型と長さだけ。中身は書かない)。
+
+    引数を一つずつ別のレコードに書くと、合言葉を復唱した文字列が複数の欄に
+    分かれてログの伏せ字に掛からない (docs/intent/system_notice_delivery.md
+    不変条件 3)。引数全体は「Tool call detected」の 1 レコードに載る。
+    """
+    if isinstance(value, (str, list, dict, tuple)):
+        return f"{type(value).__name__}, length={len(value)}"
+    return type(value).__name__
+
+
 def _normalize_spell_line(tool_name: str, tool_args: dict, quick: bool = False) -> str:
     """Produce the canonical /spell line for a given tool name and args dict.
 
@@ -2622,6 +2659,7 @@ def _execute_handy_tool_inline(
         f"[Handy Tool: {tool_name}]\n{result_str}",
         role="system",
         tags=["conversation", "handy_tool"],
+        metadata={SYSTEM_NOTICE_KEY: "handy_tool"},
         pulse_id=pulse_id,
         playbook_name=playbook_name,
     )
@@ -3086,7 +3124,7 @@ def _record_interruption_notice(
     途中で切られた発言は他のペルソナから見ても不自然な場所で終わっている。
     それが本人の言い切りなのか外から止められたのかを知れる方がよい
     (2026-08-26 まはー裁定)。役は ``host`` で、入退室の通知と同じ道を通る。
-    取り込みの側が建物名を添えて ``user`` + ``<system>`` へ組み替えてから
+    取り込みの側が建物名を添えて role=system のシステム通知へ組み替えてから
     各ペルソナの記憶へ配るので、**ここでその形を自分で作らない**。ただし
     取り込みが配るのは ``heard_by`` に載ったペルソナだけ — 在室者を渡さないと、
     通告は建物の記録に残るだけで誰の記憶にも永遠に届かない (2026-08-27 の
@@ -3718,6 +3756,7 @@ async def _run_spell_loop(
                 if _partial_results:
                     runtime._store_memory(
                         persona, _partial_results, role="system",
+                        metadata=_spell_result_record_metadata(None),
                         tags=(
                             (_node_memorize_tags + ["spell"])
                             if _node_memorize_tags else ["conversation", "spell"]
@@ -4350,17 +4389,19 @@ async def _run_spell_loop(
                     if isinstance(media_list, list):
                         aggregated_media.extend(media_list)
             # 結果のメッセージは、下で system ロールで保存した記録が次のターンに
-            # 復元されるのと同じ本文・同じ画像で送る (復元形の一枚
-            # sai_memory.memory.storage.presented_system_record_content を通す)。
-            # 送ったときと復元したときで本文が違うと、前回の送信が今回の送信の
+            # 復元されるのと同じ形 (role=system・タグ無し本文・同じ画像) で送る
+            # (本文は sai_memory.memory.storage.presented_system_record_content を
+            # 通す)。送ったときと復元したときで違うと、前回の送信が今回の送信の
             # 先頭と一致しない (docs/intent/persist_realtime_and_recall.md
-            # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
-            spell_result_msg: Dict[str, Any] = {
-                "role": "user",
-                "content": presented_system_record_content(combined_results),
-            }
+            # 不変条件 1 — 全モデル共通、送る並びは変えない)。送り先のモデルに
+            # 合わせた変換はクライアント層が行う (docs/intent/
+            # system_notice_delivery.md)。
+            spell_result_msg: Dict[str, Any] = system_notice_message(
+                presented_system_record_content(combined_results),
+                _SPELL_RESULT_NOTICE,
+                metadata={"media": aggregated_media} if aggregated_media else None,
+            )
             if aggregated_media:
-                spell_result_msg["metadata"] = {"media": aggregated_media}
                 LOGGER.info(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
@@ -4371,13 +4412,11 @@ async def _run_spell_loop(
             # 結果のメッセージ (復元形) とは別の、保存しないメッセージとして
             # 結果の直前に置く。
             if _all_quick and _round_has_failure:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "<system>/quick_spell で唱えたスペルに失敗があったため、"
-                        "結果を確認できるよう応答機会を返しています。</system>"
-                    ),
-                })
+                messages.append(system_notice_message(
+                    "/quick_spell で唱えたスペルに失敗があったため、"
+                    "結果を確認できるよう応答機会を返しています。",
+                    "quick_spell_failure",
+                ))
             messages.append(spell_result_msg)
 
             # Record to PulseContext
@@ -4418,10 +4457,9 @@ async def _run_spell_loop(
                     # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
                     # (OFF のモデルの履歴は今までどおり画像を持たない —
                     # persist_realtime_and_recall.md 不変条件 2)。
-                    metadata=(
-                        {"media": [dict(m) for m in aggregated_media]}
-                        if aggregated_media and state.get("_persist_realtime_and_recall")
-                        else None
+                    metadata=_spell_result_record_metadata(
+                        aggregated_media
+                        if state.get("_persist_realtime_and_recall") else None,
                     ),
                     pulse_context=pulse_context,
                     spell_origin_id=_spell_origin_id,
@@ -4578,14 +4616,20 @@ async def _run_spell_loop(
                         manager=getattr(runtime, "manager", None),
                     )
                     if _perception_payload:
-                        _perc_msg: Dict[str, Any] = {
-                            "role": "user",
-                            "content": _perception_payload["content"],
-                        }
-                        if _perception_payload.get("media"):
-                            _perc_msg["metadata"] = {
-                                "media": _perception_payload["media"],
-                            }
+                        # 知覚のまとめは role=system のシステム通知 (タグ無しの
+                        # 確定文面 — 次のターンに sea.runtime_context.
+                        # list_presented_perception_blocks が出すのと同じ本文。
+                        # docs/intent/system_notice_delivery.md)。
+                        from sea.runtime_context import PERCEPTION_NOTICE
+
+                        _perc_msg: Dict[str, Any] = system_notice_message(
+                            _perception_payload["content"],
+                            PERCEPTION_NOTICE,
+                            metadata=(
+                                {"media": _perception_payload["media"]}
+                                if _perception_payload.get("media") else None
+                            ),
+                        )
                         messages.append(_perc_msg)
                         LOGGER.info(
                             "[sea][spell] Beat-head perception flush injected "
@@ -4924,7 +4968,7 @@ async def _run_spell_loop(
             f"発言はそのまま保存され、以降のスペル呼び出しはスキップされました。"
         )
         try:
-            messages.append({"role": "user", "content": f"<system>{error_note}</system>"})
+            messages.append(system_notice_message(error_note, "spell_system_error"))
         except Exception:
             LOGGER.debug("[sea][spell] failed to append error note to messages", exc_info=True)
         return _partial_result()
@@ -5041,8 +5085,9 @@ async def _execute_pre_spells(
       ongoing context.
     - Execute valid spells sequentially via ``_run_spell_tool_async``, the
       same path (and the same ordering guarantee) used by the regular spell loop.
-    - Append a single ``<system>``-tagged user message to
-      ``state["_messages"]`` containing the combined results, so the
+    - Append a single role=system notice (``SYSTEM_NOTICE_KEY`` =
+      ``"spell_result"``) to ``state["_messages"]`` containing the combined
+      results, so the
       first LLM round sees them as if the user had requested them.
     - Forward any media (images, etc.) returned by spells via
       ``message["metadata"]["media"]`` so the LLM gets attachments.
@@ -5179,24 +5224,24 @@ async def _execute_pre_spells(
         + "\n\n"
         + "\n\n".join(result_lines)
     )
-    # 送る本文と画像は、下で system ロールで保存した記録が次のターンに復元される
-    # のと同じ形にする (復元形の一枚 presented_system_record_content を通し、
-    # 画像も記録に残す)。送ったときと復元したときで違うと、前回の送信が今回の
-    # 送信の先頭と一致しない (docs/intent/persist_realtime_and_recall.md
-    # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
-    spell_result_msg: Dict[str, Any] = {
-        "role": "user",
-        "content": presented_system_record_content(system_body),
-    }
-
+    # 送る形 (role=system・タグ無し本文・画像) は、下で system ロールで保存した
+    # 記録が次のターンに復元されるのと同じにする (本文は
+    # presented_system_record_content を通し、画像も記録に残す)。送ったときと
+    # 復元したときで違うと、前回の送信が今回の送信の先頭と一致しない
+    # (docs/intent/persist_realtime_and_recall.md 不変条件 1 — 全モデル共通、
+    # 送る並びは変えない)。
     aggregated_media: List[Dict[str, Any]] = []
     for _, result_meta, _executed in results:
         if isinstance(result_meta, dict):
             media_list = result_meta.get("media")
             if isinstance(media_list, list):
                 aggregated_media.extend(media_list)
+    spell_result_msg: Dict[str, Any] = system_notice_message(
+        presented_system_record_content(system_body),
+        _SPELL_RESULT_NOTICE,
+        metadata={"media": aggregated_media} if aggregated_media else None,
+    )
     if aggregated_media:
-        spell_result_msg["metadata"] = {"media": aggregated_media}
         LOGGER.info(
             "[sea][pre_spells] Attached %d media item(s) from pre-spell results",
             len(aggregated_media),
@@ -5217,10 +5262,8 @@ async def _execute_pre_spells(
             pulse_id=pulse_id, playbook_name=playbook.name,
             # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
             # (persist_realtime_and_recall.md 不変条件 2)。
-            metadata=(
-                {"media": [dict(m) for m in aggregated_media]}
-                if aggregated_media and state.get("_persist_realtime_and_recall")
-                else None
+            metadata=_spell_result_record_metadata(
+                aggregated_media if state.get("_persist_realtime_and_recall") else None,
             ),
             pulse_context=pulse_ctx,
             return_message_id=True,
@@ -5433,6 +5476,9 @@ def _place_realtime_spell_result(
         add_realtime_spell_lines_to_turn_message,
         build_turn_realtime_and_recall_message,
         find_turn_realtime_and_recall_index,
+        last_input_index,
+        realtime_context_message,
+        realtime_info_text,
     )
     turn_idx = find_turn_realtime_and_recall_index(messages)
     target_msg: Optional[Dict[str, Any]] = None
@@ -5451,16 +5497,14 @@ def _place_realtime_spell_result(
                 "placing the results in a separate trailing message that is "
                 "not kept (persona=%s)", persona_id,
             )
-            target_msg = {
-                "role": "user",
-                "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
-                "metadata": {},
-            }
+            target_msg = system_notice_message(
+                realtime_info_text(new_content), "realtime",
+            )
             messages.append(target_msg)
     elif state.get("_persist_realtime_and_recall"):
         # 作り方 (見出しと行の形) は下の OFF の「無ければ作る」と同じ文面。
         target_msg = build_turn_realtime_and_recall_message(
-            {"content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>"},
+            {"content": realtime_info_text(new_content)},
             None,
         )
         messages.append(target_msg)
@@ -5475,29 +5519,17 @@ def _place_realtime_spell_result(
         pass  # 残すモデルのまとまりに足し終えた
     elif realtime_idx is not None:
         if new_content:
+            # リアルタイム情報の末尾に行を足す (本文はタグで囲まれていない —
+            # docs/intent/system_notice_delivery.md)。
             existing_content = messages[realtime_idx].get("content", "")
-            # Insert before closing </system> tag
-            if "</system>" in existing_content:
-                messages[realtime_idx]["content"] = existing_content.replace(
-                    "</system>",
-                    "\n" + new_content + "\n</system>",
-                )
-            else:
-                messages[realtime_idx]["content"] = existing_content + "\n" + new_content
+            messages[realtime_idx]["content"] = existing_content + "\n" + new_content
         target_msg = messages[realtime_idx]
     else:
         # No realtime context message exists; create one
-        realtime_msg = {
-            "role": "user",
-            "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
-            "metadata": {"__realtime_context__": True},
-        }
-        # Insert before last user message
-        last_user_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user" and not messages[i].get("metadata", {}).get("__realtime_context__"):
-                last_user_idx = i
-                break
+        realtime_msg = realtime_context_message(realtime_info_text(new_content))
+        # Insert before the last input (user message or system notice —
+        # prepare_context と同じ数え方、sea.runtime_context.last_input_index)
+        last_user_idx = last_input_index(messages)
         if last_user_idx is not None:
             messages.insert(last_user_idx, realtime_msg)
         else:
@@ -5975,39 +6007,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             action_template = getattr(node_def, "action", None)
             if action_template:
                 prompt = _format(action_template, variables)
-                # ============================================================
-                # 設計上の重要判断 — user role + <system> タグの理由
-                # (変更を検討する前に必ず読むこと。「system っぽい指示なのに
-                #  role='system' じゃないのはおかしい」という直感だけで直すと
-                #  プロバイダ互換性が壊れる)
-                #
-                # Playbook の action テキストは LLM への指示で、本来なら
-                # role='system' で送りたい。が、各プロバイダの差異により
-                # 共通形式で system role を「途中に挿入」することができない:
-                #
-                #   - Gemini: system role は context 先頭でしか受け付けない。
-                #     messages の中途で role='system' を出すと無視されるか
-                #     エラーになる。
-                #   - Anthropic: system は messages の外側に別フィールドで
-                #     渡す仕様 (messages 配列の途中に role='system' を含め
-                #     ても効果が限定的)。
-                #   - OpenAI / NIM 等: 受け付けはするが、複数 system が並ぶ
-                #     と挙動が安定しない / 後段で吸い込まれることがある。
-                #
-                # 全プロバイダで共通の挙動を保つため、本プロジェクトでは
-                # 「指示系メッセージは user role + content を <system>...</system>
-                # で囲む」形式に統一している。llm_clients/* も <system>
-                # タグを「LLM が指示として認識すべき高優先度ブロック」として
-                # 扱うよう調整済み。
-                #
-                # 「直すべき」ではなく「対策済み」。 system role に変えると
-                # Gemini 互換が壊れる。同様の <system>…</system> 投入箇所が
-                # sea/runtime.py / sea/pulse_context.py / sea/runtime_nodes.py 等
-                # にもあるが、全て同じ理由でこの形になっている。
-                # ============================================================
-                if not prompt.lstrip().startswith("<system>"):
-                    prompt = f"<system>{prompt}</system>"
-                messages = list(base_msgs) + [{"role": "user", "content": prompt}]
+                # Playbook の action テキストは LLM への指示なので、role=system の
+                # システム通知として足す。本文はタグで囲まない — Gemini /
+                # Anthropic など会話の途中に system を置けないモデルへの変換
+                # (合言葉付きタグの user) はクライアント層 (llm_clients/
+                # system_notice.py) だけが行う (docs/intent/
+                # system_notice_delivery.md)。同じ本文が paired_action_text として
+                # 返事の記録に残り、次のターン以降は記録からの展開
+                # (saiverse_memory.adapter._expand_paired_action_payloads) が同じ
+                # 形の通知を組み直す。
+                messages = list(base_msgs) + [
+                    system_notice_message(prompt, "paired_action")
+                ]
             else:
                 messages = list(base_msgs)
 
@@ -6065,14 +6076,31 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 from saiverse.model_configs import get_model_system_prompt
                 _model_sys_prompt = get_model_system_prompt(_model_config_key)
                 if _model_sys_prompt:
-                    _injected = False
-                    for _mi, _msg in enumerate(messages):
-                        if _msg.get("role") == "system":
-                            # Create new dict to avoid mutating shared base_msgs
-                            messages[_mi] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
-                            _injected = True
-                            break
-                    if not _injected:
+                    # 足す先は head の system メッセージ (head の印で見分ける)。
+                    # head の無い列では先頭の system。会話の途中のシステム通知
+                    # (role=system) に足してはならない
+                    # (docs/intent/system_notice_delivery.md 不変条件 5)。
+                    from sai_memory.memory.storage import HEAD_MESSAGE_KEY
+
+                    def _is_target(_m: Any) -> bool:
+                        _meta = _m.get("metadata") if isinstance(_m, dict) else None
+                        return isinstance(_meta, dict) and bool(_meta.get(HEAD_MESSAGE_KEY))
+
+                    _target = next(
+                        (_mi for _mi, _msg in enumerate(messages) if _is_target(_msg)),
+                        None,
+                    )
+                    if (
+                        _target is None and messages
+                        and isinstance(messages[0], dict)
+                        and messages[0].get("role") == "system"
+                    ):
+                        _target = 0
+                    if _target is not None:
+                        _msg = messages[_target]
+                        # Create new dict to avoid mutating shared base_msgs
+                        messages[_target] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
+                    else:
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
 
@@ -6515,7 +6543,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if isinstance(result["tool_args"], dict):
                                 for arg_name, arg_value in result["tool_args"].items():
                                     state[f"{function_call_key}.args.{arg_name}"] = arg_value
-                                    LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                                    LOGGER.debug("[sea] Stored %s.args.%s (%s)", function_call_key, arg_name, _value_shape_for_log(arg_value))
                         # Set conditional_next flags
                         state["tool_called"] = True
                         state["has_speak_content"] = False
@@ -6529,7 +6557,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if isinstance(result["tool_args"], dict):
                             for key, value in result["tool_args"].items():
                                 state[f"tool_arg_{key}"] = value
-                                LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+                                LOGGER.debug("[sea] Expanded tool_arg_%s (%s)", key, _value_shape_for_log(value))
 
                     # Record tool call info for message protocol (function calling)
                     _tc_id = _resolve_tool_call_id(result)
@@ -6567,7 +6595,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if isinstance(result["tool_args"], dict):
                                 for arg_name, arg_value in result["tool_args"].items():
                                     state[f"{function_call_key}.args.{arg_name}"] = arg_value
-                                    LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                                    LOGGER.debug("[sea] Stored %s.args.%s (%s)", function_call_key, arg_name, _value_shape_for_log(arg_value))
                         # Set conditional_next flags
                         state["tool_called"] = True
                         state["has_speak_content"] = bool(text_key)
@@ -6582,7 +6610,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if isinstance(result["tool_args"], dict):
                             for key, value in result["tool_args"].items():
                                 state[f"tool_arg_{key}"] = value
-                                LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+                                LOGGER.debug("[sea] Expanded tool_arg_%s (%s)", key, _value_shape_for_log(value))
 
                     # Record tool call info for message protocol (function calling)
                     _tc_id = _resolve_tool_call_id(result)

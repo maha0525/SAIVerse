@@ -697,6 +697,10 @@ class SessionHeadSnapshot(Base):
       diff 既読状態も (persona, model) で分離される — 各 Session が「自分がまだ
       知らない変化」を独立に受け取るため (§3.1)。
     - LINE_ROLE: capture したラインの役割の記録 (参考情報、キーではない)。
+    - PASSPHRASE: システム通知の合言葉 (docs/intent/system_notice_delivery.md
+      不変条件 3)。head を作り直す (capture_all) たびにランダムに生成し直す。
+      合言葉を保存してよいのはこの列だけ。NULL = 列ができる前の行で、読み込んだ
+      後に head が作り直される。
 
     詳細: docs/intent/cached_head_architecture.md §3.3 / beat_execution_context.md §3.1
     """
@@ -707,6 +711,7 @@ class SessionHeadSnapshot(Base):
     SECTIONS_JSON = Column(Text, nullable=False)        # A: section.name -> serialized snapshot
     LAST_NOTIFIED_JSON = Column(Text, nullable=False)   # B: 最後に通知済みの各 Section snapshot
     SNAPSHOT_VERSION = Column(Integer, default=1, nullable=False)
+    PASSPHRASE = Column(String(64), nullable=True)      # システム通知の合言葉
     CAPTURED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

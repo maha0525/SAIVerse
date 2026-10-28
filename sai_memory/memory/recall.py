@@ -22,7 +22,6 @@ from sai_memory.config import (
 from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
     Message,
-    compose_message_content,
     get_embeddings_for_scope,
     get_messages_around,
     get_messages_last,
@@ -385,62 +384,6 @@ def semantic_recall_groups(
         )
 
     return groups
-
-
-def build_context_payload(
-    conn,
-    embedder: Embedder,
-    *,
-    thread_id: str,
-    resource_id: str | None,
-    last_messages: int,
-    semantic_enabled: bool,
-    topk: int,
-    range_before: int,
-    range_after: int,
-    scope: str,
-    user_query: str,
-) -> List[dict]:
-    """Build context payload with the following order:
-    [recall_group_system, recall_group_system, ..., recent_messages...,]
-
-    - recent_messages are strictly the latest N messages in the current thread
-    - recall groups are added as system messages before recent
-    """
-    # 1) recent: strictly from the same thread, chronological
-    recent = get_messages_last(conn, thread_id, last_messages)
-
-    # 2) recall groups: optional
-    payload: List[dict] = []
-    if semantic_enabled:
-        groups = semantic_recall_groups(
-            conn,
-            embedder,
-            user_query,
-            thread_id=thread_id,
-            resource_id=resource_id,
-            topk=topk,
-            range_before=range_before,
-            range_after=range_after,
-            scope=scope,
-            exclude_tags=["handy_tool", "spell"],
-        )
-        for _, bundle, score in groups:
-            # Build a single system message summarizing the group
-            lines: List[str] = ["以下はプロンプトから想起された過去のあなたの記憶です："]
-            for m in bundle:
-                role = ("assistant" if m.role == "model" else m.role)
-                lines.append(f"- {role} @ {m.created_at}:")
-                lines.append(compose_message_content(conn, m))
-            content = "\n".join(lines)
-            payload.append({"role": "system", "content": content})
-
-    # 3) append recent in chronological order
-    for m in recent:
-        role = ("assistant" if m.role == "model" else m.role)
-        payload.append({"role": role, "content": compose_message_content(conn, m)})
-
-    return payload
 
 
 def build_context(

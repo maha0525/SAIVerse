@@ -969,14 +969,14 @@ class ScheduleManager:
             else:
                 scheduled_time_str = f"{interval_sec}秒ごと"
 
-        prompt = f"""<system>
-スケジュールの実行時刻です。
+        # タグ無しの本文。記録は sea/runtime.py の run_meta_user が role=system で
+        # 残す (docs/intent/system_notice_delivery.md 不変条件 1)。
+        prompt = f"""スケジュールの実行時刻です。
 
 現在の日時: {local_now.strftime("%Y年%m月%d日 %H:%M")} ({persona_tz})
 スケジュールタイプ: {schedule.SCHEDULE_TYPE}
 スケジュール設定: {scheduled_time_str}
-スケジュールの説明: {schedule.DESCRIPTION or "（説明なし）"}
-</system>"""
+スケジュールの説明: {schedule.DESCRIPTION or "（説明なし）"}"""
         return prompt
 
     # 判断点経路の submitted=False reason のうち「意図して実行しない」と裁定済みの
@@ -1079,7 +1079,7 @@ class ScheduleManager:
         judgment_day_close) の場合は専用経路 —
         ``saiverse.autonomy_wiring.handle_scheduled_judgment`` — を通す。
         判断点は発火時に judgment_points が組む動的 args (situation_text /
-        response_schema) が必須で、通常の「<system> プロンプト + Playbook」の
+        response_schema) が必須で、通常の「スケジュール発火文 + Playbook」の
         submit_schedule では起動できないため。起床・就寝時刻の出所はこの
         PersonaSchedule 行そのもの (スケジュール未設定のペルソナは発火しない)。
 

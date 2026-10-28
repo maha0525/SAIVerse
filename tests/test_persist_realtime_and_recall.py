@@ -33,6 +33,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sai_memory.memory.storage import HEAD_MESSAGE_KEY
 from sai_memory.unified_recall import RecallHit
 
 PERSONA_ID = "tester"
@@ -284,7 +285,12 @@ def env(request, tmp_path, monkeypatch):
         )
         monkeypatch.setattr(
             "sea.head_pipeline.render_head_messages",
-            lambda *a, **k: [{"role": "system", "content": "HEAD"}],
+            # 本物の head と同じく head の印を持つ (sea/head_pipeline/integration
+            # の _compose_messages)。head は role ではなくこの印で見分ける。
+            lambda *a, **k: [{
+                "role": "system", "content": "HEAD",
+                "metadata": {HEAD_MESSAGE_KEY: True},
+            }],
         )
         monkeypatch.setattr("sai_memory.unified_recall.unified_recall", recall)
 
@@ -520,6 +526,38 @@ class TestPrefixInvariantOnTheRealPath:
         assert len(rows) == 2  # 一ターン一行
         assert json.loads(rows[0][4]) == [["memopedia", "page-a"]]
 
+    def test_kept_text_matches_the_system_notice_that_was_sent(self, env, caplog):
+        """そのターンのまとまりは role=system・タグ無しの通知として送られ、残した
+        ``rendered_text`` はその本文と一字も違わない。次のターンには同じ role・
+        同じ本文で記録から戻り、送る直前の機械検査
+        (find_unrecorded_messages) は WARN を出さない
+        (docs/intent/system_notice_delivery.md 不変条件 6 /
+        persist_realtime_and_recall.md 不変条件 1)。"""
+        import logging
+
+        _bind_realtime_spell(env)
+        env.recall.hits = [_hit("page-a", "海辺の町")]
+        with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+            turn1 = _run_turn(env, "海の話をしよう。")
+            env.recall.hits = [_hit("page-a", "海辺の町"), _hit("page-b", "灯台")]
+            turn2 = _run_turn(env, "灯台もあったね。")
+
+        sent1 = turn1[0][-1]
+        assert sent1["role"] == "system"
+        assert sent1["metadata"]["__system_notice__"] == "realtime_and_recall"
+        assert "<system" not in sent1["content"]
+        rows = _kept_rows(env)
+        assert rows[0][2] == sent1["content"]
+        restored = [
+            m for m in turn2[0]
+            if (m.get("metadata") or {}).get("__perception_batch_id__") == rows[0][0]
+        ]
+        assert len(restored) == 1
+        assert restored[0]["role"] == "system"
+        assert restored[0]["content"] == sent1["content"]
+        assert _UNRECORDED_WARNING not in caplog.text
+        assert _NOT_SENT_WARNING not in caplog.text
+
     def test_prefix_holds_after_gemini_conversion(self, env):
         """Gemini の送信形式 (system_instruction + contents) に変換した後も一致する。
 
@@ -603,9 +641,9 @@ class TestPrefixInvariantOnTheRealPath:
         """スペルの繰り返しあり・画像付きのスペル結果あり — 不変条件 1 (最初の
         呼び出しどうし) に加え、最後の呼び出しの列も次のターンの最初の呼び出しの
         列の先頭と一致する (SAIVerse の列と Gemini の送信形式の両方。往復の一致を
-        増やした直しの回帰で、不変条件 1 の外)。スペルの結果の本文は復元形
-        (``<system>\\n…\\n</system>``) で送られ、画像も記録に残って次のターンに
-        同じく付く。"""
+        増やした直しの回帰で、不変条件 1 の外)。スペルの結果は復元形 (role=system・
+        タグ無し本文 — docs/intent/system_notice_delivery.md) で送られ、画像も
+        記録に残って次のターンに同じく付く。"""
         _bind_realtime_spell(env)
         env.recall.hits = [_hit("page-a", "海辺の町")]
         env.llm.script = [
@@ -615,8 +653,10 @@ class TestPrefixInvariantOnTheRealPath:
         turn1 = _run_turn(env, "外を見て。")
         assert len(turn1) == 2
         result_msg = turn1[-1][-1]
-        assert result_msg["content"].startswith("<system>\n[Spell Result:")
-        assert result_msg["content"].endswith("\n</system>")
+        assert result_msg["role"] == "system"
+        assert result_msg["content"].startswith("[Spell Result:")
+        assert "<system>" not in result_msg["content"]
+        assert result_msg["metadata"]["__system_notice__"] == "spell_result"
         assert result_msg["metadata"]["media"][0]["path"] == env.image_path
         env.recall.hits = [_hit("page-a", "海辺の町"), _hit("page-b", "灯台")]
         turn2 = _run_turn(env, "何が見えた?")
@@ -859,7 +899,7 @@ class TestPrefixInvariantOnTheRealPath:
 
     def test_auto_pulse_with_spell_loop(self, env):
         """自律パルスのスペルの繰り返し — 周内の発言は、次のターンの履歴の復元
-        (自律の発言を user ロールの自律記録にする) と同じ形で送る。不変条件 1
+        (自律の発言を role=system の自律記録にする) と同じ形で送る。不変条件 1
         (最初の呼び出しどうし) に加え、最後の呼び出しの列も次のターンの最初の
         呼び出しの列の先頭と一致する (SAIVerse の列と Gemini の送信形式の両方。
         Codex 二巡目 #4 の直しの回帰で、不変条件 1 の外)。保存する元の発言は
@@ -874,8 +914,9 @@ class TestPrefixInvariantOnTheRealPath:
         round_msg = next(
             m for m in turn1[-1] if "散歩のメモを残そう。" in str(m.get("content"))
         )
-        assert round_msg["role"] == "user"
-        assert round_msg["content"].startswith("<system>[自律行動の記録]")
+        assert round_msg["role"] == "system"
+        assert round_msg["content"].startswith("[自律行動の記録]")
+        assert round_msg["metadata"]["__system_notice__"] == "autonomous_record"
         turn2 = _run_turn(env, "おかえり。")
         _assert_turn_prefix(turn0, turn1)
         _assert_turn_prefix(turn1, turn2)
@@ -2016,16 +2057,19 @@ class TestRecallExclusion:
         )
 
         kept = {
-            "role": "user",
-            "content": "<system>ふと浮かんだ記憶:\n- 古い記憶</system>",
+            "role": "system",
+            "content": "ふと浮かんだ記憶:\n- 古い記憶",
             "metadata": {
+                "__system_notice__": "realtime_and_recall",
                 CONSUMED_PERCEPTION_KEY: True,
                 PERSISTED_REALTIME_AND_RECALL_KEY: True,
             },
         }
         perception = {
-            "role": "user", "content": "<system>[システム通知]\n雨が降ってきた</system>",
-            "metadata": {CONSUMED_PERCEPTION_KEY: True},
+            "role": "system", "content": "[システム通知]\n雨が降ってきた",
+            "metadata": {
+                "__system_notice__": "perception", CONSUMED_PERCEPTION_KEY: True,
+            },
         }
         # 自律のターン (ユーザーの発言が無い): 末尾の知覚は種になるが、残した行はならない
         messages = [
@@ -2065,19 +2109,21 @@ class TestArasujiMaterial:
                                  rendered_text="[システム通知]\n雨が降ってきた")
         insert_realtime_and_recall_batch(
             conn, consumed_at=101,
+            # 残す文面はタグ無し (docs/intent/system_notice_delivery.md —
+            # sea.runtime_context.compose_turn_realtime_and_recall_content の形)
             rendered_text=(
-                "<system>\n## リアルタイム情報\n- 現在時刻: 10:00\n</system>\n"
-                "<system>ふと浮かんだ記憶:\n- 海辺の町</system>"
+                "## リアルタイム情報\n- 現在時刻: 10:00\n\n"
+                "ふと浮かんだ記憶:\n- 海辺の町"
             ),
             recalled_keys=[("memopedia", "p1")],
         )
         insert_realtime_and_recall_batch(
             conn, consumed_at=102,
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:01\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:01",
         )
         insert_realtime_and_recall_batch(
             conn, consumed_at=103,
-            rendered_text="<system>\n## リアルタイム情報\n- 視界: " + "長" * 600 + "\n</system>",
+            rendered_text="## リアルタイム情報\n- 視界: " + "長" * 600,
         )
         return conn
 
@@ -2268,13 +2314,13 @@ class TestArasujiMaterial:
         ).fetchone()[0]
         insert_realtime_and_recall_batch(
             conn, consumed_at=1000,
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:00\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:00",
             boundary_created_at=1000, boundary_rowid=u1_rowid,
         )
         # 境界の発言が記録に無い行 (削除済み) は after_message_id を持たない。
         insert_realtime_and_recall_batch(
             conn, consumed_at=1000,
-            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:01\n</system>",
+            rendered_text="## リアルタイム情報\n- 現在時刻: 10:01",
             boundary_created_at=1000, boundary_rowid=9999,
         )
         # 知覚のまとめも境界の発言を引く (同じ規則で次の発言の前に収まる)。
@@ -2623,9 +2669,13 @@ def _gemini_image_parts(messages: List[Dict[str, Any]]) -> tuple:
 def _images_in(messages: List[Dict[str, Any]]) -> int:
     from saiverse.media_utils import iter_image_media
 
+    # 数えないのは head の system メッセージだけ。会話の途中のシステム通知
+    # (role=system — 知覚・スペルの結果など) の画像はクライアント層で通知と一緒に
+    # 送られる (docs/intent/system_notice_delivery.md)。
     return sum(
         len(iter_image_media(m.get("metadata"))) for m in messages
-        if isinstance(m, dict) and m.get("role") != "system"
+        if isinstance(m, dict)
+        and not (isinstance(m.get("metadata"), dict) and m["metadata"].get("__head__"))
     )
 
 
@@ -2753,8 +2803,10 @@ class TestToolResultBeforeTheFirstCall:
         ]
         assert len(tool_msgs) == 1
         assert tool_msgs[0]["id"]
-        assert tool_msgs[0]["content"].startswith(f"<system>\ntool '{CAMERA_TOOL}' {word}:")
-        assert tool_msgs[0]["content"].endswith("\n</system>")
+        # 復元形 = role=system・タグ無し本文 (docs/intent/system_notice_delivery.md)
+        assert tool_msgs[0]["role"] == "system"
+        assert tool_msgs[0]["content"].startswith(f"tool '{CAMERA_TOOL}' {word}:")
+        assert tool_msgs[0]["metadata"]["__system_notice__"] == "tool_result"
         with env.adapter._db_lock:
             stored = env.adapter.conn.execute(
                 "SELECT role FROM messages WHERE id = ?", (tool_msgs[0]["id"],),
@@ -2762,7 +2814,8 @@ class TestToolResultBeforeTheFirstCall:
         assert [r[0] for r in stored] == ["system"]
 
     def test_off_model_tool_result_is_not_kept(self, env, monkeypatch):
-        """OFF のモデルは今までどおり: 記録に残さず、今までの文面で送る。"""
+        """OFF のモデルは今までどおり記録に残さない (送る形は全モデル共通の
+        role=system のシステム通知 — docs/intent/system_notice_delivery.md)。"""
         env.persona.model = OFF_MODEL
         env.persona.lightweight_model = OFF_MODEL
         _register_camera(env, monkeypatch)
@@ -2771,8 +2824,9 @@ class TestToolResultBeforeTheFirstCall:
             m for m in turn1[0] if f"tool '{CAMERA_TOOL}' result:" in str(m.get("content"))
         ]
         assert tool_msgs == [{
-            "role": "user",
-            "content": f"<system>tool '{CAMERA_TOOL}' result:\n写真を撮った</system>",
+            "role": "system",
+            "content": f"tool '{CAMERA_TOOL}' result:\n写真を撮った",
+            "metadata": {"__system_notice__": "tool_result"},
         }]
         with env.adapter._db_lock:
             stored = env.adapter.conn.execute(
@@ -2797,27 +2851,38 @@ _NOT_SENT_WARNING = "the record has a row that the first send of this turn does 
 # ---------------------------------------------------------------------------
 
 
-SNAPSHOT_TOOL = "get_situation_snapshot"
+SNAPSHOT_TOOL = "situation_recorder"
 _CHANGE_MARK = "【状況変化】"
 
 
-def _use_real_situation_snapshot(env) -> None:
-    """本物の get_situation_snapshot (状況の変化を記録に書く) が動く最小の世界。
+def _register_situation_recorder(env, monkeypatch) -> None:
+    """ツールの実行中に記録へ一行書く偽のツール (TOOL ノードから呼ぶ)。
 
-    ツールは persona_context の manager から自分を引き、記録 (実 SAIMemoryAdapter
-    のメモリ内でない一時ファイルの SQLite) の作業メモリと比べて、変化があれば
-    ``<system>【状況変化】…</system>`` の行を記録に書く。
+    以前は本物の get_situation_snapshot (状況の変化を記録に書く) を使っていたが、
+    呼び出し元の無いツールとして削除した (docs/intent/system_notice_delivery.md
+    「掃除」)。この場面で見たいのは「ツールの中で書かれた記録の行」が送る列の
+    どこに並ぶかなので、同じことをする偽のツールに置き換える。書く行の形は今の
+    システム通知 (role=system・タグ無し本文 + 識別の印)。
     """
-    env.manager.all_personas = {PERSONA_ID: env.persona}
-    env.manager.user_presence_status = "online"
-    env.persona.manager_ref = env.manager
-    env.persona.timezone_name = "UTC"
-    env.persona.buildings = {}
-    env.persona.id_to_name_map = {}
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+    from tools import TOOL_REGISTRY
+
+    def fake_situation_recorder(**kwargs):
+        env.persona.sai_memory.append_persona_message({
+            "role": "system",
+            "content": f"{_CHANGE_MARK}ユーザー: オフライン → オンライン",
+            "metadata": {
+                "tags": ["internal", "situation_change"],
+                SYSTEM_NOTICE_KEY: "situation_change",
+            },
+        })
+        return ("現在の状況: ユーザーはオンライン", {"has_change": True})
+
+    monkeypatch.setitem(TOOL_REGISTRY, SNAPSHOT_TOOL, fake_situation_recorder)
 
 
 def _situation_snapshot_then_llm_playbook():
-    """TOOL (状況の変化を記録する get_situation_snapshot) → LLM。"""
+    """TOOL (ツールの中で状況の変化を記録に書く) → LLM。"""
     return _custom_playbook([
         {
             "id": "snap", "type": "tool", "action": SNAPSHOT_TOOL,
@@ -2882,7 +2947,7 @@ def _prepare_scene(env, monkeypatch, scene: str) -> Dict[str, Any]:
         _register_camera(env, monkeypatch)
         kwargs["playbook"] = _tool_then_llm_playbook()
     elif scene == "situation_change":
-        _use_real_situation_snapshot(env)
+        _register_situation_recorder(env, monkeypatch)
         kwargs["playbook"] = _situation_snapshot_then_llm_playbook()
     elif scene == "tool_memorize_tool":
         _register_camera(env, monkeypatch)
@@ -2925,8 +2990,8 @@ def test_first_send_matches_the_next_turn(env, monkeypatch, scene):
     """不変条件 1: どの場面でも、ターンの最初の呼び出しの列が次のターンの最初の
     呼び出しの列の先頭と一字一句同じ (SAIVerse の列と Gemini の送信形式の両方)。
 
-    ``situation_change`` (本物の get_situation_snapshot が状況の変化を記録に
-    書く) と ``tool_memorize_tool`` (MEMORIZE の行が二つの TOOL の結果の間に
+    ``situation_change`` (ツールの中で状況の変化を記録に書く) と
+    ``tool_memorize_tool`` (MEMORIZE の行が二つの TOOL の結果の間に
     記録される) は Codex 六巡目の指摘の場面で、送る列を記録に揃える前は
     次のターンの先頭と割れた。"""
     turn1, turn2 = _run_scene_turns(env, monkeypatch, scene)
@@ -3061,10 +3126,13 @@ def test_first_send_check_reports_an_unrecorded_message(env, monkeypatch, caplog
     }], name="action_pb")
     with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
         turn = _run_turn(env, "こんにちは。", playbook=playbook)
+    # action の指示文は role=system・タグ無しのシステム通知として足される
+    # (docs/intent/system_notice_delivery.md)
     assert [(kind, m["content"]) for kind, m in seen[0]] == [
-        (runtime_context.NOT_KEPT, "<system>手短に答えて。</system>"),
+        (runtime_context.NOT_KEPT, "手短に答えて。"),
     ]
-    assert turn[0][-1]["content"] == "<system>手短に答えて。</system>"
+    assert turn[0][-1]["role"] == "system"
+    assert turn[0][-1]["content"] == "手短に答えて。"
     assert _UNRECORDED_WARNING in caplog.text
     assert "手短に答えて。" in caplog.text
 
@@ -3079,10 +3147,11 @@ def test_off_model_and_nested_playbooks_are_not_aligned(env, monkeypatch):
     _register_camera(env, monkeypatch)
     turn = _run_turn(env, "写真を撮って。", playbook=_tool_then_llm_playbook())
     assert seen == []
-    # OFF のモデルでは TOOL の結果は記録に残らない今までの形のまま、最後に並ぶ
+    # OFF のモデルでは TOOL の結果は記録に残らないまま、最後に並ぶ
     assert turn[0][-1] == {
-        "role": "user",
-        "content": f"<system>tool '{CAMERA_TOOL}' result:\n写真を撮った</system>",
+        "role": "system",
+        "content": f"tool '{CAMERA_TOOL}' result:\n写真を撮った",
+        "metadata": {"__system_notice__": "tool_result"},
     }
 
     env.persona.model = ON_MODEL

@@ -64,7 +64,7 @@
       "id": "record",
       "type": "memorize",
       "action": "{last}",
-      "role": "user",
+      "role": "system",
       "tags": [
         "building_move",
         "playbook_result"

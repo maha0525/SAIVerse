@@ -71,15 +71,17 @@ def _resolve_target(
 
 
 def _build_directive(target_display: str, gist: str) -> str:
-    """言葉を書く 1 Beat への指示 (user role + <system> の統一形式)。"""
+    """言葉を書く 1 Beat への指示の本文 (タグ無し)。
+
+    送る列には role=system のシステム通知として足す — 送り先のモデルに合わせた
+    変換はクライアント層が行う (docs/intent/system_notice_delivery.md)。
+    """
     gist_line = f"伝えたいことのメモ: {gist}\n" if gist else ""
     return (
-        "<system>\n"
         f"あなたはいま、この場で「{target_display}」に向けて声をかけようとしています。\n"
         f"{gist_line}"
         "相手に届けたい言葉だけを、普段のあなたの声で書いてください。\n"
-        "スペルは使えません。\n"
-        "</system>"
+        "スペルは使えません。"
     )
 
 
@@ -174,7 +176,9 @@ def tell(target: str, gist: str = "") -> str:
             persona_voiced=True,
         ))
         directive = _build_directive(target_display, (gist or "").strip())
-        messages.append({"role": "user", "content": directive})
+        from sai_memory.memory.storage import system_notice_message
+
+        messages.append(system_notice_message(directive, "tell_directive"))
 
         state: Dict[str, Any] = {
             "_pulse_id": pulse_id,
@@ -196,7 +200,7 @@ def tell(target: str, gist: str = "") -> str:
             state["_execution_context"] = execution_context
 
         pulse_ctx.append(PulseLogEntry(
-            role="user", content=directive,
+            role="system", content=directive,
             node_id="tell_directive", playbook_name=_PLAYBOOK_NAME,
         ))
         result = llm_client.generate(

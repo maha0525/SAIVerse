@@ -1284,29 +1284,94 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
-def wrap_system_record_content(content: str) -> str:
-    """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。
+#: システム通知の識別に使う metadata の鍵 (docs/intent/system_notice_delivery.md
+#: 不変条件 1・4)。値はその通知を作った系統の ASCII snake_case 名 (例:
+#: ``"schedule"``, ``"building_event"``, ``"subline_report"``)。供給側は
+#: role=system・タグ無し本文と一緒にこの鍵を書く。``__`` で始まるので、送り手から
+#: 届く metadata からは api/routes/chat.py の ``_client_metadata`` が必ず取り除く
+#: (サーバーだけが書ける)。
+SYSTEM_NOTICE_KEY = "__system_notice__"
 
-    履歴の復元 (saiverse_memory.adapter._payload_from_message_locked) と、記録と
-    同じものをその場で送る経路 (スペルの結果・事前スペルの結果 —
-    sea/runtime_llm) が**同じこの一枚**を通る。送ったときの本文と、保存して
-    次のターンに復元される本文が一字でも違うと、前回の送信が今回の送信の
-    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 2)。
-    ``content`` は :func:`compose_message_content` を通した後の文字列。
-    """
-    if content:
-        return f"<system>\n{content}\n</system>"
-    return "<system></system>"
+#: 起動時の移行 (database/system_notice_migration.py) が、システム通知か発話かを
+#: 決められずにレポート送りにした行 (タグの対応が曖昧な行・系統を判定できなかった
+#: 行) の metadata に付ける印。値は残した理由の文字列。本文と role は変えない。
+#: この印を持つ行は「実会話」(``_conversation_exclusion``) から外れ、コア記憶の
+#: scene・自動想起・Chronicle の発話の判定に混ざらない。レポートを見て行を手で
+#: 直したら (発話なら発話のまま、通知なら role=system と ``SYSTEM_NOTICE_KEY`` に
+#: して)、この鍵を metadata から消せば普通の行の扱いに戻る。``__`` で始まるので
+#: ``SYSTEM_NOTICE_KEY`` と同じくサーバーだけが書ける。
+SYSTEM_NOTICE_REVIEW_KEY = "__system_notice_review__"
+
+#: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
+#: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
+#: ``_compose_messages`` が人格指示の system メッセージの metadata に ``True`` で
+#: 付ける。LLM クライアントが「先頭の system 欄へまとめる system」と「会話の途中の
+#: システム通知」を分ける判定は、位置ではなくこの印で行う (履歴が空のターンでは、
+#: 冒頭の通知が人格指示と位置では区別できないため)。記録には保存されない。
+HEAD_MESSAGE_KEY = "__head__"
+
+#: head の system メッセージの metadata に載せる合言葉の実際の値の鍵 (不変条件 3)。
+#: 値は ``SessionHeadSnapshot.PASSPHRASE`` と同じ。組み上がった messages 列と
+#: 一緒にクライアント層まで運ばれ、llm_clients/system_notice.py の最終変換が読んで
+#: 剥がす。llm_io.log を書く saiverse/logging_config.py の
+#: ``_sanitize_messages_for_log`` もこの鍵を落とす。
+SYSTEM_NOTICE_PASSPHRASE_KEY = "__system_notice_passphrase__"
+
+#: head の本文に書く合言葉の仮置き文字列。実際の値への置換はクライアント層の
+#: 最終変換 (llm_clients/system_notice.py) が、head の印を持つ system メッセージの
+#: 本文に対してだけ行う — SAIVerse 層で messages を写す口 (llm_io.log・
+#: /api/chat/preview) には仮置きのまま出る。
+SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER = "{{SYSTEM_NOTICE_PASSPHRASE}}"
 
 
 def presented_system_record_content(text: str) -> str:
-    """これから system ロールで保存する ``text`` が、復元されたときに出る本文。
+    """これから system ロールで保存する ``text`` が、記録から復元されたときに出る本文。
 
     リンク付きスレッドの抜粋などを持たない素の記録の
-    :func:`compose_message_content` (前後の空白を落とす) →
-    :func:`wrap_system_record_content` と同じ結果。
+    :func:`compose_message_content` (前後の空白を落とす) と同じ結果。記録と
+    同じものをその場で送る経路 (スペルの結果・事前スペルの結果・TOOL ノードの
+    結果・子ラインの結果報告) はこの一枚を通す — 送ったときの本文と、保存して
+    次のターンに復元される本文 (saiverse_memory.adapter.
+    _payload_from_message_locked) が一字でも違うと、前回の送信が今回の送信の
+    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 1)。
     """
-    return wrap_system_record_content((text or "").strip())
+    return (text or "").strip()
+
+
+def system_notice_message(
+    content: str, kind: str, *, metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """会話の途中のシステム通知を、messages 列に出す形 (role=system・タグ無し) にする。
+
+    docs/intent/system_notice_delivery.md「読み出しと messages 列の組み立て」。
+    本文はタグで囲まない — 送り先のモデルに合わせた変換 (そのまま送るか、
+    合言葉付きタグの user にするか) はクライアント層 (llm_clients/
+    system_notice.py) だけが行う。``kind`` は :data:`SYSTEM_NOTICE_KEY` の値
+    (その通知を作った系統の ASCII snake_case 名)。``metadata`` に渡した鍵
+    (media・内部の印など) はそのまま写す。本文は加工しない — 記録から復元される
+    本文と揃える必要がある呼び出し元は :func:`presented_system_record_content`
+    を通してから渡す。
+    """
+    meta: Dict[str, Any] = dict(metadata) if metadata else {}
+    meta[SYSTEM_NOTICE_KEY] = kind
+    return {"role": "system", "content": content, "metadata": meta}
+
+
+def is_system_notice(msg: Any) -> bool:
+    """messages 列のメッセージが、会話の途中のシステム通知か。
+
+    role=system で、識別用の metadata (:data:`SYSTEM_NOTICE_KEY`) を持つもの。
+    head が組んだ system メッセージ (:data:`HEAD_MESSAGE_KEY`) は通知ではない。
+    """
+    if not isinstance(msg, dict):
+        return False
+    role = msg.get("role")
+    if not (isinstance(role, str) and role.lower() == "system"):
+        return False
+    meta = msg.get("metadata")
+    if not isinstance(meta, dict):
+        return False
+    return bool(meta.get(SYSTEM_NOTICE_KEY)) and not meta.get(HEAD_MESSAGE_KEY)
 
 
 def compose_message_content(
@@ -2670,10 +2735,13 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     role: 会話本文 (user 発話 / persona 応答) のみ対象。persona 応答は歴史的に
     'model' (Gemini 系呼称) と 'assistant' (OpenAI 系呼称・インポートログ) の
     両方が実データに存在する (実 DB 実査で確認、2026-07-04)。'system'/'host' は
-    会話本文ではないため除外する。
-    content が '<system>' で始まる行は、role=user で保存されるシステム通知
-    (Track切替通知等、event_message タグを持たない世代がある) なので除外する。
-    口調のアンカー (scene) にシステム通知が混入すると手本として劣化するため。
+    会話本文ではないため除外する。システム通知は role=system で保存する決まり
+    (docs/intent/system_notice_delivery.md 不変条件 1) なので、この role の条件で
+    除外される — 口調のアンカー (scene) にシステム通知が混入すると手本として
+    劣化するため。本文の文字列 (``<system>`` で始まるか) では判定しない
+    (同 不変条件 2)。本文に ``<system>`` を埋め込んで role=user で保存していた
+    旧世代の行 (Track切替通知等、event_message タグを持たない世代がある) は、
+    起動時の移行 (database/system_notice_migration.py) で role=system へ正規化する。
 
     ``get_conversation_window_around`` (コア記憶 scene) と
     ``get_conversation_messages_between`` (範囲クリップの読み出し) が共用する
@@ -2683,6 +2751,10 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
     編纂 (``chronicle_eligibility_filter``) が 2026-08-29 裁定でタグ除外を
     やめたのとは独立の境界で、口調のアンカー (scene) に機構の定型文を
     混ぜない目的は変わらないため。
+
+    移行が確認待ちとしてレポート送りにした行 (``SYSTEM_NOTICE_REVIEW_KEY`` の印を
+    持つ行) も除外する — role=user のまま残るので role の条件では外れないが、
+    中身は機構の文でありうるため。
     """
     tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
@@ -2693,8 +2765,8 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             SELECT 1 FROM json_each(metadata, '$.tags')
             WHERE json_each.value IN ({tag_placeholders})
         )
+        AND json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEW_KEY}"') IS NULL
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        AND content NOT LIKE '<system>%'
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
 
@@ -2706,12 +2778,13 @@ def filter_real_conversation_ids(
 
     定義は ``_conversation_exclusion`` を名指しで再利用する — role が
     user/model/assistant で、機構タグ (handy_tool / spell / event_message) も
-    line_role 除外も ``'<system>'`` 頭の本文も持たない行だけが「発話」。
+    line_role 除外も持たない行だけが「発話」。
 
     吸収の機構 E (docs/intent/chronicle_coverage_gaps.md) が「吸収先の無い
-    run を単独編纂してよいか」の線引きに使う。role だけで判定してはならない:
-    機構の記録 (入室通知等) は role=user で保存されており、role 判定では
-    「発話あり」に化けて捏造あらすじの温床に戻る。
+    run を単独編纂してよいか」の線引きに使う。機構の記録 (入室通知等) が
+    「発話あり」に化けると捏造あらすじの温床に戻る。システム通知は role=system
+    で保存する決まり (docs/intent/system_notice_delivery.md 不変条件 1) なので
+    role の条件で外れ、機構タグの条件がその二重の柵になる。
     """
     ids = [str(m) for m in message_ids]
     if not ids:
@@ -2743,7 +2816,7 @@ def real_conversation_filter() -> Tuple[str, Tuple[str, ...]]:
     - ``_conversation_exclusion()`` — SCENE / 範囲クリップと同じ実会話定義
       (Stelis スレッド除外・handy_tool/spell/event_message タグ除外・
       sub_line/meta_judgment/nested line_role 除外・role は user/model/assistant
-      のみ・'<system>' 始まり本文の除外)
+      のみ = role=system のシステム通知の除外)
     - 通常履歴 (``get_messages_last``) と同じ ``scope='discardable'`` 除外
 
     列は messages の非修飾列名で参照する。JOIN 先で使う場合は、相手側に
@@ -2940,19 +3013,8 @@ def search_conversation_messages(
     - ``date_from_ts`` / ``date_to_ts``: created_at の範囲 (Unix 秒、両端含む)。
     - 戻り値は created_at 降順 (新しい順)、最大 ``limit`` 件。
     """
-    tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
-    role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
-    exclusion_clause = f"""
-        thread_id NOT IN (SELECT thread_id FROM stelis_threads)
-        AND role IN ('user', 'model', 'assistant')
-        AND NOT EXISTS (
-            SELECT 1 FROM json_each(metadata, '$.tags')
-            WHERE json_each.value IN ({tag_placeholders})
-        )
-        AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
-        AND content NOT LIKE '<system>%'
-    """
-    params: List[Any] = list(MECHANISM_TAGS) + list(CHRONICLE_EXCLUDED_LINE_ROLES)
+    exclusion_clause, exclusion_params = _conversation_exclusion()
+    params: List[Any] = list(exclusion_params)
 
     where_parts = [exclusion_clause]
     for kw in keywords:

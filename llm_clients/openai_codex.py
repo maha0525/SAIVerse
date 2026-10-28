@@ -36,6 +36,7 @@ from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .base import LLMClient, ToolSpecFormat
+from .exceptions import InvalidRequestError
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -69,6 +70,11 @@ from .output_phases import (
     output_phases_for_sent_text,
 )
 from .schema_utils import normalize_schema_for_strict_json_output
+from .system_notice import (
+    accepts_mid_conversation_system,
+    redact_passphrase,
+    system_notice_passphrase,
+)
 from .utils import positive_token_count
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
@@ -489,11 +495,27 @@ class OpenAICodexClient(LLMClient):
         return out
 
     def _build_input(
-        self, messages: List[Dict[str, Any]]
+        self, messages: List[Dict[str, Any]], passphrase: str = "",
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        """Lower SAIVerse-style messages into Responses API input items."""
+        """Lower SAIVerse-style messages into Responses API input items.
+
+        ``passphrase`` is this request's head passphrase. The strings made here
+        from non-string values (a dict of tool arguments turned into JSON, a
+        dict tool result or content part turned into text) did not exist when
+        :func:`llm_clients.system_notice.present_system_notices` masked the
+        passphrase, so they are masked here after the conversion
+        (docs/intent/system_notice_delivery.md invariant 3). Masking an
+        already masked string changes nothing. Tool results, tool arguments and
+        assistant text are masked; system text (the head carries the
+        passphrase) and user content (a tagged notice carries it in its
+        ``pass`` attribute) are left as the preparer made them.
+        """
         instructions_parts: List[str] = []
         input_items: List[Dict[str, Any]] = []
+
+        def _flat(content: Any) -> str:
+            return redact_passphrase(self._flatten_content_text(content), passphrase)
+
         for msg in messages:
             role = msg.get("role")
 
@@ -502,13 +524,13 @@ class OpenAICodexClient(LLMClient):
                     {
                         "type": "function_call_output",
                         "call_id": msg.get("tool_call_id") or msg.get("call_id") or "",
-                        "output": self._flatten_content_text(msg.get("content")),
+                        "output": _flat(msg.get("content")),
                     }
                 )
                 continue
 
             if role == "assistant" and msg.get("tool_calls"):
-                text_part = self._flatten_content_text(msg.get("content"))
+                text_part = _flat(msg.get("content"))
                 if text_part:
                     input_items.append(
                         {
@@ -527,18 +549,20 @@ class OpenAICodexClient(LLMClient):
                             "type": "function_call",
                             "call_id": tc.get("id") or "",
                             "name": fn.get("name", ""),
-                            "arguments": args_value or "",
+                            "arguments": redact_passphrase(args_value or "", passphrase),
                         }
                     )
                 continue
 
             if role == "system":
+                # system は伏せない — head の本文に合言葉が正当に入る
                 text = self._flatten_content_text(msg.get("content"))
                 if text:
                     instructions_parts.append(text)
                 continue
 
             if role == "user":
+                # user は伏せない — タグ化した通知の pass 属性に合言葉が正当に入る
                 parts = self._user_content_to_parts(msg.get("content"))
                 input_items.append(
                     {
@@ -550,7 +574,7 @@ class OpenAICodexClient(LLMClient):
                 continue
 
             if role == "assistant":
-                text = self._flatten_content_text(msg.get("content"))
+                text = _flat(msg.get("content"))
                 # A past Codex response that arrived as several output messages
                 # is sent back as the same messages with their phase, but only
                 # when the recorded split still joins to the exact text being
@@ -619,18 +643,33 @@ class OpenAICodexClient(LLMClient):
                 max_image_bytes=self._max_image_bytes,
                 max_image_embeds=self._max_image_embeds,
                 convert_system_to_user=False,
+                # 会話の途中のシステム通知 (head より後ろの role=system) は
+                # instructions へ寄せず、元の位置で合言葉付きタグの user にする
+                # (Responses API は input の途中に system を置けない —
+                # docs/intent/system_notice_delivery.md 不変条件 5)。
+                convert_system_notices=not accepts_mid_conversation_system(
+                    "openai_codex", None,
+                ),
                 reasoning_passback_field=None,
                 # _build_input reads the per-message split of past assistant
                 # turns from here; the preparer drops metadata otherwise.
                 keep_metadata_keys=(OUTPUT_PHASES_METADATA_KEY,),
             )
         except Exception as exc:  # noqa: BLE001
-            LOG.warning(
-                "prepare_openai_messages failed; falling back to raw messages "
-                "(image attachments may be dropped): %s",
-                exc,
-            )
-            return messages
+            # 元の messages のまま送り続けない (fail-closed)。この変換は画像の展開
+            # だけでなく、システム通知を元の位置で合言葉付きタグにし、head の合言葉の
+            # 仮置きを置き換え、通知以外の本文の合言葉を伏せる
+            # (docs/intent/system_notice_delivery.md)。元の messages では、通知が
+            # instructions へ寄って位置を失い、伏せ字の無い本文が送られる。
+            LOG.error("prepare_openai_messages failed; refusing to send: %s", exc)
+            raise InvalidRequestError(
+                f"Codex request preparation failed: {exc}",
+                original_error=exc,
+                user_message=(
+                    "送信するメッセージの変換に失敗したため、送信を中止しました。"
+                    "ログを確認してください。"
+                ),
+            ) from exc
 
     def _build_body(
         self,
@@ -640,8 +679,10 @@ class OpenAICodexClient(LLMClient):
         response_schema: Optional[Dict[str, Any]],
         reasoning_effort: Optional[str],
     ) -> Dict[str, Any]:
+        # 合言葉は変換の前の列の head から取る (変換は head の合言葉の metadata を剥がす)
+        passphrase = system_notice_passphrase(messages)
         prepared_messages = self._expand_attachments(messages)
-        instructions, input_items = self._build_input(prepared_messages)
+        instructions, input_items = self._build_input(prepared_messages, passphrase)
         body: Dict[str, Any] = {
             "model": self.model,
             "input": input_items,
@@ -1138,10 +1179,10 @@ class OpenAICodexClient(LLMClient):
             try:
                 return json.loads(data_str)
             except json.JSONDecodeError:
-                LOG.debug(
-                    "could not parse SSE payload: %s",
-                    redact_secrets(data_str, getattr(resp, _SENT_TOKEN_ATTR, None))[:200],
-                )
+                # 中身は書かない (大きさだけ)。payload は生成途中の断片を運ぶので、
+                # 冒頭で切ると合言葉を復唱した応答の断片がログに残り、行ごとの
+                # 伏せ字に掛からない (docs/intent/system_notice_delivery.md 不変条件 3)。
+                LOG.debug("could not parse SSE payload (%d chars)", len(data_str))
                 return None
 
         for chunk in resp.iter_content():

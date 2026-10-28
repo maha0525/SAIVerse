@@ -303,7 +303,7 @@ Playbook 数が増えた場合、以下の対応:
   - SAIMemory には残るので recall や Chronicle / Memopedia 連携には使える
 - **`report_to_parent`**: `line_role="main_line"` + `scope="committed"` で記録される
   - 親メインラインの「会話の一部」として次の Pulse から自動的にプロンプトに載る
-  - `<system>` タグ付き user メッセージとして注入される (既存 sub_play 挙動を踏襲)
+  - `<system>` タグ付き user メッセージとして注入される (既存 sub_play 挙動を踏襲)。2026-10-28 から形は role=system のシステム通知 (`__system_notice__` = `subline_report`、タグ無し本文) で、会話の途中の system を受け取れないモデルへはクライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](../system_notice_delivery.md))
 
 ### サブライン内の `<system>` タグ命令や構造化出力応答
 
@@ -470,7 +470,7 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 ### なぜこの形にするか
 
 - **既存 Spell loop の機構 (report_to_parent / media transport / line_role 自動分離) をそのまま流用できる**: 新規ランタイム経路は不要、`tools/run_playbook.py` を Spell loop の入口で直接呼べばいい
-- **「ペルソナが意思決定する」哲学を完全には壊さない**: Spell 結果がメインライン LLM に流入するという形は、LLM が自分で `run_playbook` を呼んだ場合と同形。`<system>` タグ付き user メッセージで「ユーザー要望により実行しました」と添えれば、ペルソナから見ても文脈が自然に繋がる
+- **「ペルソナが意思決定する」哲学を完全には壊さない**: Spell 結果がメインライン LLM に流入するという形は、LLM が自分で `run_playbook` を呼んだ場合と同形。`<system>` タグ付き user メッセージで「ユーザー要望により実行しました」と添えれば、ペルソナから見ても文脈が自然に繋がる (2026-10-28 からは、添えるならサーバー側のシステム通知として置く — 下の「`<system>` タグ付き user メッセージの併用」の改訂)
 - **「強制実行」の哲学的歪みを最小化**: ペルソナ側の意思決定ノードはそのまま残り、結果を踏まえて応答する自由は保たれる。「LLM 判断をバイパスして機械的に実行」する範囲は Spell 1 回分だけ
 
 ### `pre_spells` の構文
@@ -490,6 +490,8 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 - 個々の Spell 実行失敗は通常の Spell loop と同じく、エラー文字列が user message として親 context に注入される
 
 ### `<system>` タグ付き user メッセージの併用
+
+> **2026-10-28 の改訂**: この節の案 (user メッセージの本文に `<system>` の文脈ヒントを埋める) は、今の規則では成り立たない。システム通知は role=system・タグ無し本文 + 識別用の metadata `__system_notice__` で、サーバー側だけが作る ([system_notice_delivery.md](../system_notice_delivery.md) 不変条件 2・4)。user の本文に書かれた `<system>` は合言葉を持たないので、ペルソナには「書き手がそう書いたただの文章」として読まれる。文脈ヒントが要るなら、サーバー側で独立したシステム通知として置く。以下は起草時の案の記録。
 
 UI が `pre_spells` を送る時、合わせて user メッセージ側に文脈ヒントを埋めると自然:
 

@@ -273,10 +273,17 @@ def _transcribe_message(
         cleaned = re.sub(r"<[^>]+>", "", content).strip()
         if not cleaned:
             return ("consumed", None, False)
+        # システム通知は role=system・タグ無し本文 + 識別の印で保存する
+        # (docs/intent/system_notice_delivery.md 不変条件 1)。
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         entry = {
-            "role": "user",
-            "content": f"<system>[{building_name}] {cleaned}</system>",
-            "metadata": {"tags": ["internal", "event_message"]},
+            "role": "system",
+            "content": f"[{building_name}] {cleaned}",
+            "metadata": {
+                "tags": ["internal", "event_message"],
+                SYSTEM_NOTICE_KEY: "building_event",
+            },
         }
         ts_value = m.get("timestamp")
         if isinstance(ts_value, str):

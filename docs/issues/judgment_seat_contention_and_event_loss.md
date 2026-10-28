@@ -63,7 +63,7 @@
 
 **発見**: 2026-08-14（同レビュー high 指摘 F4）
 
-回収の応対（`_dispatch_recovered_event_response`）は外部イベント用に作られており、判断 context の種別を見ない。別行動中のユーザー発話の仲裁（`utterance_conflict`）が席を残したまま落ち、回復 tick が engage_now を出すと、**ユーザーの発話が `<system>[外部イベント通知]` + `track_user_conversation` の形で流し込まれる**。応答は届くが、対ユーザー会話 Track は running にならず、会話の出来事も開かず、Track 切替通知も出ない — 応答と帳簿が食い違う。
+回収の応対（`_dispatch_recovered_event_response`）は外部イベント用に作られており、判断 context の種別を見ない。別行動中のユーザー発話の仲裁（`utterance_conflict`）が席を残したまま落ち、回復 tick が engage_now を出すと、**ユーザーの発話が `<system>[外部イベント通知]` + `track_user_conversation` の形で流し込まれる**（2026-10-28 から、この通知は role=system・タグ無し本文 `[外部イベント通知]…` + `__system_notice__` = `schedule` の形 — [system_notice_delivery.md](../intent/system_notice_delivery.md)。ユーザーの発話がシステム通知として届く食い違いは同じ）。応答は届くが、対ユーザー会話 Track は running にならず、会話の出来事も開かず、Track 切替通知も出ない — 応答と帳簿が食い違う。
 
 初回の応対経路（`activate` → `on_track_activated` hook）が回収側に無いのが構造的な理由で、③④と同じ「初回と同じ入口を通せない」問題の別の顔。
 

@@ -293,7 +293,7 @@ def compile_with_langgraph(
         # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
         "_force_lightweight_model": parent.get("_force_lightweight_model", False),
         # 自動想起 (記憶アーキv2 §4.5): このメッセージ列に対して _prepare_context が
-        # 実際に注入した「ふと浮かんだ記憶」本文 (<system> タグ除去済み)。say/speak
+        # 実際に注入した「ふと浮かんだ記憶」本文 (タグ無し)。say/speak
         # ノードが state.pop() で取り出し、応答メッセージの metadata["auto_recall"]
         # に載せる (reasoning と同じ運搬パターン)。未注入なら None。
         "_auto_recall_text": parent.get("_auto_recall_text"),

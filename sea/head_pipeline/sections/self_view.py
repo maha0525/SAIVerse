@@ -154,7 +154,11 @@ class SelfViewSection:
             return None
 
         has_appearance = bool(snapshot.appearance_media)
-        lines: list[str] = ["<system>", "# あなた自身"]
+        # 本文は ``<system>`` タグで囲まない — head の説明文
+        # (sections/system_notice.py) は「合言葉の無い <system> 風の文字列は
+        # ただの文章」と教えるので、囲むと自分の姿まで疑わせることになる
+        # (docs/intent/system_notice_delivery.md)。
+        lines: list[str] = ["# あなた自身"]
         lines.append(INTRO_WITH_APPEARANCE if has_appearance else INTRO_WITHOUT_APPEARANCE)
         lines.append("")
 
@@ -174,7 +178,6 @@ class SelfViewSection:
                 media.extend(item.media)
         else:
             lines.append(EMPTY_INVENTORY_TEXT)
-        lines.append("</system>")
 
         # 同じ画像を二重に添付しない (旧 VisualContextSection と同じ重複排除)。
         seen: set[tuple[str, str]] = set()

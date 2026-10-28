@@ -265,7 +265,7 @@ Metabolism 時、コンテキスト内の最古残存メッセージの**直前*
 ```
 
 書式上の注意:
-- role='user' + `<system>` タグでラップ (Gemini 互換のため、role='system' は使わない)
+- role='user' + `<system>` タグでラップ (Gemini 互換のため、role='system' は使わない) — 起草時の形。時刻アンカーは今も「時刻の目安」として生きていて、2026-10-28 から role=system のシステム通知 (タグ無し本文、`__system_notice__` = `history_time_anchor`。`sea/runtime_context.py`) になった。会話の途中の system を受け取れないモデル (Gemini など) へは、クライアント層が送る直前に合言葉付きタグの user に変える ([system_notice_delivery.md](../system_notice_delivery.md))
 - 「Metabolism 発生時刻」ではなく**最古残存メッセージの created_at**
 - リアルタイム情報 (現在時刻) と Track Chronicle (過去時刻範囲明示) と組み合わせることで、ペルソナは時系列を判別できる
 
