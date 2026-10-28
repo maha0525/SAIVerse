@@ -1,14 +1,14 @@
 # Meta Model API (Muse) をプロバイダとして同梱する
 
-**ステータス**: 検証待ち（外部通信なしのモック HTTP テストは通過。実サービスでの接続確認は、まはーの `META_API_KEY` で未実施）
+**ステータス**: 検証待ち（実サービスでの接続は 3 モデルとも確認済み。会話の途中の system メッセージを変換するかどうかを、実サービスの結果を踏まえてまはーが決める）
 
 ## 利用者が得るものと経路
 
-Meta のキーをモデル管理のプロバイダタブで設定し、Muse Spark 1.3 と
-Muse Wonder (Preview) を会話モデル・軽量モデルとして選べるようにする。
+Meta のキーをモデル管理のプロバイダタブで設定し、Muse Spark 1.3、
+Muse Spark 1.3 Contributor、Muse Wonder (Preview) を会話モデル・軽量モデルとして選べるようにする。
 これまで Muse Spark は OpenRouter 経由 (`openrouter-meta-muse-spark-1.2`) でしか使えなかった
 (Muse 系では、ほかに Muse Glimmer 30B が NVIDIA NIM 経由で同梱されている)。
-この 2 本の追加で、既存の OpenRouter 経由・NIM 経由の定義は変えない。
+この 3 本の追加で、既存の OpenRouter 経由・NIM 経由の定義は変えない。
 
 同梱のプロバイダ定義 → 設定ローダー（builtin / expansion / user の3階層から読み込む仕組み） →
 モデル定義の `provider_ref`（参照先プロバイダ）の解決 → クライアント生成処理 →
@@ -23,9 +23,23 @@ OpenAI SDK → Chat Completions (`POST https://api.meta.ai/v1/chat/completions`)
 
 - 接続先は `https://api.meta.ai/v1`、認証は `META_API_KEY`。Meta の文書の例示名
   `MODEL_API_KEY` は汎用的すぎて `.env` の中で何のキーか分からないため採らない。
-- 登録する対話用モデルは `muse-spark-1.3` と `muse-wonder-1.0` の 2 本だけ (まはー指定)。
-  Meta 直結では、Contributor 版・Muse Spark 1.2 / 1.1・画像生成・音声認識・SAM は登録しない
-  (既存の `openrouter-meta-muse-spark-1.2` はそのまま残す)。
+- 登録する会話用のモデルは `muse-spark-1.3`・`muse-spark-1.3-contributor`・`muse-wonder-1.0` の
+  3 本 (まはー指定)。Meta 直結では、Muse Spark 1.2 / 1.1 (と 1.2 の Contributor 版)・画像生成・
+  音声認識・SAM は登録しない (既存の `openrouter-meta-muse-spark-1.2` はそのまま残す)。
+- Contributor 版は、Meta が送った内容 (プロンプト・ファイル・コンテキスト・モデルの応答) を
+  将来のモデルの学習に使う代わりに、料金が大幅に安い版 (入力 $0.10 / キャッシュ入力 $0.002 /
+  出力 $0.20、100 万トークンあたり)。SAIVerse から送る内容には、ペルソナの人格の指示文・記憶・
+  会話がそのまま含まれる。だから学習に使われることは、表示名
+  (`Muse Spark 1.3 Contributor(学習利用あり)`) とキーの設定手順の文書の両方に書き、
+  モデルを選ぶ人がその場で分かるようにする。SAIVerse が最初から選んでおくモデルにはしない。
+- Contributor 版は、Meta のモデル一覧で推論の深さ `max` が使えないと明記されている。
+  そのためモデル定義の選択肢は minimal〜xhigh の 5 段にする (最初から選ばれている値は通常版と同じ medium)。
+  2026-10-27 に実サービスへ `max` を送ったところ、エラーにはならず普通に返答した。
+  `max` として扱われたのか、別の深さに落とされたのかは応答から分からないので、
+  文書の記載に従って選択肢から外したままにする。
+  レート制限も通常版より低い (チームあたり毎分 150 リクエスト・毎分 300 万トークン。
+  通常版は毎分 3,000 リクエスト・毎分 400 万トークン)。それ以外の仕様 (コンテキスト長・
+  出力上限・画像・ツール・決まった JSON の形での出力 [構造化出力]) は通常版と同じ扱いにする。
 - Chat Completions を使う。Meta は Responses API も持つが、SAIVerse の
   `openai_compat` クライアントは Chat Completions で全機能を揃えている。
 - Meta の Chat Completions の文書に HTTP 400 を返すと明記されている項目は、次の全部:
@@ -66,6 +80,12 @@ OpenAI SDK → Chat Completions (`POST https://api.meta.ai/v1/chat/completions`)
   (`default_convert_system_to_user`)。Meta の API では system が developer と同列に扱われ、
   会話構造の検証が OpenAI より厳密だと案内されているため、OpenRouter 経由の
   Muse 定義と同じ安全側に倒す。
+  2026-10-27 の実サービスでの確認では、変換しなくても Meta は受け付けた (Spark 1.3 と
+  Wonder の両方で、system が会話の途中・末尾・先頭に 2 通連続・assistant の直後にある
+  5 通りを送り、全部が普通に返答した)。一方、変換した会話では Wonder が「system の
+  指示が user のメッセージの中に来ているので、上位の指示ではなく利用者の依頼として扱う」と
+  返答した。受け付けてもらうために変換する必要はなく、むしろ変換すると system の指示が
+  効きにくくなっている可能性がある。変換をやめるかどうかは未決。
 - キャッシュは Meta 側で自動 (先頭一致)。`cached_tokens` は
   `prompt_tokens_details` に含まれて返るため、既存の使用量記録処理でそのまま読み取って集計できる。
   `prompt_cache_key` は送らない。SAIVerse にはどのプロバイダにも `prompt_cache_key` を
@@ -105,4 +125,9 @@ Meta の実サーバーへの通信や、本番ペルソナの呼び出し・デ
 ## 経緯
 
 - 2026-10-27: まはーの依頼で着手。公式資料を読み、同梱プロバイダ定義 1 本・モデル定義 2 本・
-  文書を追加し、外部通信なしのモック HTTP テストを作成した。
+  文書を追加し、外部通信をせず疑似的な応答で動作を確かめるテストを作成した (PR #426、マージ済み)。
+- 2026-10-27: マージ後、まはーが Contributor 版の価格を見て、`muse-spark-1.3-contributor` の
+  追加を依頼した (別 PR)。同じ日にまはーがキーを設定し、テスト用の一時ディレクトリから
+  テスト用に作ったダミーの入力だけで 3 モデルを実サービスに通した (ペルソナは使っていない)。
+  モデル定義の初期値のままでの会話・ストリーミング・画像付きの会話・構造化出力・ツール呼び出しが
+  3 モデルとも通り、使用量とキャッシュの記録も返った (費用は合計 $0.035)。
