@@ -4283,6 +4283,117 @@ class SluiceInputEstimateTest(unittest.TestCase):
         self.assertEqual(media_estimate, self.OPENAI_IMAGE * sent_images + noted_estimate)
         self.assertGreaterEqual(noted_estimate, sum(len(text) for text in note_texts))
 
+    # -- 会話の途中のシステム通知のメディア (PR #431 の Codex レビュー P2) -----------
+
+    #: head の合言葉 (llm_clients/system_notice.system_notice_passphrase が読む)。
+    PASSPHRASE = "AbCdEf123456"
+
+    def _head(self):
+        """head の system メッセージ (これより後ろの role=system が通知になる)。"""
+        from sai_memory.memory.storage import (
+            HEAD_MESSAGE_KEY,
+            SYSTEM_NOTICE_PASSPHRASE_KEY,
+        )
+
+        return {"role": "system", "content": "head", "metadata": {
+            HEAD_MESSAGE_KEY: True, SYSTEM_NOTICE_PASSPHRASE_KEY: self.PASSPHRASE,
+        }}
+
+    def test_notice_media_note_is_counted_even_without_the_file(self):
+        """ファイルの無い画像を持つ通知も、クライアントが足す説明の文 (保存済みの
+        要約ごと) で数える。Codex の再現: 存在しない画像 + 長い保存済みの要約で、
+        見積もりが説明の文の字数を下回っていた。"""
+        from llm_clients.openai_message_preparer import prepare_openai_messages
+
+        self._role_models()
+        missing = str(self.media_dir / "gone.png")
+        summary = "要" * 5000
+
+        def notice(media):
+            return {"role": "system", "content": "部屋の様子", "metadata": {
+                "media": media,
+            }}
+
+        messages = [self._head(), notice([
+            {"type": "image", "path": missing, "summary": summary},
+        ])]
+        bare = [self._head(), notice([])]
+        note = f"[画像: {missing}] {summary}"
+        for model in (self.VISION, "role-gemini", "role-anthropic", "role-xai"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(messages, model)
+                    - sluice._estimate_input_tokens(bare, model),
+                    len(note) + 1,
+                )
+        # 実物の OpenAI 互換の組み立て (system のまま届ける通知) が送る字数を
+        # 見積もりが下回らない。
+        prepared = prepare_openai_messages(messages, supports_images=True)
+        sent_chars = sum(len(str(msg.get("content") or "")) for msg in prepared)
+        self.assertIn(summary, str(prepared[-1]["content"]))
+        self.assertGreaterEqual(
+            sluice._estimate_input_tokens(messages, self.VISION), sent_chars,
+        )
+
+    def test_embedded_notice_image_counts_both_image_and_note(self):
+        """埋め込める通知の画像は、部品 (画像の見積もり) と説明の文の両方で数える
+        (クライアントはタグの中の説明の文に加えて部品も送る)。"""
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._role_models()
+        path = self._file("notice.png")
+        summary = "窓辺に猫がいる"
+
+        def notice(media):
+            return {"role": "system", "content": "部屋の様子", "metadata": {
+                "media": media,
+            }}
+
+        messages = [self._head(), notice([
+            {"type": "image", "path": path, "summary": summary},
+        ])]
+        bare = [self._head(), notice([])]
+        note = f"[画像: {path}] {summary}"
+        for model, provider in (("role-gemini", "gemini"), ("role-anthropic", "anthropic")):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(messages, model)
+                    - sluice._estimate_input_tokens(bare, model),
+                    estimate_image_tokens(provider) + len(note) + 1,
+                )
+
+    def test_ordinary_message_missing_image_is_still_not_counted(self):
+        """通知でない普通のメッセージの、ファイルの無い画像は従来どおり数えない
+        (クライアントも iter_image_media が落とすので送らない)。head の有無を問わない。"""
+        missing = str(self.media_dir / "gone.png")
+        media = {"media": [{"type": "image", "path": missing, "summary": "要" * 5000}]}
+        message = {"role": "user", "content": "見て", "metadata": media}
+        bare = {"role": "user", "content": "見て"}
+        for prefix in ([], [self._head()]):
+            with self.subTest(head=bool(prefix)):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(prefix + [message], self.VISION),
+                    sluice._estimate_input_tokens(prefix + [bare], self.VISION),
+                )
+
+    def test_headless_notice_mark_still_counts_the_note(self):
+        """head の無い列でも、通知の印を持つメッセージの画像はクライアント
+        (OpenAI 互換・Anthropic・Gemini) が説明の文にするので数える。"""
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+        missing = str(self.media_dir / "gone.png")
+        summary = "要" * 500
+        message = {"role": "user", "content": "見て", "metadata": {
+            SYSTEM_NOTICE_KEY: "building_event",
+            "media": [{"type": "image", "path": missing, "summary": summary}],
+        }}
+        bare = {"role": "user", "content": "見て"}
+        self.assertEqual(
+            sluice._estimate_input_tokens([message], self.VISION)
+            - sluice._estimate_input_tokens([bare], self.VISION),
+            len(f"[画像: {missing}] {summary}") + 1,
+        )
+
     def test_limit_is_ninety_percent_of_context_minus_output_budget(self):
         self._patch_models({
             "budget-model": {

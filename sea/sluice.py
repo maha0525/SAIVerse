@@ -754,15 +754,39 @@ def _estimate_input_tokens(
       にも関係なくそのまま送る (openai_message_preparer.py は ``metadata`` に
       画像の無いメッセージの ``content`` を触らない)。保存された会話から組む
       メッセージはこの形を作らないので、多めの側に倒しておく。
+
+    会話の途中のシステム通知 (:func:`llm_clients.system_notice.is_presented_system_notice`
+    — metadata の ``__system_notice__``) のメディアは、クライアントが通知の本文に
+    足す説明の文 (:func:`llm_clients.system_notice.system_notice_media_notes`) で
+    数える。説明の文はファイルの有無を問わず metadata の全項目ぶん作られ、保存済みの
+    要約を丸ごと含むので、ファイルの無い項目も数える。三種類 (画像・音声・動画)
+    全部を数えるのは Gemini のタグ化した通知に合わせた形で、他のクライアントでは
+    同じか多め。埋め込む画像は説明の文に加えて部品としても送られるので、画像の
+    見積もりも従来どおり数える (非常弁が置き換える通知の画像は、説明の文が既に
+    数えてあるので足さない)。head のある列で変換された通知
+    (:func:`llm_clients.system_notice.system_notice_indices`) は、どのクライアントも
+    説明の文だけを使うので、注記 (:func:`_media_note_tokens`) は数えない。head の
+    無い列で通知の印を持つメッセージは、クライアントによって説明の文
+    (OpenAI 互換・Anthropic・Gemini の画像、Gemini の音声・動画) と生成した要約の
+    注記 (基底の音声・動画、xAI の画像) が分かれるので、両方を数えて多めの側に倒す。
     """
     from llm_clients.system_notice import (
+        is_presented_system_notice,
         model_accepts_mid_conversation_system,
         present_system_notices,
+        system_notice_indices,
+        system_notice_media_notes,
+        system_notice_passphrase,
     )
     from saiverse.model_configs import get_model_config
     from saiverse.token_estimator import estimate_image_tokens
 
     model = str(model)
+    # 通知の説明の文の伏せ字に使う合言葉と、head のある列で変換される通知の位置は、
+    # 変換の前の列から読む (変換は head の写しから合言葉を外す。列の長さは変わら
+    # ないので位置はそのまま使える)。クライアントと同じ出どころ。
+    notice_passphrase = system_notice_passphrase(messages)
+    presented_notice_positions = system_notice_indices(messages)
     # 会話の途中のシステム通知 (role=system) は、クライアントが送る直前に送り先の
     # モデルに合わせた形 (そのまま、または合言葉付きタグの user) に変える
     # (llm_clients/system_notice.py)。役割ごとのメディアの扱い
@@ -787,8 +811,9 @@ def _estimate_input_tokens(
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
     total = _response_schema_tokens(response_schema)
     # 埋め込む画像は、非常弁が置き換えるかを全部見てから数える:
-    # (メッセージの番号, 画像の番号, 項目, 役割, 非常弁で数えるか)。
-    embedded: List[Tuple[int, int, Dict[str, Any], str, bool]] = []
+    # (メッセージの番号, 画像の番号, 項目, 役割, 非常弁で数えるか,
+    #  置き換えたときに注記を数えるか)。
+    embedded: List[Tuple[int, int, Dict[str, Any], str, bool, bool]] = []
     # 枠は新しいメッセージから順に埋まるので、末尾から数える。
     for msg_pos in range(len(messages) - 1, -1, -1):
         msg = messages[msg_pos]
@@ -812,6 +837,15 @@ def _estimate_input_tokens(
         if not isinstance(metadata, dict):
             continue
         role = _role_class(msg.get("role"))
+        # 通知の説明の文 (docstring の最後の段落)。改行の 1 字は、クライアントが
+        # 本文と説明の文をつなぐ ``\n`` の分。
+        if is_presented_system_notice(msg):
+            for note in system_notice_media_notes(
+                metadata, ("image", "audio", "video"), passphrase=notice_passphrase,
+            ):
+                total += len(note) + 1
+        # head のある列で変換された通知は、説明の文だけで送られるので注記を数えない。
+        counts_notes = msg_pos not in presented_notice_positions
         # ``__visual_context__`` と ``__skip_image_summary__`` の画像は、クライアントと
         # 同じく枠も非常弁も使わない (llm_clients/utils.select_embedded_attachment_keys)。
         always_embedded = bool(
@@ -834,13 +868,15 @@ def _estimate_input_tokens(
             if not sends_media:
                 continue
             if within_limit and role in rules.image_embed_roles:
-                embedded.append((msg_pos, item_pos, item, role, valve_counts))
-            elif role in rules.image_note_roles:
+                embedded.append(
+                    (msg_pos, item_pos, item, role, valve_counts, counts_notes),
+                )
+            elif counts_notes and role in rules.image_note_roles:
                 total += _media_note_tokens(item)
-        if sends_media and role in rules.audio_note_roles:
+        if counts_notes and sends_media and role in rules.audio_note_roles:
             for item in _metadata_media_items(metadata, "audio"):
                 total += _media_note_tokens(item)
-        if sends_media and role in rules.video_note_roles:
+        if counts_notes and sends_media and role in rules.video_note_roles:
             for item in _metadata_media_items(metadata, "video"):
                 total += _media_note_tokens(item)
 
@@ -871,10 +907,10 @@ def _estimate_input_tokens(
             (valve_entries[pos][0], valve_entries[pos][1])
             for pos in attachment_positions_to_replace(sizes, ceiling, floor)
         }
-    for msg_pos, item_pos, item, role, _valve_counts in embedded:
+    for msg_pos, item_pos, item, role, _valve_counts, counts_notes in embedded:
         if (msg_pos, item_pos) not in replaced:
             total += image_tokens
-        elif role in rules.image_note_roles:
+        elif counts_notes and role in rules.image_note_roles:
             total += _media_note_tokens(item)
     return total
 
