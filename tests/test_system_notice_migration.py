@@ -27,10 +27,12 @@ import pytest
 from database.system_notice_migration import (
     AMBIGUOUS_TAGS_REASON,
     MIGRATION_MARKER_KEY,
+    MIGRATION_RULES_VERSION,
     OUTPUT_DIR_NAME,
     UNCLASSIFIED_REASON,
     UNKNOWN_SYSTEM_REASON,
     migrate_main_db,
+    marker_rules_version,
     migrate_persona_db,
     run_migration,
     run_startup_system_notice_migration,
@@ -736,19 +738,19 @@ def test_persona_migration_stops_when_another_process_finished_first(
     from database import system_notice_migration as mig
     from sai_memory.memory.storage import set_embed_metadata
 
-    original_marker_set = mig._persona_marker_set
+    original_done_version = mig._persona_done_version
     calls = {"n": 0}
 
     def _check_then_other_process_finishes(conn):
-        found = original_marker_set(conn)
+        found = original_done_version(conn)
         calls["n"] += 1
         if calls["n"] == 1:
             # 読み取り専用の確認の直後、こちらが書き込みの取引を取る前に終える
             with closing(init_db(str(persona_db))) as other:
-                set_embed_metadata(other, MIGRATION_MARKER_KEY, "other-process")
+                set_embed_metadata(other, MIGRATION_MARKER_KEY, mig._marker_value())
         return found
 
-    monkeypatch.setattr(mig, "_persona_marker_set", _check_then_other_process_finishes)
+    monkeypatch.setattr(mig, "_persona_done_version", _check_then_other_process_finishes)
     before = _rows(persona_db)
     out = tmp_path / "out"
     result = migrate_persona_db(persona_db, persona_id="p1", output_dir=out, stamp=STAMP)
@@ -1475,87 +1477,390 @@ def test_a_failed_flush_rolls_back_and_leaves_no_staged_result(
 
 
 # ---------------------------------------------------------------------------
-# 印の無い旧世代のスケジュール発火文・外部イベント通知 (変換しない)
+# 印の無い旧世代のスケジュール発火文・外部イベント通知 (個別条件)
 # ---------------------------------------------------------------------------
 
 _LEGACY_SCHEDULE_FIRED = (
     "<system>\nスケジュールの実行時刻です。\n\n現在の日時: 2026年03月21日 09:00 (Asia/Tokyo)\n"
     "スケジュールタイプ: periodic\nスケジュール設定: 毎日 09:00\nスケジュールの説明: 朝が来ました。\n</system>"
 )
+_LEGACY_SCHEDULE_DONE = (
+    "<system>\nスケジュールが実行されました。\n\n現在の日時: 2025年12月08日 00:11 (Asia/Tokyo)\n"
+    "スケジュールタイプ: oneshot\nスケジュール設定: 2025年12月08日 00:11\n"
+    "スケジュールの説明: スケジュール機能テスト。\n</system>"
+)
 _LEGACY_EXTERNAL = (
     "<system>\n[外部イベント通知]\n差出人: まはー (@maha)\n内容: @Ai_Fi_SAI 聞こえるー？\n</system>"
 )
-#: (id, content, metadata)。旧世代の発火文と外部イベント通知は、発火の記録の
-#: metadata (schedule_id / source="external_event") を持っていても系統の印
-#: (with:["system"] / event_message) が無い。ユーザーが同じ形を打った発言と
-#: 機械的に区別できないので変換しない。
+#: 中断の再開文が元の発火文を引用している形 (書き出しが本文の途中にだけある)
+_RESUMED_QUOTING_SCHEDULE = (
+    "<system>\n[前回の処理が中断されました]\n中断理由: 優先度の高いリクエストを処理しました\n"
+    "前回のプロンプト: <system>\nスケジュールの実行時刻です。\n</system>\n</system>"
+)
+_X_POST_INSTRUCTION = "<system>\n以下の指示やトピックに基づいて、X に投稿してください。\n朝の挨拶\n</system>"
+_VOICE_INPUT = "<system>ｽﾀｯｸﾁｬﾝから音声入力を受信しました。添付の音声を聞いてください。</system>"
+#: レビューの再現: ユーザーが発火文の形を打ち、送信 API の metadata に schedule_id を書いた発言
+_USER_TYPED_SCHEDULE = "<system>スケジュールの実行時刻です。この文を説明してください</system>"
+
+_SCHEDULE_META = {"tags": ["conversation"], "schedule_id": 3, "schedule_type": "periodic"}
+_EXTERNAL_META = {
+    "tags": ["conversation"], "source": "external_event", "event_type": "x_mention", "with": ["user"],
+}
+
+
+def _inner(text: str) -> str:
+    return text[len("<system>\n"):-len("\n</system>")]
+
+
+#: (id, content, metadata, 期待 — (レポートの表記, 本文)。None は変換しない)
 _LEGACY_ROWS = [
     ("fired", _LEGACY_SCHEDULE_FIRED,
-     {"tags": ["conversation", "pulse:abc"], "with": ["user"], "schedule_id": 3}),
-    ("external", _LEGACY_EXTERNAL,
-     {"tags": ["conversation"], "with": ["user"], "source": "external_event"}),
+     {**_SCHEDULE_META, "tags": ["conversation", "pulse:abc"], "with": ["user"]},
+     ("schedule(旧世代)", _inner(_LEGACY_SCHEDULE_FIRED))),
+    ("done", _LEGACY_SCHEDULE_DONE, {**_SCHEDULE_META, "schedule_type": "oneshot"},
+     ("schedule(旧世代)", _inner(_LEGACY_SCHEDULE_DONE))),
+    ("external", _LEGACY_EXTERNAL, _EXTERNAL_META,
+     ("external_event(旧世代)", _inner(_LEGACY_EXTERNAL))),
+    # 書き出しが本文の途中にだけある行は拾わない
+    ("resumed", _RESUMED_QUOTING_SCHEDULE, _SCHEDULE_META, None),
+    # X の投稿指示・音声入力の通知は、発火の記録の metadata があっても拾わない
+    ("x_post", _X_POST_INSTRUCTION, _SCHEDULE_META, None),
+    ("voice_input", _VOICE_INPUT,
+     {"tags": ["conversation"], "source": "stackchan_voice", "with": ["user"]}, None),
+    # 書き出しが合っていても、発火の記録の metadata が無い・違う行は拾わない
+    ("no_schedule_id", _LEGACY_SCHEDULE_FIRED, {"tags": ["conversation"]}, None),
+    ("external_other_source", _LEGACY_EXTERNAL,
+     {"tags": ["conversation"], "source": "stackchan_voice"}, None),
+    # tags が conversation だけではない行は拾わない
+    ("extra_tag", _LEGACY_SCHEDULE_FIRED, {**_SCHEDULE_META, "tags": ["conversation", "x_post"]}, None),
+    # 来歴: 建物履歴からの転記の印 (building_msg_ref) を持つ行はユーザーの発言の
+    # 転記なので、発火文の形と発火の記録の metadata がそろっていても拾わない
+    ("transcribed", _USER_TYPED_SCHEDULE,
+     {**_SCHEDULE_META, "with": ["user"], "building_msg_ref": "b1:b1:7"}, None),
+    ("transcribed_external", _LEGACY_EXTERNAL,
+     {**_EXTERNAL_META, "building_msg_ref": "b1:b1:8"}, None),
+    # 来歴: 通話の文字起こし (ユーザーの声) も拾わない
+    ("voice_transcript", _LEGACY_SCHEDULE_FIRED,
+     {**_SCHEDULE_META, "with": ["user"], "voice_call": True, "voice_transcript": True}, None),
 ]
 
 
-def test_legacy_schedule_and_external_event_rows_are_left_for_review(tmp_path):
-    """旧世代の発火文は変換せず、確認待ちの印つきでレポートに全件並ぶ (記憶 DB・建物履歴とも)。"""
+def _make_legacy_persona_db(path: Path) -> None:
+    with closing(init_db(str(path))) as conn:
+        for i, (row_id, content, meta, _expected) in enumerate(_LEGACY_ROWS):
+            _insert(conn, row_id, "user", content, meta, created_at=i)
+        # 印 (with:["system"]) のある発火文は従来の AND 判定が拾う (旧世代の表記にならない)
+        _insert(
+            conn, "marked", "user", _LEGACY_SCHEDULE_FIRED,
+            {**_SCHEDULE_META, "with": ["system"]}, created_at=100,
+        )
+        conn.commit()
+
+
+def _legacy_db(tmp_path) -> Path:
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    _make_legacy_persona_db(db)
+    return db
+
+
+def test_legacy_schedule_notices_in_persona_memory_are_converted(tmp_path):
+    db = _legacy_db(tmp_path)
+    before = _rows(db)
+
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    after = _rows(db)
+    for row_id, _content, meta, expected in _LEGACY_ROWS:
+        role, content, new_meta, _ = after[row_id]
+        if expected is None:
+            # 本文・role はそのまま、確認待ちの印だけが足される
+            assert (role, content) == before[row_id][:2], row_id
+            assert new_meta == {**meta, SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED_REASON}, row_id
+            continue
+        assert role == "system", row_id
+        assert content == expected[1], row_id
+        # 通知の印の値はどちらも schedule。確認待ちの印は付かない
+        assert new_meta == {**meta, SYSTEM_NOTICE_KEY: "schedule"}, row_id
+        assert is_system_notice({"role": role, "metadata": new_meta})
+    assert after["marked"][0] == "system"
+    assert after["marked"][2][SYSTEM_NOTICE_KEY] == "schedule"
+
+    # 件数は印で拾った系統と区別し、スケジュールと外部イベントも分けて出る
+    assert result.counts() == {
+        ("messages", "schedule(旧世代)"): 2,
+        ("messages", "external_event(旧世代)"): 1,
+        ("messages", "schedule"): 1,
+    }
+    text = report.read_text(encoding="utf-8")
+    assert "messages / schedule(旧世代): 2" in text
+    assert "messages / external_event(旧世代): 1" in text
+    assert "messages / schedule: 1" in text
+    assert {s.row_id for s in result.skipped} == {
+        r[0] for r in _LEGACY_ROWS if r[3] is None
+    }
+    # 今の版の印が立つ
+    assert marker_rules_version(_marker(db)) == MIGRATION_RULES_VERSION
+
+    # 冪等: 完了の印を消して流し直しても、変換済みの行は条件から外れている
+    migrated = _rows(db)
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute("DELETE FROM embed_metadata WHERE key = ?", (MIGRATION_MARKER_KEY,))
+        conn.commit()
+    again = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+    assert not again.changes
+    assert again.backup_path is None
+    assert _rows(db) == migrated
+
+
+def test_a_user_utterance_transcribed_by_the_real_transfer_is_left_for_review(tmp_path):
+    """レビューの再現: 建物履歴の発言を記憶へ写す実関数が作った行は、旧世代の判定に当たらない。
+
+    ユーザーが発火文の形の本文を打ち、送信 API の metadata に schedule_id を書いた
+    発言を、建物履歴から記憶への転記 (_transcribe_message → HistoryManager が記憶へ
+    渡す形) で写し、記憶の行の metadata をそのまま記憶 DB に置いて移行する。
+    """
+    from types import SimpleNamespace
+
+    from builtin_data.tools.get_building_messages import _transcribe_message
+    from persona.history_manager import HistoryManager
+
+    stored = []
+
+    class _CapturingAdapter:
+        def is_ready(self):
+            return True
+
+        def append_persona_message(self, message, **_kw):
+            stored.append(message)
+            return str(len(stored))
+
+    hm = HistoryManager(
+        persona_id="p1",
+        persona_log_path=tmp_path / "log" / "p1" / "log.json",
+        building_memory_paths={},
+        initial_persona_history=[],
+        memory_adapter=_CapturingAdapter(),
+    )
+    persona = SimpleNamespace(persona_id="p1", buildings={}, sai_memory=None)
+    building_msg = {
+        "role": "user",
+        "persona_id": None,
+        "content": _USER_TYPED_SCHEDULE,
+        "building_id": "b1",
+        "message_id": "b1:7",
+        "seq": 7,
+        "timestamp": "2026-10-28T00:00:00+00:00",
+        "ingested_by": [],
+        # 送信 API の _client_metadata は tags / with / __ 始まりを落とすが、
+        # schedule_id は通す
+        "metadata": {"schedule_id": 1, "schedule_type": "periodic"},
+    }
+    outcome = _transcribe_message(
+        building_msg, persona=persona, manager=None, persona_id="p1", building_id="b1",
+        history_manager=hm, id_to_name_map={}, check_provenance=False,
+    )
+    assert outcome[0] == "ingested"
+    (message,) = stored
+    meta = message["metadata"]
+    assert meta["with"] == ["user"] and meta["building_msg_ref"] == "b1:b1:7"
+    assert {t for t in meta["tags"] if not t.startswith("pulse:")} == {"conversation"}
+
+    db = tmp_path / "personas" / "p1" / "memory.db"
+    db.parent.mkdir(parents=True)
+    with closing(init_db(str(db))) as conn:
+        _insert(conn, "typed", message["role"], message["content"], meta)
+        conn.commit()
+
+    (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    role, content, new_meta, _ = _rows(db)["typed"]
+    assert (role, content) == ("user", _USER_TYPED_SCHEDULE)
+    assert new_meta[SYSTEM_NOTICE_REVIEW_KEY] == UNCLASSIFIED_REASON
+    assert SYSTEM_NOTICE_KEY not in new_meta
+    assert not result.changes
+    assert [s.row_id for s in result.skipped] == ["typed"]
+
+
+def _make_building_db(path: Path, rows) -> None:
+    """rows: (seq, content, metadata, legacy_seq, client_message_id)"""
     from sqlalchemy import create_engine
 
     from database.models import BuildingMessage
 
-    persona = tmp_path / "personas" / "p1" / "memory.db"
-    persona.parent.mkdir(parents=True)
-    with closing(init_db(str(persona))) as conn:
-        for i, (row_id, content, meta) in enumerate(_LEGACY_ROWS):
-            _insert(conn, row_id, "user", content, meta, created_at=i)
-        conn.commit()
-
-    main = tmp_path / "user_data" / "database" / "saiverse.db"
-    main.parent.mkdir(parents=True)
-    engine = create_engine(f"sqlite:///{main}")
+    engine = create_engine(f"sqlite:///{path}")
     BuildingMessage.__table__.create(engine)
     engine.dispose()
-    with closing(sqlite3.connect(str(main))) as conn:
-        # 旧世代の書き手の行の形 (旧世代の列が埋まり、画面からの送信の印が無い)
+    with closing(sqlite3.connect(str(path))) as conn:
         conn.executemany(
             "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
-            "heard_by, ingested_by, metadata_json, legacy_seq, legacy_message_id) "
-            "VALUES ('b1', ?, 'user', ?, '2026-03-01T00:00:00+00:00', '[]', '[]', ?, ?, ?)",
+            "heard_by, ingested_by, metadata_json, legacy_seq, legacy_message_id, "
+            "client_message_id) VALUES ('b1', ?, 'user', ?, "
+            "'2026-03-01T00:00:00+00:00', '[]', '[]', ?, ?, ?, ?)",
             [
-                (seq, content, json.dumps(meta, ensure_ascii=False), 100 + seq, f"old:{seq}")
-                for seq, (_id, content, meta) in enumerate(_LEGACY_ROWS, start=1)
+                (
+                    seq, content, json.dumps(meta, ensure_ascii=False), legacy_seq,
+                    None if legacy_seq is None else f"old:{legacy_seq}", cmid,
+                )
+                for seq, content, meta, legacy_seq, cmid in rows
             ],
         )
         conn.commit()
-    with closing(sqlite3.connect(str(main))) as conn:
-        building_before = conn.execute(
+
+
+def _building_rows(path: Path):
+    with closing(sqlite3.connect(str(path))) as conn:
+        return conn.execute(
             "SELECT seq, role, content, metadata_json FROM building_messages ORDER BY seq"
         ).fetchall()
 
-    results, report = run_migration(db_path=main, saiverse_home=tmp_path)
 
-    by_label = {r.label: r for r in results}
-    mem, bm = by_label["ペルソナ p1"], by_label["本体 DB"]
-    assert not mem.changes and not bm.changes
-    after = _rows(persona)
-    for row_id, content, meta in _LEGACY_ROWS:
-        role, new_content, new_meta, _ = after[row_id]
-        assert (role, new_content) == ("user", content), row_id
-        # 確認待ちの印だけが足され、通知の印は付かない (会話の手本・想起から外れる)
-        assert new_meta == {**meta, SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED_REASON}, row_id
-    assert {s.row_id for s in mem.skipped} == {r[0] for r in _LEGACY_ROWS}
-    with closing(sqlite3.connect(str(main))) as conn:
-        assert conn.execute(
-            "SELECT seq, role, content, metadata_json FROM building_messages ORDER BY seq"
-        ).fetchall() == building_before
-    assert {s.row_id for s in bm.skipped} == {"1", "2"}
+def test_legacy_schedule_notices_in_building_messages_are_converted(tmp_path):
+    db = tmp_path / "saiverse.db"
+    # 旧世代の書き手の行 (旧世代の列が埋まり、画面からの送信の印が無い)
+    old_rows = [
+        (i, content, meta, 100 + i, None)
+        for i, (_id, content, meta, _expected) in enumerate(_LEGACY_ROWS, start=1)
+    ]
+    # 来歴の条件: 発火文の形と発火の記録の metadata がそろっていても、画面から
+    # 送られた行・今の書き込み経路の行 (旧世代の列が空) は拾わない
+    base = len(old_rows)
+    provenance_rows = [
+        (base + 1, _LEGACY_SCHEDULE_FIRED, _SCHEDULE_META, None, "cmid-1"),
+        (base + 2, _USER_TYPED_SCHEDULE, _SCHEDULE_META, None, None),
+        (base + 3, _LEGACY_EXTERNAL, _EXTERNAL_META, 300, "cmid-2"),
+    ]
+    _make_building_db(db, old_rows + provenance_rows)
 
+    result = migrate_main_db(db, output_dir=tmp_path / "out", stamp=STAMP)
+
+    after = _building_rows(db)
+    expected = [r[3] for r in _LEGACY_ROWS] + [None] * len(provenance_rows)
+    sources = old_rows + provenance_rows
+    for (seq, role, content, raw_meta), want, (_s, original, meta, _l, _c) in zip(
+        after, expected, sources,
+    ):
+        # metadata は変えない
+        assert json.loads(raw_meta) == meta, seq
+        if want is None:
+            assert (role, content) == ("user", original), seq
+        else:
+            # 今の建物の出来事の行と同じ形 (role=host・タグ無し本文)
+            assert (role, content) == ("host", want[1]), seq
+    assert result.counts() == {
+        ("building_messages", "schedule(旧世代)"): 2,
+        ("building_messages", "external_event(旧世代)"): 1,
+    }
+    assert result.backup_path is not None
+    skipped_seqs = {int(s.row_id) for s in result.skipped}
+    assert {base + 1, base + 2, base + 3} <= skipped_seqs
+
+    # 冪等: 本体 DB は毎起動で走査し直すが、変換済みの行は条件から外れている
+    again = migrate_main_db(db, output_dir=tmp_path / "out", stamp=STAMP)
+    assert not again.changes and again.backup_path is None
+    assert _building_rows(db) == after
+
+
+def test_report_separates_legacy_schedule_and_external_event_samples(tmp_path):
+    """スケジュールがサンプル枠を埋めても、外部イベントの件数とサンプルが見える。"""
+    from database.system_notice_migration import SAMPLES_PER_KIND
+
+    db = tmp_path / "user_data" / "database" / "saiverse.db"
+    db.parent.mkdir(parents=True)
+    schedules = [
+        (i, _LEGACY_SCHEDULE_FIRED.replace("朝が来ました", f"朝が来ました {i}"), _SCHEDULE_META, i, None)
+        for i in range(1, SAMPLES_PER_KIND + 3)
+    ]
+    external = (len(schedules) + 1, _LEGACY_EXTERNAL, _EXTERNAL_META, 99, None)
+    _make_building_db(db, schedules + [external])
+
+    results, report = run_migration(db_path=db, saiverse_home=tmp_path, dry_run=True)
+
+    (main,) = results
+    assert main.counts() == {
+        ("building_messages", "schedule(旧世代)"): len(schedules),
+        ("building_messages", "external_event(旧世代)"): 1,
+    }
     text = report.read_text(encoding="utf-8")
-    assert "### 変換しなかった <system> 始まりの行 (全 2 件)" in text
-    for row_id, _content, _meta in _LEGACY_ROWS:
-        assert f"- [messages] id={row_id} role=user" in text
-    for seq in ("1", "2"):
-        assert f"- [building_messages] id={seq} role=user" in text
+    assert f"building_messages / schedule(旧世代): {len(schedules)}" in text
+    assert "building_messages / external_event(旧世代): 1" in text
+    assert text.count("[building_messages / schedule(旧世代)]") == SAMPLES_PER_KIND
+    assert f"[building_messages / external_event(旧世代)] id={external[0]}" in text
+
+
+def _as_rules_version_1(tmp_path, monkeypatch, db: Path) -> None:
+    """版 1 の移行を済ませた状態を作る (旧世代の判定が無い規則で流し、印を版 1 の形にする)。"""
+    from database import system_notice_migration as mig
+
+    with monkeypatch.context() as m:
+        m.setattr(mig, "legacy_notice", lambda *_a: None)
+        migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "v1", stamp=STAMP)
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            "UPDATE embed_metadata SET value = ? WHERE key = ?",
+            ("2026-10-27T00:00:00+00:00", MIGRATION_MARKER_KEY),
+        )
+        conn.commit()
+
+
+def test_a_memory_migrated_by_rules_version_1_is_rescanned_for_legacy_notices(
+    tmp_path, monkeypatch,
+):
+    db = _legacy_db(tmp_path)
+    _as_rules_version_1(tmp_path, monkeypatch, db)
+    v1 = _rows(db)
+    # 版 1 では旧世代の発火文も「系統を判定できなかった」として確認待ちになっている
+    assert v1["fired"][2][SYSTEM_NOTICE_REVIEW_KEY] == UNCLASSIFIED_REASON
+    assert v1["marked"][0] == "system"  # 印で拾う行は版 1 で変換済み
+    assert marker_rules_version(_marker(db)) == 1
+
+    # dry-run は走査し直しの結果を見せるだけで何も書かない
+    (dry,), _ = run_migration(db_path=None, saiverse_home=tmp_path, dry_run=True)
+    assert dry.rescan_from_version == 1 and len(dry.changes) == 3
+    assert _rows(db) == v1
+
+    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+
+    after = _rows(db)
+    assert result.rescan_from_version == 1
+    assert result.backup_path is not None
+    # 旧世代の判定に当たる行だけが変換され、版 1 の確認待ちの印は外れる
+    assert result.counts() == {
+        ("messages", "schedule(旧世代)"): 2,
+        ("messages", "external_event(旧世代)"): 1,
+    }
+    for row_id, _content, meta, expected in _LEGACY_ROWS:
+        if expected is None:
+            assert after[row_id] == v1[row_id], row_id
+            continue
+        role, content, new_meta, _ = after[row_id]
+        assert (role, content) == ("system", expected[1]), row_id
+        assert new_meta == {**meta, SYSTEM_NOTICE_KEY: "schedule"}, row_id
+    # 版 1 で変換済みの行は素通り (二重に変換しない)
+    assert after["marked"] == v1["marked"]
+    # 走査し直しでは、版 1 で報告済みの残した行を数え直さない
+    assert not result.skipped and not result.unknown_system_count
+    assert marker_rules_version(_marker(db)) == MIGRATION_RULES_VERSION
+    assert "走査し直し: 規則の版 1" in report.read_text(encoding="utf-8")
+
+    # 今の版の印が立ったので、次の起動では何もしない
+    again = migrate_persona_db(db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP)
+    assert again.already_done and not again.changes
+    assert _rows(db) == after
+
+
+@pytest.mark.parametrize(
+    "value, version",
+    [
+        (None, None),
+        ("2026-10-27T00:00:00+00:00", 1),  # 版 1 の形 (完了時刻だけ)
+        ("other-process", 1),  # 読めない値は古い側に倒す
+        ("v2 2026-10-28T00:00:00+00:00", 2),
+        ("v10 2027-01-01T00:00:00+00:00", 10),
+    ],
+)
+def test_marker_rules_version_reads_the_marker_value(value, version):
+    assert marker_rules_version(value) == version
 
 
 def test_cli_refuses_a_home_that_does_not_exist(tmp_path):

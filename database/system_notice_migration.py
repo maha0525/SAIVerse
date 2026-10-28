@@ -10,7 +10,10 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
    行だけを、タグを剥がして role=system + ``__system_notice__`` にする
    (AND 判定、不変条件 2・4)。識別用 metadata の無いタグ始まりの行は触らない
    (外部由来の偽物は role=user のまま残れば、合言葉の規則のもとで「ただの
-   文章」として読まれる)。
+   文章」として読まれる)。例外は、本番の写しの dry-run レポートで系統を確定した
+   旧世代のスケジュール発火文・外部イベント通知で、書き出しと発火の記録の
+   metadata と、ユーザーの発言ではないことの来歴の個別条件で拾う
+   (:func:`legacy_notice`)。
 2. 旧世界で role=system・タグ無しで保存された行 (スペルの結果・TOOL の結果・
    Handy Tool・権限拒否など)。``__system_notice__`` が無いので
    ``is_system_notice`` が偽になり、自動想起の種などから外れる。tags から系統を
@@ -61,10 +64,37 @@ SYSTEM_OPEN = "<system>"
 SYSTEM_CLOSE = "</system>"
 
 #: ペルソナの記憶 DB の ``embed_metadata`` に書く「この移行は済んだ」の印。
-#: 値は完了時刻 (ISO)。置き場と判定 (キーがあれば済み) は saiverse/
-#: v3_shape_migration.py の ``MARKER_KEY`` と同じ流儀 — 書き込み先と同じ DB に
-#: 置くので、memory.db を差し替え・復元しても「移行したか」と中身がずれない。
+#: 値は ``"v<規則の版> <完了時刻 (ISO)>"`` (:func:`_marker_value`)。版 1 の印は
+#: 版を書く前の形で、値が完了時刻だけ。置き場は saiverse/v3_shape_migration.py の
+#: ``MARKER_KEY`` と同じ流儀 — 書き込み先と同じ DB に置くので、memory.db を
+#: 差し替え・復元しても「移行したか」と中身がずれない。
 MIGRATION_MARKER_KEY = "system_notice_migration_done"
+
+#: 移行の規則の版。済んだ DB にも当て直す必要のある規則を足したときに上げる。
+#: 印の版がこれより古い DB は、足した規則だけで走査し直す (:func:`migrate_persona_db`)。
+#:
+#: - 版 1: 印の AND 判定・印の無い role=system の推定・列と表の剥がし
+#: - 版 2: 旧世代のスケジュール発火文・外部イベント通知の個別条件
+#:   (:func:`legacy_notice`)
+MIGRATION_RULES_VERSION = 2
+
+
+def _marker_value() -> str:
+    return f"v{MIGRATION_RULES_VERSION} {datetime.now(timezone.utc).isoformat()}"
+
+
+def marker_rules_version(value: Optional[str]) -> Optional[int]:
+    """完了の印の値が表す規則の版。印が無ければ None。
+
+    版を書いていない値 (完了時刻だけ — 版 1 の形) と、読めない値は版 1 として
+    扱う — 古い側に倒せば、走査し直しは変換済みの行を素通りするだけで済む。
+    """
+    if value is None:
+        return None
+    head = str(value).split(" ", 1)[0]
+    if head.startswith("v") and head[1:].isdigit():
+        return int(head[1:])
+    return 1
 
 #: 写しとレポートの置き場 (``<SAIVERSE_HOME>/backups/`` の下)。
 OUTPUT_DIR_NAME = "system_notice_migration"
@@ -262,6 +292,80 @@ def classify_tagged_message(
     return None
 
 
+#: 系統の印 (``with:["system"]`` / ``event_message`` など) を持たない旧世代の
+#: スケジュール発火文の書き出し。旧 schedule_manager は二つの文面を使った
+#: (現行は前者 — saiverse/schedule_manager.py)。
+_LEGACY_SCHEDULE_PREFIXES = ("スケジュールの実行時刻です", "スケジュールが実行されました")
+#: 同じく、旧世代の外部イベント通知 (X のメンションなど) の書き出し。現行は
+#: saiverse/autonomy_wiring.py が ``source="external_event"`` 付きで組む。
+_LEGACY_EXTERNAL_EVENT_PREFIX = "[外部イベント通知]"
+#: レポートの件数とサンプルで、印で拾った ``schedule`` と区別する表記。行に書く
+#: ``__system_notice__`` の値はどちらも ``schedule`` (外部イベントの応対は
+#: スケジュールと同じ入口から起動していた)。
+LEGACY_SCHEDULE_LABEL = "schedule(旧世代)"
+LEGACY_EXTERNAL_EVENT_LABEL = "external_event(旧世代)"
+#: 旧世代の通知が記憶 DB に書かれたときの系統名 (``__system_notice__`` の値)。
+LEGACY_NOTICE_KIND = "schedule"
+
+#: 建物履歴から記憶への転記が行の metadata に刻む来歴のキー
+#: (builtin_data/tools/get_building_messages.py の ``BUILDING_MSG_REF_KEY``)。
+#: 旧データの判定なので、保存された当時の値をここに固定する。
+_BUILDING_MSG_REF_KEY = "building_msg_ref"
+
+
+def legacy_notice(
+    role: Any, content: Any, metadata: Dict[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """系統の印を持たない旧世代のスケジュール発火文・外部イベント通知なら (レポートの表記, 剥がした本文)。
+
+    docs/intent/system_notice_delivery.md「移行」の旧世代の個別条件。本番の写しの
+    dry-run レポートで系統を確定した二つだけを拾う。条件は全部の AND:
+
+    - role=user、tags が ``conversation`` だけ (``pulse:`` を除く)
+    - ユーザーの発言の来歴を持たない — 建物履歴からの転記の印
+      (``building_msg_ref``) も、通話の文字起こしの印 (``voice_call`` /
+      ``voice_transcript``) も無い
+    - タグの剥がしが成立する (完全な組が一つ)
+    - 剥がした本文の先頭が発火文の書き出しで、その発火の記録として供給側が付けた
+      metadata を持つ — スケジュールは ``schedule_id``、外部イベントは
+      ``source="external_event"``
+
+    ``schedule_id`` と ``source`` は、送り手 (チャットの送信 API) も metadata に
+    書ける。だから本文と metadata だけでは、ユーザーが発火文の形を打った発言と
+    区別できない。来歴の条件はそれを縛る: 今のコードでユーザーの発言が記憶に
+    入る経路は、建物履歴からの転記 (2026-07-21 から必ず ``building_msg_ref`` を
+    刻む) と通話の文字起こしだけ (本番の写しでは正規の旧発火文 306 件のどれも
+    これらの印を持たない)。建物履歴の行の来歴は列で縛る (:func:`scan_main_conn`
+    — 呼び出し側の条件)。
+
+    書き出しは剥がした本文の先頭でだけ見る (中断の再開文が元の発火文を引用して
+    いる行は、先頭が再開文なので拾わない)。X の投稿指示・音声入力の通知など、
+    出自の確度が足りない形はここで拾わない。:func:`classify_tagged_message` が
+    系統を決められなかった行にだけ使う (印があるものはそちらが優先)。
+    """
+    if not isinstance(role, str) or role.lower() != "user":
+        return None
+    if not starts_with_system_tag(content):
+        return None
+    tags = {t for t in _tags_of(metadata) if not t.startswith("pulse:")}
+    if tags != {"conversation"}:
+        return None
+    if _BUILDING_MSG_REF_KEY in metadata or metadata.get("voice_call") or metadata.get(
+        "voice_transcript"
+    ):
+        return None
+    body = strip_system_tags(content)
+    if body is None:
+        return None
+    if body.startswith(_LEGACY_SCHEDULE_PREFIXES):
+        return (LEGACY_SCHEDULE_LABEL, body) if metadata.get("schedule_id") is not None else None
+    if body.startswith(_LEGACY_EXTERNAL_EVENT_PREFIX):
+        if metadata.get("source") == "external_event":
+            return LEGACY_EXTERNAL_EVENT_LABEL, body
+        return None
+    return None
+
+
 def classify_unmarked_system_message(metadata: Dict[str, Any]) -> Optional[str]:
     """印 (``__system_notice__``) の無い role=system 行の系統名。推定できなければ None。"""
     tags = _tags_of(metadata)
@@ -343,6 +447,9 @@ class StoreResult:
     #: 確認待ちの印を付けるべき行があるのに、metadata の列が無い古いスキーマなので
     #: 付けられなかったか。真なら完了の印を立てない (:func:`migrate_persona_db`)。
     review_marks_deferred: bool = False
+    #: 古い版の規則で移行を済ませた記憶 DB を、新しい版で足した規則だけで走査し
+    #: 直したとき、その印の版 (:data:`MIGRATION_RULES_VERSION`)。全体を走査したら None。
+    rescan_from_version: Optional[int] = None
     #: この結果のコミットで立てた完了の印の値 (立てていなければ None)。孤児の
     #: 仮の結果の JSON を採用してよいかを、DB の印と突き合わせて決めるのに使う
     #: (:func:`regenerate_pending_reports`)。
@@ -408,6 +515,7 @@ class StoreResult:
             "already_done": self.already_done,
             "error": self.error,
             "review_marks_deferred": self.review_marks_deferred,
+            "rescan_from_version": self.rescan_from_version,
             "marker_value": self.marker_value,
             "counts": [[t, k, n] for (t, k), n in sorted(self.counts().items())],
             "samples": [asdict(c) for c in _sample_changes(self.changes)],
@@ -428,6 +536,7 @@ class StoreResult:
             already_done=bool(data.get("already_done")),
             error=data.get("error"),
             review_marks_deferred=bool(data.get("review_marks_deferred")),
+            rescan_from_version=data.get("rescan_from_version"),
             marker_value=data.get("marker_value"),
             restored_counts={(t, k): n for t, k, n in data.get("counts") or []},
             changes=[Change(**c) for c in data.get("samples") or []],
@@ -533,14 +642,65 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
+def _notice_metadata(metadata: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """通知に変換する行の新しい metadata (通知の印を足す)。
+
+    前の走査が「系統を判定できなかった」として付けた確認待ちの印は外す — 版 1 の
+    移行で確認待ちにした旧世代の発火文を、版 2 の走査し直しで通知にするとき、
+    印が残ると「まだ確認が要る行」に見え続ける。他の理由の確認待ちの印は、この
+    変換が解消するものではないので残す。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, SYSTEM_NOTICE_REVIEW_KEY
+
+    new_meta = dict(metadata)
+    new_meta[SYSTEM_NOTICE_KEY] = kind
+    if new_meta.get(SYSTEM_NOTICE_REVIEW_KEY) == UNCLASSIFIED_REASON:
+        del new_meta[SYSTEM_NOTICE_REVIEW_KEY]
+    return new_meta
+
+
+def _scan_legacy_rescan(conn: sqlite3.Connection, result: StoreResult, order: str) -> None:
+    """版 1 で移行を済ませた記憶 DB に、版 2 で足した旧世代の判定だけを当てる (書かない)。
+
+    版 1 の走査で印の判定 (:func:`classify_tagged_message`) が系統を決めた行は
+    変換済みか曖昧として確認待ちにしてあるので見ない。変換済みの行はタグで
+    始まらないので、そもそも読まれない (二重に変換しない)。変換しない行は版 1 の
+    レポートに載っていて確認待ちの印も付いているので、ここでは数えない。
+    """
+    rows = conn.execute(
+        "SELECT id, role, content, metadata FROM messages "
+        f"WHERE substr(content, 1, ?) = ? ORDER BY {order}",
+        (len(SYSTEM_OPEN), SYSTEM_OPEN),
+    ).fetchall()
+    for row_id, role, content, raw_meta in rows:
+        metadata = _load_json(raw_meta)
+        if classify_tagged_message(role, content, metadata) is not None:
+            continue
+        legacy = legacy_notice(role, content, metadata)
+        if legacy is None:
+            continue
+        label, body = legacy
+        result.updates.append((
+            "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
+            (body, _dump_json(_notice_metadata(metadata, LEGACY_NOTICE_KIND)), row_id),
+        ))
+        result.changes.append(Change("messages", str(row_id), label, content, body))
+
+
+def scan_persona_conn(
+    conn: sqlite3.Connection, result: StoreResult, *, legacy_only: bool = False,
+) -> None:
     """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
 
-    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`) と、
+    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`、
+      決められなければ旧世代の個別条件 :func:`legacy_notice`) と、
       印の無い role=system 行 (:func:`classify_unmarked_system_message`)。
     - messages.paired_action_text: 列そのものが機構だけが書く指示文の控えなので、
       タグで始まる値は剥がす。
     - perception_batches (kind=realtime_and_recall).rendered_text。
+
+    ``legacy_only`` は版 1 で移行を済ませた DB の走査し直し
+    (:func:`_scan_legacy_rescan`)。
     """
     from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
@@ -549,6 +709,12 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     cols = _columns(conn, "messages")
     if not {"id", "role", "content"} <= cols:
         # 判定に要る列が無い DB は対象が無い (変換もしない)
+        return
+    if legacy_only:
+        if "metadata" in cols:  # metadata の無い行は旧世代の条件に当たらない
+            _scan_legacy_rescan(
+                conn, result, "created_at, rowid" if "created_at" in cols else "rowid",
+            )
         return
     meta_col = _col_or_null(cols, "metadata")
     # 確認待ちの印は metadata の列に書く。列の無い古いスキーマでは付けられないので、
@@ -568,6 +734,14 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
         if starts_with_system_tag(content):
             kind = classify_tagged_message(role, content, metadata)
             body = strip_system_tags(content) if kind is not None else None
+            label = kind
+            if kind is None:
+                # 印で系統を決められなかった行のうち、旧世代の発火文の個別条件に
+                # 当たるもの (確認待ちの印は付けない)
+                legacy = legacy_notice(role, content, metadata)
+                if legacy is not None:
+                    kind = LEGACY_NOTICE_KIND
+                    label, body = legacy
             if kind is None or body is None:
                 result.skipped.append(Skipped(
                     "messages", str(row_id), str(role),
@@ -582,14 +756,12 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 else:
                     result.review_marks_deferred = True
                 continue
-            new_meta = dict(metadata)
-            new_meta[SYSTEM_NOTICE_KEY] = kind
             result.updates.append((
                 "UPDATE messages SET role = 'system', content = ?, metadata = ? "
                 "WHERE id = ?",
-                (body, _dump_json(new_meta), row_id),
+                (body, _dump_json(_notice_metadata(metadata, kind)), row_id),
             ))
-            result.changes.append(Change("messages", str(row_id), kind, content, body))
+            result.changes.append(Change("messages", str(row_id), label, content, body))
             continue
         if role_s != "system" or metadata.get(SYSTEM_NOTICE_KEY):
             continue
@@ -690,10 +862,11 @@ def scan_persona_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
             ))
 
 
-def _persona_marker_set(conn: sqlite3.Connection) -> bool:
+def _persona_done_version(conn: sqlite3.Connection) -> Optional[int]:
+    """完了の印の規則の版 (:func:`marker_rules_version`)。印が無ければ None。"""
     from sai_memory.memory.storage import get_embed_metadata
 
-    return get_embed_metadata(conn, MIGRATION_MARKER_KEY) is not None
+    return marker_rules_version(get_embed_metadata(conn, MIGRATION_MARKER_KEY))
 
 
 def _set_persona_marker(conn: sqlite3.Connection) -> None:
@@ -711,9 +884,7 @@ def _set_persona_marker(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS embed_metadata ("
         "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
     )
-    set_embed_metadata(
-        conn, MIGRATION_MARKER_KEY, datetime.now(timezone.utc).isoformat(), commit=False,
-    )
+    set_embed_metadata(conn, MIGRATION_MARKER_KEY, _marker_value(), commit=False)
 
 
 def _apply(conn: sqlite3.Connection, updates: Sequence[Tuple[str, tuple]]) -> None:
@@ -960,7 +1131,10 @@ def migrate_persona_db(
 ) -> StoreResult:
     """一つのペルソナの記憶 DB を移行する。
 
-    印 (:data:`MIGRATION_MARKER_KEY`) が立っていれば何もしない。そうでなければ
+    今の版 (:data:`MIGRATION_RULES_VERSION`) の印 (:data:`MIGRATION_MARKER_KEY`) が
+    立っていれば何もしない。古い版の印なら、その後の版で足した規則だけで走査し
+    直し (``legacy_only`` — 変換済みの行は条件から外れているので素通りする)、
+    印を今の版に書き換える。印が無ければ全体を走査する。どちらも
     書き込みの取引 (``BEGIN IMMEDIATE`` — 他のプロセスの書き込みを止める) を
     取り、その中で印をもう一度確かめ (別のプロセスが先に終えていれば何も
     せずに終える)、変換する行を走査し、変換する行があれば写しを
@@ -985,24 +1159,30 @@ def migrate_persona_db(
 
     result = StoreResult(label=f"ペルソナ {persona_id}", path=str(db_path), persona=True)
     with closing(_open_readonly(db_path)) as conn:
-        if _persona_marker_set(conn):
+        done = _persona_done_version(conn)
+        if done is not None and done >= MIGRATION_RULES_VERSION:
             result.already_done = True
             return result
         if dry_run:
-            scan_persona_conn(conn, result)
+            result.rescan_from_version = done
+            scan_persona_conn(conn, result, legacy_only=done is not None)
             return result
 
     staged: Optional[Path] = None
     with closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            if _persona_marker_set(conn):
+            done = _persona_done_version(conn)
+            if done is not None and done >= MIGRATION_RULES_VERSION:
                 # 同時に起動した別のプロセスが、こちらの読み取りの後に移行を
                 # 終えた。何も書かずに終える。
                 conn.rollback()
                 result.already_done = True
                 return result
-            scan_persona_conn(conn, result)
+            # 古い版の印がある DB は、その後の版で足した規則だけで走査し直す
+            # (版 1 → 2 で足したのは旧世代の個別条件だけ)
+            result.rescan_from_version = done
+            scan_persona_conn(conn, result, legacy_only=done is not None)
             if result.updates:
                 backup = output_dir / persona_id / _snapshot_name("memory.db", stamp)
                 try:
@@ -1073,6 +1253,29 @@ _SLUICE_LEDGER_KIND = "sluice.pan"
 _SAIMEMORY_APPEND_TARGETS = ("saimemory.append", "saimemory.append_digest")
 
 
+def _written_by_old_writer(legacy_seq: Any, legacy_message_id: Any, client_message_id: Any) -> bool:
+    """建物履歴の行が、旧世代の発火文を書きえた書き手の行か (来歴の条件)。
+
+    建物履歴には書き手が機構かユーザーかを持つ列が無い (旧世代の発火文も
+    ユーザーの発言も role=user・persona_id 無しで載る)。代わりに、書いた経路の
+    世代が列に残る:
+
+    - ``legacy_seq`` / ``legacy_message_id``: 旧ログの取り込みと、ペルソナ側の
+      番号を持ち込んでいた世代の書き込みだけが埋める。本番の写しでは正規の
+      旧発火文 171 件の全部が持ち、2026-09-06 より後に書かれた行は一つも
+      持たない。
+    - ``client_message_id``: 画面からの送信が必ず付ける。正規の旧発火文は
+      どれも持たない (本番の写しで画面から送られた 1039 件は全部持つ)。
+
+    両方を満たす行だけを旧世代の判定に回す。今の画面からの送信は
+    ``client_message_id`` を持つので外れ、今の書き込み経路の行は旧世代の列が空
+    なので外れる。ただし旧世代の列は、書き込み (database/building_messages.py の
+    ``insert_building_message``) が呼び出し側の渡した seq / message_id を写す
+    作りなので、列の契約ではなく、本番の写しで確かめた分かれ方に立っている。
+    """
+    return (legacy_seq is not None or legacy_message_id is not None) and not client_message_id
+
+
 def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     """本体 DB を読んで、変換を ``result`` に積む (書かない)。
 
@@ -1081,7 +1284,9 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
 
     - building_messages: 音声通話の痕跡 (role=user + タグ + event_message +
       ``voice_call``) を、今の形 (role=host・タグ無し、saiverse/voice_call.py の
-      ``_building_entry``) にする。
+      ``_building_entry``) にする。印の無い旧世代のスケジュール発火文・外部
+      イベント通知 (:func:`legacy_notice`。書き手の世代の列で来歴を縛る —
+      :func:`_written_by_old_writer`) も同じ形にする。
     - execution_ledger: on_event の prepared 行の ``dispatch_envelope.user_input``
       (回収で応対の入力として送り直される) と、スルースの applied / completed
       行の結果の ``prompt`` (再適用で記録の paired_action_text になる)。
@@ -1090,8 +1295,12 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
     from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
     if _table_exists(conn, "building_messages"):
-        for row_id, role, content, raw_meta in conn.execute(
-            "SELECT id, role, content, metadata_json FROM building_messages "
+        bm_cols = _columns(conn, "building_messages")
+        for row_id, role, content, raw_meta, legacy_seq, legacy_mid, client_mid in conn.execute(
+            "SELECT id, role, content, metadata_json, "
+            f"{_col_or_null(bm_cols, 'legacy_seq')}, "
+            f"{_col_or_null(bm_cols, 'legacy_message_id')}, "
+            f"{_col_or_null(bm_cols, 'client_message_id')} FROM building_messages "
             "WHERE substr(content, 1, ?) = ? ORDER BY id",
             (len(SYSTEM_OPEN), SYSTEM_OPEN),
         ).fetchall():
@@ -1103,13 +1312,20 @@ def scan_main_conn(conn: sqlite3.Connection, result: StoreResult) -> None:
                 and metadata.get("voice_call") is True
             )
             body = strip_system_tags(content) if is_voice_call else None
+            label = "voice_call"
+            if not is_voice_call and _written_by_old_writer(legacy_seq, legacy_mid, client_mid):
+                # 印の無い旧世代のスケジュール発火文・外部イベント通知 (記憶 DB と同じ
+                # 個別条件)。今の建物の出来事の行と同じ role=host・タグ無しにする。
+                legacy = legacy_notice(role, content, metadata)
+                if legacy is not None:
+                    label, body = legacy
             if body is not None:
                 result.updates.append((
                     "UPDATE building_messages SET role = 'host', content = ? WHERE id = ?",
                     (body, row_id),
                 ))
                 result.changes.append(Change(
-                    "building_messages", str(row_id), "voice_call", content, body,
+                    "building_messages", str(row_id), label, content, body,
                 ))
                 continue
             result.skipped.append(Skipped(
@@ -1330,6 +1546,13 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
             lines.append(f"- 移行前の写し: {res.backup_path}")
         if res.error:
             lines.append(f"- エラー: {res.error}")
+        if res.rescan_from_version is not None:
+            lines.append(
+                f"- 走査し直し: 規則の版 {res.rescan_from_version} で移行を済ませた記憶なので、"
+                f"版 {MIGRATION_RULES_VERSION} までに足した規則 (旧世代のスケジュール発火文・"
+                "外部イベント通知) だけを当て直した。前の版で変換しなかった行は、前の版の"
+                "レポートと確認待ちの印にある"
+            )
         if res.review_marks_deferred:
             lines.append(
                 "- 確認待ちの印: この記憶 DB は metadata の列が無い古い形なので、確認が要る行に"
@@ -1863,7 +2086,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for res in results:
         print(f"{res.label}: converted={len(res.changes)} skipped={len(res.skipped)} "
               f"unknown_system={res.unknown_system_count} done_before={res.already_done} "
-              f"error={res.error}")
+              f"rescan_from_version={res.rescan_from_version} error={res.error}")
     print(f"report: {report}")
     return 0 if not any(r.error for r in results) else 1
 
