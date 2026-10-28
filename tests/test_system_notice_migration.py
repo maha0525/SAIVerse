@@ -1446,6 +1446,10 @@ def test_the_staged_result_is_flushed_to_disk_before_the_commit(
     assert run_dir_name in pre_commit_dirs
     assert mig.RESULTS_DIR_NAME in pre_commit_dirs
     assert OUTPUT_DIR_NAME in pre_commit_dirs
+    # 新規作成されうる階層の親は、既存が保証される祖先 (SAIVERSE_HOME) まで
+    # 確定させる (Codex 8 巡目 — backups/ 自体が初回作成の環境もある)
+    assert "backups" in pre_commit_dirs
+    assert tmp_path.name in pre_commit_dirs
     # 付け替えの後 (印あり) にもフォルダの項目を確定させる
     assert ("dir", marker, run_dir_name) in events
 

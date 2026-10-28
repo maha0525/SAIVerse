@@ -863,12 +863,21 @@ def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResul
             fh.flush()
             os.fsync(fh.fileno())
         _fsync_dir(results_dir)
-        # 起動ごとのフォルダは今回の実行で新しく作られる。フォルダ自身を確定させて
-        # も、その名前の項目は親に載っているので、親 (results/) とさらにその親
-        # (backups/system_notice_migration/ — 初回はこれも新規) まで確定させないと、
-        # 電源断でフォルダ名ごと消えて、コミット済みの完了の印だけが残りうる。
-        _fsync_dir(results_dir.parent)
-        _fsync_dir(results_dir.parent.parent)
+        # 起動ごとのフォルダは今回の実行で新しく作られる (初回は results/ と
+        # backups/system_notice_migration/、環境によっては backups/ も新規)。
+        # フォルダ自身を確定させても、その名前の項目は親に載っているので、
+        # 新規作成されうる各階層の親を、既存が保証される祖先 (SAIVERSE_HOME)
+        # まで確定させないと、電源断でフォルダ名ごと消えて、コミット済みの
+        # 完了の印だけが残りうる (Codex 7〜8 巡目)。
+        from saiverse.data_paths import get_saiverse_home
+
+        home = get_saiverse_home()
+        current = results_dir.parent
+        for _ in range(8):  # 安全弁 (実際の深さは 3 段)
+            _fsync_dir(current)
+            if current == home or current.parent == current:
+                break
+            current = current.parent
     except BaseException:
         _discard_staged(staged)
         raise
