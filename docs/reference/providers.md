@@ -32,8 +32,9 @@
 Meta は会話用の `meta-muse-spark-1.3` (`muse-spark-1.3`)、
 `meta-muse-spark-1.3-contributor` (`muse-spark-1.3-contributor`、送った内容を Meta が
 学習に使う代わりに安い版) と `meta-muse-wonder-1.0` (`muse-wonder-1.0`、プレビュー) を同梱する。
-`default_supports_images` と `default_convert_system_to_user` を true にしており、
-3 モデルへ継承される。`openai_compat_options` は宣言しない (OpenAI の初期設定の動作のまま)。
+`default_supports_images` を true にしており、3 モデルへ継承される。
+会話の途中の system メッセージは user へ変換せず、system のまま送る
+(`default_convert_system_to_user` は書かない)。`openai_compat_options` も書かない (OpenAI の初期設定の動作のまま)。
 Muse は推論を止められないので、モデル定義の `reasoning_effort` に `none` は無い。
 Contributor 版は Meta が `max` も受け付けないので、選択肢は minimal〜xhigh。
 Meta が 400 を返す `stop` / `top_p` などはモデル定義の `parameters` に入れていない。

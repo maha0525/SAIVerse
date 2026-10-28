@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通る。Contributor 版の追加はブランチ feature/meta-muse-contributor の PR にある。次 = まはーが PR を確認し、会話の途中の system メッセージを user に変換する設定をやめるかを決める。 | まはー (PR 確認と変換の判断) | [intent](../intent/meta_muse_provider.md) | 2026-10-27 |
+| 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通る。Contributor 版の追加と、会話の途中の system メッセージを user に変換しない変更は、ブランチ feature/meta-muse-contributor と feature/meta-muse-keep-system の PR にある。次 = まはーが 2 つの PR を確認し、ペルソナとの会話で Muse が途中の指示に従うかを確かめる。 | まはー (PR 確認と実際の会話での確認) | [intent](../intent/meta_muse_provider.md) | 2026-10-27 |
 | 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
 | 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正はブランチ feature/mac-setup-tls-and-brew-path にあり、まだ develop に入っていない。次 = レビューの消し込みと検収を経て develop に入れ、次のリリースを Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | 私 (レビューと検収) → リリース → Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-10-26 |
 | 🟣 検証待ち | 画像の枚数上限の既定を廃止し、バイトの非常弁で要求サイズ上限を避ける | 実装はブランチ feature/image-attachment-unlimited にあり、まだ develop に入っていない。次 = 検収とレビューを経て develop に入れ、画像の多い Gemini の会話で、全部の画像が画像のまま送られ、新しい画像の回もキャッシュが当たることをログで見る。 | 私 (検収とレビュー) → まはー (実機確認) | [issue](../issues/image_attachment_limit_breaks_cache_prefix.md) | 2026-10-25 |

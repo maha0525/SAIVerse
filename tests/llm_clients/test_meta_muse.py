@@ -169,11 +169,12 @@ def assert_meta_request(request, body, api_model):
     for field in REJECTED_FIELDS:
         assert field not in body, f"{field} must not be sent to Meta"
     assert body.get("n", 1) == 1
-    # The leading system message stays a system message; a later one becomes user.
+    # Meta accepts system messages anywhere in the conversation, so a later one is
+    # sent as system too. Rewriting it as user made Muse treat it as the user's request.
     roles = [msg["role"] for msg in body["messages"]]
-    assert roles == ["system", "user", "assistant", "user", "user"]
+    assert roles == ["system", "user", "assistant", "system", "user"]
     assert body["messages"][0]["content"] == "synthetic leading system"
-    assert body["messages"][3]["content"] == "<system>\nsynthetic mid-conversation system\n</system>"
+    assert body["messages"][3]["content"] == "synthetic mid-conversation system"
 
 
 def assert_usage(usage, config_key):
@@ -192,7 +193,7 @@ def test_catalog_resolves_meta_provider_and_pricing(isolated, config_key):
     assert cfg["api_key_env"] == "META_API_KEY"
     assert cfg["context_length"] == 1048576
     assert cfg["supports_images"] is True
-    assert cfg["convert_system_to_user"] is True
+    assert not cfg.get("convert_system_to_user")
     assert cfg["supports_structured_output"] is True
     # Meta rejects a request with more than 50 images (HTTP 400).
     assert cfg["max_image_embeds"] == 50
