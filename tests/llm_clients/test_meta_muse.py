@@ -17,6 +17,8 @@ MODELS = {
     # config key -> (API model name, input, cached input, output) in USD per 1M tokens
     "meta-muse-wonder-1.0": ("muse-wonder-1.0", 4.0, 0.2, 20.0),
     "meta-muse-spark-1.3": ("muse-spark-1.3", 1.25, 0.15, 4.25),
+    # Contributor mode: Meta may train on the content in exchange for the lower price.
+    "meta-muse-spark-1.3-contributor": ("muse-spark-1.3-contributor", 0.10, 0.002, 0.20),
 }
 KEY = "synthetic-meta-key"
 TOOL = {
@@ -200,6 +202,8 @@ def test_catalog_resolves_meta_provider_and_pricing(isolated, config_key):
         "max_completion_tokens": 32768,
     }
     assert "none" not in cfg["parameters"]["reasoning_effort"]["options"]
+    # Meta documents that "max" is not available on the Contributor variant.
+    assert ("max" in cfg["parameters"]["reasoning_effort"]["options"]) == (not api_model.endswith("-contributor"))
     pricing = model_configs.get_model_pricing(config_key)
     assert pricing["input_per_1m_tokens"] == input_rate
     assert pricing["cached_input_per_1m_tokens"] == cached_rate
