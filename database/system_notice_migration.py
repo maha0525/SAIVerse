@@ -863,6 +863,12 @@ def _stage_result_json(results_dir: Optional[Path], key: str, result: StoreResul
             fh.flush()
             os.fsync(fh.fileno())
         _fsync_dir(results_dir)
+        # 起動ごとのフォルダは今回の実行で新しく作られる。フォルダ自身を確定させて
+        # も、その名前の項目は親に載っているので、親 (results/) とさらにその親
+        # (backups/system_notice_migration/ — 初回はこれも新規) まで確定させないと、
+        # 電源断でフォルダ名ごと消えて、コミット済みの完了の印だけが残りうる。
+        _fsync_dir(results_dir.parent)
+        _fsync_dir(results_dir.parent.parent)
     except BaseException:
         _discard_staged(staged)
         raise

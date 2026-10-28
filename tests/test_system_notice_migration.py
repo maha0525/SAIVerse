@@ -1415,7 +1415,9 @@ def test_the_staged_result_is_flushed_to_disk_before_the_commit(
 ):
     """仮の JSON の中身とフォルダの項目は、完了の印のコミットより前に fsync される (Codex 6 巡目)。
 
-    付け替えの後もフォルダの項目を fsync する。
+    起動ごとのフォルダは新規作成なので、その名前の項目を持つ親 (results/) と
+    さらにその親も、印のコミット前に fsync する (Codex 7 巡目)。付け替えの後も
+    フォルダの項目を fsync する。
     """
     from database import system_notice_migration as mig
 
@@ -1423,11 +1425,11 @@ def test_the_staged_result_is_flushed_to_disk_before_the_commit(
     real_fsync = mig.os.fsync
 
     def _fsync(fd):
-        events.append(("file", _marker(persona_db)))
+        events.append(("file", _marker(persona_db), None))
         real_fsync(fd)
 
     def _fsync_dir(directory):
-        events.append(("dir", _marker(persona_db), sorted(p.name for p in directory.iterdir())))
+        events.append(("dir", _marker(persona_db), directory.name))
 
     monkeypatch.setattr(mig.os, "fsync", _fsync)
     monkeypatch.setattr(mig, "_fsync_dir", _fsync_dir)
@@ -1436,11 +1438,16 @@ def test_the_staged_result_is_flushed_to_disk_before_the_commit(
     assert result.result_saved
     marker = _marker(persona_db)
     assert marker is not None
-    # 仮の JSON の中身 → フォルダの項目 (どちらも印のコミット前) → 付け替え後のフォルダ
-    assert events[0] == ("file", None)
-    assert events[1][:2] == ("dir", None) and "persona_p1.json.tmp" in events[1][2]
-    assert events[2][:2] == ("dir", marker) and "persona_p1.json" in events[2][2]
-    assert "persona_p1.json.tmp" not in events[2][2]
+    # 仮の JSON の中身 → フォルダとその親二段 (全部 印のコミット前) → 付け替え後のフォルダ
+    results_root = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.RESULTS_DIR_NAME
+    run_dir_name = next(results_root.iterdir()).name
+    assert events[0][:2] == ("file", None)
+    pre_commit_dirs = [e[2] for e in events if e[0] == "dir" and e[1] is None]
+    assert run_dir_name in pre_commit_dirs
+    assert mig.RESULTS_DIR_NAME in pre_commit_dirs
+    assert OUTPUT_DIR_NAME in pre_commit_dirs
+    # 付け替えの後 (印あり) にもフォルダの項目を確定させる
+    assert ("dir", marker, run_dir_name) in events
 
 
 def test_a_failed_flush_rolls_back_and_leaves_no_staged_result(
