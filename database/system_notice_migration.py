@@ -1215,6 +1215,7 @@ def _split_position_is_free(conn: sqlite3.Connection, cols: set, rowid: Any, cre
 
 
 def _queue_voice_split(
+    conn: sqlite3.Connection,
     result: StoreResult,
     cols: set,
     row_id: Any,
@@ -1234,23 +1235,54 @@ def _queue_voice_split(
     role=user・本文 ``""`` で、元の行の metadata (確認待ちの印を除く全部) を持つ。
     id は ``add_message`` と同じく ``uuid4``。本文が空なので、``add_message`` を呼ぶ
     記憶の書き込み (saiverse_memory/adapter.py) と同じく埋め込みの行は作らない。
+
+    新しい行は実会話 (storage.py の ``filter_real_conversation_ids``) に入る形にする:
+    元の行の tags のうち ``MECHANISM_TAGS`` に入るものは新しい行に写さず、元の行の
+    line_role が ``CHRONICLE_EXCLUDED_LINE_ROLES`` に入るなら新しい行は
+    ``USER_LINE_ROLE`` にする。外したものは新しい行の ``REVIEW_CLEARED_KEY`` に残す
+    (saiverse/system_notice_review.py の ``ACTION_USER`` と同じ形)。通知の行 (元の行)
+    の tags と line_role はそのまま。
     """
-    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, SYSTEM_NOTICE_REVIEW_KEY
+    from sai_memory.memory.storage import (
+        CHRONICLE_EXCLUDED_LINE_ROLES,
+        MECHANISM_TAGS,
+        SYSTEM_NOTICE_KEY,
+        SYSTEM_NOTICE_REVIEW_KEY,
+    )
+    from saiverse.system_notice_review import REVIEW_CLEARED_KEY, USER_LINE_ROLE
 
     notice_meta = {k: metadata[k] for k in _VOICE_NOTICE_KEPT_KEYS if k in metadata}
     notice_meta[SYSTEM_NOTICE_KEY] = match.kind
     user_meta = {k: v for k, v in metadata.items() if k != SYSTEM_NOTICE_REVIEW_KEY}
-    new_id = str(uuid.uuid4())
+    cleared: Dict[str, Any] = {}
+    tags = user_meta.get("tags")
+    if isinstance(tags, list):
+        removed = [t for t in tags if t in MECHANISM_TAGS]
+        if removed:
+            user_meta["tags"] = [t for t in tags if t not in MECHANISM_TAGS]
+            cleared["tags"] = removed
     copied = [c for c in _SPLIT_COPIED_COLUMNS if c in cols]
+    if "line_role" in cols:
+        row = conn.execute("SELECT line_role FROM messages WHERE id = ?", (row_id,)).fetchone()
+        line_role = row[0] if row is not None else None
+        if line_role in CHRONICLE_EXCLUDED_LINE_ROLES:
+            copied.remove("line_role")
+            cleared["line_role"] = line_role
+    if cleared:
+        user_meta[REVIEW_CLEARED_KEY] = cleared
+    new_id = str(uuid.uuid4())
     copied_sql = "".join(f", {c}" for c in copied)
+    extra_cols = ", line_role" if "line_role" in cleared else ""
+    extra_vals = ", ?" if "line_role" in cleared else ""
+    extra_params = (USER_LINE_ROLE,) if "line_role" in cleared else ()
     result.updates.append((
         "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
         (match.body, _dump_json(notice_meta), row_id),
     ))
     result.updates.append((
-        f"INSERT INTO messages (id, role, content, metadata{copied_sql}) "
-        f"SELECT ?, 'user', '', ?{copied_sql} FROM messages WHERE id = ?",
-        (new_id, _dump_json(user_meta), row_id),
+        f"INSERT INTO messages (id, role, content, metadata{extra_cols}{copied_sql}) "
+        f"SELECT ?, 'user', '', ?{extra_vals}{copied_sql} FROM messages WHERE id = ?",
+        (new_id, _dump_json(user_meta), *extra_params, row_id),
     ))
     result.changes.append(Change("messages", str(row_id), match.label, content, match.body or ""))
     result.changes.append(Change(SPLIT_ADDED_TABLE, new_id, match.label, content, ""))
@@ -1525,7 +1557,7 @@ def _queue_conversion(
             return held
         if not _split_position_is_free(conn, cols, rowid, created_at):
             return SPLIT_POSITION_REASON
-        _queue_voice_split(result, cols, row_id, content, metadata, match)
+        _queue_voice_split(conn, result, cols, row_id, content, metadata, match)
         return None
     result.updates.append((
         "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
@@ -2915,8 +2947,8 @@ CUTOVER_FROM_START = "first_start"
 CUTOVER_FROM_ATTEMPT = "unrecorded_attempt"
 
 #: ``cutover.json`` を書けなかった起動が、その起動で決めようとした境の時刻を残す本体 DB の
-#: ``execution_ledger`` の行の KIND と IDEMPOTENCY_KEY (固定で一行だけ。既にあれば書き換え
-#: ない — 最初に残した時刻が最も早い)。STATUS は ``completed`` (終端)。台帳の読み手
+#: ``execution_ledger`` の行の KIND と IDEMPOTENCY_KEY (固定で一行だけ。既にあれば、より早い
+#: 時刻のときだけ書き換える — :func:`_write_cutover_attempt`)。STATUS は ``completed`` (終端)。台帳の読み手
 #: (saiverse/execution_ledger.py・saiverse/building_id_repair.py) は STATUS (と KIND の
 #: 前方一致) で絞るので、この行は回復の処理の走査に入らない (:data:`COMMIT_LEDGER_KIND`
 #: の行と同じ)。
@@ -2989,12 +3021,18 @@ def _marker_completed_at(value: str) -> Optional[datetime]:
     return _parse_utc(value)
 
 
-def _earliest_completion_marker(saiverse_home: Path) -> Optional[datetime]:
+def _earliest_completion_marker(
+    saiverse_home: Path, found: Optional[List[datetime]] = None,
+) -> Optional[datetime]:
     """記憶 DB の完了の印の完了時刻のうち最も早いもの。印がどこにも無ければ None。
 
     読めない記憶 DB・読めない印が一つでもあれば :class:`CutoverUnavailable` —
     読み落とした印が最も早いものだと、切り替わりの時刻が遅く決まり、その間に
     新しい形式のコードが書いた行が自動の変換の対象に入る。
+
+    ``found`` を渡せば、読めた完了時刻を読んだ順に足す (途中で
+    :class:`CutoverUnavailable` を送るときも、それまでに読めた時刻は残る —
+    :func:`resolve_cutover` が本体 DB に残す時刻に使う)。
     """
     from sai_memory.memory.storage import get_embed_metadata_strict
 
@@ -3018,6 +3056,8 @@ def _earliest_completion_marker(saiverse_home: Path) -> Optional[datetime]:
             raise CutoverUnavailable(
                 f"記憶 {persona_id} の完了の印の時刻を読めませんでした: {value!r}"
             )
+        if found is not None:
+            found.append(at)
         if earliest is None or at < earliest:
             earliest = at
     return earliest
@@ -3112,7 +3152,9 @@ def _run_folder_started_at(run_dir: Path) -> Optional[datetime]:
     return at
 
 
-def _earliest_migration_trace(saiverse_home: Path) -> Optional[datetime]:
+def _earliest_migration_trace(
+    saiverse_home: Path, found: Optional[List[datetime]] = None,
+) -> Optional[datetime]:
     """この移行が前の起動で書いた記録の時刻のうち、最も早いもの。記録が無ければ None。
 
     完了の印は記憶 DB ごとに版を上げるたびに書き換わり、記憶 DB を消せば消える
@@ -3131,10 +3173,17 @@ def _earliest_migration_trace(saiverse_home: Path) -> Optional[datetime]:
     置き場に書かれる)。``cutover.json`` 自身も数えない。
 
     記録はあるのに時刻を読めない・置き場を読めないときは :class:`CutoverUnavailable`
-    — 読み落とした記録が最も早いものだと、境が遅く決まる。
+    — 読み落とした記録が最も早いものだと、境が遅く決まる。``found`` は
+    :func:`_earliest_completion_marker` と同じ (読めた時刻を読んだ順に足す)。
     """
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
     times: List[datetime] = []
+
+    def _note(at: datetime) -> None:
+        times.append(at)
+        if found is not None:
+            found.append(at)
+
     try:
         if not output_dir.is_dir():
             return None
@@ -3154,11 +3203,11 @@ def _earliest_migration_trace(saiverse_home: Path) -> Optional[datetime]:
     for run_dir in run_dirs:
         at = _run_folder_started_at(run_dir)
         if at is not None:
-            times.append(at)
+            _note(at)
     for path in copies:
-        times.append(_file_written_at(path))
+        _note(_file_written_at(path))
     if has_leftovers:
-        times.append(_file_written_at(leftovers))
+        _note(_file_written_at(leftovers))
     return min(times) if times else None
 
 
@@ -3240,7 +3289,11 @@ def _write_cutover_attempt(conn: sqlite3.Connection, cutover: Cutover) -> bool:
 
     KIND :data:`CUTOVER_ATTEMPT_LEDGER_KIND`・IDEMPOTENCY_KEY :data:`CUTOVER_ATTEMPT_LEDGER_KEY`・
     STATUS ``completed``・PAYLOAD_JSON ``{"cutover": <ISO 8601>, "source": <決め方>}``。
-    既にその行があれば書き換えない。表が無ければ書かずに False。
+    既にその行があれば、``cutover`` がその行の時刻より早いときだけ PAYLOAD_JSON と
+    UPDATED_AT を書き換える (前の起動が最古の候補を読む前に止まり、後の起動が読んだ後に
+    止まると、後の起動の時刻のほうが早い)。その行の時刻を読めなければ書き換えない
+    (より早い時刻かもしれない。読む側 :func:`_cutover_attempt_in_main_db` が
+    :class:`CutoverUnavailable` で止め続ける)。表が無ければ書かずに False。
     """
     if not _table_exists(conn, "execution_ledger"):
         return False
@@ -3248,6 +3301,22 @@ def _write_cutover_attempt(conn: sqlite3.Connection, cutover: Cutover) -> bool:
     payload = json.dumps(
         {"cutover": cutover.at.isoformat(), "source": cutover.source}, ensure_ascii=False,
     )
+    existing = conn.execute(
+        "SELECT PAYLOAD_JSON FROM execution_ledger WHERE KIND = ? AND IDEMPOTENCY_KEY = ?",
+        (CUTOVER_ATTEMPT_LEDGER_KIND, CUTOVER_ATTEMPT_LEDGER_KEY),
+    ).fetchone()
+    if existing is not None:
+        try:
+            left_at = _parse_utc(json.loads(existing[0])["cutover"])
+        except (ValueError, KeyError, TypeError):
+            left_at = None
+        if left_at is not None and cutover.at < left_at:
+            conn.execute(
+                "UPDATE execution_ledger SET PAYLOAD_JSON = ?, UPDATED_AT = ? "
+                "WHERE KIND = ? AND IDEMPOTENCY_KEY = ?",
+                (payload, now, CUTOVER_ATTEMPT_LEDGER_KIND, CUTOVER_ATTEMPT_LEDGER_KEY),
+            )
+        return True
     conn.execute(
         "INSERT INTO execution_ledger (EXECUTION_ID, KIND, IDEMPOTENCY_KEY, PERSONA_ID, STATUS, "
         "PAYLOAD_JSON, RESULT_JSON, ERROR, CREATED_AT, UPDATED_AT) "
@@ -3287,7 +3356,8 @@ def _leave_cutover_attempt(main_db: Optional[Path], cutover: Cutover) -> None:
     if wrote:
         LOGGER.warning(
             "[system-notice-migration] left the cutover time %s (%s) in execution_ledger of %s "
-            "because it could not be recorded in cutover.json",
+            "because it could not be recorded in cutover.json (an earlier time already left "
+            "there is kept)",
             cutover.at.isoformat(), cutover.source, main_db,
         )
     else:
@@ -3355,33 +3425,44 @@ def resolve_cutover(
     ``dry_run`` は決めた時刻を記録しない。決める材料 (記録・完了の印・移行が前に書いた
     記録・本体 DB に残した時刻) を読めない、または記録できなければ
     :class:`CutoverUnavailable` — 呼び出し側はその起動で自動の変換を一つもしない。
-    そのとき (``dry_run`` でなければ) この起動で決めようとした時刻 (決める前に止まった
-    なら ``now``) を本体 DB に残す (:func:`_leave_cutover_attempt`)。この起動の時刻は
-    実際の切り替えより早いことはないので、候補に足しても境が実際より早まることはなく、
-    次の起動の時刻で決め直すより早い。
+    そのとき (``dry_run`` でなければ) 失敗した時点までに読めた候補と ``now`` のうち
+    最も早い時刻を本体 DB に残す (:func:`_leave_cutover_attempt`)。候補を全部読み
+    終えてから比べると、最古の印を読んだ後に別の記録の読み取りで止まった起動は
+    ``now`` を残し、その印を持つ記憶 DB が後で消えると、印の時刻から ``now`` までの
+    行が境より前になる。読めた候補はどれも実際の切り替えより早いことはなく、
+    ``now`` も同じなので、残した時刻で境が実際より早まることはない。
     """
     path = _cutover_path(saiverse_home)
-    cutover = Cutover(now.astimezone(timezone.utc), CUTOVER_FROM_START)
+    start = Cutover(now.astimezone(timezone.utc), CUTOVER_FROM_START)
+    # 決め方ごとの、読めた時刻 (読んだ順)。途中で止まっても、それまでの分は残る。
+    # 同じ時刻なら先に並べた決め方を取る (min は最初の最小を返す)
+    found: Dict[str, List[datetime]] = {
+        CUTOVER_FROM_MARKER: [], CUTOVER_FROM_TRACE: [], CUTOVER_FROM_ATTEMPT: [],
+    }
+
+    def _earliest_found() -> Optional[Cutover]:
+        candidates = [Cutover(at, source) for source, times in found.items() for at in times]
+        return min(candidates, key=lambda c: c.at) if candidates else None
+
     try:
         recorded = _read_cutover(path)
         if recorded is not None:
             return recorded
-        candidates = [
-            Cutover(at, source) for at, source in (
-                (_earliest_completion_marker(saiverse_home), CUTOVER_FROM_MARKER),
-                (_earliest_migration_trace(saiverse_home), CUTOVER_FROM_TRACE),
-                (_cutover_attempt_in_main_db(main_db), CUTOVER_FROM_ATTEMPT),
-            ) if at is not None
-        ]
-        if candidates:
-            # 同じ時刻なら先に並べた決め方を取る (min は最初の最小を返す)
-            cutover = min(candidates, key=lambda c: c.at)
+        _earliest_completion_marker(saiverse_home, found[CUTOVER_FROM_MARKER])
+        _earliest_migration_trace(saiverse_home, found[CUTOVER_FROM_TRACE])
+        attempt = _cutover_attempt_in_main_db(main_db)
+        if attempt is not None:
+            found[CUTOVER_FROM_ATTEMPT].append(attempt)
+        cutover = _earliest_found() or start
         if dry_run:
             return cutover
         recorded = _record_cutover(path, cutover, saiverse_home=saiverse_home)
     except CutoverUnavailable:
         if not dry_run:
-            _leave_cutover_attempt(main_db, cutover)
+            earliest = _earliest_found()
+            _leave_cutover_attempt(
+                main_db, earliest if earliest is not None and earliest.at < start.at else start,
+            )
         raise
     LOGGER.info(
         "[system-notice-migration] recorded the cutover time %s (%s) in %s",
