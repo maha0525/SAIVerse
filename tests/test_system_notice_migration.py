@@ -44,6 +44,8 @@ from sai_memory.memory.storage import (
     init_db,
     is_system_notice,
 )
+# 起動時の知らせは翻訳の鍵と引数で返るので、文言表で日本語に描いてから確かめる
+from tests.test_system_notice_migration_completion import _render
 
 STAMP = "20261028_000000"
 
@@ -462,7 +464,8 @@ def test_rows_whose_metadata_is_not_an_object_are_left_and_reported(tmp_path):
     """metadata が辞書に読めない行 (壊れた JSON・配列) は変換せず、レポートに残す。
 
     識別用 metadata が読めない行は系統を判定できない — 印だけの metadata に
-    置き換えると元の metadata が失われる。
+    置き換えると元の metadata が失われる。確認待ちの印も付けられないので、
+    変換しなかった行・推定できなかった行とは別の件数としてレポートに出す。
     """
     db = tmp_path / "personas" / "p1" / "memory.db"
     db.parent.mkdir(parents=True)
@@ -487,8 +490,11 @@ def test_rows_whose_metadata_is_not_an_object_are_left_and_reported(tmp_path):
         after = conn.execute("SELECT id, role, content, metadata FROM messages").fetchall()
     assert after == before
     assert result.changes == []
-    assert {s.row_id for s in result.skipped} == {"tagged_broken", "tagged_list"}
-    assert result.unknown_system_count == 1
+    assert not result.skipped and not result.unknown_system_count
+    assert result.unreadable_metadata_count == 3
+    assert {s.row_id for s in result.unreadable_metadata_samples} == {
+        "tagged_broken", "tagged_list", "system_broken",
+    }
 
 
 def test_realtime_and_recall_batch_matches_the_turn_composition(persona_db, tmp_path):
@@ -702,9 +708,10 @@ def test_startup_entry_reports_through_an_alert(persona_db, tmp_path, monkeypatc
     assert alerts[0]["level"] == "info"
     # 変換した件数は知らせるが、確認待ちの行の件数とレポートの場所は出さない
     # (確認待ちの行の案内は、確認待ちの行を確定する画面が出す)
-    assert f"{alerts[0]['details']['converted']} 件の記録" in alerts[0]["message"]
-    assert "確認が要る行" not in alerts[0]["message"]
-    assert "report_" not in alerts[0]["message"]
+    message = _render(alerts[0]["message"])
+    assert f"{alerts[0]['details']['converted']} 件の記録" in message
+    assert "確認が要る行" not in message
+    assert "report_" not in message
     assert run_startup_system_notice_migration(str(db)) == []
 
 
@@ -1062,9 +1069,9 @@ def test_report_write_failure_raises_an_alert(persona_db, tmp_path, monkeypatch)
 
     assert [a["id"] for a in alerts] == ["system_notice_migration_report_failed"]
     assert alerts[0]["level"] == "warning"
-    assert "移行は完了しましたが" in alerts[0]["message"]
+    assert "移行は完了しましたが" in _render(alerts[0]["message"])
     # 確認待ちの行の件数は出さない
-    assert "確認が要る行" not in alerts[0]["message"]
+    assert "確認が要る行" not in _render(alerts[0]["message"])
 
 
 def test_main_db_leftovers_are_compared_by_row_not_by_count(tmp_path, monkeypatch):
@@ -1176,13 +1183,13 @@ def test_unsaved_result_json_raises_an_alert_and_keeps_the_previous_comparison(
     assert [a["id"] for a in alerts] == [
         "system_notice_migration_result_unsaved", "system_notice_migration_failed",
     ]
-    alert = alerts[0]
+    alert = _render(alerts[0])
     assert alert["level"] == "warning"
     assert alert["details"]["unsaved"] == ["本体 DB", "ペルソナ p1"]
     assert "本体 DB の残した行は次の起動のレポートにもう一度載せます" in alert["message"]
     assert "確認が要る行" not in alert["message"]
     # 材料を保存できなかったペルソナの記憶は移行しない (巻き戻し、完了の印も立てない)
-    assert alerts[1]["details"]["failed"] == ["ペルソナ p1"]
+    assert _render(alerts[1]["details"])["failed"] == ["ペルソナ p1"]
     assert _rows(persona) == before
     with closing(sqlite3.connect(str(persona))) as conn:
         assert conn.execute(
@@ -1252,7 +1259,7 @@ def test_old_schema_defers_the_marker_until_review_marks_can_be_written(tmp_path
     # 1 回目: 変換 (rendered_text) だけをコミットし、完了の印は立てない
     alerts = run_startup_system_notice_migration(no_main)
     assert [a["id"] for a in alerts] == ["system_notice_migration_done"]
-    assert "次の起動で印を付け直します" in alerts[0]["message"]
+    assert "次の起動で印を付け直します" in _render(alerts[0]["message"])
     assert _marker(db) is None
     assert _batches(db) == {"realtime_and_recall": "現在時刻: 09:00"}
     (report,) = (tmp_path / "backups" / OUTPUT_DIR_NAME).glob("report_*.md")
@@ -1477,6 +1484,11 @@ def test_a_failed_flush_rolls_back_and_leaves_no_staged_result(
     def _fail(_fd):
         raise OSError("I/O error")
 
+    # 切り替わりの時刻は前の起動で記録済み (記録の確定の失敗は、変換を一つもしない
+    # 別の経路 — tests/test_system_notice_migration_cutover.py)
+    cutover = tmp_path / "backups" / OUTPUT_DIR_NAME / mig.CUTOVER_FILE_NAME
+    cutover.parent.mkdir(parents=True)
+    cutover.write_text(json.dumps({"cutover": "2026-10-28T00:00:00+00:00"}), encoding="utf-8")
     monkeypatch.setattr(mig.os, "fsync", _fail)
     before = _rows(persona_db)
     (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)

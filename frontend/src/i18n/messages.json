@@ -12403,6 +12403,14 @@
     "ja": "起動時の移行が途中で止まりました。次の起動で再試行します。ログを確認してください。",
     "en": "The migration at startup stopped partway. It will be retried on the next start. Please check the log."
   },
+  "api.systemNoticeMigration.cutoverUnavailableTitle": {
+    "ja": "システム通知の記録の移行を見送りました",
+    "en": "Migrating system notice records was skipped"
+  },
+  "api.systemNoticeMigration.cutoverUnavailableMessage": {
+    "ja": "新しい形式に切り替わった時刻を決められなかったか、保存できなかったので、この起動では記録を一つも変換していません。次の起動で再試行します。ログを確認してください。",
+    "en": "The time this environment switched to the new format could not be determined or saved, so no record was converted on this start. It will be retried on the next start. Please check the log."
+  },
   "api.systemNoticeMigration.failedTitle": {
     "ja": "システム通知の記録の移行が一部の記録でできませんでした",
     "en": "Some system notice records could not be migrated"
