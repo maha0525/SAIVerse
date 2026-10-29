@@ -1900,7 +1900,7 @@ class SAIMemoryAdapter:
         書くまでの間に別の書き手 (実行中の Pulse・記憶ブラウザの編集) が
         その行を変えることはない。
 
-        ``rewrite`` は ``{"role", "content", "metadata", "line_role"}`` の辞書
+        ``rewrite`` は ``{"role", "content", "metadata", "line_role", "created_at"}`` の辞書
         (metadata は辞書として読めたときだけ辞書、それ以外は None) を受け取る。
         返り値:
 
@@ -1922,12 +1922,12 @@ class SAIMemoryAdapter:
             return "unavailable"
         with immediate_transaction(self.conn, self._db_lock):
             row = self.conn.execute(  # type: ignore[attr-defined]
-                "SELECT role, content, metadata, line_role FROM messages WHERE id=?",
+                "SELECT role, content, metadata, line_role, created_at FROM messages WHERE id=?",
                 (message_id,),
             ).fetchone()
             if row is None:
                 return "missing"
-            role, content, raw_meta, line_role = row
+            role, content, raw_meta, line_role, created_at = row
             metadata: Optional[Dict[str, Any]] = None
             if raw_meta:
                 try:
@@ -1938,7 +1938,7 @@ class SAIMemoryAdapter:
                     metadata = decoded
             result = rewrite({
                 "role": role, "content": content, "metadata": metadata,
-                "line_role": line_role,
+                "line_role": line_role, "created_at": created_at,
             })
             if result is None:
                 return "unchanged"
@@ -2183,7 +2183,10 @@ class SAIMemoryAdapter:
                     msg = message_data[msg_id]
                     score = message_scores[msg_id]
                     if before > 0 or after > 0:
-                        around = get_messages_around(self.conn, msg.thread_id, msg.id, before, after)
+                        around = get_messages_around(
+                            self.conn, msg.thread_id, msg.id, before, after,
+                            settled_only=True,
+                        )
                         bundle = [*around[:before], msg, *around[before:]]
                         bundle.sort(key=lambda m: m.created_at)
                     else:

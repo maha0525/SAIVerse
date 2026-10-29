@@ -282,7 +282,9 @@ def semantic_recall(
     expanded: List[Message] = []
     seen = set()
     for msg, score, chunk_index in picked:
-        around = get_messages_around(conn, msg.thread_id, msg.id, range_before, range_after)
+        around = get_messages_around(
+            conn, msg.thread_id, msg.id, range_before, range_after, settled_only=True,
+        )
         bundle = [*around[:range_before], msg, *around[range_before:]] if (range_before or range_after) else [msg]
         for m in bundle:
             if m.id in seen:
@@ -367,7 +369,9 @@ def semantic_recall_groups(
 
     groups: List[Tuple[Message, List[Message], float]] = []
     for seed, score, chunk_index in picked:
-        before_after = get_messages_around(conn, seed.thread_id, seed.id, range_before, range_after)
+        before_after = get_messages_around(
+            conn, seed.thread_id, seed.id, range_before, range_after, settled_only=True,
+        )
         # Stitch into ordered bundle
         bundle = [*before_after[:range_before], seed, *before_after[range_before:]] if (range_before or range_after) else [seed]
         # Ensure chronological

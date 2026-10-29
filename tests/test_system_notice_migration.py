@@ -565,9 +565,11 @@ def _make_main_db(path: Path) -> None:
     engine.dispose()
 
     def _bm(seq, role, content, meta):
+        # created_at は移行を始めた時刻 (印の無い環境の境) より前に置く — 境と同じ秒の
+        # 行は境より後として扱う (tests/test_system_notice_migration_round2.py)
         return (
             "b1", seq, role, content, "2026-10-01T00:00:00+00:00", "[]", "[]",
-            json.dumps(meta, ensure_ascii=False),
+            json.dumps(meta, ensure_ascii=False), "2026-10-01 00:00:00",
         )
 
     envelope_tagged = {
@@ -587,7 +589,7 @@ def _make_main_db(path: Path) -> None:
     with closing(sqlite3.connect(str(path))) as conn:
         conn.executemany(
             "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
-            "heard_by, ingested_by, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "heard_by, ingested_by, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 _bm(1, "user", "<system>(音声通話が行われたが、文字起こしは得られなかった)</system>",
                     {"tags": ["internal", "event_message"], "voice_call": True}),
@@ -1722,8 +1724,8 @@ def _make_building_db(path: Path, rows) -> None:
         conn.executemany(
             "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
             "heard_by, ingested_by, metadata_json, legacy_seq, legacy_message_id, "
-            "client_message_id) VALUES ('b1', ?, 'user', ?, "
-            "'2026-03-01T00:00:00+00:00', '[]', '[]', ?, ?, ?, ?)",
+            "client_message_id, created_at) VALUES ('b1', ?, 'user', ?, "
+            "'2026-03-01T00:00:00+00:00', '[]', '[]', ?, ?, ?, ?, '2026-03-01 00:00:00')",
             [
                 (
                     seq, content, json.dumps(meta, ensure_ascii=False), legacy_seq,

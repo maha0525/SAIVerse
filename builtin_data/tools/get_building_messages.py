@@ -130,11 +130,24 @@ def _append_and_mark(
     persona_id: str,
     history_manager: Any,
     check_provenance: bool,
-) -> None:
+) -> bool:
     """転記 entry を memory 先行で追記し、成功後に ingested marker を立てる。
 
     順序契約 (M8): 「memory append 成功 → marker 成功」を確認できたものだけが
     「転記成功」。途中失敗は例外 = ラウンド停止。
+
+    記憶へ足す直前に、建物の行の ``ingested_by`` を本体 DB から読み直し
+    (:func:`_marked_in_building_db`)、このペルソナの印が既にあれば足さずに
+    False を返す (呼び出し側は消費として扱う)。ラウンドの頭で読んだ写し ``m`` の
+    後に、確認の画面の削除 (saiverse/system_notice_review.py — 建物の行に印を
+    付けてから記憶の行を消す) が割り込むと、写しには印が無く、記憶の側の
+    ``building_msg_ref`` の照会も消えた行を見つけられないので、同じ発言を取り込み
+    直してしまう。読み直しは照会の後に行う — 照会が行を見つけられなかったなら
+    削除は印を付け終えているので、読み直しがその印を見る。
+
+    Returns:
+        True: 記憶に行がある状態で印を付けた (追記した、または照会で見つけた)。
+        False: 建物の行に既にこのペルソナの印があり、何も足さなかった。
     """
     ref = _building_msg_ref(m)
     if ref:
@@ -162,12 +175,48 @@ def _append_and_mark(
             "re-marking only (no duplicate append)", ref,
         )
     else:
+        try:
+            marked = _marked_in_building_db(m, persona_id, manager)
+        except Exception as exc:
+            # 確かめられないまま足すと、所有者が消した行を戻しかねない —
+            # 照会の失敗と同じくラウンドを停止して次ラウンドで再試行する。
+            LOGGER.warning(
+                "[building_ingest] ingested_by re-read failed (ref=%s)",
+                ref, exc_info=True,
+            )
+            raise _TranscribeFailed(
+                f"ingested_by re-read failed (ref={ref})"
+            ) from exc
+        if marked:
+            LOGGER.info(
+                "[building_ingest] building row %s is already marked for %s "
+                "after this round read it; not appending", ref, persona_id,
+            )
+            return False
         status, _mid = history_manager.add_to_persona_only(
             entry, memory_first=True
         )
         if status == "failed":
             raise _TranscribeFailed(f"memory append failed (ref={ref})")
     _mark_ingested(m, persona_id, manager)
+    return True
+
+
+def _marked_in_building_db(m: Dict[str, Any], persona_id: str, manager: Any) -> bool:
+    """建物の行の ``ingested_by`` を本体 DB から読み直し、このペルソナの印があるか。
+
+    本体 DB を引けない (manager・building_id・message_id のどれかが無い) ときは
+    False (写しの判定のまま進む)。
+    """
+    session_factory = getattr(manager, "SessionLocal", None) if manager else None
+    building_id = m.get("_building_id") or m.get("building_id")
+    message_id = m.get("message_id")
+    if not (session_factory and building_id and message_id):
+        return False
+    from database.building_messages import fetch_ingested_by
+
+    current = fetch_ingested_by(session_factory, building_id, message_id)
+    return bool(current) and persona_id in current
 
 
 def _transcribe_message(
@@ -232,12 +281,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, True)
         return ("ingested", speaker, True)
 
     # System / movement / world events (role="host"). These come from
@@ -289,12 +339,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, True)
         return ("ingested", "システム", True)
 
     # Ingest user messages directly
@@ -307,12 +358,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, True)
         return ("ingested", "ユーザー", True)
 
     # 上記のどの型でもない (自分自身の発話等) — 従来どおり対象外の素通り。

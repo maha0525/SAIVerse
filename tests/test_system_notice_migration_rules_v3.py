@@ -722,7 +722,9 @@ def test_rows_whose_metadata_is_not_a_readable_dict_are_never_overwritten(db, tm
     assert not result.changes
     assert result.unreadable_metadata_count == len(rows)
     assert {s.row_id for s in result.unreadable_metadata_samples} == {r[0] for r in rows}
-    # 確認待ちにもできないので、レポートに件数を出す (完了の印は立てる)
-    from database.system_notice_migration import render_report
+    # 確認待ちにもできないので、レポートに件数を出し、行が残る間は完了の印を立てない
+    # (完了にすると二度と走査されず、実会話に混ざり続ける — 敵対レビュー 2 巡目)
+    from database.system_notice_migration import MARKER_HELD_UNREADABLE_METADATA, render_report
     assert "metadata が辞書として読めない" in render_report([result], dry_run=False, stamp=STAMP)
-    assert marker_rules_version(_marker(db)) == MIGRATION_RULES_VERSION
+    assert MARKER_HELD_UNREADABLE_METADATA in result.marker_held
+    assert _marker(db) is None

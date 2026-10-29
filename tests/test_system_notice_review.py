@@ -11,12 +11,16 @@ docs/intent/system_notice_delivery.md「追補」の「確認待ちの行の確�
 - 4 つの操作の結果 (role・本文・通知の印・確認待ちの印・確定の記録)。発話への
   変換は実会話から外す印 (機構のタグ・line_role) も外して記録し、包みの内側の
   本文を一字も変えない
-- 選べない操作・見つからない行・確定済みの行・一覧の後に中身が変わった行は
-  書き換えずに拒否する
+- 選べない操作・見つからない行・確定済みの行・一覧の後に中身 (本文・metadata・
+  created_at・line_role) が変わった行は書き換えずに拒否する
 - 建物の履歴から転記された行の削除は、建物の側の取り込み済みの印を先に確実にし、
-  取り込み直しで行が復活しない
+  取り込み直しで行が復活しない。転記が建物の行を読んだ後に削除が割り込んでも、
+  転記は記憶へ足す直前に印を読み直して足さない。複数のペルソナの印が同じ建物の行に
+  並行して付いても、どちらも失われない
 - 書き手が決まっていない行 (確認待ち・「そのままにする」) は、あらすじと
-  Memopedia の材料に発話として渡らない (SQL と Python の判定は同じ行を選ぶ)
+  Memopedia の材料に発話として渡らない (SQL と Python の判定は同じ行を選ぶ)。
+  記憶の検索・想起 (キーワード検索・意味検索・周辺の行の広げ・鮮明想起) の
+  候補にも入らない
 - 画面の警告は件数と読めなかった記憶に応じて置き直し、どちらも無くなったら外す
 
 記憶 DB は一時ディレクトリに作り、書き込みは本物の ``SAIMemoryAdapter.rewrite_message``
@@ -106,7 +110,11 @@ def _version(db_path: Path, mid: str) -> str:
         meta = json.loads(row[2]) if row[2] else None
     except ValueError:
         meta = None
-    return review.row_version(row[0], row[1], meta if isinstance(meta, dict) else None)
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        created_at = conn.execute("SELECT created_at FROM messages WHERE id=?", (mid,)).fetchone()[0]
+    return review.row_version(
+        row[0], row[1], meta if isinstance(meta, dict) else None, created_at, row[3],
+    )
 
 
 @pytest.fixture()
@@ -832,3 +840,266 @@ def test_api_lists_and_applies_through_get_adapter(world, monkeypatch):
     assert res["remaining"] == 4
     assert _row(world.a_db, "a-tool")[:2] == ("user", "Email sent.")
     assert any(a["id"] == review.REVIEW_ALERT_ID for a in world.manager.startup_alerts)
+
+
+# ---------------------------------------------------------------------------
+# 記憶を検索・想起してモデルに渡す経路 (Codex 2 巡目)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """問い合わせを常に ``[1, 0]`` にする埋め込み (行の側は DB に直接書く)。"""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def embed(self, texts, *, is_query=False):
+        return [[1.0, 0.0] for _ in texts]
+
+
+#: (id, role, 本文, metadata, 埋め込み)。問い合わせ [1, 0] に近いのは書き手が
+#: 決まっていない行 (u1・k1・u2) で、決まっている行で一番近いのは s1。u2 は s1 の
+#: 直後に並ぶので、周辺の行を広げると s1 の隣に来る。
+_RECALL_ROWS = [
+    ("n1", "user", "前の発話 りんご", {"tags": ["conversation"]}, [0.0, 1.0]),
+    ("s1", "user", "本人の発話 りんご", {"tags": ["conversation"]}, [0.9, 0.1]),
+    ("u2", "user", "<system>機構の文 りんご</system>",
+     {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}, [1.0, 0.05]),
+    ("n2", "assistant", "後ろの応答 りんご", {"tags": ["conversation"]}, [0.0, 1.0]),
+    ("u1", "user", "<system>機構の文 りんご</system>",
+     {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}, [1.0, 0.0]),
+    ("k1", "user", "<system>残した文 りんご</system>",
+     {"tags": ["conversation"], SYSTEM_NOTICE_REVIEWED_KEY: "keep"}, [1.0, 0.0]),
+]
+_SETTLED_IDS = {"n1", "s1", "n2"}
+
+
+@pytest.fixture()
+def recall_db(tmp_path):
+    db = _make_persona(tmp_path, "p", [row[:4] for row in _RECALL_ROWS])
+    conn = init_db(str(db), check_same_thread=False)
+    for mid, _role, _content, _meta, vec in _RECALL_ROWS:
+        conn.execute(
+            "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
+            (mid, json.dumps(vec)),
+        )
+    conn.commit()
+    yield SimpleNamespace(db=db, conn=conn)
+    conn.close()
+
+
+def _assert_no_unsettled_text(text):
+    assert "機構の文" not in text and "残した文" not in text
+
+
+def test_search_candidates_leave_out_rows_whose_author_is_unsettled(recall_db):
+    from sai_memory.memory.storage import get_all_messages_for_search, get_embeddings_for_scope
+
+    conn = recall_db.conn
+    found = {m.id for m in get_all_messages_for_search(conn, required_tags=["conversation"])}
+    assert found == _SETTLED_IDS
+    assert {m.id for m in get_all_messages_for_search(conn)} == _SETTLED_IDS
+    corpus = get_embeddings_for_scope(conn, thread_id="t1", required_tags=["conversation"])
+    assert {m.id for m, _v, _c in corpus} == _SETTLED_IDS
+
+
+def test_semantic_recall_leaves_out_unsettled_rows_before_ranking_and_after_expanding(recall_db):
+    from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
+
+    kwargs = dict(
+        thread_id="t1", resource_id=None, topk=1, range_before=1, range_after=1,
+        scope="thread", required_tags=["conversation"],
+    )
+    msgs = semantic_recall(recall_db.conn, _FakeEmbedder(), "q", **kwargs)
+    # 順位付けの前に u1・k1 が外れて s1 が選ばれ、広げた周辺からも u2 が外れる
+    assert [m.id for m in msgs] == ["n1", "s1", "n2"]
+    [(seed, bundle, _score)] = semantic_recall_groups(recall_db.conn, _FakeEmbedder(), "q", **kwargs)
+    assert seed.id == "s1"
+    assert [m.id for m in bundle] == ["n1", "s1", "n2"]
+
+
+def test_memopedia_search_hits_leave_out_unsettled_rows(recall_db, monkeypatch):
+    from sai_memory.memory import recall as recall_module
+    from sai_memory.memopedia.generator import format_search_results, recall_with_snippets
+
+    monkeypatch.setattr(recall_module, "Embedder", _FakeEmbedder)
+    hits = recall_with_snippets(recall_db.conn, "q", topk=10, keywords=["りんご"])
+    assert hits
+    assert {h.message_id for h in hits} <= _SETTLED_IDS
+    _assert_no_unsettled_text(format_search_results(hits, set()))
+
+
+def _recall_adapter(recall_db):
+    adapter = _adapter(recall_db.db)
+    adapter.embedder = _FakeEmbedder()
+    adapter.settings = SimpleNamespace(
+        topk=1, range_before=1, range_after=1, last_messages=0, scope="thread",
+    )
+    adapter._thread_id = lambda *_a, **_k: "t1"
+    return adapter
+
+
+def test_hybrid_recall_leaves_out_unsettled_rows_and_their_neighbours(recall_db):
+    adapter = _recall_adapter(recall_db)
+    try:
+        text = adapter.recall_hybrid("q", ["りんご"], max_chars=4000)
+        snippet = adapter.recall_snippet(None, "q", max_chars=4000)
+    finally:
+        adapter.conn.close()
+    assert "本人の発話" in text
+    _assert_no_unsettled_text(text)
+    assert "本人の発話" in snippet
+    _assert_no_unsettled_text(snippet)
+
+
+def test_memory_search_brief_leaves_out_unsettled_rows(recall_db, monkeypatch):
+    from builtin_data.tools import memory_search_brief as brief
+
+    adapter = _recall_adapter(recall_db)
+
+    @contextlib.contextmanager
+    def opener():
+        yield adapter
+
+    monkeypatch.setattr(brief, "get_active_persona_id", lambda: "p")
+    monkeypatch.setattr(brief, "open_persona_memory", opener)
+    try:
+        text = brief.memory_search_brief(query="q", keywords=["りんご"], topk=10)
+    finally:
+        adapter.conn.close()
+    assert "本人の発話" in text
+    _assert_no_unsettled_text(text)
+    for mid in ("u1", "u2", "k1"):
+        assert f"({mid})" not in text
+
+
+def test_message_uri_text_search_leaves_out_unsettled_rows(recall_db):
+    from saiverse.uri_resolver import UriResolver
+
+    adapter = _recall_adapter(recall_db)
+    resolver = UriResolver(manager=None)
+    resolver._get_adapter = lambda _pid: adapter
+    resolver._get_active_thread_id = lambda _adapter: "t1"
+    try:
+        resolved = resolver.resolve("saiverse://self/message/msg?contain=りんご&window=1", persona_id="p")
+    finally:
+        adapter.conn.close()
+    # 本文に「りんご」を含む一番新しい行は k1 (残した文) だが、当たりは n2
+    assert resolved.metadata["message_id"] == "n2"
+    _assert_no_unsettled_text(resolved.content)
+
+
+def test_vivid_recall_does_not_quote_unsettled_rows(recall_db):
+    from sea.auto_recall import _LedgerItem, _source_message_ids, _vivid_fallback_messages
+
+    conn = recall_db.conn
+    conn.execute("CREATE TABLE arasuji_entries (id TEXT PRIMARY KEY, source_ids_json TEXT)")
+    conn.execute(
+        "INSERT INTO arasuji_entries VALUES ('e1', ?)",
+        (json.dumps(["s1", "u1", "u2", "k1"]),),
+    )
+    conn.commit()
+    assert _source_message_ids(conn, "e1") == ["s1"]
+    item = _LedgerItem(
+        source_type="fragment", source_id="f1", title="りんご", content="", uri="",
+        best_score=1.0, chronicle_entry_id="e1",
+    )
+    quoted = _vivid_fallback_messages(conn, item, max_messages=5)
+    assert [q[1] for q in quoted] and all("本人の発話" in q[1] for q in quoted)
+
+
+# ---------------------------------------------------------------------------
+# 削除と転記の競合 (Codex 2 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_marks_on_the_same_building_row_keep_both(building_world, monkeypatch):
+    """二人のペルソナの印が同じ建物の行に重なっても、どちらも失われない。"""
+    from database import building_messages as bm
+
+    w = building_world
+    real_loads = json.loads
+    state = {"fired": False}
+
+    def loads(text, *args, **kwargs):
+        if not state["fired"]:
+            state["fired"] = True
+            # 一人目が行を読んだ直後に、二人目の印が先に書かれる
+            bm.mark_ingested(w.session_factory, w.building_id, w.message_id, "q")
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(bm, "json", SimpleNamespace(
+        loads=loads, dumps=json.dumps, JSONDecodeError=json.JSONDecodeError,
+    ))
+    assert bm.mark_ingested(w.session_factory, w.building_id, w.message_id, "p") is True
+    assert state["fired"]
+    monkeypatch.undo()
+    assert sorted(_ingested_by(w)) == ["p", "q"]
+
+
+@pytest.mark.parametrize("check_provenance", [True, False])
+def test_delete_between_reading_the_building_row_and_appending_does_not_restore_the_row(
+    building_world, check_provenance,
+):
+    """転記が建物の行を読んだ後、記憶へ足す前に削除が割り込んでも、行は戻らない。"""
+    from builtin_data.tools import get_building_messages as ingest
+    from database.building_messages import fetch_building_messages
+
+    w = building_world
+    # 転記が建物の履歴を読む (まだ取り込み済みの印が無い)
+    building_row = [
+        r for r in fetch_building_messages(w.session_factory, w.building_id)
+        if r["message_id"] == w.message_id
+    ][0]
+    building_row["_building_id"] = w.building_id  # _ingest_round と同じ
+    assert building_row["ingested_by"] == []
+    # その後、記憶の照会の前に確認の画面の削除が割り込む
+    result = review.apply_review_action(
+        "delete", [("p", "m", _version(w.db, "m"))], w.opener,
+        lambda pid, ref: review.mark_building_ref_ingested(w.session_factory, ref, pid),
+    )
+    assert [a["message_id"] for a in result["applied"]] == ["m"]
+
+    appended = []
+    history = SimpleNamespace(add_to_persona_only=lambda entry, **_: appended.append(entry) or ("ok", "x"))
+    outcome = ingest._transcribe_message(
+        building_row,
+        persona=SimpleNamespace(sai_memory=w.adapter),
+        manager=SimpleNamespace(SessionLocal=w.session_factory),
+        persona_id="p", building_id=w.building_id, history_manager=history,
+        id_to_name_map={}, check_provenance=check_provenance,
+    )
+    assert appended == []
+    assert outcome[0] == "consumed"
+    assert _row(w.db, "m") is None
+    assert _ingested_by(w) == ["p"]
+
+
+# ---------------------------------------------------------------------------
+# 行のハッシュの材料 (Codex 2 巡目)
+# ---------------------------------------------------------------------------
+
+
+def test_a_row_whose_time_or_line_role_changed_after_listing_is_rejected(world):
+    listing = review.build_review_listing(world.dbs)
+    seen = {
+        (r["persona_id"], r["message_id"]): r["version"]
+        for g in listing["groups"] for r in g["rows"]
+    }
+    a_conn = world.adapters["alice"].conn
+    b_conn = world.adapters["bob"].conn
+    # 記憶ブラウザで日時だけが変わった行と、line_role だけが変わった行
+    a_conn.execute("UPDATE messages SET created_at=created_at+3600 WHERE id='a-tool'")
+    b_conn.execute("UPDATE messages SET line_role='sub_line' WHERE id='b-tool'")
+    a_conn.commit()
+    b_conn.commit()
+    before = (_raw_row(world.a_db, "a-tool"), _raw_row(world.b_db, "b-tool"))
+    result = review.apply_review_action("keep", [
+        ("alice", "a-tool", seen[("alice", "a-tool")]),
+        ("bob", "b-tool", seen[("bob", "b-tool")]),
+    ], _open(world))
+    assert result["applied"] == []
+    assert {(r["message_id"], r["reason"]) for r in result["rejected"]} == {
+        ("a-tool", "changed"), ("b-tool", "changed"),
+    }
+    assert (_raw_row(world.a_db, "a-tool"), _raw_row(world.b_db, "b-tool")) == before

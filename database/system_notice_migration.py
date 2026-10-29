@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -434,6 +435,29 @@ VOICE_INPUT_NOTICE_KIND = "voice_input"
 _VOICE_SOURCE_SUFFIX = "_voice"
 
 
+#: 発話者が付けた添付の置き場 (api/routes/chat.py の /chat/send が書く 3 つ。確認待ちの
+#: 行を確定する画面の saiverse/system_notice_review.py の ``ATTACHMENT_FIELDS`` と同じ)。
+_ATTACHMENT_FIELDS = ("media", "images", "documents")
+
+
+def _speaker_has_attachments(role: Any, metadata: Dict[str, Any]) -> bool:
+    """role=system でない行 (発話者の行) が、添付の項目を一つでも持つか。
+
+    項目の数え方は確認の画面の ``attachment_items`` と同じ (各欄のリストの辞書の項目を
+    一つずつ数え、ファイルを指す欄が無い項目も数える)。この行を行ごと role=system に
+    すると発話者の添付が機構の通知の持ち物になるので、移行は規則 5 の二行分割以外では
+    行ごと変換しない (:data:`SPEAKER_ATTACHMENT_REASON`)。
+    """
+    role_s = role.lower() if isinstance(role, str) else ""
+    if role_s == "system":
+        return False
+    for field_name in _ATTACHMENT_FIELDS:
+        values = metadata.get(field_name)
+        if isinstance(values, list) and any(isinstance(item, dict) for item in values):
+            return True
+    return False
+
+
 def _has_audio_media(metadata: Dict[str, Any]) -> bool:
     media = metadata.get("media")
     if not isinstance(media, list):
@@ -658,6 +682,12 @@ UNKNOWN_SYSTEM_REASON = "系統を推定できなかった role=system"
 #: 形をした行は機構の書いたものと言い切れない (ユーザーが案内文などを真似た
 #: 発言でありうる)。
 AFTER_CUTOVER_REASON = "新しい形式に切り替わった後に作られた行"
+#: 確認待ちの印の値・レポートの理由: 発話者 (ユーザー・ペルソナ) の行が添付
+#: (``media`` / ``images`` / ``documents``) を持つので、規則に当たっても行ごとは変換
+#: しなかった行。行ごと role=system にすると、発話者の添付が機構の通知の持ち物になる
+#: (docs/intent/system_notice_delivery.md 不変条件 7)。例外は規則 5 の二行分割だけ
+#: (添付は分けた音声の行に残る — :func:`_queue_voice_split`)。
+SPEAKER_ATTACHMENT_REASON = "発話者の添付を持つ行"
 
 
 class CutoverUnavailable(Exception):
@@ -681,6 +711,18 @@ MARKER_HELD_MAIN_DB_FAILED = "main_db_failed"
 #:   と、その JSON に書いた印の値と一致しなくなり、コミット済みの結果が捨てられる
 #:   (:func:`_settle_staged_results`)
 MARKER_HELD_STAGED_RESULT = "staged_result_unresolved"
+#: - 走査の対象 (タグ始まり・role=system) の行に、metadata が辞書として読めない行が
+#:   ある (:attr:`StoreResult.unreadable_metadata_count`)。その行には確認待ちの印を
+#:   付けられず (元の metadata を失う)、実会話として扱われ続ける。完了の印を立てると
+#:   二度と走査されないので、行が残る間は立てずに毎起動で画面に出す
+MARKER_HELD_UNREADABLE_METADATA = "unreadable_metadata"
+
+#: 変換をコミットした回の記録 (:func:`_settle_staged_results` が仮の結果の JSON の採否を
+#: 決めるのに使う)。記憶 DB は ``embed_metadata`` の鍵 ``<この接頭辞><起動のフォルダ名>``、
+#: 本体 DB は ``execution_ledger`` の KIND :data:`COMMIT_LEDGER_KIND` の行
+#: (IDEMPOTENCY_KEY が起動のフォルダ名、STATUS ``completed``)。
+COMMIT_RECORD_KEY_PREFIX = "system_notice_migration_commit:"
+COMMIT_LEDGER_KIND = "system_notice_migration.commit"
 
 
 @dataclass
@@ -723,7 +765,15 @@ class StoreResult:
     #: 仮の結果の JSON を採用してよいかを、DB の印と突き合わせて決めるのに使う
     #: (:func:`regenerate_pending_reports`)。
     marker_value: Optional[str] = None
-    #: 結果の JSON から読み戻したときの系統別件数 (``changes`` はサンプルだけになる)。
+    #: この結果の変換をコミットした取引が DB に書いた、その回の記録の名前 (起動の
+    #: フォルダ名 — :data:`COMMIT_RECORD_KEY_PREFIX` / :data:`COMMIT_LEDGER_KIND`)。
+    #: 変換をコミットしなかった回は None。完了の印を見送った回・本体 DB でも、仮の
+    #: 結果の JSON をこの記録と突き合わせて採用できる (:func:`_settle_staged_results`)。
+    commit_record: Optional[str] = None
+    #: ``changes`` が変換した全行か。全行を JSON に保存する前の版の結果の JSON から
+    #: 読み戻すと、``changes`` は系統ごとのサンプルだけなので偽になる。
+    changes_complete: bool = True
+    #: 結果の JSON から読み戻したときの系統別件数。
     restored_counts: Optional[Dict[Tuple[str, str], int]] = None
     #: この起動でこの結果をレポートの材料 (結果の JSON) に書いたか。JSON には載せない。
     result_saved: bool = False
@@ -788,7 +838,12 @@ class StoreResult:
         return sorted(keys)
 
     def to_json(self) -> Dict[str, Any]:
-        """レポートを組み直せるだけの中身 (件数・サンプル・残した行) を JSON にできる形で。"""
+        """レポートを組み直せる中身 (件数・変換した全行・残した行) を JSON にできる形で。
+
+        ``changes`` は変換した全行 (表・行 id・系統・変更前後の全文)。変換を復元・目視
+        できる記録はこれだけなので、サンプルに切り詰めない。``samples`` は全行を
+        持たない前の版の読み手のために残す。
+        """
         from dataclasses import asdict
 
         return {
@@ -802,7 +857,9 @@ class StoreResult:
             "marker_held": list(self.marker_held),
             "rescan_from_version": self.rescan_from_version,
             "marker_value": self.marker_value,
+            "commit_record": self.commit_record,
             "counts": [[t, k, n] for (t, k), n in sorted(self.counts().items())],
+            "changes": [asdict(c) for c in self.changes] if self.changes_complete else None,
             "samples": [asdict(c) for c in _sample_changes(self.changes)],
             "skipped": [asdict(s) for s in self.skipped],
             "unknown_system_count": self.unknown_system_count,
@@ -817,6 +874,8 @@ class StoreResult:
 
     @classmethod
     def from_json(cls, data: Dict[str, Any]) -> "StoreResult":
+        full = data.get("changes")
+        complete = isinstance(full, list)
         return cls(
             label=data["label"],
             path=data["path"],
@@ -828,8 +887,10 @@ class StoreResult:
             marker_held=[str(r) for r in data.get("marker_held") or []],
             rescan_from_version=data.get("rescan_from_version"),
             marker_value=data.get("marker_value"),
+            commit_record=data.get("commit_record"),
+            changes_complete=complete,
             restored_counts={(t, k): n for t, k, n in data.get("counts") or []},
-            changes=[Change(**c) for c in data.get("samples") or []],
+            changes=[Change(**c) for c in (full if complete else data.get("samples") or [])],
             skipped=[Skipped(**s) for s in data.get("skipped") or []],
             unknown_system_count=int(data.get("unknown_system_count") or 0),
             unknown_system_samples=[Skipped(**s) for s in data.get("unknown_system_samples") or []],
@@ -898,17 +959,17 @@ def _col_or_null(cols: set, name: str) -> str:
 
 
 def _created_after_cutover(created_at: Any, cutover: Optional[int]) -> bool:
-    """行の作成時刻が、新しい形式に切り替わった時刻 (epoch 秒) より後か。
+    """行の作成時刻が、新しい形式に切り替わった時刻 (秒に切り捨てた epoch 秒) と同じ秒か、それより後か。
 
     ``cutover`` が None なら境を当てない (偽)。起動の入口 (:func:`run_migration`) は
     必ず渡す — None で呼ぶのは、境と関係の無い規則を確かめる呼び出しだけ。
 
-    - 数 (epoch 秒) と数の文字列は秒で比べる。本体 DB の ``building_messages.
-      created_at`` の形 (SQLite の ``CURRENT_TIMESTAMP``、UTC の
+    - 数 (epoch 秒) と数の文字列は秒に切り捨てて比べる。本体 DB の
+      ``building_messages.created_at`` の形 (SQLite の ``CURRENT_TIMESTAMP``、UTC の
       ``YYYY-MM-DD HH:MM:SS``) と ISO の文字列は UTC として読む (時差の無い値は UTC)。
-    - 切り替わりの時刻と同じ秒の行は前に数える。切り替わりの時刻は起動の移行の
-      時刻で、移行はペルソナの読み込みより前に走るので、その秒に新しい形式の
-      コードが書いた行は無い。
+    - 切り替わりの時刻と同じ秒の行は後に数える (自動では変換せず確認待ちにする)。
+      保存先ごとに時刻の精度が違い (本体 DB の ``created_at`` は秒まで)、同じ秒の中の
+      前後を決められないので、確認待ちの側に倒す。
     - 作成時刻の無い行 (NULL・列の無い古いスキーマ) は前に数える。今の書き手
       (記憶の ``add_message``・建物の履歴・実行台帳・送信トレイ・知覚のまとめ) は
       必ず作成時刻を書くので、無い行は古いスキーマか外部からの取り込みの行。
@@ -920,17 +981,17 @@ def _created_after_cutover(created_at: Any, cutover: Optional[int]) -> bool:
         return True
     if isinstance(created_at, (int, float)):
         try:
-            return int(created_at) > cutover
+            return math.floor(created_at) >= cutover
         except (ValueError, OverflowError):  # NaN・無限大
             return True
     if isinstance(created_at, str):
         text = created_at.strip()
         try:
-            return int(float(text)) > cutover
+            return math.floor(float(text)) >= cutover
         except (ValueError, OverflowError):
             pass
         at = _parse_utc(text)
-        return True if at is None else int(at.timestamp()) > cutover
+        return True if at is None else math.floor(at.timestamp()) >= cutover
     return True
 
 
@@ -1042,10 +1103,23 @@ def _classify_persona_row(
     :func:`_unmarked_system_rule`。走査し直しは、当たった規則の版が印の版より
     新しい行だけを変換する — 古い版の規則に当たる行は、その版の走査が変換したか
     確認待ちにしてある。
+
+    発話者の添付を持つ role=user の行で、規則 5 (音声入力の案内文) の形のものは、
+    旧規則より先に規則 5 にする — 旧規則のタグ (``event_message`` など) を持っていても、
+    規則 5 の出どころの確認と二行分割を通す。それ以外の規則に当たった、発話者の添付を
+    持つ行は、変換の手前で確認待ちにする (:func:`_queue_conversion`)。
     """
     from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
     if starts_with_system_tag(content):
+        if (
+            isinstance(role, str) and role.lower() == "user"
+            and _speaker_has_attachments(role, metadata)
+            and is_voice_input_notice(strip_system_tags(content), metadata)
+        ):
+            return _RowMatch(
+                VOICE_INPUT_NOTICE_KIND, VOICE_INPUT_NOTICE_KIND, strip_system_tags(content), 3,
+            )
         kind = classify_tagged_message(role, content, metadata)
         if kind is not None:
             return _RowMatch(kind, kind, strip_system_tags(content), 1)
@@ -1183,7 +1257,12 @@ class BuildingSourceRows:
       持てば、それと ``building_id`` / ``message_id`` が一致する行。``building_id`` に
       ``:`` が入りうるので、区切りの位置を全部試す。
     - 持たなければ (転記が印を刻む前の行)、音声の ``media`` の ``uri`` が同じ
-      ``role='user'`` の行。音声のファイル名は受け取るたびに一意に作られる。
+      ``role='user'`` の行。音声のファイル名は受け取るたびに一意に作られる。比べるのは
+      各行の ``metadata_json`` を JSON として解釈した ``media`` の、``type`` が
+      ``audio`` の項目の ``uri`` (生の JSON の文字列では探さない — 同じ uri がエスケープ
+      の違う表現で保存されていると、文字列の検索では候補から漏れて、一つに決まったと
+      誤認する)。初めて uri で引くときに ``role='user'`` の行を一度だけ全部読んで、
+      uri から行への対応を作る (:meth:`_audio_uri_index`)。
 
     本体 DB は読み取り専用で、最初に引くときに開く。本体 DB が無い・開けない・
     ``building_messages`` の表か列が無い・引く途中で失敗した場合は、それ以降も
@@ -1194,6 +1273,8 @@ class BuildingSourceRows:
         self._path = main_db
         self._conn: Optional[sqlite3.Connection] = None
         self._unavailable = main_db is None
+        #: 音声の uri → その uri を音声として持つ role=user の行 (``id`` → ``client_message_id``)。
+        self._uri_index: Optional[Dict[str, Dict[Any, Any]]] = None
 
     def __enter__(self) -> "BuildingSourceRows":
         return self
@@ -1252,8 +1333,27 @@ class BuildingSourceRows:
         (client_message_id,) = found.values()
         return bool(client_message_id)
 
-    @staticmethod
-    def _find(conn: sqlite3.Connection, metadata: Dict[str, Any]) -> Dict[Any, Any]:
+    def _audio_uri_index(self, conn: sqlite3.Connection) -> Dict[str, Dict[Any, Any]]:
+        """音声の uri → その uri を音声 (``type`` が ``audio``) として持つ role=user の行。"""
+        if self._uri_index is not None:
+            return self._uri_index
+        index: Dict[str, Dict[Any, Any]] = {}
+        for row_id, client_message_id, raw in conn.execute(
+            "SELECT id, client_message_id, metadata_json FROM building_messages WHERE role = 'user'",
+        ):
+            media = _load_json(raw).get("media")
+            if not isinstance(media, list):
+                continue
+            for m in media:
+                if not isinstance(m, dict) or m.get("type") != "audio":
+                    continue
+                uri = m.get("uri")
+                if isinstance(uri, str) and uri:
+                    index.setdefault(uri, {})[row_id] = client_message_id
+        self._uri_index = index
+        return index
+
+    def _find(self, conn: sqlite3.Connection, metadata: Dict[str, Any]) -> Dict[Any, Any]:
         """元の行の候補 (``id`` → ``client_message_id``)。"""
         found: Dict[Any, Any] = {}
         if _BUILDING_MSG_REF_KEY in metadata:
@@ -1274,19 +1374,12 @@ class BuildingSourceRows:
         uris = {
             m.get("uri") for m in media if isinstance(m, dict) and m.get("type") == "audio"
         } if isinstance(media, list) else set()
+        uris = {uri for uri in uris if isinstance(uri, str) and uri}
+        if not uris:
+            return found
+        index = self._audio_uri_index(conn)
         for uri in uris:
-            if not isinstance(uri, str) or not uri:
-                continue
-            for row_id, client_message_id, raw in conn.execute(
-                "SELECT id, client_message_id, metadata_json FROM building_messages "
-                "WHERE role = 'user' AND instr(metadata_json, ?) > 0",
-                (uri,),
-            ):
-                row_media = _load_json(raw).get("media")
-                if isinstance(row_media, list) and any(
-                    isinstance(m, dict) and m.get("uri") == uri for m in row_media
-                ):
-                    found[row_id] = client_message_id
+            found.update(index.get(uri, {}))
         return found
 
 
@@ -1315,8 +1408,23 @@ def _queue_conversion(
     *,
     source_rows: Optional[BuildingSourceRows] = None,
 ) -> Optional[str]:
-    """当たった規則の変換を ``result`` に積む。変換できなければ残す理由を返す。"""
+    """当たった規則の変換を ``result`` に積む。変換できなければ残す理由を返す。
+
+    発話者の添付を持つ行は、規則 5 の二行分割のほかは変換しない
+    (:data:`SPEAKER_ATTACHMENT_REASON`)。印を付けるだけの role=system の行は発話者の
+    行ではないので対象外。role=user の行は、ユーザーの発言の来歴
+    (:func:`_has_user_utterance_provenance`) を持つときだけ添付が発話者のもの —
+    来歴の無い role=user の行の添付 (旧世代の知覚のまとまりの画像など) は機構が
+    付けたもので、行ごと変換してよい。
+    """
     row_id, role, content, _raw_meta, rowid, created_at = row
+    role_s = role.lower() if isinstance(role, str) else ""
+    if (
+        not match.mark_only and match.kind != VOICE_INPUT_NOTICE_KIND
+        and _speaker_has_attachments(role, metadata)
+        and (role_s != "user" or _has_user_utterance_provenance(metadata))
+    ):
+        return SPEAKER_ATTACHMENT_REASON
     if match.mark_only:
         result.updates.append((
             "UPDATE messages SET metadata = ? WHERE id = ?",
@@ -1647,11 +1755,52 @@ def _set_persona_marker(conn: sqlite3.Connection) -> None:
     """
     from sai_memory.memory.storage import set_embed_metadata
 
+    _ensure_embed_metadata(conn)
+    set_embed_metadata(conn, MIGRATION_MARKER_KEY, _marker_value(), commit=False)
+
+
+def _ensure_embed_metadata(conn: sqlite3.Connection) -> None:
+    """``embed_metadata`` の無い古い記憶 DB に、init_db と同じ定義の表を作る (取引の中で)。"""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS embed_metadata ("
         "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
     )
-    set_embed_metadata(conn, MIGRATION_MARKER_KEY, _marker_value(), commit=False)
+
+
+def _write_persona_commit_record(conn: sqlite3.Connection, run_name: str) -> None:
+    """記憶 DB の変換をコミットする取引の中で、その回の記録を ``embed_metadata`` に書く。
+
+    鍵は :data:`COMMIT_RECORD_KEY_PREFIX` + 起動のフォルダ名 (起動ごとに一意)、値は
+    書いた時刻。完了の印は版を上げるたびに書き換わるが、この鍵は回ごとに別なので
+    書き換わらない。変換した回だけが書くので、鍵の数は変換を伴った起動の数を超えない。
+    """
+    from sai_memory.memory.storage import set_embed_metadata
+
+    _ensure_embed_metadata(conn)
+    set_embed_metadata(
+        conn, COMMIT_RECORD_KEY_PREFIX + run_name, datetime.now(timezone.utc).isoformat(),
+        commit=False,
+    )
+
+
+def _write_main_commit_record(conn: sqlite3.Connection, run_name: str) -> bool:
+    """本体 DB の変換をコミットする取引の中で、その回の記録を ``execution_ledger`` に書く。
+
+    実行台帳は「実行の記録」の既存の置き場で、KIND と IDEMPOTENCY_KEY の組が一意。
+    KIND :data:`COMMIT_LEDGER_KIND`・IDEMPOTENCY_KEY が起動のフォルダ名・STATUS
+    ``completed`` (終端) の行を一つ書く。台帳の読み手は KIND の前方一致と STATUS で
+    絞るので、この行は回復処理の走査に入らない。表が無ければ書かずに False。
+    """
+    if not _table_exists(conn, "execution_ledger"):
+        return False
+    now = int(datetime.now(timezone.utc).timestamp())
+    conn.execute(
+        "INSERT INTO execution_ledger (EXECUTION_ID, KIND, IDEMPOTENCY_KEY, PERSONA_ID, STATUS, "
+        "PAYLOAD_JSON, RESULT_JSON, ERROR, CREATED_AT, UPDATED_AT) "
+        "VALUES (?, ?, ?, NULL, 'completed', NULL, NULL, NULL, ?, ?)",
+        (str(uuid.uuid4()), COMMIT_LEDGER_KIND, run_name, now, now),
+    )
+    return True
 
 
 def _apply(conn: sqlite3.Connection, updates: Sequence[Tuple[str, tuple]]) -> None:
@@ -1995,6 +2144,15 @@ def migrate_persona_db(
                     return failed
                 result.backup_path = str(backup)
             _apply(conn, result.updates)
+            if result.updates and results_dir is not None:
+                # この回の変換をコミットした記録 (仮の結果の JSON の採否の突き合わせに使う。
+                # 完了の印を見送った回でも書く)
+                _write_persona_commit_record(conn, results_dir.name)
+                result.commit_record = results_dir.name
+            if result.unreadable_metadata_count and MARKER_HELD_UNREADABLE_METADATA not in held:
+                # 確認待ちの印を付けられない行が残る (元の metadata を失わずには付けられ
+                # ない)。完了にすると二度と走査されず、実会話に混ざり続ける
+                held.append(MARKER_HELD_UNREADABLE_METADATA)
             result.marker_held = held
             if result.review_marks_deferred:
                 LOGGER.warning(
@@ -2140,6 +2298,15 @@ def scan_main_conn(
                 legacy = legacy_notice(role, content, metadata)
                 if legacy is not None:
                     label, body = legacy
+            if body is not None and is_voice_call and _speaker_has_attachments(role, metadata):
+                # 通話の文字起こしの行の添付は発話者のもので、行ごと role=host にすると
+                # 機構の行の持ち物になる (記憶 DB と同じ扱い)。旧世代の書き手の行
+                # (画面からの送信の印を持たない) の添付は機構が付けたもの
+                result.skipped.append(Skipped(
+                    "building_messages", str(row_id), str(role), sorted(tags), _head(content),
+                    reason=SPEAKER_ATTACHMENT_REASON,
+                ))
+                continue
             if body is not None:
                 result.updates.append((
                     "UPDATE building_messages SET role = 'host', content = ? WHERE id = ?",
@@ -2245,6 +2412,12 @@ def scan_main_conn(
                 continue
             kind = classify_tagged_message(message.get("role"), content, metadata)
             body = strip_system_tags(content) if kind is not None else None
+            if kind is not None and _speaker_has_attachments(message.get("role"), metadata):
+                result.skipped.append(Skipped(
+                    "execution_outbox", str(outbox_id), str(message.get("role")),
+                    sorted(_tags_of(metadata)), _head(content), reason=SPEAKER_ATTACHMENT_REASON,
+                ))
+                continue
             if kind is None or body is None:
                 result.skipped.append(Skipped(
                     "execution_outbox", str(outbox_id), str(message.get("role")),
@@ -2290,8 +2463,9 @@ def migrate_main_db(
     ので、同じ行のままならレポートの材料にしない。書き換えを伴う結果は
     :func:`migrate_persona_db` と同じく、コミットの前に仮の名前で書き (書けなければ
     巻き戻す)、コミットの後に正式な名前へ付け替える。本体 DB は完了の印を持た
-    ないので、付け替えの前に止まった起動の仮の JSON は次の起動で採用できず
-    捨てる (:func:`regenerate_pending_reports`)。
+    ないので、変換をコミットする取引の中で、その回の記録を実行台帳に書く
+    (:func:`_write_main_commit_record`)。付け替えの前に止まった起動の仮の JSON は、
+    次の起動がこの記録と突き合わせて採否を決める (:func:`_settle_staged_results`)。
     """
     result = StoreResult(label="本体 DB", path=str(db_path))
     if not db_path.exists():
@@ -2331,6 +2505,13 @@ def migrate_main_db(
                 applied.backup_path = str(backup)
             # 変換が無ければ (同時に起動した別のプロセスが先に終えた) 何も書かない
             _apply(conn, applied.updates)
+            if (
+                applied.updates and results_dir is not None
+                and _write_main_commit_record(conn, results_dir.name)
+            ):
+                # この回の変換をコミットした記録 (本体 DB は完了の印を持たないので、
+                # 仮の結果の JSON の採否はこの記録だけで決まる)
+                applied.commit_record = results_dir.name
             report_it = bool(applied.changes) or (
                 applied.has_leftovers and applied.leftover_keys() != last_leftovers
             )
@@ -2373,9 +2554,74 @@ def migrate_main_db(
 # ---------------------------------------------------------------------------
 
 
+def changes_path_for(report_path: Path) -> Path:
+    """レポートの隣に書く、変換した全行のファイルの場所 (``changes_<レポートの名前>``)。
+
+    名前は ``report_`` で始めない — レポートを ``report_*.md`` で探す読み手に混ざらない。
+    """
+    return report_path.with_name(f"changes_{report_path.name}")
+
+
+def _full_text(text: Any) -> str:
+    """全件のファイルに書く本文 (切り詰めない。改行は ``\\n`` と書いて一行に収める)。"""
+    return str(text or "").replace("\r", "").replace("\n", "\\n")
+
+
+def render_changes(
+    results: Sequence[StoreResult], *, dry_run: bool, stamp: str,
+) -> str:
+    """変換した全行 (表・系統・行 id・変更前後の全文) の一覧。レポートの本文はサンプルだけ。"""
+    lines: List[str] = [
+        "# システム通知の移行で変換した全行",
+        "",
+        f"- 実行: {stamp}" + (" (dry-run: 何も書き換えていない)" if dry_run else ""),
+        "- 本文は切り詰めず、改行は \\n と書いて一行に収めた",
+        "",
+    ]
+    for res in results:
+        if not res.changes:
+            continue
+        lines.append(f"## {res.label}")
+        lines.append(f"- DB: {res.path}")
+        lines.append(f"- 変換した行: {sum(res.counts().values())} 件")
+        if not res.changes_complete:
+            lines.append(
+                "- この DB の結果は全行を保存する前の版で書かれたので、ここには系統ごとの"
+                "サンプルだけが載っている"
+            )
+        lines.append("")
+        for c in res.changes:
+            lines.append(f"- [{c.table} / {c.kind}] id={c.row_id}")
+            lines.append(f"  - 前: {_full_text(c.before)}")
+            lines.append(f"  - 後: {_full_text(c.after)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _write_report_files(
+    report_path: Path, results: Sequence[StoreResult], *, dry_run: bool, stamp: str,
+    cutover: Optional["Cutover"],
+) -> None:
+    """レポートと、その隣の変換した全行のファイル (変換が一件でもあれば) を書く。"""
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    changes_path: Optional[Path] = None
+    if any(r.changes for r in results):
+        changes_path = changes_path_for(report_path)
+        changes_path.write_text(
+            render_changes(results, dry_run=dry_run, stamp=stamp), encoding="utf-8",
+        )
+    report_path.write_text(
+        render_report(
+            results, dry_run=dry_run, stamp=stamp, cutover=cutover, changes_path=changes_path,
+        ),
+        encoding="utf-8",
+    )
+
+
 def render_report(
     results: Sequence[StoreResult], *, dry_run: bool, stamp: str,
     cutover: Optional["Cutover"] = None,
+    changes_path: Optional[Path] = None,
 ) -> str:
     from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
 
@@ -2385,6 +2631,11 @@ def render_report(
         f"- 実行: {stamp}" + (" (dry-run: 何も書き換えていない)" if dry_run else ""),
         "- 設計: docs/intent/system_notice_delivery.md「移行」",
     ]
+    if changes_path is not None:
+        lines.append(
+            f"- 変換した全行 (変更前後の全文): {changes_path}。このレポートの本文には"
+            f"系統ごとに最大 {SAMPLES_PER_KIND} 件のサンプルだけを載せる"
+        )
     if cutover is not None:
         lines.append(
             f"- 新しい形式に切り替わった時刻: {cutover.at.isoformat()} "
@@ -2496,6 +2747,10 @@ _MARKER_HELD_REPORT_LINES = {
     MARKER_HELD_PLAYBOOK_NAMES: "規則 3 の材料 (実在する Playbook 名) を完全に読めなかった",
     MARKER_HELD_MAIN_DB_FAILED: "本体 DB の移行が失敗した (記憶へ書かれる前の旧形式の本文が残りうる)",
     MARKER_HELD_STAGED_RESULT: "前の起動の仮の結果の JSON の採否がまだ決まっていない",
+    MARKER_HELD_UNREADABLE_METADATA: (
+        "metadata が辞書として読めない行が残っていて、確認待ちの印を付けられない "
+        "(下の「metadata が辞書として読めない行」の節。行が直るまで毎起動で走査し直す)"
+    ),
 }
 
 
@@ -2522,12 +2777,20 @@ def _iter_persona_dbs(saiverse_home: Path) -> Iterable[Tuple[str, Path]]:
 #: 記憶 DB のどれかに既にあった完了の印のうち、最も早い完了時刻 (この移行を
 #: 含む版 — v0.3.27 以降 — を最初に動かした起動の、最初の移行の時刻)。
 CUTOVER_FROM_MARKER = "earliest_completion_marker"
-#: 完了の印がどこにも無かったので、記録した起動の、移行を始めた時刻。
+#: この移行が前の起動で書いた記録 (:func:`_earliest_migration_trace`) のうち最も早い
+#: 時刻。完了の印より早かったか、印がどこにも無かったとき。
+CUTOVER_FROM_TRACE = "earliest_migration_trace"
+#: 完了の印も、移行が前に書いた記録もどこにも無かったので、記録した起動の、移行を
+#: 始めた時刻。
 CUTOVER_FROM_START = "first_start"
 
 _CUTOVER_SOURCE_REPORT_LINES = {
     CUTOVER_FROM_MARKER: "記憶の完了の印のうち最も早いもの — この移行を含む版を最初に動かした起動の時刻",
-    CUTOVER_FROM_START: "完了の印がどこにも無かったので、記録した起動の時刻",
+    CUTOVER_FROM_TRACE: (
+        "この移行が前の起動で書いた記録 (起動ごとの結果のフォルダ・移行前の写し・"
+        "last_leftovers.json) のうち最も早いもの"
+    ),
+    CUTOVER_FROM_START: "完了の印も、移行が前に書いた記録も無かったので、記録した起動の時刻",
 }
 
 
@@ -2543,7 +2806,7 @@ class Cutover:
     @property
     def epoch(self) -> int:
         """秒に切り捨てた epoch 秒 (行の作成時刻と比べる値 — :func:`_created_after_cutover`)。"""
-        return int(self.at.timestamp())
+        return math.floor(self.at.timestamp())
 
 
 def _cutover_path(saiverse_home: Path) -> Path:
@@ -2616,13 +2879,99 @@ def _earliest_completion_marker(saiverse_home: Path) -> Optional[datetime]:
     return earliest
 
 
+def _file_written_at(path: Path) -> datetime:
+    """ファイルを最後に書いた時刻 (更新時刻、UTC)。読めなければ :class:`CutoverUnavailable`。"""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise CutoverUnavailable(f"移行の記録 {path} の時刻を読めませんでした: {exc}") from exc
+
+
+def _run_folder_started_at(run_dir: Path) -> Optional[datetime]:
+    """起動ごとの結果のフォルダの ``RUN`` に書いた、その起動の開始時刻。
+
+    ``RUN`` も結果の JSON も無いフォルダ (何も記録しないまま止まった起動) は痕跡では
+    ないので None。``RUN`` があるか結果の JSON があるのに、``RUN`` の時刻を読めない
+    ときは :class:`CutoverUnavailable`。
+    """
+    run_info = run_dir / RUN_INFO_NAME
+    try:
+        exists = run_info.is_file()
+        recorded = exists or any(run_dir.glob("*.json")) or any(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+    except OSError as exc:
+        raise CutoverUnavailable(f"移行の記録 {run_dir} を読めませんでした: {exc}") from exc
+    if not recorded:
+        return None
+    try:
+        info = json.loads(run_info.read_text(encoding="utf-8"))
+        at = _parse_utc(info["started_at"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise CutoverUnavailable(
+            f"移行の記録 {run_info} から起動の時刻を読めませんでした: {exc}"
+        ) from exc
+    if at is None:
+        raise CutoverUnavailable(f"移行の記録 {run_info} の起動の時刻を読めませんでした")
+    return at
+
+
+def _earliest_migration_trace(saiverse_home: Path) -> Optional[datetime]:
+    """この移行が前の起動で書いた記録の時刻のうち、最も早いもの。記録が無ければ None。
+
+    完了の印は記憶 DB ごとに版を上げるたびに書き換わり、記憶 DB を消せば消える
+    (v0.3.27 の起動のときに記憶 DB が無かった環境では、どこにも残らない)。そこで
+    移行が ``<SAIVERSE_HOME>/backups/system_notice_migration/`` に書く永続の記録も
+    候補にする (どれも移行を書き換えありで走らせた起動だけが書く。dry-run は書かない):
+
+    - ``results/<起動>/RUN`` の ``started_at`` (その起動の開始時刻)
+    - 移行前の写し (``*.pre_migration_*.bak`` — 本体 DB の分は直下、記憶の分は
+      ``<persona_id>/`` の下) の更新時刻 (写しを書いた時刻)
+    - ``last_leftovers.json`` の更新時刻 (最後に書き換えた時刻)
+
+    更新時刻はその記録を最後に書いた時刻なので、最初の起動より遅いことはあっても
+    早いことはない。最も早いものを取れば、最初の起動の時刻に最も近い。レポート
+    (``report_*.md``) は結果のフォルダから作るので数えない (dry-run のレポートも同じ
+    置き場に書かれる)。``cutover.json`` 自身も数えない。
+
+    記録はあるのに時刻を読めない・置き場を読めないときは :class:`CutoverUnavailable`
+    — 読み落とした記録が最も早いものだと、境が遅く決まる。
+    """
+    output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
+    times: List[datetime] = []
+    try:
+        if not output_dir.is_dir():
+            return None
+        results_root = output_dir / RESULTS_DIR_NAME
+        run_dirs = (
+            [p for p in results_root.iterdir() if p.is_dir()] if results_root.is_dir() else []
+        )
+        copies = [
+            p for p in output_dir.glob("*.pre_migration_*.bak") if p.is_file()
+        ] + [
+            p for p in output_dir.glob("*/*.pre_migration_*.bak") if p.is_file()
+        ]
+        leftovers = output_dir / LAST_LEFTOVERS_NAME
+        has_leftovers = leftovers.is_file()
+    except OSError as exc:
+        raise CutoverUnavailable(f"移行の記録の置き場 {output_dir} を読めませんでした: {exc}") from exc
+    for run_dir in run_dirs:
+        at = _run_folder_started_at(run_dir)
+        if at is not None:
+            times.append(at)
+    for path in copies:
+        times.append(_file_written_at(path))
+    if has_leftovers:
+        times.append(_file_written_at(leftovers))
+    return min(times) if times else None
+
+
 def _record_cutover(path: Path, cutover: Cutover, *, saiverse_home: Path) -> Cutover:
     """切り替わりの時刻を新しく記録し、記録にある時刻を返す。
 
     既に記録があれば書き換えない — 同時に起動した別のプロセスが先に記録していれば、
     その時刻を返す。中身を OS に確定させた仮のファイルを、上書きしない固いリンクで
     正式な名前に付ける (書きかけの記録が正式な名前で残らない)。固いリンクを作れない
-    ファイルシステムでは、正式な名前を排他で新しく作って書く。書けなければ
+    ファイルシステムでも、正式な名前に直接は書かず、確定させた仮のファイルを名前の
+    付け替え (:func:`_publish_without_link`) で公開する。書けなければ
     :class:`CutoverUnavailable`。
     """
     data = {
@@ -2647,10 +2996,7 @@ def _record_cutover(path: Path, cutover: Cutover, *, saiverse_home: Path) -> Cut
         except FileExistsError:
             pass  # 別のプロセスが先に記録した
         except OSError:
-            try:
-                _write_new(path)
-            except FileExistsError:
-                pass
+            _publish_without_link(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
         # 新しく作られうるフォルダ (backups/ と system_notice_migration/) の項目も確定させる
@@ -2664,6 +3010,33 @@ def _record_cutover(path: Path, cutover: Cutover, *, saiverse_home: Path) -> Cut
     return recorded
 
 
+def _publish_without_link(tmp: Path, path: Path) -> None:
+    """固いリンクを作れないとき、中身を確定させた仮のファイル ``tmp`` を正式な名前 ``path`` で公開する。
+
+    正式な名前に直接書くと、途中で止まったときに空か書きかけの記録が残り、次の起動
+    からは壊れた記録として :class:`CutoverUnavailable` が続く。だから名前の付け替え
+    (原子的) で、完成した中身だけを公開する。
+
+    - Windows の ``os.rename`` は、付け替え先の名前が既にあると FileExistsError で
+      失敗する。付け替えそのものが排他になるので、先に記録したプロセスの記録を
+      上書きしない。
+    - それ以外の OS の ``os.rename`` は既存の名前を上書きする。付け替えの直前に
+      正式な名前が無いことを確かめ、あれば付け替えない。確かめてから付け替えるまでの
+      間に別のプロセスが記録すると上書きしうる。この重なりは、固いリンクを作れない
+      ファイルシステムで、記録の無い環境の二つのプロセスが同時に移行を始めたときだけ
+      起き、そのとき両方が書く時刻は「それぞれの起動の時刻」(差は起動のずれ) になる。
+    """
+    if os.name == "nt":
+        try:
+            os.rename(tmp, path)
+        except FileExistsError:
+            pass  # 別のプロセスが先に記録した
+        return
+    if path.exists():
+        return  # 別のプロセスが先に記録した
+    os.rename(tmp, path)
+
+
 def resolve_cutover(
     saiverse_home: Path, *, now: datetime, dry_run: bool = False,
 ) -> Cutover:
@@ -2672,22 +3045,30 @@ def resolve_cutover(
     記録 (``<SAIVERSE_HOME>/backups/system_notice_migration/cutover.json``) があれば
     それを返し、決め直さない。記録が無ければ決めて記録する:
 
-    - 記憶 DB のどれかに完了の印があれば、その完了時刻のうち最も早いもの。この
-      移行を含む版を既に動かした環境の、最初の移行の時刻 — その起動からは、機構は
-      旧形式の本文を書かない。
-    - どこにも印が無ければ ``now`` (この起動の、移行を始めた時刻)。
+    - 記憶 DB の完了の印の完了時刻と、この移行が前の起動で書いた記録の時刻
+      (:func:`_earliest_migration_trace`) のうち、最も早いもの。この移行を含む版を
+      既に動かした環境の、最初の移行の時刻に最も近い時刻 — その起動からは、機構は
+      旧形式の本文を書かない。印だけで決めないのは、v0.3.27 の起動のときに記憶 DB が
+      無かった環境 (印がどこにも残らない) と、古い記憶 DB を消して残った最古の印が
+      遅くなった環境で、境が実際の切り替えより遅く決まるため。
+    - 印も記録もどこにも無ければ ``now`` (この起動の、移行を始めた時刻)。
 
-    ``dry_run`` は決めた時刻を記録しない。決める材料 (記録・完了の印) を読めない、
-    または記録できなければ :class:`CutoverUnavailable` — 呼び出し側はその起動で
-    自動の変換を一つもしない。
+    ``dry_run`` は決めた時刻を記録しない。決める材料 (記録・完了の印・移行が前に書いた
+    記録) を読めない、または記録できなければ :class:`CutoverUnavailable` — 呼び出し
+    側はその起動で自動の変換を一つもしない。
     """
     path = _cutover_path(saiverse_home)
     recorded = _read_cutover(path)
     if recorded is not None:
         return recorded
-    earliest = _earliest_completion_marker(saiverse_home)
-    if earliest is not None:
-        cutover = Cutover(earliest, CUTOVER_FROM_MARKER)
+    candidates = [
+        Cutover(at, source) for at, source in (
+            (_earliest_completion_marker(saiverse_home), CUTOVER_FROM_MARKER),
+            (_earliest_migration_trace(saiverse_home), CUTOVER_FROM_TRACE),
+        ) if at is not None
+    ]
+    if candidates:
+        cutover = min(candidates, key=lambda c: c.at)
     else:
         cutover = Cutover(now.astimezone(timezone.utc), CUTOVER_FROM_START)
     if dry_run:
@@ -2779,10 +3160,7 @@ def _write_run_report(run_dir: Path, report_path: Path, *, stamp: str) -> Option
         cutover = _read_cutover(run_dir.parent.parent / CUTOVER_FILE_NAME)
     except CutoverUnavailable:
         cutover = None  # レポートの一行が欠けるだけ (移行そのものは記録を読めた起動だけが走る)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        render_report(results, dry_run=False, stamp=stamp, cutover=cutover), encoding="utf-8",
-    )
+    _write_report_files(report_path, results, dry_run=False, stamp=stamp, cutover=cutover)
     (run_dir / REPORTED_MARKER_NAME).write_text(str(report_path), encoding="utf-8")
     return report_path
 
@@ -2792,11 +3170,18 @@ def _settle_staged_results(run_dir: Path) -> int:
 
     仮の JSON はコミットの前に書くので、残っているのは「コミットの前に止まった」
     か「コミットの後、正式な名前へ付け替える前に止まった (付け替えに失敗した)」
-    かのどちらか。区別は DB の完了の印で付ける: その DB の印が、仮の JSON に
-    書いた値 (``marker_value`` — 書いた取引で立てた印) と一致すれば、その取引は
-    コミットされているので正式な名前へ付け替えて採用する。一致しない・印が無い・
-    印を持たない結果 (本体 DB、印を見送ったペルソナ) は、変換が確定したと
-    確かめられないので捨てる — 確定していない変換をレポートの材料にしない。
+    かのどちらか。区別は DB に残ったその回の記録で付ける:
+
+    - 仮の JSON の ``commit_record`` (変換をコミットする取引が書いた回の記録の名前)
+      が DB にあれば、その取引はコミットされている — 記憶 DB は ``embed_metadata`` の
+      :data:`COMMIT_RECORD_KEY_PREFIX` の鍵、本体 DB は実行台帳の
+      :data:`COMMIT_LEDGER_KIND` の行 (:func:`_commit_record_exists`)。完了の印を
+      見送った回と本体 DB も、これで採用できる。
+    - 記憶 DB は、完了の印が仮の JSON に書いた値 (``marker_value`` — 書いた取引で
+      立てた印) と一致する場合も採用する (回の記録を書かなかった前の版の仮の JSON)。
+
+    どちらでもなければ、変換が確定したと確かめられないので捨てる — 確定していない
+    変換をレポートの材料にしない。
     DB が読めない (ロックなど) ときと、仮の JSON そのものが読めない (一時的な
     I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
     して壊れている仮の JSON は書きかけで止まったもので、捨てる — 仮の JSON は
@@ -2819,21 +3204,26 @@ def _settle_staged_results(run_dir: Path) -> int:
             data = json.loads(raw.decode("utf-8"))
         except ValueError:
             data = None  # 書きかけで止まった — 確定した結果ではない
-        expected = data.get("marker_value") if isinstance(data, dict) else None
+        data = data if isinstance(data, dict) else {}
+        expected = data.get("marker_value")
+        record = data.get("commit_record")
+        persona = bool(data.get("persona"))
         keep = False
-        if isinstance(expected, str) and data.get("persona") and data.get("path"):
-            db = Path(data["path"])
-            if db.is_file():
-                try:
-                    with closing(_open_readonly(db)) as conn:
-                        actual = get_embed_metadata_strict(conn, MIGRATION_MARKER_KEY)
-                except sqlite3.Error:
-                    LOGGER.warning(
-                        "[system-notice-migration] could not read %s to settle %s; "
-                        "will retry on the next start", db, staged, exc_info=True,
-                    )
-                    continue
-                keep = actual == expected
+        checkable = isinstance(record, str) or (persona and isinstance(expected, str))
+        db = Path(data["path"]) if checkable and isinstance(data.get("path"), str) else None
+        if db is not None and db.is_file():
+            try:
+                with closing(_open_readonly(db)) as conn:
+                    if isinstance(record, str):
+                        keep = _commit_record_exists(conn, record, persona=persona)
+                    if not keep and persona and isinstance(expected, str):
+                        keep = get_embed_metadata_strict(conn, MIGRATION_MARKER_KEY) == expected
+            except sqlite3.Error:
+                LOGGER.warning(
+                    "[system-notice-migration] could not read %s to settle %s; "
+                    "will retry on the next start", db, staged, exc_info=True,
+                )
+                continue
         final = staged.with_name(staged.name[: -len(STAGED_SUFFIX)])
         try:
             if keep:
@@ -2851,6 +3241,21 @@ def _settle_staged_results(run_dir: Path) -> int:
                 "[system-notice-migration] could not settle %s", staged, exc_info=True,
             )
     return adopted
+
+
+def _commit_record_exists(conn: sqlite3.Connection, record: str, *, persona: bool) -> bool:
+    """その回の変換をコミットした記録が DB にあるか (読めなければ sqlite3.Error を送る)。"""
+    from sai_memory.memory.storage import get_embed_metadata_strict
+
+    if persona:
+        return get_embed_metadata_strict(conn, COMMIT_RECORD_KEY_PREFIX + record) is not None
+    if not _table_exists(conn, "execution_ledger"):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM execution_ledger WHERE KIND = ? AND IDEMPOTENCY_KEY = ?",
+        (COMMIT_LEDGER_KIND, record),
+    ).fetchone()
+    return row is not None
 
 
 _STAGED_PERSONA_PREFIX = "persona_"
@@ -3032,11 +3437,7 @@ def run_migration(
     if results_dir is None:
         if any(r.has_findings for r in results):
             written = report_path or output_dir / f"report_{stamp}_dry_run.md"
-            written.parent.mkdir(parents=True, exist_ok=True)
-            written.write_text(
-                render_report(results, dry_run=True, stamp=stamp, cutover=cutover),
-                encoding="utf-8",
-            )
+            _write_report_files(written, results, dry_run=True, stamp=stamp, cutover=cutover)
     else:
         report_ok = True
         if results_dir.is_dir() and any(results_dir.glob("*.json")):
@@ -3204,6 +3605,27 @@ def startup_alerts(
                 ),
             ),
             {"held": [_alert_label(r) for r in held]},
+        ))
+    # metadata を読めないので確認待ちの印を付けられない行が残る記憶 (完了の印を見送り、
+    # 行が残る間は毎起動でここに出る)
+    unreadable = [
+        r for r in results if not r.error
+        and MARKER_HELD_UNREADABLE_METADATA in r.marker_held and r.unreadable_metadata_count
+    ]
+    if unreadable:
+        alerts.append(_alert(
+            "system_notice_migration_unreadable_metadata", "warning", "unreadableMetadata",
+            _ui(
+                "unreadableMetadataMessage",
+                count=sum(r.unreadable_metadata_count for r in unreadable),
+            ),
+            {"unreadable_metadata": [
+                _ui(
+                    "personaCountLabel", id=Path(r.path).parent.name,
+                    count=r.unreadable_metadata_count,
+                )
+                for r in unreadable
+            ]},
         ))
     if failed:
         alerts.append(_alert(

@@ -23,7 +23,10 @@ docs/intent/system_notice_delivery.md「追補 (2026-10-29)」の「確認待ち
 - 削除は、建物の履歴から転記された行 (``building_msg_ref`` を持つ行) なら、消す前に
   建物の側の取り込み済みの印 (``ingested_by``) を確実にする — 印の書き込みに失敗して
   宙に浮いた転記は、次の転記で記憶の側の ``building_msg_ref`` を照会して重複を
-  避けるので、照会先の行を消すと同じ発話が取り込み直されて復活する。
+  避けるので、照会先の行を消すと同じ発話が取り込み直されて復活する。転記の側は
+  記憶へ足す直前に建物の行の ``ingested_by`` を読み直す (get_building_messages.py の
+  ``_append_and_mark``) ので、転記が建物の履歴を読んだ後に削除が割り込んでも、
+  ここで付けた印を見て足さない。
 - 書き込みは記憶ブラウザの編集 API (api/routes/people/memory.py) と同じ
   ``get_adapter`` 経由のアダプタの書き込みの取引に乗せる
   (``SAIMemoryAdapter.rewrite_message``)。
@@ -190,14 +193,27 @@ def attachment_counts(items: Iterable[Dict[str, str]]) -> Dict[str, int]:
     return counts
 
 
-def row_version(role: Any, content: Any, metadata: Optional[Dict[str, Any]]) -> str:
-    """行の role・本文・metadata から作るハッシュ (一覧の ``version``)。
+def row_version(
+    role: Any,
+    content: Any,
+    metadata: Optional[Dict[str, Any]],
+    created_at: Any,
+    line_role: Any,
+) -> str:
+    """行の role・本文・metadata・created_at・line_role から作るハッシュ (一覧の ``version``)。
 
     一覧と確定の操作が同じ関数で作る — metadata は記憶 DB の JSON を辞書として
-    読んだもの (読めない行は None) を、鍵の順をそろえて直列化する。
+    読んだもの (読めない行は None) を、鍵の順をそろえて直列化する。created_at は
+    一覧が日時として表示する値、line_role は「通常のユーザー発話に変換」が読んで
+    書き換える値で、どちらも記憶 DB の列の値をそのまま (一覧の表示用の変換の前に)
+    材料にする。一覧の後に記憶ブラウザで日時や line_role だけが変わった行にも、
+    所有者の選択を当てないため。
     """
     payload = json.dumps(
-        {"role": role, "content": content, "metadata": metadata},
+        {
+            "role": role, "content": content, "metadata": metadata,
+            "created_at": created_at, "line_role": line_role,
+        },
         ensure_ascii=False, sort_keys=True, default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -237,7 +253,7 @@ def rewrite_for_action(
     """``action`` を当てた後の行 (``SAIMemoryAdapter.rewrite_message`` の ``rewrite``)。
 
     ``row`` は ``rewrite_message`` が渡す辞書 (role / content / metadata /
-    line_role)。``version`` を渡したときは、今の行のハッシュ (:func:`row_version`) と
+    line_role / created_at)。``version`` を渡したときは、今の行のハッシュ (:func:`row_version`) と
     違えば :class:`RowChanged` を投げる。選べない操作なら :class:`ActionNotAllowed`
     を投げる (どちらも書き換えない)。
 
@@ -250,7 +266,9 @@ def rewrite_for_action(
     role = row.get("role")
     content = row.get("content")
     metadata = row.get("metadata")
-    if version is not None and version != row_version(role, content, metadata):
+    if version is not None and version != row_version(
+        role, content, metadata, row.get("created_at"), row.get("line_role"),
+    ):
         raise RowChanged(action)
     if action not in allowed_actions(role, content, metadata):
         raise ActionNotAllowed(action)
@@ -389,11 +407,11 @@ def _head(content: Any) -> str:
     return ""
 
 
-def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str, Any]]]:
+def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str, Any], Any]]:
     """記憶 DB を読み取り専用で開き、確認待ちの印を持つ行を返す。
 
-    ``metadata`` の列が無い古いスキーマには印が付いていない (移行が付けられない)
-    ので空。
+    各行は ``(id, role, content, created_at, metadata, line_role)``。``metadata`` の
+    列が無い古いスキーマには印が付いていない (移行が付けられない) ので空。
     """
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
@@ -402,19 +420,20 @@ def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str
             return []
         order = "created_at, rowid" if "created_at" in cols else "rowid"
         created = "created_at" if "created_at" in cols else "NULL"
+        line_role = "line_role" if "line_role" in cols else "NULL"
         raw_rows = conn.execute(
-            f"SELECT id, role, content, {created}, metadata FROM messages "
+            f"SELECT id, role, content, {created}, metadata, {line_role} FROM messages "
             f"WHERE instr(metadata, ?) > 0 ORDER BY {order}",
             (SYSTEM_NOTICE_REVIEW_KEY,),
         ).fetchall()
     rows = []
-    for row_id, role, content, created_at, raw_meta in raw_rows:
+    for row_id, role, content, created_at, raw_meta, line_role_value in raw_rows:
         try:
             metadata = json.loads(raw_meta)
         except (TypeError, ValueError):
             continue
         if _is_pending(metadata):
-            rows.append((row_id, role, content, created_at, metadata))
+            rows.append((row_id, role, content, created_at, metadata, line_role_value))
     return rows
 
 
@@ -439,7 +458,7 @@ def collect_review_rows(
                 "persona_id": persona_id, "persona_name": persona_name, "error": str(exc),
             })
             continue
-        for row_id, role, content, created_at, metadata in pending:
+        for row_id, role, content, created_at, metadata, line_role in pending:
             text = content if isinstance(content, str) else ""
             raw_tags = metadata.get("tags")
             tags = sorted(t for t in raw_tags if isinstance(t, str)) if isinstance(raw_tags, list) else []
@@ -453,7 +472,7 @@ def collect_review_rows(
                 reason=str(metadata.get(SYSTEM_NOTICE_REVIEW_KEY) or ""),
                 created_at=int(created_at) if isinstance(created_at, (int, float)) else None,
                 actions=allowed_actions(role, content, metadata),
-                version=row_version(role, content, metadata),
+                version=row_version(role, content, metadata, created_at, line_role),
                 attachments=attachment_items(metadata),
                 head=_head(text),
             ))

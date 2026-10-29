@@ -12479,6 +12479,18 @@
     "ja": "前回の移行の結果のファイルをまだ確かめられていません。",
     "en": "The result file of the previous migration could not be checked yet. "
   },
+  "api.systemNoticeMigration.unreadableMetadataTitle": {
+    "ja": "システム通知の記録の移行で、確認待ちにできない記録があります",
+    "en": "Some system notice records could not be set aside for review"
+  },
+  "api.systemNoticeMigration.unreadableMetadataMessage": {
+    "ja": "{count} 件の記録は付属情報 (metadata) が読めない形のため、確認待ちの印を付けられず、会話の記録として扱われたままです (ペルソナごとの件数は下にあります)。移行は完了扱いにせず、記録が直るまで起動のたびに確かめます。詳しい一覧は移行のレポートにあります。",
+    "en": "{count} records have metadata in an unreadable form, so they could not be marked for review and are still treated as conversation (counts per persona are listed below). The migration is not treated as complete and will check them on every start until the records are fixed. The full list is in the migration report."
+  },
+  "api.systemNoticeMigration.personaCountLabel": {
+    "ja": "ペルソナ {id}: {count} 件",
+    "en": "Persona {id}: {count}"
+  },
   "api.systemNoticeMigration.mainDbLabel": {
     "ja": "本体 DB",
     "en": "Main database"

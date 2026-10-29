@@ -235,6 +235,11 @@ def _leave_committed_v2_result(tmp_path: Path, persona: Path) -> Path:
     """版 2 の移行をコミットした後、正式な名前へ付け替える前に止まった起動の仮の JSON。"""
     run_dir = tmp_path / "backups" / OUTPUT_DIR_NAME / RESULTS_DIR_NAME / "20261028_000000_1_aaaaaa"
     run_dir.mkdir(parents=True)
+    # 結果の JSON を書いた起動は必ず RUN (起動の素性と開始時刻) を一緒に書く。開始時刻は
+    # 境の候補になる (database/system_notice_migration.py の _earliest_migration_trace)
+    (run_dir / mig.RUN_INFO_NAME).write_text(json.dumps({
+        "pid": 99999999, "process_created_at": None, "started_at": "2026-10-28T00:00:00+00:00",
+    }), encoding="utf-8")
     staged = run_dir / "persona_p1.json.tmp"
     staged.write_text(json.dumps(StoreResult(
         label="ペルソナ p1", path=str(persona), persona=True, marker_value=_V2_MARKER,

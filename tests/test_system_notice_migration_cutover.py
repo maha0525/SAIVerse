@@ -387,9 +387,13 @@ def test_main_db_rows_after_the_cutover_are_not_converted(tmp_path):
 
     with closing(sqlite3.connect(str(main))) as conn:
         building = dict(conn.execute("SELECT seq, role FROM building_messages").fetchall())
+        # 移行が変換をコミットした回の記録 (KIND system_notice_migration.commit) は除く
         ledger = {
             r[0]: json.loads(r[1])["dispatch_envelope"]["user_input"]
-            for r in conn.execute("SELECT EXECUTION_ID, PAYLOAD_JSON FROM execution_ledger")
+            for r in conn.execute(
+                "SELECT EXECUTION_ID, PAYLOAD_JSON FROM execution_ledger WHERE KIND != ?",
+                (mig.COMMIT_LEDGER_KIND,),
+            )
         }
         outbox = {
             r[0]: json.loads(r[1])["message"]["role"]
