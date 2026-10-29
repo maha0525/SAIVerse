@@ -454,13 +454,24 @@ def list_system_notice_review():
     同じ型の行を束ね、束と行ごとに「選べる操作」を付けて返す
     (docs/intent/system_notice_delivery.md「確認待ちの行の確定」)。各行は本文の
     全文・添付 (種類と参照)・行のハッシュ (``version`` — 確定の操作に渡す) を持つ。
+    取り直したついでに、同じ結果から画面の警告も置き直す (一時的に読めなかった記憶が
+    読めるようになったとき、確定する行が無くても警告が外れるように)。
     """
-    from saiverse.system_notice_review import build_review_listing, known_persona_dbs
+    from saiverse.system_notice_review import (
+        build_review_listing,
+        known_persona_dbs,
+        place_review_alert,
+    )
 
     manager = app_state.manager
     if manager is None:
         raise HTTPException(status_code=503, detail="Manager not ready")
-    return build_review_listing(known_persona_dbs(manager))
+    listing = build_review_listing(known_persona_dbs(manager))
+    try:
+        place_review_alert(manager, listing["total"], listing["errors"])
+    except Exception:  # noqa: BLE001 — 警告の置き直しの失敗で一覧を止めない
+        LOGGER.warning("[system-notice-review] failed to replace the alert on relisting", exc_info=True)
+    return listing
 
 
 @router.post("/notice-review/apply")

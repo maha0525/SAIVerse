@@ -792,6 +792,17 @@ def refresh_review_alert(manager: Any, persona_dbs: Optional[Sequence[Tuple[str,
     except Exception:  # noqa: BLE001 — 起動と確定の操作を止めない
         LOGGER.warning("[system-notice-review] failed to count pending rows", exc_info=True)
         return -1
+    place_review_alert(manager, count, errors)
+    return count
+
+
+def place_review_alert(manager: Any, count: int, errors: Sequence[Dict[str, str]]) -> None:
+    """数え終えた結果 (確認待ちの件数と読めなかった DB) から警告を置き直す。
+
+    一覧の取り直し (``GET /api/system/notice-review``) も、同じ結果でここを通す —
+    記憶 DB が一時的に読めなかった後に読めるようになったとき、確定する行が無くても
+    画面の「読み込みをやり直す」で警告が外れるように。
+    """
     unreadable = [e.get("persona_name") or e.get("persona_id") or "" for e in errors]
     alerts = list(getattr(manager, "startup_alerts", None) or [])
     index = next((i for i, a in enumerate(alerts) if a.get("id") == REVIEW_ALERT_ID), None)
@@ -804,4 +815,3 @@ def refresh_review_alert(manager: Any, persona_dbs: Optional[Sequence[Tuple[str,
     elif index is not None:
         del alerts[index]
     manager.startup_alerts = alerts
-    return count

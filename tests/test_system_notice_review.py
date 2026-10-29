@@ -844,6 +844,45 @@ def test_api_lists_and_applies_through_get_adapter(world, monkeypatch):
     assert any(a["id"] == review.REVIEW_ALERT_ID for a in world.manager.startup_alerts)
 
 
+def test_relisting_replaces_a_stale_alert_without_any_apply(world, monkeypatch):
+    """一時的に読めなかった記憶が読めるようになった後、一覧を取り直すだけで警告が直る。
+
+    確定する行が無いと確定の操作は起きないので、取り直しの経路でも置き直す
+    (PR #434 のレビューの指摘)。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routes import system as system_routes
+    from saiverse import app_state
+
+    monkeypatch.setenv("SAIVERSE_HOME", str(world.home))
+    monkeypatch.setattr(app_state, "manager", world.manager)
+    app = FastAPI()
+    app.include_router(system_routes.router, prefix="/api/system")
+    client = TestClient(app)
+
+    # 起動時に記憶を読めなかったときの警告 (確認待ち 0 件・読めないペルソナあり)。
+    # ほかの警告は位置ごとそのまま残る
+    other = {"id": "other_alert", "level": "warning", "title": "t", "message": "m", "details": {}}
+    world.manager.startup_alerts = [other, review.review_alert(0, ["alice"])]
+    listing = client.get("/api/system/notice-review").json()
+    assert listing["total"] == 5
+    assert world.manager.startup_alerts == [other, review.review_alert(5, [])]
+
+    # 確認待ちが全部片づいていれば、取り直しで警告が外れる
+    for db in (world.a_db, world.b_db):
+        with contextlib.closing(sqlite3.connect(str(db))) as conn:
+            conn.execute(
+                "UPDATE messages SET metadata = json_remove(metadata, ?) WHERE json_valid(metadata)",
+                (f'$."{SYSTEM_NOTICE_REVIEW_KEY}"',),
+            )
+            conn.commit()
+    world.manager.startup_alerts = [other, review.review_alert(0, ["alice"])]
+    assert client.get("/api/system/notice-review").json()["total"] == 0
+    assert world.manager.startup_alerts == [other]
+
+
 # ---------------------------------------------------------------------------
 # 記憶を検索・想起してモデルに渡す経路 (Codex 2 巡目)
 # ---------------------------------------------------------------------------
