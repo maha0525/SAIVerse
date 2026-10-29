@@ -1374,9 +1374,13 @@ def test_an_uncommitted_staged_result_is_discarded(tmp_path, marker):
         encoding="utf-8",
     )
 
-    assert mig.regenerate_pending_reports(tmp_path) == []
+    (report,) = mig.regenerate_pending_reports(tmp_path)
     assert not staged.exists() and not main_staged.exists()
     assert not any(run_dir.glob("*.json"))
+    # 照合に使う欄を持たない仮の JSON (main_staged) は、コミットされたかを確かめられない
+    # ので捨てずに残し、レポートにその事実だけを書く (tests/test_system_notice_migration_round5.py)
+    assert (run_dir / f"main.json.tmp{mig.UNVERIFIED_SUFFIX}").exists()
+    assert "main.json.tmp.unverified" in report.read_text(encoding="utf-8")
 
 
 def _leave_committed_staged_result(persona_db, tmp_path, monkeypatch):

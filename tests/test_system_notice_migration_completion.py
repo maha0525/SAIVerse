@@ -190,6 +190,12 @@ def test_an_unreadable_main_db_holds_the_marker(persona, tmp_path):
     names, complete = mig.known_playbook_names(main)
     assert not complete
 
+    # 境は前の起動で記録済み (境を決める前の起動では、本体 DB を読めないと境の候補
+    # — cutover.json を書けなかった起動が本体 DB に残した時刻 — を読めないので、何も
+    # 変換しない: tests/test_system_notice_migration_round5.py)
+    from tests.test_system_notice_migration_round2 import _record_cutover
+
+    _record_cutover(tmp_path)
     results, _ = run_migration(db_path=main, saiverse_home=tmp_path)
 
     main_result, persona_result = results

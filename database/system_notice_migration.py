@@ -2716,7 +2716,7 @@ def render_changes(
 
 def _write_report_files(
     report_path: Path, results: Sequence[StoreResult], *, dry_run: bool, stamp: str,
-    cutover: Optional["Cutover"],
+    cutover: Optional["Cutover"], unverified: Sequence[Path] = (),
 ) -> None:
     """レポートと、その隣の変換した全行のファイル (変換が一件でもあれば) を書く。"""
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2729,6 +2729,7 @@ def _write_report_files(
     report_path.write_text(
         render_report(
             results, dry_run=dry_run, stamp=stamp, cutover=cutover, changes_path=changes_path,
+            unverified=unverified,
         ),
         encoding="utf-8",
     )
@@ -2738,6 +2739,7 @@ def render_report(
     results: Sequence[StoreResult], *, dry_run: bool, stamp: str,
     cutover: Optional["Cutover"] = None,
     changes_path: Optional[Path] = None,
+    unverified: Sequence[Path] = (),
 ) -> str:
     from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
 
@@ -2759,6 +2761,14 @@ def render_report(
             "これより後に作られた行は、規則に当たっても自動では変換せず、理由"
             f"「{AFTER_CUTOVER_REASON}」でこのレポートに出す (記憶の messages の行には"
             "確認待ちの印を付ける)"
+        )
+    if unverified:
+        lines.append(
+            "- コミットされたかを確かめられなかった仮の結果の JSON: "
+            + ", ".join(str(p) for p in unverified)
+            + " (照合に使う欄 commit_record・marker_value か DB のパスを持たないので、削除せず"
+            f"名前の末尾に {UNVERIFIED_SUFFIX} を付けて残した。中の変換はこのレポートの件数と"
+            "全行のファイルに含めていない)"
         )
     lines.append("")
     for res in results:
@@ -2899,6 +2909,19 @@ CUTOVER_FROM_TRACE = "earliest_migration_trace"
 #: 完了の印も、移行が前に書いた記録もどこにも無かったので、記録した起動の、移行を
 #: 始めた時刻。
 CUTOVER_FROM_START = "first_start"
+#: 前の起動が境を決めようとして ``cutover.json`` に記録できなかった時刻 (本体 DB の
+#: ``execution_ledger`` の :data:`CUTOVER_ATTEMPT_LEDGER_KIND` の行 —
+#: :func:`_leave_cutover_attempt`)。完了の印や移行が前に書いた記録より早かったとき。
+CUTOVER_FROM_ATTEMPT = "unrecorded_attempt"
+
+#: ``cutover.json`` を書けなかった起動が、その起動で決めようとした境の時刻を残す本体 DB の
+#: ``execution_ledger`` の行の KIND と IDEMPOTENCY_KEY (固定で一行だけ。既にあれば書き換え
+#: ない — 最初に残した時刻が最も早い)。STATUS は ``completed`` (終端)。台帳の読み手
+#: (saiverse/execution_ledger.py・saiverse/building_id_repair.py) は STATUS (と KIND の
+#: 前方一致) で絞るので、この行は回復の処理の走査に入らない (:data:`COMMIT_LEDGER_KIND`
+#: の行と同じ)。
+CUTOVER_ATTEMPT_LEDGER_KIND = "system_notice_migration.cutover_attempt"
+CUTOVER_ATTEMPT_LEDGER_KEY = "first"
 
 _CUTOVER_SOURCE_REPORT_LINES = {
     CUTOVER_FROM_MARKER: "記憶の完了の印のうち最も早いもの — この移行を含む版を最初に動かした起動の時刻",
@@ -2907,6 +2930,10 @@ _CUTOVER_SOURCE_REPORT_LINES = {
         "last_leftovers.json) のうち最も早いもの"
     ),
     CUTOVER_FROM_START: "完了の印も、移行が前に書いた記録も無かったので、記録した起動の時刻",
+    CUTOVER_FROM_ATTEMPT: (
+        "前の起動が境を決めようとして cutover.json に記録できなかった時刻 (本体 DB の "
+        f"execution_ledger の KIND {CUTOVER_ATTEMPT_LEDGER_KIND} の行に残したもの)"
+    ),
 }
 
 
@@ -2916,7 +2943,8 @@ class Cutover:
 
     #: UTC の aware な時刻。
     at: datetime
-    #: 決め方 (:data:`CUTOVER_FROM_MARKER` / :data:`CUTOVER_FROM_START`)。
+    #: 決め方 (:data:`CUTOVER_FROM_MARKER` / :data:`CUTOVER_FROM_TRACE` /
+    #: :data:`CUTOVER_FROM_START` / :data:`CUTOVER_FROM_ATTEMPT`)。
     source: str
 
     @property
@@ -3065,6 +3093,8 @@ def _run_folder_started_at(run_dir: Path) -> Optional[datetime]:
         results = (
             [] if exists
             else sorted(run_dir.glob("*.json")) + sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+            # 付け替えは更新時刻を変えない (:func:`_settle_staged_results`)
+            + _unverified_results(run_dir)
         )
     except OSError as exc:
         raise CutoverUnavailable(f"移行の記録 {run_dir} を読めませんでした: {exc}") from exc
@@ -3205,8 +3235,107 @@ def _publish_without_link(tmp: Path, path: Path) -> None:
         pass  # 別のプロセスが先に記録した
 
 
+def _write_cutover_attempt(conn: sqlite3.Connection, cutover: Cutover) -> bool:
+    """境の時刻 ``cutover`` を本体 DB の ``execution_ledger`` に一行だけ残す (コミットは呼び出し側)。
+
+    KIND :data:`CUTOVER_ATTEMPT_LEDGER_KIND`・IDEMPOTENCY_KEY :data:`CUTOVER_ATTEMPT_LEDGER_KEY`・
+    STATUS ``completed``・PAYLOAD_JSON ``{"cutover": <ISO 8601>, "source": <決め方>}``。
+    既にその行があれば書き換えない。表が無ければ書かずに False。
+    """
+    if not _table_exists(conn, "execution_ledger"):
+        return False
+    now = int(datetime.now(timezone.utc).timestamp())
+    payload = json.dumps(
+        {"cutover": cutover.at.isoformat(), "source": cutover.source}, ensure_ascii=False,
+    )
+    conn.execute(
+        "INSERT INTO execution_ledger (EXECUTION_ID, KIND, IDEMPOTENCY_KEY, PERSONA_ID, STATUS, "
+        "PAYLOAD_JSON, RESULT_JSON, ERROR, CREATED_AT, UPDATED_AT) "
+        "SELECT ?, ?, ?, NULL, 'completed', ?, NULL, NULL, ?, ? "
+        "WHERE NOT EXISTS (SELECT 1 FROM execution_ledger WHERE KIND = ? AND IDEMPOTENCY_KEY = ?)",
+        (
+            str(uuid.uuid4()), CUTOVER_ATTEMPT_LEDGER_KIND, CUTOVER_ATTEMPT_LEDGER_KEY,
+            payload, now, now, CUTOVER_ATTEMPT_LEDGER_KIND, CUTOVER_ATTEMPT_LEDGER_KEY,
+        ),
+    )
+    return True
+
+
+def _leave_cutover_attempt(main_db: Optional[Path], cutover: Cutover) -> None:
+    """境を ``cutover.json`` に記録できなかった起動で、決めようとした境の時刻を本体 DB に残す。
+
+    この起動は何も変換しないが、アプリは起動を続け、新しい形式の行を書く。次の起動が
+    その起動の時刻で境を決め直すと、間に書かれた行が境より前の旧形式として変換されうる。
+    だから本体 DB の ``execution_ledger`` に残し (:func:`_write_cutover_attempt`)、
+    :func:`resolve_cutover` が境の候補に含める。本体 DB が無い・``execution_ledger`` が
+    無い・書けないときは残さない (ログだけ。呼び出し側は元の :class:`CutoverUnavailable`
+    を送る)。
+    """
+    if main_db is None or not main_db.is_file():
+        return
+    try:
+        with closing(sqlite3.connect(str(main_db))) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            wrote = _write_cutover_attempt(conn, cutover)
+            conn.commit()
+    except sqlite3.Error:
+        LOGGER.error(
+            "[system-notice-migration] could not leave the cutover time %s in %s",
+            cutover.at.isoformat(), main_db, exc_info=True,
+        )
+        return
+    if wrote:
+        LOGGER.warning(
+            "[system-notice-migration] left the cutover time %s (%s) in execution_ledger of %s "
+            "because it could not be recorded in cutover.json",
+            cutover.at.isoformat(), cutover.source, main_db,
+        )
+    else:
+        LOGGER.warning(
+            "[system-notice-migration] %s has no execution_ledger table; the cutover time %s "
+            "was not left anywhere", main_db, cutover.at.isoformat(),
+        )
+
+
+def _cutover_attempt_in_main_db(main_db: Optional[Path]) -> Optional[datetime]:
+    """本体 DB に残した、前の起動が決めようとした境の時刻 (:func:`_leave_cutover_attempt`)。
+
+    本体 DB・``execution_ledger``・その行のどれかが無ければ None。本体 DB を読めない・
+    行の時刻を読めないときは :class:`CutoverUnavailable` (読み落とした時刻が最も早い
+    ものだと、境が遅く決まる)。
+    """
+    if main_db is None or not main_db.is_file():
+        return None
+    try:
+        with closing(_open_readonly(main_db)) as conn:
+            if not _table_exists(conn, "execution_ledger"):
+                return None
+            row = conn.execute(
+                "SELECT PAYLOAD_JSON FROM execution_ledger WHERE KIND = ? AND IDEMPOTENCY_KEY = ?",
+                (CUTOVER_ATTEMPT_LEDGER_KIND, CUTOVER_ATTEMPT_LEDGER_KEY),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise CutoverUnavailable(
+            f"本体 DB {main_db} の execution_ledger を読めませんでした: {exc}"
+        ) from exc
+    if row is None:
+        return None
+    try:
+        at = _parse_utc(json.loads(row[0])["cutover"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise CutoverUnavailable(
+            f"本体 DB {main_db} の {CUTOVER_ATTEMPT_LEDGER_KIND} の行の時刻を読めませんでした: {exc}"
+        ) from exc
+    if at is None:
+        raise CutoverUnavailable(
+            f"本体 DB {main_db} の {CUTOVER_ATTEMPT_LEDGER_KIND} の行の時刻を読めませんでした"
+        )
+    return at
+
+
 def resolve_cutover(
     saiverse_home: Path, *, now: datetime, dry_run: bool = False,
+    main_db: Optional[Path] = None,
 ) -> Cutover:
     """この環境で新しい形式に切り替わった時刻 (それより後に作られた行は自動では変換しない)。
 
@@ -3214,34 +3343,46 @@ def resolve_cutover(
     それを返し、決め直さない。記録が無ければ決めて記録する:
 
     - 記憶 DB の完了の印の完了時刻と、この移行が前の起動で書いた記録の時刻
-      (:func:`_earliest_migration_trace`) のうち、最も早いもの。この移行を含む版を
-      既に動かした環境の、最初の移行の時刻に最も近い時刻 — その起動からは、機構は
-      旧形式の本文を書かない。印だけで決めないのは、v0.3.27 の起動のときに記憶 DB が
-      無かった環境 (印がどこにも残らない) と、古い記憶 DB を消して残った最古の印が
-      遅くなった環境で、境が実際の切り替えより遅く決まるため。
-    - 印も記録もどこにも無ければ ``now`` (この起動の、移行を始めた時刻)。
+      (:func:`_earliest_migration_trace`) と、``cutover.json`` を書けなかった前の起動が
+      本体 DB ``main_db`` に残した時刻 (:func:`_cutover_attempt_in_main_db`) のうち、
+      最も早いもの。この移行を含む版を既に動かした環境の、最初の移行の時刻に最も近い
+      時刻 — その起動からは、機構は旧形式の本文を書かない。印だけで決めないのは、
+      v0.3.27 の起動のときに記憶 DB が無かった環境 (印がどこにも残らない) と、古い
+      記憶 DB を消して残った最古の印が遅くなった環境で、境が実際の切り替えより遅く
+      決まるため。
+    - どれも無ければ ``now`` (この起動の、移行を始めた時刻)。
 
     ``dry_run`` は決めた時刻を記録しない。決める材料 (記録・完了の印・移行が前に書いた
-    記録) を読めない、または記録できなければ :class:`CutoverUnavailable` — 呼び出し
-    側はその起動で自動の変換を一つもしない。
+    記録・本体 DB に残した時刻) を読めない、または記録できなければ
+    :class:`CutoverUnavailable` — 呼び出し側はその起動で自動の変換を一つもしない。
+    そのとき (``dry_run`` でなければ) この起動で決めようとした時刻 (決める前に止まった
+    なら ``now``) を本体 DB に残す (:func:`_leave_cutover_attempt`)。この起動の時刻は
+    実際の切り替えより早いことはないので、候補に足しても境が実際より早まることはなく、
+    次の起動の時刻で決め直すより早い。
     """
     path = _cutover_path(saiverse_home)
-    recorded = _read_cutover(path)
-    if recorded is not None:
-        return recorded
-    candidates = [
-        Cutover(at, source) for at, source in (
-            (_earliest_completion_marker(saiverse_home), CUTOVER_FROM_MARKER),
-            (_earliest_migration_trace(saiverse_home), CUTOVER_FROM_TRACE),
-        ) if at is not None
-    ]
-    if candidates:
-        cutover = min(candidates, key=lambda c: c.at)
-    else:
-        cutover = Cutover(now.astimezone(timezone.utc), CUTOVER_FROM_START)
-    if dry_run:
-        return cutover
-    recorded = _record_cutover(path, cutover, saiverse_home=saiverse_home)
+    cutover = Cutover(now.astimezone(timezone.utc), CUTOVER_FROM_START)
+    try:
+        recorded = _read_cutover(path)
+        if recorded is not None:
+            return recorded
+        candidates = [
+            Cutover(at, source) for at, source in (
+                (_earliest_completion_marker(saiverse_home), CUTOVER_FROM_MARKER),
+                (_earliest_migration_trace(saiverse_home), CUTOVER_FROM_TRACE),
+                (_cutover_attempt_in_main_db(main_db), CUTOVER_FROM_ATTEMPT),
+            ) if at is not None
+        ]
+        if candidates:
+            # 同じ時刻なら先に並べた決め方を取る (min は最初の最小を返す)
+            cutover = min(candidates, key=lambda c: c.at)
+        if dry_run:
+            return cutover
+        recorded = _record_cutover(path, cutover, saiverse_home=saiverse_home)
+    except CutoverUnavailable:
+        if not dry_run:
+            _leave_cutover_attempt(main_db, cutover)
+        raise
     LOGGER.info(
         "[system-notice-migration] recorded the cutover time %s (%s) in %s",
         recorded.at.isoformat(), recorded.source, path,
@@ -3304,8 +3445,18 @@ def _try_write_result_json(results_dir: Optional[Path], key: str, result: StoreR
         )
 
 
+class RunResultsUnreadable(Exception):
+    """起動のフォルダの結果の JSON のうち、読めないものがある (:func:`_load_run_results`)。"""
+
+
 def _load_run_results(run_dir: Path) -> List[StoreResult]:
+    """起動のフォルダの結果の JSON を全部読む。一つでも読めなければ :class:`RunResultsUnreadable`。
+
+    読めた分だけでレポートを書くと、読めなかった DB の変換が全件のファイルから欠けた
+    まま ``REPORTED`` が置かれ、次の起動でも作り直されない。
+    """
     out: List[StoreResult] = []
+    unreadable: List[Path] = []
     for path in sorted(run_dir.glob("*.json")):
         try:
             out.append(StoreResult.from_json(json.loads(path.read_text(encoding="utf-8"))))
@@ -3313,28 +3464,53 @@ def _load_run_results(run_dir: Path) -> List[StoreResult]:
             LOGGER.warning(
                 "[system-notice-migration] unreadable result file %s", path, exc_info=True,
             )
+            unreadable.append(path)
+    if unreadable:
+        raise RunResultsUnreadable(
+            "読めない結果の JSON があるので、レポートを確定しません (次の起動で再び試す): "
+            + ", ".join(str(p) for p in unreadable)
+        )
     # 本体 DB を先に、ペルソナは名前の順に
     out.sort(key=lambda r: (r.persona, r.label))
     return out
 
 
+#: コミットされたかを確かめられない仮の結果の JSON に付ける名前の末尾
+#: (``<key>.json.tmp.unverified`` — :func:`_settle_staged_results`)。以後の起動では採否の
+#: 対象にしない (``*.json`` にも ``*.json.tmp`` にも当たらない)。
+UNVERIFIED_SUFFIX = ".unverified"
+
+
+def _unverified_results(run_dir: Path) -> List[Path]:
+    return sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}{UNVERIFIED_SUFFIX}"))
+
+
 def _write_run_report(run_dir: Path, report_path: Path, *, stamp: str) -> Optional[Path]:
-    """一回の起動の結果の JSON 群からレポートを書き、その起動のフォルダに書き終えた印を置く。"""
+    """一回の起動の結果の JSON 群からレポートを書き、その起動のフォルダに書き終えた印を置く。
+
+    結果の JSON を一つでも読めなければ :class:`RunResultsUnreadable` を送り、何も書かない。
+    ``REPORTED`` は、全件のファイルと通常のレポートを両方とも書き終えてから置く。
+    """
     results = _load_run_results(run_dir)
-    if not results:
+    unverified = _unverified_results(run_dir)
+    if not results and not unverified:
         return None
     try:
         # 起動ごとのフォルダは <home>/backups/<OUTPUT_DIR_NAME>/<RESULTS_DIR_NAME>/<run_id>
         cutover = _read_cutover(run_dir.parent.parent / CUTOVER_FILE_NAME)
     except CutoverUnavailable:
         cutover = None  # レポートの一行が欠けるだけ (移行そのものは記録を読めた起動だけが走る)
-    _write_report_files(report_path, results, dry_run=False, stamp=stamp, cutover=cutover)
+    _write_report_files(
+        report_path, results, dry_run=False, stamp=stamp, cutover=cutover, unverified=unverified,
+    )
     (run_dir / REPORTED_MARKER_NAME).write_text(str(report_path), encoding="utf-8")
     return report_path
 
 
 def _settle_staged_results(run_dir: Path) -> int:
-    """終わった起動のフォルダに残った仮の結果の JSON (``*.json.tmp``) の採否を決める。採用した数を返す。
+    """終わった起動のフォルダに残った仮の結果の JSON (``*.json.tmp``) の採否を決める。
+
+    採用した数と :data:`UNVERIFIED_SUFFIX` を付けて残した数の和 (レポートの中身を変えた数) を返す。
 
     仮の JSON はコミットの前に書くので、残っているのは「コミットの前に止まった」
     か「コミットの後、正式な名前へ付け替える前に止まった (付け替えに失敗した)」
@@ -3350,20 +3526,44 @@ def _settle_staged_results(run_dir: Path) -> int:
 
     DB を開いて、その回の記録 (と完了の印) が無いと確かめられたときだけ捨てる —
     確定していない変換をレポートの材料にしない。照合に使う欄 (``commit_record`` と
-    ``marker_value``) をどちらも持たない仮の JSON は、確かめる手段が無いので捨てる。
+    ``marker_value``) をどちらも持たない、または記録先の DB のパス (``path``) を
+    持たない仮の JSON は、コミットされたかを確かめる手段が無い。捨てると、コミット
+    された変換の唯一の記録を失いうるので、名前の末尾に :data:`UNVERIFIED_SUFFIX` を
+    付けて残し (以後の起動では採否の対象にしない)、その起動のレポートに一行書く。
     この版が書くそういう仮の JSON は、変換をコミットしなかった回 (変換する行が無く、
     完了の印も見送った記憶) のものだけ — 本体 DB の変換は、その回の記録を書ける
     ときだけコミットする (:func:`migrate_main_db`)。回の記録を書く前の版 (v0.3.27) が
-    本体 DB の分として書いた仮の JSON も、この欄を持たないので捨てる。
+    本体 DB の分として書いた仮の JSON は、この欄を持たない。
     記録先の DB が見つからない・読めない (ロックなど) ときと、仮の JSON そのものが
     読めない (一時的な I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
     して壊れている仮の JSON は書きかけで止まったもので、捨てる — 仮の JSON は
-    OS に確定させてからコミットする (:func:`_stage_result_json`) ので、コミット
-    された取引の仮の JSON が書きかけで残ることはない。
+    OS に確定させてからコミットする (:func:`_stage_result_json`。v0.3.27 も同じ) ので、
+    コミットされた取引の仮の JSON が書きかけで残ることはない。
+
+    採用と :data:`UNVERIFIED_SUFFIX` への付け替えはレポートの中身を変えるので、その前に
+    その起動のフォルダの ``REPORTED`` を外す (作り直しの書き出しが失敗しても、次の起動で
+    また作り直せるように)。外せなければその仮の JSON は決めずに残す。
     """
     from sai_memory.memory.storage import get_embed_metadata_strict
 
     adopted = 0
+    unreported = False
+
+    def _unreport() -> bool:
+        nonlocal unreported
+        if not unreported:
+            try:
+                (run_dir / REPORTED_MARKER_NAME).unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning(
+                    "[system-notice-migration] could not remove %s before settling the staged "
+                    "results; will retry on the next start", run_dir / REPORTED_MARKER_NAME,
+                    exc_info=True,
+                )
+                return False
+            unreported = True
+        return True
+
     for staged in sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}")):
         try:
             raw = staged.read_bytes()  # 復号の失敗 (書きかけ) は読み取りの失敗と分けて下で扱う
@@ -3373,10 +3573,12 @@ def _settle_staged_results(run_dir: Path) -> int:
                 "will retry on the next start", staged, exc_info=True,
             )
             continue
+        half_written = False
         try:
             data = json.loads(raw.decode("utf-8"))
         except ValueError:
-            data = None  # 書きかけで止まった — 確定した結果ではない
+            data = None
+            half_written = True  # 書きかけで止まった — 確定した結果ではない
         data = data if isinstance(data, dict) else {}
         expected = data.get("marker_value")
         record = data.get("commit_record")
@@ -3384,6 +3586,24 @@ def _settle_staged_results(run_dir: Path) -> int:
         keep = False
         checkable = isinstance(record, str) or (persona and isinstance(expected, str))
         db = Path(data["path"]) if checkable and isinstance(data.get("path"), str) else None
+        if not half_written and db is None:
+            # コミットされたかを確かめる手段が無い — 捨てずに残す
+            unverified = staged.with_name(staged.name + UNVERIFIED_SUFFIX)
+            if not _unreport():
+                continue
+            try:
+                os.replace(staged, unverified)
+            except OSError:
+                LOGGER.warning(
+                    "[system-notice-migration] could not set aside %s", staged, exc_info=True,
+                )
+                continue
+            adopted += 1
+            LOGGER.warning(
+                "[system-notice-migration] kept %s as %s: it has no commit_record / marker_value "
+                "/ path to check whether its migration was committed", staged, unverified.name,
+            )
+            continue
         if db is not None and not db.is_file():
             # 記録先の DB が見えない (一時的に外れた場所・移動の途中など)。記録が無いとは
             # 確かめられていないので捨てない
@@ -3406,6 +3626,8 @@ def _settle_staged_results(run_dir: Path) -> int:
                 )
                 continue
         final = staged.with_name(staged.name[: -len(STAGED_SUFFIX)])
+        if keep and not _unreport():
+            continue
         try:
             if keep:
                 os.replace(staged, final)
@@ -3453,6 +3675,12 @@ def _unsettled_staged_persona_ids(
     呼び出し側はその起動で完了の印を見送る (:data:`MARKER_HELD_STAGED_RESULT`)。
     走っている別の起動のフォルダ (:func:`_run_in_progress`) と、この起動のフォルダは
     数えない。置き場を読めなければ None (どの記憶のものか分からない)。
+    :data:`UNVERIFIED_SUFFIX` を付けた仮の JSON は採否の対象ではないので数えない。
+
+    走っている別の起動が、同じ SAIVERSE_HOME で動く別の版 (旧版) のプロセスで、仮の
+    JSON を書いた直後にこの起動が完了の印を書き換えると、旧版の付け替えが失敗したときに
+    次の起動で印が一致しなくなりうる。同じ SAIVERSE_HOME で二つの版を同時に動かすことは
+    想定しない使い方なので、この競合は扱わない。
     """
     root = output_dir / RESULTS_DIR_NAME
     suffix = f".json{STAGED_SUFFIX}"
@@ -3487,29 +3715,37 @@ def regenerate_pending_reports(saiverse_home: Path) -> List[Path]:
     書けずに終われば次の起動で作り直される。
 
     終わった起動のフォルダに仮の結果の JSON が残っていれば、先に採否を決める
-    (:func:`_settle_staged_results`)。採用した JSON があれば、レポートを書き
-    終えた起動のフォルダでもレポートを作り直す。
+    (:func:`_settle_staged_results`)。採用した JSON、または :data:`UNVERIFIED_SUFFIX`
+    を付けて残した JSON があれば、レポートを書き終えた起動のフォルダでもレポートを
+    作り直す (その前に ``REPORTED`` を外すので、作り直しの書き出しが失敗しても次の起動で
+    また作り直す)。結果の JSON を一つでも読めないフォルダは、レポートを確定せずに残す
+    (:class:`RunResultsUnreadable`)。
     """
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
     results_root = output_dir / RESULTS_DIR_NAME
     if not results_root.is_dir():
         return []
+
+    def _has_material(run_dir: Path) -> bool:
+        return any(run_dir.glob("*.json")) or bool(_unverified_results(run_dir))
+
     written: List[Path] = []
     for run_dir in sorted(results_root.iterdir()):
         if not run_dir.is_dir():
             continue
         has_staged = any(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
-        reported = (run_dir / REPORTED_MARKER_NAME).exists()
-        if reported and not has_staged:
+        if (run_dir / REPORTED_MARKER_NAME).exists() and not has_staged:
             continue
-        if not has_staged and not any(run_dir.glob("*.json")):
+        if not has_staged and not _has_material(run_dir):
             continue
         if _run_in_progress(run_dir):
             continue
-        adopted = _settle_staged_results(run_dir) if has_staged else 0
-        if reported and not adopted:
+        if has_staged:
+            _settle_staged_results(run_dir)
+        # 採否で中身が変わる前に REPORTED は外れている (_settle_staged_results)
+        if (run_dir / REPORTED_MARKER_NAME).exists():
             continue
-        if not any(run_dir.glob("*.json")):
+        if not _has_material(run_dir):
             continue
         try:
             path = _write_run_report(
@@ -3552,7 +3788,7 @@ def run_migration(
     """
     started = datetime.now(timezone.utc)
     stamp = started.astimezone().strftime("%Y%m%d_%H%M%S")
-    cutover = resolve_cutover(saiverse_home, now=started, dry_run=dry_run)
+    cutover = resolve_cutover(saiverse_home, now=started, dry_run=dry_run, main_db=db_path)
     run_id = f"{stamp}_{_unique_suffix()}"
     output_dir = saiverse_home / "backups" / OUTPUT_DIR_NAME
     results_dir = None if dry_run else output_dir / RESULTS_DIR_NAME / run_id
