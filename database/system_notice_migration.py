@@ -26,6 +26,13 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
 通知の行と本文の無い音声の行の二行に分ける (:func:`_queue_voice_split`)。ただし
 元の行を確かめられない音声入力の行は分けずに確認待ちにする。
 
+規則の版 4 で、2 に、``switch_active_thread`` (builtin_data/tools/thread_switch.py) が
+書いた行と、ChatGPT の会話の取り込み (scripts/import_chatgpt_conversations.py) の
+見出しの行を足した。どちらも v0.3.27 で書き手を直したときに漏れていて、印の無い
+role=system のまま書かれていた行。同じ版で、``lg_stelis_start_node`` (sea/runtime_nodes.py)
+が書いた Stelis の開始の行と、削除済みの二つの書き手 (別の City への移動の失敗の案内、
+``get_since_last_user_conversation`` の要約の行) が書いた行も足した。
+
 元の発言の行 (本体 DB の ``building_messages`` — :class:`BuildingSourceRows`) が画面
 からの送信の印 ``client_message_id`` を持つ行は、どの版のどの規則に当たっても変換せず
 確認待ちにする (:data:`SENT_FROM_SCREEN_REASON`)。所有者が確認待ちの行を確定した記録
@@ -106,10 +113,16 @@ MIGRATION_MARKER_KEY = "system_notice_migration_done"
 #: - 版 3: docs/intent/system_notice_delivery.md「追補」の移行の規則の第二版
 #:   (:func:`classify_tagged_message_v3` と、:func:`classify_unmarked_system_message`
 #:   の ``perception`` タグ・感情パラメータ変動の行)
+#: - 版 4: 印の無い role=system 行のうち、``switch_active_thread`` (builtin_data/
+#:   tools/thread_switch.py) が書いた行と、scripts/import_chatgpt_conversations.py が
+#:   取り込みの先頭に書いた見出しの行、``lg_stelis_start_node`` (sea/runtime_nodes.py)
+#:   が書いた Stelis の開始の行、旧 ``_handle_movement`` が書いた別の City への移動の
+#:   失敗の案内、旧 ``get_since_last_user_conversation`` が書いた要約の行
+#:   (:func:`classify_unmarked_system_message`)
 #:
 #: 印の版が N の DB は、版 N より後に足した規則だけで走査し直す (各規則が自分の
 #: 版を持つ — :func:`_classify_persona_row`)。
-MIGRATION_RULES_VERSION = 3
+MIGRATION_RULES_VERSION = 4
 
 
 def _marker_value() -> str:
@@ -557,6 +570,68 @@ _EMOTION_SUMMARY_RE = re.compile(
 #: その系統名 (出どころの関数名から)。
 EMOTION_SUMMARY_KIND = "emotion_summary"
 
+#: builtin_data/tools/thread_switch.py の ``switch_active_thread`` が書く行の系統名
+#: (同じファイルの ``THREAD_SWITCH_NOTICE_KIND`` と同じ値)。その行は、移動元の
+#: スレッドの行への参照 ``other_thread_messages`` を metadata に持つか (移動元に行が
+#: あった場合)、``summary`` が渡されなかったときの本文
+#: (:data:`_THREAD_SWITCH_PREFIX` で始まる) を持つ。``other_thread_messages`` を書く
+#: のはこのツールだけ。
+THREAD_SWITCH_KIND = "thread_switch"
+_THREAD_SWITCH_PREFIX = "[thread switch] moved from "
+#: scripts/import_chatgpt_conversations.py が取り込んだ会話の先頭に書く見出しの行の
+#: 系統名 (同じファイルの ``CHATGPT_IMPORT_NOTICE_KIND`` と同じ値)。
+CHATGPT_IMPORT_KIND = "chatgpt_import"
+#: その見出しの本文の全体の形。題 (``record.title``) と会話の id (``conversation_id``
+#: か、無ければ ``identifier`` — 題がそのまま入ることもある) は任意の文字列で、時刻は
+#: ``format_datetime`` の形 (秒まで、UTC の ``Z``)。削除された旧 Gradio の管理画面
+#: (コミット 41ee80d9 で削除) も同じ形で書いていた。
+_CHATGPT_IMPORT_HEADER_RE = re.compile(
+    r'\[Imported ChatGPT conversation ".*" \(.*\) created \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\]',
+    re.DOTALL,
+)
+#: sea/runtime_nodes.py の ``lg_stelis_start_node`` が親のスレッドに書く Stelis の開始の
+#: 行の系統名 (同じファイルの ``STELIS_ANCHOR_NOTICE_KIND`` と同じ値)。その行は本文が
+#: 空で、metadata の ``type`` が ``stelis_anchor``、``stelis_thread_id`` に Stelis の
+#: スレッドの id を持つ。v0.3.27 の後もこの書き手は印の無いまま書いていた。
+STELIS_ANCHOR_KIND = "stelis_anchor"
+#: 旧 persona/mixins/movement.py の ``_handle_movement`` (コミット f915bf22 で削除) が、
+#: 別の City への移動 (``dispatch_callback``) に失敗したときに role=system で書いた案内
+#: の系統名。本文は :data:`_CITY_DISPATCH_FAILURE_PREFIX` に失敗の理由を続けたものか、
+#: ``dispatch_callback`` が無いときの :data:`_CITY_DISPATCH_UNAVAILABLE` そのもの。
+CITY_DISPATCH_FAILURE_KIND = "city_dispatch_failure"
+_CITY_DISPATCH_FAILURE_PREFIX = "別のCityへの移動に失敗しました。"
+_CITY_DISPATCH_UNAVAILABLE = "別のCityへ移動する機能が設定されていません。"
+#: 旧 builtin_data/tools/get_since_last_user_conversation.py の
+#: ``_save_summary_to_memory`` (コミット 1b9ede25 で削除) が書いた要約の行の系統名。
+#: その行は metadata に ``summary_uuid`` (uuid4 の文字列) と、tags の
+#: ``since_user_conversation`` を持ち、本文は ``[要約 <summary_uuid の先頭 8 文字>] `` で
+#: 始まる。
+SINCE_USER_CONVERSATION_SUMMARY_KIND = "since_user_conversation_summary"
+_SINCE_USER_CONVERSATION_TAG = "since_user_conversation"
+
+
+def _is_stelis_anchor_row(metadata: Dict[str, Any], content: Any) -> bool:
+    """``lg_stelis_start_node`` が書いた Stelis の開始の行の形か (規則の版 4)。"""
+    thread_id = metadata.get("stelis_thread_id")
+    return (
+        metadata.get("type") == "stelis_anchor"
+        and isinstance(thread_id, str) and bool(thread_id)
+        and (content is None or (isinstance(content, str) and not content.strip()))
+    )
+
+
+def _is_since_user_conversation_summary_row(
+    metadata: Dict[str, Any], tags: AbstractSet[str], content: Any,
+) -> bool:
+    """``_save_summary_to_memory`` が書いた要約の行の形か (規則の版 4)。"""
+    summary_uuid = metadata.get("summary_uuid")
+    return (
+        isinstance(summary_uuid, str) and len(summary_uuid) >= 8
+        and _SINCE_USER_CONVERSATION_TAG in tags
+        and isinstance(content, str)
+        and content.startswith(f"[要約 {summary_uuid[:8]}] ")
+    )
+
 
 def _unmarked_system_rule(
     metadata: Dict[str, Any], content: Any = None,
@@ -580,6 +655,21 @@ def _unmarked_system_rule(
         return "perception", 3
     if isinstance(content, str) and _EMOTION_SUMMARY_RE.fullmatch(content):
         return EMOTION_SUMMARY_KIND, 3
+    # 版 4
+    if "other_thread_messages" in metadata or (
+        isinstance(content, str) and content.startswith(_THREAD_SWITCH_PREFIX)
+    ):
+        return THREAD_SWITCH_KIND, 4
+    if isinstance(content, str) and _CHATGPT_IMPORT_HEADER_RE.fullmatch(content):
+        return CHATGPT_IMPORT_KIND, 4
+    if _is_stelis_anchor_row(metadata, content):
+        return STELIS_ANCHOR_KIND, 4
+    if isinstance(content, str) and (
+        content.startswith(_CITY_DISPATCH_FAILURE_PREFIX) or content == _CITY_DISPATCH_UNAVAILABLE
+    ):
+        return CITY_DISPATCH_FAILURE_KIND, 4
+    if _is_since_user_conversation_summary_row(metadata, tags, content):
+        return SINCE_USER_CONVERSATION_SUMMARY_KIND, 4
     return None
 
 
@@ -590,6 +680,11 @@ def classify_unmarked_system_message(
 
     tags から推定する (版 1)。版 3 で、``perception`` タグの行 (知覚の旧世代) と、
     本文が感情パラメータの変動の知らせ (:data:`_EMOTION_SUMMARY_RE`) の行を足した。
+    版 4 で、``switch_active_thread`` が書いた行 (:data:`THREAD_SWITCH_KIND`) と、
+    ChatGPT の会話の取り込みの見出しの行 (:data:`CHATGPT_IMPORT_KIND`)、Stelis の開始の
+    行 (:data:`STELIS_ANCHOR_KIND`)、別の City への移動の失敗の案内
+    (:data:`CITY_DISPATCH_FAILURE_KIND`)、``get_since_last_user_conversation`` の要約の行
+    (:data:`SINCE_USER_CONVERSATION_SUMMARY_KIND`) を足した。
     """
     hit = _unmarked_system_rule(metadata, content)
     return hit[0] if hit else None
@@ -1765,9 +1860,11 @@ def _scan_persona_messages(
             and (match is None or match.version <= rescan_from_version)
         ):
             continue  # 前の版の走査が確認待ちに残した行 (前の版のレポートにある)
-        if _created_after_cutover(row[5], cutover):
+        if role_s != "system" and _created_after_cutover(row[5], cutover):
             # 新しい形式に切り替わった後の行。旧形式の形をしていても機構の書いた
-            # ものと言い切れない (ユーザーが真似た発言でありうる) ので、所有者が決める
+            # ものと言い切れない (ユーザーが真似た発言でありうる) ので、所有者が決める。
+            # role=system の行はユーザーが送れないので、境の後でも規則で判定する
+            # (v0.3.27 の後も印の無いまま書いていた Stelis の開始の行など)
             result.skipped.append(Skipped(
                 "messages", str(row_id), str(role),
                 sorted(_tags_of(metadata)), _head(content), reason=AFTER_CUTOVER_REASON,

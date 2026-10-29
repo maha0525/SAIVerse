@@ -156,7 +156,10 @@ user、本文は `<system>` で包まれ、目印を metadata に持つ) とし�
 > `_is_user_side` が「入力の側」に数えるので、上の決定どおり検索の種に含まれ続ける。
 > 知覚ブロックは従来どおり知覚の印 (`CONSUMED_PERCEPTION_KEY`) で会話文から外れる。
 > 添付アイテム作成の注記 (`attachment_note` — 発言の直後に独立した通知として並ぶ) は
-> ユーザーが言った言葉ではないので、種にしない (`_NON_CONVERSATIONAL_NOTICES`)。除外は会話文の判定そのものを直したので、エンティティトリガーの「最新
+> ユーザーが言った言葉ではないので、種にしない (`_NON_CONVERSATIONAL_NOTICES`)。
+> 印の無い role=system で書かれていた機構の行に後から印を付けた系統 (`thread_switch`・
+> `chatgpt_import`・`stelis_anchor`・`city_dispatch_failure`・`since_user_conversation_summary`、
+> system_notice_delivery.md「移行の規則の版 4」) も、印の無かったときと同じく種にしない。除外は会話文の判定そのものを直したので、エンティティトリガーの「最新
 ユーザー発話」・ambient カウント・コンテキスト内除外の ID 集合・添付概要の取得元にも
 同時に効く (添付概要は特に重要 — 知覚ブロックはメディアを持ちうるので、外さないと
 「今添付されたもの」の取得元まで部屋の様子に乗っ取られる)。
