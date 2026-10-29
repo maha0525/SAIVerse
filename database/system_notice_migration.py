@@ -76,6 +76,7 @@ import math
 import os
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -723,6 +724,13 @@ MARKER_HELD_UNREADABLE_METADATA = "unreadable_metadata"
 #: (IDEMPOTENCY_KEY が起動のフォルダ名、STATUS ``completed``)。
 COMMIT_RECORD_KEY_PREFIX = "system_notice_migration_commit:"
 COMMIT_LEDGER_KIND = "system_notice_migration.commit"
+#: 本体 DB に ``execution_ledger`` が無いので、変換をコミットしなかったときの理由
+#: (:func:`migrate_main_db`。レポートの「エラー」の行に載る)。
+MAIN_DB_NO_COMMIT_RECORD_ERROR = (
+    "本体 DB に execution_ledger の表が無く、この回の変換をコミットした記録を書けないので、"
+    "本体 DB は移行していません (変換する行は元のまま残っています)。execution_ledger の表が"
+    "作られた後の起動で再試行します"
+)
 
 
 @dataclass
@@ -780,6 +788,10 @@ class StoreResult:
     #: この起動でこの結果を材料に書こうとして失敗したか (レポートから詳細が欠ける)。
     #: JSON には載せない。
     result_save_failed: bool = False
+    #: 本体 DB に ``execution_ledger`` が無く、その回の変換の記録を書けないので、変換を
+    #: コミットしなかったか (:data:`MAIN_DB_NO_COMMIT_RECORD_ERROR`)。画面の警告を分ける
+    #: のに使う。JSON には載せない (理由は ``error`` に載る)。
+    commit_record_unavailable: bool = False
 
     def counts(self) -> Dict[Tuple[str, str], int]:
         if self.restored_counts is not None:
@@ -1262,7 +1274,12 @@ class BuildingSourceRows:
       ``audio`` の項目の ``uri`` (生の JSON の文字列では探さない — 同じ uri がエスケープ
       の違う表現で保存されていると、文字列の検索では候補から漏れて、一つに決まったと
       誤認する)。初めて uri で引くときに ``role='user'`` の行を一度だけ全部読んで、
-      uri から行への対応を作る (:meth:`_audio_uri_index`)。
+      uri から行への対応を作る (:meth:`_audio_uri_index`)。読んだ行の中に
+      ``metadata_json`` を読めない行 (JSON として解釈できない・辞書でない・``media`` が
+      一覧でない) が一つでもあれば、その行が同じ音声を持つ元の発言だった可能性を除け
+      ないので、その回の uri での引き当ては全部「決められない」(None) にする。
+      ``building_msg_ref`` で引く行は、``building_id`` と ``message_id`` の列で引くので
+      読めない行に左右されない。
 
     本体 DB は読み取り専用で、最初に引くときに開く。本体 DB が無い・開けない・
     ``building_messages`` の表か列が無い・引く途中で失敗した場合は、それ以降も
@@ -1275,6 +1292,9 @@ class BuildingSourceRows:
         self._unavailable = main_db is None
         #: 音声の uri → その uri を音声として持つ role=user の行 (``id`` → ``client_message_id``)。
         self._uri_index: Optional[Dict[str, Dict[Any, Any]]] = None
+        #: role=user の行の ``metadata_json`` を全部読めたか (読めない行があれば、uri での
+        #: 引き当ては全部「決められない」— :meth:`_audio_uri_index`)。
+        self._uri_index_complete = True
 
     def __enter__(self) -> "BuildingSourceRows":
         return self
@@ -1328,21 +1348,42 @@ class BuildingSourceRows:
         except sqlite3.Error:
             self._give_up("could not read the main DB for the voice input source check")
             return None
-        if len(found) != 1:
+        if found is None or len(found) != 1:
             return None
         (client_message_id,) = found.values()
         return bool(client_message_id)
 
     def _audio_uri_index(self, conn: sqlite3.Connection) -> Dict[str, Dict[Any, Any]]:
-        """音声の uri → その uri を音声 (``type`` が ``audio``) として持つ role=user の行。"""
+        """音声の uri → その uri を音声 (``type`` が ``audio``) として持つ role=user の行。
+
+        ``metadata_json`` を読めない行は対応に載せられないので、
+        ``_uri_index_complete`` を偽にする (:meth:`_find` が uri での引き当てを
+        「決められない」にする)。
+        """
         if self._uri_index is not None:
             return self._uri_index
         index: Dict[str, Dict[Any, Any]] = {}
+        complete = True
         for row_id, client_message_id, raw in conn.execute(
             "SELECT id, client_message_id, metadata_json FROM building_messages WHERE role = 'user'",
         ):
-            media = _load_json(raw).get("media")
+            if raw is None or raw == "" or raw == b"":
+                continue
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError):
+                complete = False
+                continue
+            if value is None:
+                continue
+            if not isinstance(value, dict):
+                complete = False
+                continue
+            media = value.get("media")
+            if media is None:
+                continue
             if not isinstance(media, list):
+                complete = False
                 continue
             for m in media:
                 if not isinstance(m, dict) or m.get("type") != "audio":
@@ -1350,11 +1391,22 @@ class BuildingSourceRows:
                 uri = m.get("uri")
                 if isinstance(uri, str) and uri:
                     index.setdefault(uri, {})[row_id] = client_message_id
+        if not complete:
+            LOGGER.warning(
+                "[system-notice-migration] main DB has role=user building rows whose "
+                "metadata_json cannot be read; voice input rows without building_msg_ref "
+                "are held for review: %s", self._path,
+            )
         self._uri_index = index
+        self._uri_index_complete = complete
         return index
 
-    def _find(self, conn: sqlite3.Connection, metadata: Dict[str, Any]) -> Dict[Any, Any]:
-        """元の行の候補 (``id`` → ``client_message_id``)。"""
+    def _find(self, conn: sqlite3.Connection, metadata: Dict[str, Any]) -> Optional[Dict[Any, Any]]:
+        """元の行の候補 (``id`` → ``client_message_id``)。
+
+        uri で引くのに、本体 DB に ``metadata_json`` を読めない role=user の行があれば
+        None (候補を全部は数えられない)。
+        """
         found: Dict[Any, Any] = {}
         if _BUILDING_MSG_REF_KEY in metadata:
             ref = metadata.get(_BUILDING_MSG_REF_KEY)
@@ -1378,6 +1430,8 @@ class BuildingSourceRows:
         if not uris:
             return found
         index = self._audio_uri_index(conn)
+        if not self._uri_index_complete:
+            return None
         for uri in uris:
             found.update(index.get(uri, {}))
         return found
@@ -2466,6 +2520,9 @@ def migrate_main_db(
     ないので、変換をコミットする取引の中で、その回の記録を実行台帳に書く
     (:func:`_write_main_commit_record`)。付け替えの前に止まった起動の仮の JSON は、
     次の起動がこの記録と突き合わせて採否を決める (:func:`_settle_staged_results`)。
+    本体 DB に ``execution_ledger`` が無ければこの記録を書けないので、変換をコミット
+    しない (:data:`MAIN_DB_NO_COMMIT_RECORD_ERROR` を ``error`` に載せて返し、画面の
+    警告は :func:`startup_alerts` が別に出す)。
     """
     result = StoreResult(label="本体 DB", path=str(db_path))
     if not db_path.exists():
@@ -2486,6 +2543,25 @@ def migrate_main_db(
         conn.execute("BEGIN IMMEDIATE")
         try:
             scan_main_conn(conn, applied, cutover=cutover)
+            if (
+                applied.updates and results_dir is not None
+                and not _table_exists(conn, "execution_ledger")
+            ):
+                # その回の変換の記録を書けない。コミットした後、仮の結果の JSON を正式な
+                # 名前へ付け替える前に止まると、次の起動はコミットされたかを確かめられ
+                # ず、変換した全行の記録を失う。だから変換をコミットしない。
+                conn.rollback()
+                LOGGER.error(
+                    "[system-notice-migration] %s has no execution_ledger table, so the record "
+                    "of this conversion cannot be written; skipping its migration", db_path,
+                )
+                failed = StoreResult(
+                    label=result.label, path=result.path,
+                    error=MAIN_DB_NO_COMMIT_RECORD_ERROR,
+                    commit_record_unavailable=True,
+                )
+                _try_write_result_json(results_dir, "main", failed)
+                return failed
             if applied.updates:
                 backup = output_dir / _snapshot_name("saiverse.db", stamp)
                 try:
@@ -2887,21 +2963,66 @@ def _file_written_at(path: Path) -> datetime:
         raise CutoverUnavailable(f"移行の記録 {path} の時刻を読めませんでした: {exc}") from exc
 
 
+#: 起動ごとの結果のフォルダの名前の先頭 (``<時刻>_<pid>_<乱数>`` の ``<時刻>``。
+#: その起動の地方時を秒まで — :func:`run_migration` の ``stamp``)。
+_RUN_FOLDER_STAMP = re.compile(r"^(\d{8}_\d{6})(?:_|$)")
+
+
+def _legacy_run_folder_started_at(run_dir: Path, results: Sequence[Path]) -> datetime:
+    """``RUN`` の無い結果のフォルダ (``RUN`` を書く前の版の形式) の起動の時刻。
+
+    ``results/<起動>/`` は 938ec0f8 から書かれ、``RUN`` は a56380fd から書かれる。
+    その間の版は ``RUN`` を書かずに結果の JSON だけを書いた — それは正当な保存形式で、
+    壊れた記録ではない。
+
+    - フォルダ名の先頭の時刻 (その起動の地方時、秒まで) を読めれば、それをこの
+      計算機の地方時として UTC に直す。秒に切り捨てた起動の時刻なので、実際の起動より
+      遅いことはない。
+    - 読めなければ、フォルダの中の結果の JSON の更新時刻のうち最も早いもの (その起動
+      より後に書いた時刻なので、起動より早いことはない)。
+    - どちらも取れなければ :class:`CutoverUnavailable`。
+    """
+    match = _RUN_FOLDER_STAMP.match(run_dir.name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S").astimezone(timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            pass  # 日付として成り立たない名前 — 更新時刻で決める
+    times: List[datetime] = []
+    for path in results:
+        try:
+            times.append(_file_written_at(path))
+        except CutoverUnavailable:
+            LOGGER.warning(
+                "[system-notice-migration] could not read the time of %s", path, exc_info=True,
+            )
+    if not times:
+        raise CutoverUnavailable(
+            f"移行の記録 {run_dir} (RUN の無い前の版の形式) から起動の時刻を読めませんでした"
+        )
+    return min(times)
+
+
 def _run_folder_started_at(run_dir: Path) -> Optional[datetime]:
     """起動ごとの結果のフォルダの ``RUN`` に書いた、その起動の開始時刻。
 
     ``RUN`` も結果の JSON も無いフォルダ (何も記録しないまま止まった起動) は痕跡では
-    ないので None。``RUN`` があるか結果の JSON があるのに、``RUN`` の時刻を読めない
-    ときは :class:`CutoverUnavailable`。
+    ないので None。``RUN`` が無く結果の JSON だけがあるフォルダは ``RUN`` を書く前の
+    版の形式で、フォルダ名か JSON の更新時刻から時刻を決める
+    (:func:`_legacy_run_folder_started_at`)。``RUN`` があるのに時刻を読めないときは
+    :class:`CutoverUnavailable`。
     """
     run_info = run_dir / RUN_INFO_NAME
     try:
         exists = run_info.is_file()
-        recorded = exists or any(run_dir.glob("*.json")) or any(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+        results = (
+            [] if exists
+            else sorted(run_dir.glob("*.json")) + sorted(run_dir.glob(f"*.json{STAGED_SUFFIX}"))
+        )
     except OSError as exc:
         raise CutoverUnavailable(f"移行の記録 {run_dir} を読めませんでした: {exc}") from exc
-    if not recorded:
-        return None
+    if not exists:
+        return _legacy_run_folder_started_at(run_dir, results) if results else None
     try:
         info = json.loads(run_info.read_text(encoding="utf-8"))
         at = _parse_utc(info["started_at"])
@@ -3020,11 +3141,11 @@ def _publish_without_link(tmp: Path, path: Path) -> None:
     - Windows の ``os.rename`` は、付け替え先の名前が既にあると FileExistsError で
       失敗する。付け替えそのものが排他になるので、先に記録したプロセスの記録を
       上書きしない。
-    - それ以外の OS の ``os.rename`` は既存の名前を上書きする。付け替えの直前に
-      正式な名前が無いことを確かめ、あれば付け替えない。確かめてから付け替えるまでの
-      間に別のプロセスが記録すると上書きしうる。この重なりは、固いリンクを作れない
-      ファイルシステムで、記録の無い環境の二つのプロセスが同時に移行を始めたときだけ
-      起き、そのとき両方が書く時刻は「それぞれの起動の時刻」(差は起動のずれ) になる。
+    - それ以外の OS の ``os.rename`` は既存の名前を上書きする。正式な名前が無いことの
+      確認と付け替えを、同じフォルダに ``O_CREAT | O_EXCL`` で作るロックのファイル
+      (``cutover.json`` + :data:`CUTOVER_LOCK_SUFFIX`) を持っている間だけ行う
+      (:func:`_publish_under_lock`)。確認と付け替えの間に別のプロセスが割り込んで、
+      先に公開した記録を上書きすることがない。
     """
     if os.name == "nt":
         try:
@@ -3032,9 +3153,160 @@ def _publish_without_link(tmp: Path, path: Path) -> None:
         except FileExistsError:
             pass  # 別のプロセスが先に記録した
         return
-    if path.exists():
-        return  # 別のプロセスが先に記録した
-    os.rename(tmp, path)
+    _publish_under_lock(tmp, path)
+
+
+#: ``cutover.json`` の公開の間だけ持つロックのファイルの名前の末尾 (固いリンクを作れない
+#: POSIX だけで使う — :func:`_publish_under_lock`)。
+CUTOVER_LOCK_SUFFIX = ".lock"
+#: ロックを別のプロセスが持っているとき、その公開を待つ長さ (秒)。持っている間にする
+#: のは存在の確認と名前の付け替えだけなので、走っているプロセスなら一瞬で終わる。
+_CUTOVER_LOCK_WAIT_SECONDS = 2.0
+#: これより古いロックのファイルは、持ち主を確かめられなくても前の起動の残骸とみなす (秒)。
+_CUTOVER_LOCK_STALE_SECONDS = 30.0
+
+
+def _publish_under_lock(tmp: Path, path: Path) -> None:
+    """固いリンクを作れない POSIX で、``tmp`` を ``path`` として公開する (先に公開した記録は上書きしない)。
+
+    ロックのファイル ``path`` + :data:`CUTOVER_LOCK_SUFFIX` を ``O_CREAT | O_EXCL`` で
+    作れたプロセスだけが、正式な名前が無いことを確かめて付け替える。作れないとき:
+
+    - 正式な名前が既にあれば、先に公開した別のプロセスの記録なので何もしない
+      (呼び出し側 :func:`_record_cutover` がその記録を読み直して従う)。
+    - ロックが前の起動の残骸 (:func:`_clear_stale_cutover_lock`) なら片づけて作り直す。
+    - それ以外は持ち主の公開を :data:`_CUTOVER_LOCK_WAIT_SECONDS` まで待つ。待っても
+      記録が現れなければ何もしない — 呼び出し側は記録を読めずに
+      :class:`CutoverUnavailable` を送り、この起動は何も変換しない。
+
+    公開した後、ロックを消す前に止まった場合は、記録が既にあるので次の起動は記録を
+    読んでこの関数に来ない。
+    """
+    lock = path.with_name(path.name + CUTOVER_LOCK_SUFFIX)
+    deadline = time.monotonic() + _CUTOVER_LOCK_WAIT_SECONDS
+    while True:
+        owned = _create_cutover_lock(lock)
+        if owned is not None:
+            break
+        if path.exists():
+            return  # 別のプロセスが先に記録した
+        if _clear_stale_cutover_lock(lock):
+            continue
+        if time.monotonic() >= deadline:
+            LOGGER.warning(
+                "[system-notice-migration] another process holds %s; the cutover time is not "
+                "recorded on this start", lock,
+            )
+            return
+        time.sleep(0.05)
+    try:
+        if not path.exists():
+            os.rename(tmp, path)
+    finally:
+        _release_cutover_lock(lock, owned)
+
+
+def _create_cutover_lock(lock: Path) -> Optional[bytes]:
+    """ロックのファイルを新しく作り、書いた中身を返す。既にあれば None。"""
+    content = json.dumps({
+        "pid": os.getpid(),
+        "process_created_at": _process_created_at(os.getpid()),
+        "token": uuid.uuid4().hex,
+    }).encode("utf-8")
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return None
+    try:
+        os.write(fd, content)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return content
+
+
+def _release_cutover_lock(lock: Path, owned: bytes) -> None:
+    """自分が作ったロックのファイルを消す (中身が自分の書いたものでなければ消さない)。"""
+    try:
+        if lock.read_bytes() == owned:
+            lock.unlink()
+    except OSError:
+        LOGGER.warning("[system-notice-migration] could not remove %s", lock, exc_info=True)
+
+
+def _cutover_lock_owner_alive(raw: bytes) -> bool:
+    """ロックのファイルの持ち主のプロセスがまだ走っているか (分からなければ真)。"""
+    try:
+        info = json.loads(raw.decode("utf-8"))
+        pid = int(info["pid"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return True  # 作った直後で中身がまだ無い — 古さで判断する
+    if pid == os.getpid():
+        return True
+    try:
+        import psutil
+
+        if not psutil.pid_exists(pid):
+            return False
+    except Exception:  # noqa: BLE001 — 生死を確かめられなければ走っている側に倒す
+        return True
+    expected = info.get("process_created_at")
+    actual = _process_created_at(pid)
+    if isinstance(expected, (int, float)) and actual is not None:
+        return abs(float(expected) - actual) <= 0.01
+    return True
+
+
+def _clear_stale_cutover_lock(lock: Path) -> bool:
+    """前の起動が残したロックのファイルなら片づけて真を返す。
+
+    残骸とみなすのは、持ち主のプロセスがもう居ない (:func:`_cutover_lock_owner_alive`)
+    か、:data:`_CUTOVER_LOCK_STALE_SECONDS` より古いとき (持っている間の仕事は一瞬で
+    終わる)。片づけるときは、読んだ中身と同じかを確かめるために一意の名前へ付け替えて
+    から読み直す — 同時に片づけようとした別のプロセスが作り直した新しいロックを
+    付け替えてしまった場合は、元の名前が空いていれば戻して偽を返す。
+    """
+    try:
+        raw = lock.read_bytes()
+        age = time.time() - lock.stat().st_mtime
+    except FileNotFoundError:
+        return True  # 持ち主が消した — 作り直す
+    except OSError:
+        return False
+    if age <= _CUTOVER_LOCK_STALE_SECONDS and _cutover_lock_owner_alive(raw):
+        return False
+    aside = lock.with_name(f"{lock.name}.{_unique_suffix()}.stale")
+    try:
+        os.rename(lock, aside)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        moved = aside.read_bytes()
+    except OSError:
+        moved = None
+    if moved != raw:
+        # 別のプロセスが作り直したばかりのロックだった — 名前が空いていれば戻す
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except OSError:
+            pass
+        else:
+            try:
+                os.write(fd, moved or b"")
+            finally:
+                os.close(fd)
+    try:
+        aside.unlink()
+    except OSError:
+        LOGGER.warning("[system-notice-migration] could not remove %s", aside, exc_info=True)
+    if moved == raw:
+        LOGGER.warning(
+            "[system-notice-migration] removed %s left by a stopped process", lock,
+        )
+        return True
+    return False
 
 
 def resolve_cutover(
@@ -3180,10 +3452,15 @@ def _settle_staged_results(run_dir: Path) -> int:
     - 記憶 DB は、完了の印が仮の JSON に書いた値 (``marker_value`` — 書いた取引で
       立てた印) と一致する場合も採用する (回の記録を書かなかった前の版の仮の JSON)。
 
-    どちらでもなければ、変換が確定したと確かめられないので捨てる — 確定していない
-    変換をレポートの材料にしない。
-    DB が読めない (ロックなど) ときと、仮の JSON そのものが読めない (一時的な
-    I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
+    DB を開いて、その回の記録 (と完了の印) が無いと確かめられたときだけ捨てる —
+    確定していない変換をレポートの材料にしない。照合に使う欄 (``commit_record`` と
+    ``marker_value``) をどちらも持たない仮の JSON は、確かめる手段が無いので捨てる。
+    この版が書くそういう仮の JSON は、変換をコミットしなかった回 (変換する行が無く、
+    完了の印も見送った記憶) のものだけ — 本体 DB の変換は、その回の記録を書ける
+    ときだけコミットする (:func:`migrate_main_db`)。回の記録を書く前の版 (v0.3.27) が
+    本体 DB の分として書いた仮の JSON も、この欄を持たないので捨てる。
+    記録先の DB が見つからない・読めない (ロックなど) ときと、仮の JSON そのものが
+    読めない (一時的な I/O・権限の失敗) ときは決めずに残し、次の起動でまた試す。読めたのに JSON と
     して壊れている仮の JSON は書きかけで止まったもので、捨てる — 仮の JSON は
     OS に確定させてからコミットする (:func:`_stage_result_json`) ので、コミット
     された取引の仮の JSON が書きかけで残ることはない。
@@ -3211,7 +3488,15 @@ def _settle_staged_results(run_dir: Path) -> int:
         keep = False
         checkable = isinstance(record, str) or (persona and isinstance(expected, str))
         db = Path(data["path"]) if checkable and isinstance(data.get("path"), str) else None
-        if db is not None and db.is_file():
+        if db is not None and not db.is_file():
+            # 記録先の DB が見えない (一時的に外れた場所・移動の途中など)。記録が無いとは
+            # 確かめられていないので捨てない
+            LOGGER.warning(
+                "[system-notice-migration] %s to settle %s is not found; "
+                "will retry on the next start", db, staged,
+            )
+            continue
+        if db is not None:
             try:
                 with closing(_open_readonly(db)) as conn:
                     if isinstance(record, str):
@@ -3627,12 +3912,20 @@ def startup_alerts(
                 for r in unreadable
             ]},
         ))
-    if failed:
+    # 本体 DB に execution_ledger が無いので変換をコミットしなかった (理由が他の失敗と
+    # 違い、表が作られるまで毎起動で続くので、別の知らせにする)
+    if any(r.commit_record_unavailable for r in failed):
+        alerts.append(_alert(
+            "system_notice_migration_commit_record_unavailable", "warning",
+            "commitRecordUnavailable", _ui("commitRecordUnavailableMessage"),
+        ))
+    other_failed = [r for r in failed if not r.commit_record_unavailable]
+    if other_failed:
         alerts.append(_alert(
             "system_notice_migration_failed", "warning", "failed", _ui("failedMessage"),
-            {"failed": [_alert_label(r) for r in failed]},
+            {"failed": [_alert_label(r) for r in other_failed]},
         ))
-    elif report is not None and converted_rows:
+    elif not failed and report is not None and converted_rows:
         # 古いスキーマで確認待ちの印を付けられず、完了の印を見送った記憶
         deferred_note = (
             _ui("doneDeferredNote")

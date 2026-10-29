@@ -12411,6 +12411,14 @@
     "ja": "新しい形式に切り替わった時刻を決められなかったか、保存できなかったので、この起動では記録を一つも変換していません。次の起動で再試行します。ログを確認してください。",
     "en": "The time this environment switched to the new format could not be determined or saved, so no record was converted on this start. It will be retried on the next start. Please check the log."
   },
+  "api.systemNoticeMigration.commitRecordUnavailableTitle": {
+    "ja": "本体 DB のシステム通知の記録を移行できませんでした",
+    "en": "System notice records in the main database could not be migrated"
+  },
+  "api.systemNoticeMigration.commitRecordUnavailableMessage": {
+    "ja": "本体 DB に実行台帳の表 (execution_ledger) が無いため、変換を確定したことを後から確かめるための記録を書けません。そのため本体 DB の行は変換せず、元のまま残しました。表が作られた後の起動で再試行します。ログを確認してください。",
+    "en": "The main database has no execution ledger table (execution_ledger), so the migration cannot write the record that later confirms a committed conversion. Rows in the main database were therefore left unconverted. The migration will be retried on a start after the table is created. Please check the log."
+  },
   "api.systemNoticeMigration.failedTitle": {
     "ja": "システム通知の記録の移行が一部の記録でできませんでした",
     "en": "Some system notice records could not be migrated"
