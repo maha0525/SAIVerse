@@ -3554,7 +3554,7 @@ export default function Home() {
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
         >
-            <SystemAlertBanner />
+            <SystemAlertBanner backendConnected={backendConnected} />
             <Sidebar
                 refreshTrigger={backendConnected}
                 viewingBuildingId={currentBuildingId}

@@ -29,7 +29,16 @@ interface AlertResponse {
     alerts: SystemAlert[];
 }
 
-export default function SystemAlertBanner() {
+interface Props {
+    /**
+     * 画面が裏側と繋がっているか (page.tsx の backendConnected)。警告は裏側の
+     * 起動時に作られるので、画面が裏側より先に開いた・裏側が再起動したときは、
+     * 繋がり直した時点で一度取り直す。
+     */
+    backendConnected?: boolean;
+}
+
+export default function SystemAlertBanner({ backendConnected = true }: Props) {
     useLocale();
     const [alerts, setAlerts] = useState<SystemAlert[]>([]);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -57,10 +66,13 @@ export default function SystemAlertBanner() {
     };
 
     useEffect(() => {
-        fetchAlerts();
         window.addEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
         return () => window.removeEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
     }, []);
+
+    useEffect(() => {
+        if (backendConnected) fetchAlerts();
+    }, [backendConnected]);
 
     const announceReviewChanged = () => {
         window.dispatchEvent(new Event(NOTICE_REVIEW_CHANGED_EVENT));
