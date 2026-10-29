@@ -15,6 +15,9 @@ const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     },
 }).outputText;
 
+// Stand-in for the review modal: the banner only decides when to mount it.
+function ReviewModal() { return null; }
+
 function harness(initialAlerts) {
     const states = [], effects = [], requests = [], notices = [];
     let cursor = 0, mounted = false, confirmed = false;
@@ -35,6 +38,10 @@ function harness(initialAlerts) {
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
         if (name === 'lucide-react') return {};
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
+        if (name === './SystemNoticeReviewModal') return {
+            __esModule: true, default: ReviewModal, NOTICE_REVIEW_ALERT_ID: 'system_notice_review_pending',
+            NOTICE_REVIEW_CHANGED_EVENT: 'saiverse:system-notice-review-changed',
+        };
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, options) => {
@@ -52,7 +59,14 @@ function harness(initialAlerts) {
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
-    global.window = { confirm: () => confirmed, alert: message => notices.push(message) };
+    const listeners = new Map();
+    global.window = {
+        confirm: () => confirmed,
+        alert: message => notices.push(message),
+        addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+        removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
+        dispatchEvent(event) { (listeners.get(event.type) || []).forEach(fn => fn(event)); return true; },
+    };
     function render() {
         cursor = 0;
         const tree = module.exports.default();
@@ -87,7 +101,8 @@ const exampleAlerts = () => [
     h = harness(exampleAlerts());
     let tree = await h.mount();
     assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, false, false]);
-    assert.equal(all(tree, node => node.type === 'button').length, 4);
+    // 3 headers + 3 close buttons + 1 archive button
+    assert.equal(all(tree, node => node.type === 'button').length, 7);
     headers(tree)[1].props.onClick();
     assert.deepEqual(headers(h.render()).map(node => node.props['aria-expanded']), [true, true, false]);
     headers(h.render())[1].props.onClick();
@@ -125,5 +140,25 @@ const exampleAlerts = () => [
     assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, false]);
     assert.ok(h.requests.some(r => r.url === '/api/system/legacy-log/room%20%2F%201/archive' && r.method === 'POST'));
     assert.ok(h.requests.every(r => !r.url.includes('/quarantine')));
-    console.log('System alerts: expansion, cancel, failure, retry, busy state, and unrelated alerts passed.');
+
+    // The pending-review alert carries a button that mounts the review modal;
+    // other alerts do not. Closing the modal unmounts it, and the modal's change
+    // callback fetches the alerts again.
+    const reviewAlert = { id: 'system_notice_review_pending', level: 'warning', title: 'Review', message: 'm', details: {} };
+    h = harness([reviewAlert, { id: 'information', level: 'info', title: 'Information', message: 'Keep too' }]);
+    tree = await h.mount();
+    const reviewButtons = all(tree, node => node.type === 'button' && node.props['data-i18n'] === 'components.SystemAlertBanner.openNoticeReview');
+    assert.equal(reviewButtons.length, 1);
+    assert.equal(all(tree, node => node.type === ReviewModal).length, 0);
+    reviewButtons[0].props.onClick();
+    tree = h.render();
+    const modal = all(tree, node => node.type === ReviewModal)[0];
+    assert.ok(modal);
+    const before = h.requests.length;
+    await modal.props.onChanged();
+    assert.equal(h.requests.length, before + 1);
+    assert.equal(h.requests[before].url, '/api/system/alerts');
+    modal.props.onClose();
+    assert.equal(all(h.render(), node => node.type === ReviewModal).length, 0);
+    console.log('System alerts: expansion, cancel, failure, retry, busy state, unrelated alerts, and review entry passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

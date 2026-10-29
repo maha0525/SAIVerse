@@ -441,7 +441,7 @@ class TestVividRecall(AutoRecallBase):
             "CREATE TABLE message_embeddings (message_id TEXT, chunk_index INTEGER, vector TEXT)"
         )
         conn.execute(
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER)"
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER, metadata TEXT)"
         )
         conn.commit()
         return conn
@@ -594,7 +594,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
             "CREATE TABLE message_embeddings (message_id TEXT, chunk_index INTEGER, vector TEXT)"
         )
         conn.execute(
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER)"
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER, metadata TEXT)"
         )
         conn.commit()
         return conn

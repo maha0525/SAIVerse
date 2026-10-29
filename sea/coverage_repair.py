@@ -670,7 +670,7 @@ def plan_tail_rewind(
             meta = msg.get("metadata")
             tags = meta.get("tags") if isinstance(meta, dict) else None
             est_material += material_len(
-                content, tags if isinstance(tags, (list, tuple)) else (),
+                content, tags if isinstance(tags, (list, tuple)) else (), meta,
             )
         # 材料ゼロ (退場候補に編纂対象が無い等) なら畳みの LLM は走らない —
         # 見込み 1 を置くと実走 0 と食い違う (ローカルレビュー 2026-08-31 L5)。

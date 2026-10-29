@@ -13,6 +13,7 @@ import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
 import FeedManagementPanel from './settings/FeedManagementPanel';
 import MovementNoticeSetting from './settings/MovementNoticeSetting';
+import SystemNoticeReviewEntry from './SystemNoticeReviewEntry';
 import ModalOverlay from './common/ModalOverlay';
 import WatermarkBar, { WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
 
@@ -1746,6 +1747,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 <div className={styles.sectionHeader}>
                                     <h3 data-i18n="components.GlobalSettingsModal.text091">{uiText("components.GlobalSettingsModal.text091")}</h3>
                                 </div>
+
+                                {/* 確認待ちの記憶の行を確定する画面への常設の入口 (確認待ちがある間だけ出る) */}
+                                <SystemNoticeReviewEntry classNames={{
+                                    card: styles.utilityCard,
+                                    title: styles.utilityTitle,
+                                    desc: styles.utilityDesc,
+                                    button: styles.utilityRunBtn,
+                                }} />
 
                                 {/* アイテム概要の一括生成 */}
                                 <div className={styles.utilityCard}>

@@ -333,16 +333,22 @@ class UriResolver:
 
         # saiverse://self/message/msg?contain=TEXT&window=N
         if len(path) >= 1 and path[0] == "msg" and "contain" in params:
-            from sai_memory.memory.storage import _row_to_message, get_messages_around
+            from sai_memory.memory.storage import (
+                _row_to_message,
+                author_settled_sql,
+                get_window_with_anchor,
+            )
 
             query_text = params["contain"]
             window = int(params.get("window", 0))
             thread_id = self._get_active_thread_id(adapter)
 
+            # 本文での検索なので、書き手が決まっていない行は当たりにも周辺にも
+            # 入れない (storage.author_settled_sql — 記憶の検索の経路で共有)。
             with adapter._db_lock:
                 cursor = adapter.conn.execute(
                     "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-                    "FROM messages WHERE thread_id = ? AND content LIKE ? "
+                    f"FROM messages WHERE thread_id = ? AND content LIKE ? AND {author_settled_sql()} "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (thread_id, f"%{query_text}%"),
                 )
@@ -354,9 +360,11 @@ class UriResolver:
             msg = _row_to_message(row)
 
             if window > 0:
+                # 当たりを前後で挟む (前と後を別々に取る正典順。周辺は書き手が
+                # 決まっていない行を外す)
                 with adapter._db_lock:
-                    surrounding = get_messages_around(
-                        adapter.conn, thread_id, msg.id, before=window, after=window
+                    surrounding = get_window_with_anchor(
+                        adapter.conn, msg, window, window, settled_only=True,
                     )
                 content = self._format_messages(surrounding, highlight_id=msg.id)
             else:
@@ -378,7 +386,7 @@ class UriResolver:
         if (len(path) >= 2 and path[0] == "msg") or (
             len(path) == 1 and path[0] not in ("msg", "range", "thread", "summary")
         ):
-            from sai_memory.memory.storage import get_message, get_messages_around
+            from sai_memory.memory.storage import get_message, get_window_with_anchor
 
             message_id = path[1] if path[0] == "msg" else path[0]
             window = int(params.get("window", 0))
@@ -389,20 +397,10 @@ class UriResolver:
                 return self._error(parsed.raw, f"Message not found: {message_id}")
 
             if window > 0:
+                # 前と後を別々に取って anchor を挟む (正典順 created_at, rowid のまま —
+                # created_at の比較で挿し込むと、同じ秒の後ろの行が anchor の前に並ぶ)
                 with adapter._db_lock:
-                    surrounding = get_messages_around(
-                        adapter.conn, msg.thread_id, message_id, before=window, after=window
-                    )
-                # Insert anchor
-                insert_idx = 0
-                for i, m in enumerate(surrounding):
-                    if m.created_at <= msg.created_at and m.id != msg.id:
-                        insert_idx = i + 1
-                    elif m.created_at > msg.created_at:
-                        break
-                    else:
-                        insert_idx = i + 1
-                all_msgs = surrounding[:insert_idx] + [msg] + surrounding[insert_idx:]
+                    all_msgs = get_window_with_anchor(adapter.conn, msg, window, window)
                 content = self._format_messages(all_msgs, highlight_id=message_id)
             else:
                 content = self._format_messages([msg])

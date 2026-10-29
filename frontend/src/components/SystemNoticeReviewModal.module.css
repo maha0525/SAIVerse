@@ -1,0 +1,338 @@
+/* 画面上部の警告バナー (z-index 9999) から開くので、その上に重ねる。ModalOverlay
+   の .overlay (z-index 1000) より詳細度を上げ、読み込み順に依らず勝つようにする
+   (ModalOverlay は document.body の直下へ描く)。 */
+:global(body) > .overlayAboveBanner {
+    z-index: 10000;
+}
+
+.modal {
+    background: white;
+    border-radius: 1rem;
+    width: 860px;
+    max-width: 95vw;
+    max-height: 85vh;
+    max-height: 85svh;
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    color: #1e293b;
+}
+
+.header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid #e2e8f0;
+    flex-shrink: 0;
+}
+
+.question {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.25rem;
+    flex-shrink: 0;
+}
+
+.closeButton:hover {
+    color: #475569;
+}
+
+.body {
+    padding: 1rem 1.5rem 1.5rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.note {
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #9a3412;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.error {
+    margin: 0;
+    color: #b91c1c;
+    font-size: 0.9rem;
+}
+
+.muted {
+    margin: 0;
+    color: #64748b;
+    font-size: 0.85rem;
+}
+
+.group {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.75rem;
+    padding: 0.9rem 1rem;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.groupHeader {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+    font-size: 0.9rem;
+}
+
+.count {
+    font-weight: 700;
+    color: #1e293b;
+}
+
+.role {
+    padding: 0.05rem 0.5rem;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #475569;
+    font-size: 0.75rem;
+}
+
+.personas {
+    color: #475569;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.content {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 0.5rem;
+    background: white;
+    border: 1px solid #e2e8f0;
+    color: #1e293b;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+    overflow-x: hidden;
+    max-height: 12rem;
+    overflow-y: auto;
+}
+
+.tags {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: #64748b;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.actionsLabel {
+    font-size: 0.8rem;
+    color: #64748b;
+}
+
+.actionButton {
+    padding: 0.35rem 0.85rem;
+    border-radius: 0.4rem;
+    border: 1px solid #cbd5e1;
+    background: white;
+    color: #1e293b;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.actionButton:hover:not(:disabled) {
+    background: #f1f5f9;
+}
+
+.actionButton:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.danger {
+    border-color: #fca5a5;
+    color: #b91c1c;
+}
+
+.danger:hover:not(:disabled) {
+    background: #fef2f2;
+}
+
+.expandButton {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0;
+    background: none;
+    border: none;
+    color: #334155;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.row {
+    border-top: 1px solid #e2e8f0;
+    padding-top: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.rowMeta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem;
+    font-size: 0.85rem;
+    color: #334155;
+}
+
+.errorBox {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.attachments {
+    font-size: 0.8rem;
+    color: #334155;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.attachmentRefs {
+    margin: 0.2rem 0 0;
+    padding-left: 1.2rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
+/* ---- dark mode ---- */
+
+:global([data-theme="dark"]) .modal {
+    background: #1e293b;
+    color: #e2e8f0;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+:global([data-theme="dark"]) .header {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .question,
+:global([data-theme="dark"]) .count {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .closeButton:hover {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .note {
+    background: rgba(251, 146, 60, 0.12);
+    border-color: rgba(251, 146, 60, 0.35);
+    color: #fdba74;
+}
+
+:global([data-theme="dark"]) .error {
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .muted,
+:global([data-theme="dark"]) .tags,
+:global([data-theme="dark"]) .actionsLabel,
+:global([data-theme="dark"]) .personas {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .group {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .role {
+    background: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .content {
+    background: #1e293b;
+    border-color: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .actionButton {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .actionButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .danger {
+    border-color: rgba(248, 113, 113, 0.5);
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .danger:hover:not(:disabled) {
+    background: rgba(248, 113, 113, 0.1);
+}
+
+:global([data-theme="dark"]) .expandButton,
+:global([data-theme="dark"]) .rowMeta,
+:global([data-theme="dark"]) .attachments {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .attachmentRefs {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .row {
+    border-top-color: rgba(255, 255, 255, 0.08);
+}

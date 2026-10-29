@@ -964,9 +964,14 @@ def get_all_messages_for_search(
     conn: sqlite3.Connection,
     required_tags: Optional[List[str]] = None,
 ) -> List[Message]:
-    """Get all messages for keyword search, optionally filtered by tags."""
+    """Get all messages for keyword search, optionally filtered by tags.
+
+    書き手が決まっていない行 (:func:`author_settled_sql`) は候補に入れない —
+    検索の当たりとしてモデルに渡す前、順位付けの前に外す。
+    """
     params = []
 
+    where = [author_settled_sql()]
     if required_tags:
         # Build tag filter
         tag_conditions = []
@@ -975,14 +980,12 @@ def get_all_messages_for_search(
                 "EXISTS (SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = ?)"
             )
             params.append(tag)
-        tags_clause = " WHERE " + " OR ".join(tag_conditions)
-    else:
-        tags_clause = ""
+        where.append("(" + " OR ".join(tag_conditions) + ")")
 
     query = f"""
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
-        {tags_clause}
+        WHERE {" AND ".join(where)}
         ORDER BY created_at DESC, rowid DESC
     """
     cur = conn.execute(query, params)
@@ -996,8 +999,13 @@ def get_embeddings_for_scope(
     required_tags: Optional[List[str]] = None,
     exclude_tags: Optional[List[str]] = None,
 ) -> List[Tuple[Message, List[float], int]]:
+    """意味検索の候補 (行と埋め込み)。
+
+    書き手が決まっていない行 (:func:`author_settled_sql`) は候補に入れない —
+    順位付けの前に外す (semantic_recall / semantic_recall_groups の唯一の候補元)。
+    """
     # Build tags filter clause
-    tags_clause = ""
+    tags_clause = f" AND {author_settled_sql('m.metadata')}"
     params = []
 
     if required_tags:
@@ -1008,7 +1016,7 @@ def get_embeddings_for_scope(
                 "EXISTS (SELECT 1 FROM json_each(m.metadata, '$.tags') WHERE json_each.value = ?)"
             )
             params.append(tag)
-        tags_clause = " AND (" + " OR ".join(tag_conditions) + ")"
+        tags_clause += " AND (" + " OR ".join(tag_conditions) + ")"
 
     if exclude_tags:
         for tag in exclude_tags:
@@ -1050,7 +1058,13 @@ def get_embeddings_for_scope(
 
 
 def get_messages_around(
-    conn: sqlite3.Connection, thread_id: str, message_id: str, before: int, after: int
+    conn: sqlite3.Connection,
+    thread_id: str,
+    message_id: str,
+    before: int,
+    after: int,
+    *,
+    settled_only: bool = False,
 ) -> List[Message]:
     """anchor メッセージの前後 ``before``/``after`` 件を正典順で返す (anchor 自身は含まない)。
 
@@ -1058,9 +1072,33 @@ def get_messages_around(
     切る。旧実装は rowid 単独だったため、過去時刻で後から挿入された行
     (インポート・移植) が「後」側に化けて履歴表示と食い違った。created_at
     欠落 (NULL) の anchor も正典順の先頭側 (NULL 群) の位置として扱う。
+
+    ``settled_only=True`` は、前後それぞれ ``before``/``after`` 件を正典順で取って
+    から、その中の書き手が決まっていない行 (:func:`author_settled_sql`) を外す —
+    外した分をさらに遠くの行で埋めない (埋めると、当たりから離れた行が隣の文脈
+    としてモデルに渡る)。検索の当たりの周辺を広げてモデルに渡す想起の経路用
+    (semantic_recall・semantic_recall_groups・SAIMemoryAdapter.recall_hybrid・
+    ``saiverse://`` の本文検索)。返り値は前後を連結した一列なので、当たりを挟んで
+    並べる呼び出し側は前と後を別々に呼ぶ (``before`` か ``after`` の片方を 0 に
+    する) — 外した結果の件数で切り分けると前後を取り違える。
     """
     if before <= 0 and after <= 0:
         return []
+
+    def _select(where_sql: str, order: str) -> str:
+        inner = (
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
+            "rowid AS canonical_rowid "
+            f"FROM messages WHERE thread_id=? AND {where_sql} "
+            f"ORDER BY created_at {order}, rowid {order} LIMIT ?"
+        )
+        if not settled_only:
+            return inner
+        return (
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            f"FROM ({inner}) WHERE {author_settled_sql()} "
+            f"ORDER BY created_at {order}, canonical_rowid {order}"
+        )
 
     cur = conn.execute(
         "SELECT created_at, rowid FROM messages WHERE id=? AND thread_id=?",
@@ -1078,12 +1116,9 @@ def get_messages_around(
             anchor_ts, anchor_rowid, inclusive=False
         )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            f"FROM messages WHERE thread_id=? AND {before_sql} "
-            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (thread_id, *before_params, before),
+            _select(before_sql, "DESC"), (thread_id, *before_params, before),
         )
-        before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
+        before_rows = [_row_to_message(r[:7]) for r in cur.fetchall()][::-1]
 
     after_rows: List[Message] = []
     if after > 0:
@@ -1091,14 +1126,39 @@ def get_messages_around(
             anchor_ts, anchor_rowid, inclusive=False
         )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            f"FROM messages WHERE thread_id=? AND {after_sql} "
-            "ORDER BY created_at ASC, rowid ASC LIMIT ?",
-            (thread_id, *after_params, after),
+            _select(after_sql, "ASC"), (thread_id, *after_params, after),
         )
-        after_rows = [_row_to_message(r) for r in cur.fetchall()]
+        after_rows = [_row_to_message(r[:7]) for r in cur.fetchall()]
 
     return before_rows + after_rows
+
+
+def get_window_with_anchor(
+    conn: sqlite3.Connection,
+    anchor: Message,
+    before: int,
+    after: int,
+    *,
+    settled_only: bool = False,
+) -> List[Message]:
+    """``anchor`` を挟んだ前後の窓 ``[前..., anchor, 後...]`` を正典順で返す。
+
+    前と後を :func:`get_messages_around` で別々に取って連結する — 一列で取った
+    結果を件数や ``created_at`` で切り分けると、``settled_only`` で前の行が
+    減ったときや同じ秒の行で、後の行を当たりの前に置く。``anchor`` は
+    ``anchor.thread_id`` の行として扱う。
+    """
+    before_rows = (
+        get_messages_around(
+            conn, anchor.thread_id, anchor.id, before, 0, settled_only=settled_only,
+        ) if before > 0 else []
+    )
+    after_rows = (
+        get_messages_around(
+            conn, anchor.thread_id, anchor.id, 0, after, settled_only=settled_only,
+        ) if after > 0 else []
+    )
+    return [*before_rows, anchor, *after_rows]
 
 
 def get_messages_around_timestamp(
@@ -1301,6 +1361,91 @@ SYSTEM_NOTICE_KEY = "__system_notice__"
 #: して)、この鍵を metadata から消せば普通の行の扱いに戻る。``__`` で始まるので
 #: ``SYSTEM_NOTICE_KEY`` と同じくサーバーだけが書ける。
 SYSTEM_NOTICE_REVIEW_KEY = "__system_notice_review__"
+
+#: 確認待ちの行を所有者が画面で確定した記録 (docs/intent/system_notice_delivery.md
+#: 「追補」の確認待ちの行の確定)。値は選んだ操作 (``"keep"`` / ``"system"`` /
+#: ``"user"``)。確定した行からは ``SYSTEM_NOTICE_REVIEW_KEY`` を消し、代わりに
+#: この鍵を書く。印を消すだけだと、完了の印の無い DB を移行が走査し直したときに
+#: また印が付いて所有者の判断が消えるので、移行はこの鍵を持つ行の印付けと変換を
+#: 両方とも飛ばす。``"keep"`` (そのままにする) の行は偽タグに見える本文のまま
+#: 残るので、「実会話」(``_conversation_exclusion``) から外したままにする。
+SYSTEM_NOTICE_REVIEWED_KEY = "__system_notice_reviewed__"
+SYSTEM_NOTICE_REVIEWED_KEEP = "keep"
+
+
+def is_author_unsettled(metadata: Any) -> bool:
+    """書き手 (機構か発話者か) が決まっていない行か。
+
+    確認待ちの印 (``SYSTEM_NOTICE_REVIEW_KEY``) を持つ行と、所有者が「そのまま
+    にする」で確定した行 (``SYSTEM_NOTICE_REVIEWED_KEY`` が ``"keep"``)。どちらも
+    role は保存されたまま (多くは role=user) だが、中身は機構の文でありうる。
+    「実会話」(:func:`_conversation_exclusion`) はこれらの行を外し、あらすじと
+    Memopedia の材料 (sai_memory/arasuji/generator.py の ``material_text_for``、
+    sai_memory/memopedia/generator.py) は発話として渡さない。
+
+    SQL の側の同じ判定は :func:`_author_unsettled_sql`。二つの形が同じ行を
+    選ぶことは tests/test_system_notice_review.py が固定している。
+    """
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get(SYSTEM_NOTICE_REVIEW_KEY) is not None:
+        return True
+    return metadata.get(SYSTEM_NOTICE_REVIEWED_KEY) == SYSTEM_NOTICE_REVIEWED_KEEP
+
+
+def _author_unsettled_sql(metadata_column: str = "metadata") -> str:
+    """:func:`is_author_unsettled` の SQL の形 (``metadata`` 列に対する真偽式)。
+
+    ``metadata_column`` は JOIN の別名付きで参照するとき用 (例 ``"m.metadata"``)。
+    """
+    return (
+        f"(json_extract({metadata_column}, '$.\"{SYSTEM_NOTICE_REVIEW_KEY}\"') IS NOT NULL"
+        f" OR COALESCE(json_extract({metadata_column}, '$.\"{SYSTEM_NOTICE_REVIEWED_KEY}\"'), '')"
+        f" = '{SYSTEM_NOTICE_REVIEWED_KEEP}')"
+    )
+
+
+def author_settled_sql(metadata_column: str = "metadata") -> str:
+    """記憶を検索・想起してモデルに渡す経路の候補に掛ける条件 (SQL の真偽式)。
+
+    書き手が決まっていない行 (:func:`is_author_unsettled`) を外す。中身は機構の文で
+    ありうる行を、検索の当たりや想起の抜粋として ``user`` の発話の形でモデルに
+    渡さないため (docs/intent/system_notice_delivery.md「追補」の確認待ちの行の確定)。
+    「実会話」(:func:`_conversation_exclusion`) を通る経路は既に同じ条件で外れて
+    いて、この関数はそれを通らない検索の経路 (:func:`get_all_messages_for_search`・
+    :func:`get_embeddings_for_scope`・:func:`get_messages_around` の
+    ``settled_only``・:func:`filter_author_settled_ids`) が共有する一か所。
+
+    metadata が JSON として読めない行 (``json_extract`` が例外を投げる) と NULL の
+    行は、Python の判定 (読めない metadata は辞書でない = 決まっている) と同じく
+    通す。``CASE`` は選んだ枝だけを評価するので、読めない行で検索全体が止まらない。
+    """
+    return (
+        f"(CASE WHEN json_valid({metadata_column})"
+        f" THEN NOT {_author_unsettled_sql(metadata_column)} ELSE 1 END)"
+    )
+
+
+def filter_author_settled_ids(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> Set[str]:
+    """``message_ids`` のうち、書き手が決まっている行 (:func:`author_settled_sql`) の id。
+
+    id の列で候補を受け取る想起の経路 (sea/auto_recall.py の鮮明想起が、あらすじの
+    材料の id から引用する行を選ぶ) 用。存在しない id は含めない。
+    """
+    ids = sorted({str(mid) for mid in message_ids if mid})
+    out: Set[str] = set()
+    chunk_size = 500  # SQLite の既定の変数上限 999 の内側
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        ph = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id FROM messages WHERE id IN ({ph}) AND {author_settled_sql()}",
+            tuple(chunk),
+        )
+        out.update(str(row[0]) for row in cur.fetchall())
+    return out
 
 #: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
 #: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
@@ -2679,6 +2824,30 @@ def canonical_position_key(
     return _canonical_key_of_row(created_at, rowid)
 
 
+def canonical_position_keys(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> Dict[str, Tuple[Tuple[int, int], int]]:
+    """``message_ids`` の各行の正典キー (:func:`canonical_position_key`)。
+
+    ``Message`` は rowid を持たないので、別々に取った行の列 (想起の当たりごとの束
+    など) を正典順に並べ直す呼び出し側が使う。``created_at`` だけで並べると、
+    同じ秒の行の順が崩れる。存在しない id は含めない。
+    """
+    ids = sorted({str(mid) for mid in message_ids if mid})
+    out: Dict[str, Tuple[Tuple[int, int], int]] = {}
+    chunk_size = 500  # SQLite の既定の変数上限 999 の内側
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        ph = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id, created_at, rowid FROM messages WHERE id IN ({ph})",
+            tuple(chunk),
+        )
+        for mid, created_at, rowid in cur.fetchall():
+            out[str(mid)] = _canonical_key_of_row(created_at, rowid)
+    return out
+
+
 def clip_messages_before_position(
     conn: sqlite3.Connection,
     messages: List[Message],
@@ -2754,7 +2923,9 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
 
     移行が確認待ちとしてレポート送りにした行 (``SYSTEM_NOTICE_REVIEW_KEY`` の印を
     持つ行) も除外する — role=user のまま残るので role の条件では外れないが、
-    中身は機構の文でありうるため。
+    中身は機構の文でありうるため。所有者が「そのままにする」で確定した行
+    (``SYSTEM_NOTICE_REVIEWED_KEY`` が ``"keep"``) も、偽タグに見える本文のまま
+    なので除外し続ける。
     """
     tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
@@ -2765,7 +2936,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             SELECT 1 FROM json_each(metadata, '$.tags')
             WHERE json_each.value IN ({tag_placeholders})
         )
-        AND json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEW_KEY}"') IS NULL
+        AND NOT {_author_unsettled_sql()}
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES

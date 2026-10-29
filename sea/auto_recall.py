@@ -918,7 +918,12 @@ def _title_windowed_excerpt(text: str, title: str) -> Optional[str]:
 
 
 def _source_message_ids(conn, chronicle_entry_id: str) -> List[str]:
-    """chronicle_entry_id の source_ids_json から message_id 列を取り出す。"""
+    """chronicle_entry_id の source_ids_json から、引用してよい message_id 列を取り出す。
+
+    書き手が決まっていない行 (storage.py の ``filter_author_settled_ids``) は外す —
+    あらすじの被覆 (source_ids) には入っているが、「そのときの会話」として発話の
+    形で引用すると、機構の文でありうる行がその role の発言としてモデルに渡るため。
+    """
     import json
     try:
         cur = conn.execute(
@@ -938,7 +943,15 @@ def _source_message_ids(conn, chronicle_entry_id: str) -> List[str]:
         return []
     if not isinstance(message_ids, list) or not message_ids:
         return []
-    return [str(m) for m in message_ids]
+    from sai_memory.memory.storage import filter_author_settled_ids
+
+    ids = [str(m) for m in message_ids]
+    try:
+        settled = filter_author_settled_ids(conn, ids)
+    except Exception:
+        LOGGER.debug("[auto_recall][vivid] failed to check the authors of source messages", exc_info=True)
+        return []
+    return [m for m in ids if m in settled]
 
 
 def _vivid_source_messages(

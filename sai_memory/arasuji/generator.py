@@ -23,11 +23,11 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError
-from sai_memory.memory.storage import MECHANISM_TAGS, Message
+from sai_memory.memory.storage import MECHANISM_TAGS, Message, is_author_unsettled
 from sai_memory.arasuji.storage import (
     ArasujiEntry,
     create_entry,
@@ -218,14 +218,27 @@ def is_mechanism_message(msg: Message) -> bool:
     return any(t in MECHANISM_TAGS for t in _message_tags(msg))
 
 
-def material_text_for(content: str, tags: Sequence[str]) -> str:
-    """本文とタグだけから材料テキストを決める、長さ規則の純テキスト形。
+def material_text_for(
+    content: str, tags: Sequence[str], metadata: Any = None,
+) -> str:
+    """本文とタグ (と metadata) から材料テキストを決める、長さ規則の純テキスト形。
 
     Message オブジェクトを持たない呼び出し側 (退場計画 sea/eviction_plan.py の
     提示 payload) と :func:`material_text` が**同じ一枚の規則**を共有するための
     一点 — 閾値や縮め方をここ以外に二重実装しない (2026-08-29 まはー裁定:
     U 判定の物差しは材料字数)。
+
+    書き手が決まっていない行 (確認待ちの印か、「そのままにする」で確定した行 —
+    ``storage.is_author_unsettled``) は空の材料にする。role=user のまま
+    保存されているが中身は機構の文でありうるので、``[user]`` の発話として
+    編纂に渡さない (docs/intent/system_notice_delivery.md 追補)。行は編纂の
+    対象 (``chronicle_eligibility_filter``) と被覆 (source_ids) には残る —
+    提示に立った行を被覆から外すと、所有者が後で確定したときに被覆の穴が
+    開き、退場の下限「退場したものは編纂されている」の勘定も変わるため。
+    材料の字数も 0 になるので、U の勘定と実際に渡す材料はずれない。
     """
+    if is_author_unsettled(metadata):
+        return ""
     content = content or ""
     if (
         any(t in MECHANISM_TAGS for t in tags)
@@ -235,17 +248,20 @@ def material_text_for(content: str, tags: Sequence[str]) -> str:
     return content
 
 
-def material_len(content: str, tags: Sequence[str]) -> int:
+def material_len(content: str, tags: Sequence[str], metadata: Any = None) -> int:
     """:func:`material_text_for` の字数形 (payload 側の字数勘定用)。"""
-    return len(material_text_for(content, tags))
+    return len(material_text_for(content, tags, metadata))
 
 
 def material_text(msg: Message) -> str:
     """メッセージ 1 行の材料テキスト (長さ規則の適用点)。
 
-    機構名義の行で閾値超えなら決定論の一行。それ以外は本文そのまま。
+    機構名義の行で閾値超えなら決定論の一行。書き手が決まっていない行は空。
+    それ以外は本文そのまま。
     """
-    return material_text_for(msg.content or "", _message_tags(msg))
+    return material_text_for(
+        msg.content or "", _message_tags(msg), getattr(msg, "metadata", None),
+    )
 
 
 def material_chars(msg: Message) -> int:

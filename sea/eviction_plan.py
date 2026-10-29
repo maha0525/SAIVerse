@@ -274,7 +274,7 @@ def material_message_chars(messages: Sequence[Dict[str, Any]]) -> int:
     (閾値・縮んだ一行の長さを二重実装しない)。
     """
     return sum(
-        material_len(str(m.get("content") or ""), _payload_tags(m))
+        material_len(str(m.get("content") or ""), _payload_tags(m), m.get("metadata"))
         for m in messages
     )
 
