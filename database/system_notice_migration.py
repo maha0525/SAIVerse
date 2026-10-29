@@ -535,6 +535,10 @@ def resumption_notice(role: Any, content: Any, metadata: Dict[str, Any]) -> Opti
     条件は全部の AND:
 
     - role=user で、ユーザーの発言の来歴 (:func:`_has_user_utterance_provenance`) を持たない
+    - 書き手の来歴を持つ: metadata に ``schedule_id`` (スケジュールの発火) か ``slot_id``
+      (一日の予定のコマの開始) がある。再開する Pulse の要求の metadata を、旧
+      ``run_meta_user`` がそのまま記録していた。会話の取り込みが本人の発言として
+      保存した行 (同じ文面を貼り付けた発言でありうる) はこれを持たないので、確認待ちに残る
     - 本文の全体が :data:`_RESUMPTION_RE` の形で、引用した「前回のプロンプト」と末尾に
       並べたプロンプトが一字も違わない
     - そのプロンプトが ``<system>`` の包み一つで全体を囲んでいる (元のプロンプトが機構の
@@ -548,6 +552,8 @@ def resumption_notice(role: Any, content: Any, metadata: Dict[str, Any]) -> Opti
     if not isinstance(role, str) or role.lower() != "user":
         return None
     if not isinstance(content, str) or _has_user_utterance_provenance(metadata):
+        return None
+    if metadata.get("schedule_id") is None and not metadata.get("slot_id"):
         return None
     m = _RESUMPTION_RE.fullmatch(content)
     if m is None or m.group("quoted") != m.group("prompt"):

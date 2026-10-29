@@ -349,10 +349,14 @@ def test_old_resumption_rows_become_schedule_notices(db, tmp_path):
     ("from_building", "user", _resumed(_WRAPPED, _WRAPPED), {"building_msg_ref": "b1:b1:3"}),
     # ペルソナの名義の行
     ("assistant", "assistant", _resumed(_WRAPPED, _WRAPPED), {}),
+    # 書き手の来歴 (schedule_id / slot_id) が無い — 会話の取り込みが本人の発言として
+    # 元の時刻で保存した行は、同じ文面を貼り付けた発言でありうる
+    ("imported", "user", _resumed(_WRAPPED, _WRAPPED), None),
 ])
 def test_rows_off_the_resumption_shape_are_not_converted(db, tmp_path, row_id, role, content, extra):
+    meta = {"tags": ["conversation"]} if extra is None else {**_SLOT_META, **extra}
     with closing(sqlite3.connect(str(db))) as conn:
-        _insert(conn, row_id, role, content, {**_SLOT_META, **extra}, created_at=100)
+        _insert(conn, row_id, role, content, meta, created_at=100)
         conn.commit()
 
     _migrate(db, tmp_path, cutover=200)
@@ -360,6 +364,23 @@ def test_rows_off_the_resumption_shape_are_not_converted(db, tmp_path, row_id, r
     new_role, new_content, meta = _rows(db)[row_id]
     assert (new_role, new_content) == (role, content)
     assert SYSTEM_NOTICE_KEY not in meta
+
+
+def test_resumption_of_a_schedule_is_converted(db, tmp_path):
+    """スケジュールの発火を再開した行 (``schedule_id`` を持つ。要求の metadata が ``with`` を
+    ``user`` で上書きしていた世代もある) も同じく変換する。"""
+    schedule = "<system>\nスケジュールの実行時刻です。\n朝の散歩\n</system>"
+    meta = {"with": ["user"], "schedule_id": 2, "schedule_type": "periodic", "tags": ["conversation"]}
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, "sched", "user", _resumed(schedule, schedule), dict(meta), created_at=100)
+        conn.commit()
+
+    _migrate(db, tmp_path, cutover=200)
+
+    inner = "スケジュールの実行時刻です。\n朝の散歩"
+    assert _rows(db)["sched"] == (
+        "system", f"{_RESUMED_HEAD}{inner}\n\n{inner}", {**meta, SYSTEM_NOTICE_KEY: "schedule"},
+    )
 
 
 def test_resumption_rows_after_the_cutover_stay_for_review(db, tmp_path):
