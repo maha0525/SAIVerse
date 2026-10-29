@@ -23,8 +23,11 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
 1 の印を持たない行のうち、作った側が機構だと言い切れる型 (tool / internal タグ・
 実在する Playbook 名のタグ・退役した子ラインの結果の書き出し・音声入力の案内文) と、
 2 の perception タグ・感情パラメータ変動の知らせを足した。音声入力の案内文の行は、
-通知の行と本文の無い音声の行の二行に分ける (:func:`_queue_voice_split`)。所有者が
-確認待ちの行を確定した記録 (``SYSTEM_NOTICE_REVIEWED_KEY``) を持つ行には触れない。
+通知の行と本文の無い音声の行の二行に分ける (:func:`_queue_voice_split`)。ただし
+元の発言の行 (本体 DB の ``building_messages``) が画面からの送信の印
+``client_message_id`` を持つ行と、元の行を確かめられない行は分けずに確認待ちにする
+(:class:`BuildingSourceRows`)。所有者が確認待ちの行を確定した記録
+(``SYSTEM_NOTICE_REVIEWED_KEY``) を持つ行には触れない。
 
 規則で変換するのは、この環境で新しい形式に切り替わった時刻 (:func:`resolve_cutover`
 — 環境ごとに一度だけ決めて ``cutover.json`` に記録する) より前に作られた行だけ。
@@ -444,6 +447,10 @@ def is_voice_input_notice(body: Optional[str], metadata: Dict[str, Any]) -> bool
     来歴の縛りは掛けない — これはユーザーの音声の発言そのものの行なので、建物
     履歴からの転記の印を持っている。条件は本文が案内文の形・metadata の media に
     音声がある・``source`` が ``_voice`` で終わる、の AND。
+
+    この形はチャットの送信 API の送り手も作れるので、変換するのは元の発言の行が
+    画面からの送信の印を持たないと確かめられた行だけ (:class:`BuildingSourceRows`。
+    確かめるのは変換の手前の :func:`_queue_conversion`)。
     """
     if not isinstance(body, str) or _VOICE_INPUT_NOTICE_RE.fullmatch(body) is None:
         return False
@@ -480,7 +487,8 @@ def classify_tagged_message_v3(
        (呼び出し側が二行に分割する)
 
     1〜4 には来歴の縛り (:func:`_has_user_utterance_provenance`) を AND で掛ける。
-    5 には掛けない。規則 7 (定型の機構テキスト) は、本番の写しで出どころのコードを
+    5 には掛けない (代わりに、変換の手前で元の発言の行が画面からの送信でないことを
+    確かめる — :class:`BuildingSourceRows`)。規則 7 (定型の機構テキスト) は、本番の写しで出どころのコードを
     特定できた文面が無かったので、今は持たない。
     """
     if not starts_with_system_tag(content):
@@ -1075,6 +1083,16 @@ SPLIT_ADDED_TABLE = "messages(音声の行を分けて足した行)"
 #: 二行に分けた後の新しい行が、元の行の直後に並べられない (同じ時刻で後ろの
 #: rowid の行が既にある) ので、変換せずに残した行の理由。
 SPLIT_POSITION_REASON = "同じ時刻の後ろに別の行があり、音声の行を通知の直後に置けない"
+#: 規則 5 に当たったが、元の発言の行 (本体 DB の ``building_messages`` の行 —
+#: :class:`BuildingSourceRows`) が画面からの送信の印 ``client_message_id`` を持つので、
+#: 変換せずに残した行の理由。画面やチャットの送信 API から、人が案内文を真似て音声
+#: つきで送った発言でありうる。
+VOICE_SENT_FROM_SCREEN_REASON = (
+    "音声入力の案内文の形だが、元の発言の行が画面からの送信の印 (client_message_id) を持つ"
+)
+#: 規則 5 に当たったが、元の発言の行を本体 DB で一つに決められなかった (見つからない・
+#: 複数ある・本体 DB を読めない) ので、変換せずに残した行の理由。
+VOICE_SOURCE_UNKNOWN_REASON = "音声入力の案内文の形だが、元の発言の行を本体 DB で確かめられなかった"
 #: 音声入力の行を分けるとき、通知の行に残す metadata の欄。記録の分類の ``tags`` /
 #: ``with`` と、音声がどこを通って届いたかの欄 (中継の名前 ``source``・中継の接続
 #: ``gateway_session_id``・機体 ``vessel_id``)。どれもユーザーの添付でも発言の来歴
@@ -1142,6 +1160,151 @@ def _queue_voice_split(
     result.changes.append(Change(SPLIT_ADDED_TABLE, new_id, match.label, content, ""))
 
 
+#: :class:`BuildingSourceRows` が引くのに使う ``building_messages`` の列。
+_SOURCE_ROW_COLUMNS = frozenset({
+    "id", "building_id", "role", "message_id", "client_message_id", "metadata_json",
+})
+
+
+class BuildingSourceRows:
+    """記憶の行の元になった発言の行 (本体 DB の ``building_messages``) を引く (規則 5 の出どころの条件)。
+
+    規則 5 の形 (案内文・音声の ``media``・``source`` が ``_voice`` で終わる) は、
+    チャットの送信 API の送り手も作れる (``source`` は送り手が書ける欄で、音声は
+    添付として付けられる)。音声入力を中継するアドオン (stackchan・Godot ほか) は
+    ``handle_user_input_stream`` を ``client_message_id`` なしで呼び、画面からの送信は
+    必ず ``client_message_id`` を付ける。だから元の行がこの印を持つかで分ける
+    (:meth:`sent_from_screen`)。
+
+    元の行の引き方:
+
+    - 記憶の行が ``building_msg_ref`` (``"<building_id>:<message_id>"`` —
+      builtin_data/tools/get_building_messages.py の転記が 2026-07-21 から必ず刻む) を
+      持てば、それと ``building_id`` / ``message_id`` が一致する行。``building_id`` に
+      ``:`` が入りうるので、区切りの位置を全部試す。
+    - 持たなければ (転記が印を刻む前の行)、音声の ``media`` の ``uri`` が同じ
+      ``role='user'`` の行。音声のファイル名は受け取るたびに一意に作られる。
+
+    本体 DB は読み取り専用で、最初に引くときに開く。本体 DB が無い・開けない・
+    ``building_messages`` の表か列が無い・引く途中で失敗した場合は、それ以降も
+    含めて「決められない」(None) を返す。
+    """
+
+    def __init__(self, main_db: Optional[Path]) -> None:
+        self._path = main_db
+        self._conn: Optional[sqlite3.Connection] = None
+        self._unavailable = main_db is None
+
+    def __enter__(self) -> "BuildingSourceRows":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _give_up(self, message: str) -> None:
+        LOGGER.warning("[system-notice-migration] %s: %s", message, self._path, exc_info=True)
+        self.close()
+        self._unavailable = True
+
+    def _connection(self) -> Optional[sqlite3.Connection]:
+        if self._unavailable or self._path is None:
+            return None
+        if self._conn is not None:
+            return self._conn
+        try:
+            if not self._path.is_file():
+                self._give_up("main DB for the voice input source check is missing")
+                return None
+            conn = _open_readonly(self._path)
+            usable = _table_exists(conn, "building_messages") and _SOURCE_ROW_COLUMNS <= _columns(
+                conn, "building_messages",
+            )
+        except (OSError, sqlite3.Error):
+            self._give_up("could not open the main DB for the voice input source check")
+            return None
+        if not usable:
+            conn.close()
+            self._give_up("main DB has no building_messages columns for the voice input source check")
+            return None
+        self._conn = conn
+        return conn
+
+    def sent_from_screen(self, metadata: Dict[str, Any]) -> Optional[bool]:
+        """元の行が ``client_message_id`` を持てば True、持たなければ False。
+
+        元の行を一つに決められない (見つからない・複数ある)・本体 DB を読めないときは None。
+        """
+        conn = self._connection()
+        if conn is None:
+            return None
+        try:
+            found = self._find(conn, metadata)
+        except sqlite3.Error:
+            self._give_up("could not read the main DB for the voice input source check")
+            return None
+        if len(found) != 1:
+            return None
+        (client_message_id,) = found.values()
+        return bool(client_message_id)
+
+    @staticmethod
+    def _find(conn: sqlite3.Connection, metadata: Dict[str, Any]) -> Dict[Any, Any]:
+        """元の行の候補 (``id`` → ``client_message_id``)。"""
+        found: Dict[Any, Any] = {}
+        if _BUILDING_MSG_REF_KEY in metadata:
+            ref = metadata.get(_BUILDING_MSG_REF_KEY)
+            if not isinstance(ref, str):
+                return found
+            for i, ch in enumerate(ref):
+                if ch != ":":
+                    continue
+                for row_id, client_message_id in conn.execute(
+                    "SELECT id, client_message_id FROM building_messages "
+                    "WHERE building_id = ? AND message_id = ?",
+                    (ref[:i], ref[i + 1:]),
+                ):
+                    found[row_id] = client_message_id
+            return found
+        media = metadata.get("media")
+        uris = {
+            m.get("uri") for m in media if isinstance(m, dict) and m.get("type") == "audio"
+        } if isinstance(media, list) else set()
+        for uri in uris:
+            if not isinstance(uri, str) or not uri:
+                continue
+            for row_id, client_message_id, raw in conn.execute(
+                "SELECT id, client_message_id, metadata_json FROM building_messages "
+                "WHERE role = 'user' AND instr(metadata_json, ?) > 0",
+                (uri,),
+            ):
+                row_media = _load_json(raw).get("media")
+                if isinstance(row_media, list) and any(
+                    isinstance(m, dict) and m.get("uri") == uri for m in row_media
+                ):
+                    found[row_id] = client_message_id
+        return found
+
+
+def _voice_source_reason(
+    source_rows: Optional[BuildingSourceRows], metadata: Dict[str, Any],
+) -> Optional[str]:
+    """規則 5 の行を変換してよいか。よければ None、だめなら残す理由。
+
+    元の行が ``client_message_id`` を持たない (音声入力を中継するアドオンの発言) と
+    分かったときだけ変換する。持つ・確かめられない (``source_rows`` が無い場合も) ときは
+    確認待ちにする。
+    """
+    sent = source_rows.sent_from_screen(metadata) if source_rows is not None else None
+    if sent is None:
+        return VOICE_SOURCE_UNKNOWN_REASON
+    return VOICE_SENT_FROM_SCREEN_REASON if sent else None
+
+
 def _queue_conversion(
     conn: sqlite3.Connection,
     result: StoreResult,
@@ -1149,6 +1312,8 @@ def _queue_conversion(
     row: Tuple[Any, ...],
     metadata: Dict[str, Any],
     match: _RowMatch,
+    *,
+    source_rows: Optional[BuildingSourceRows] = None,
 ) -> Optional[str]:
     """当たった規則の変換を ``result`` に積む。変換できなければ残す理由を返す。"""
     row_id, role, content, _raw_meta, rowid, created_at = row
@@ -1164,6 +1329,9 @@ def _queue_conversion(
     if match.body is None:
         return AMBIGUOUS_TAGS_REASON
     if match.kind == VOICE_INPUT_NOTICE_KIND:
+        held = _voice_source_reason(source_rows, metadata)
+        if held is not None:
+            return held
         if not _split_position_is_free(conn, cols, rowid, created_at):
             return SPLIT_POSITION_REASON
         _queue_voice_split(result, cols, row_id, content, metadata, match)
@@ -1183,6 +1351,7 @@ def scan_persona_conn(
     rescan_from_version: Optional[int] = None,
     playbook_names: Optional[AbstractSet[str]] = None,
     cutover: Optional[int] = None,
+    source_rows: Optional[BuildingSourceRows] = None,
 ) -> None:
     """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
 
@@ -1212,6 +1381,10 @@ def scan_persona_conn(
     ``playbook_names`` を渡さなければ、同梱の Playbook のファイルだけから読む
     (欠けなく読めたかは :func:`known_playbook_names`。呼び出し側の
     :func:`migrate_persona_db` は自分で読んで確かめる)。
+
+    ``source_rows`` は規則 5 の行の元の発言の行を引く手段 (:class:`BuildingSourceRows`)。
+    渡さなければ、規則 5 の行は元の行を確かめられないので確認待ちにする
+    (:data:`VOICE_SOURCE_UNKNOWN_REASON`)。
     """
     if not _table_exists(conn, "messages"):
         return
@@ -1224,7 +1397,7 @@ def scan_persona_conn(
     _scan_persona_messages(
         conn, result, cols,
         rescan_from_version=rescan_from_version, playbook_names=playbook_names,
-        cutover=cutover,
+        cutover=cutover, source_rows=source_rows,
     )
     _scan_persona_other_columns(
         conn, result, cols, count_memorize_candidates=rescan_from_version is None,
@@ -1240,6 +1413,7 @@ def _scan_persona_messages(
     rescan_from_version: Optional[int],
     playbook_names: AbstractSet[str],
     cutover: Optional[int] = None,
+    source_rows: Optional[BuildingSourceRows] = None,
 ) -> None:
     """messages の行を判定して、変換と確認待ちの印を ``result`` に積む。
 
@@ -1319,7 +1493,7 @@ def _scan_persona_messages(
                 result.review_marks_deferred = True
             continue
         reason = (
-            _queue_conversion(conn, result, cols, row, metadata, match)
+            _queue_conversion(conn, result, cols, row, metadata, match, source_rows=source_rows)
             if match is not None else None
         )
         if match is not None and reason is None:
@@ -1724,12 +1898,17 @@ def migrate_persona_db(
     playbook_names: Optional[AbstractSet[str]] = None,
     hold_marker: Sequence[str] = (),
     cutover: Optional[int] = None,
+    source_rows: Optional[BuildingSourceRows] = None,
 ) -> StoreResult:
     """一つのペルソナの記憶 DB を移行する。
 
     ``cutover`` は新しい形式に切り替わった時刻 (epoch 秒 — :func:`resolve_cutover`)。
     それより後に作られた行は変換しない (:func:`scan_persona_conn`)。起動の入口
     (:func:`run_migration`) は必ず渡す。
+
+    ``source_rows`` は規則 5 の行の元の発言の行を本体 DB から引く手段
+    (:class:`BuildingSourceRows`)。起動の入口は必ず渡す。渡さなければ規則 5 の行は
+    確認待ちになる。
 
     ``hold_marker`` は、完了の印を立てる前提が欠けている理由 (``MARKER_HELD_*``)。
     一つでもあれば、変換と確認待ちの印だけをコミットして完了の印は書かない
@@ -1777,7 +1956,7 @@ def migrate_persona_db(
             result.rescan_from_version = done
             scan_persona_conn(
                 conn, result, rescan_from_version=done, playbook_names=playbook_names,
-                cutover=cutover,
+                cutover=cutover, source_rows=source_rows,
             )
             return result
 
@@ -1796,7 +1975,7 @@ def migrate_persona_db(
             result.rescan_from_version = done
             scan_persona_conn(
                 conn, result, rescan_from_version=done, playbook_names=playbook_names,
-                cutover=cutover,
+                cutover=cutover, source_rows=source_rows,
             )
             if result.updates:
                 backup = output_dir / persona_id / _snapshot_name("memory.db", stamp)
@@ -2823,27 +3002,31 @@ def run_migration(
         frozenset() if results_dir is None
         else _unsettled_staged_persona_ids(output_dir, current_run=results_dir)
     )
-    for persona_id, persona_db in _iter_persona_dbs(saiverse_home):
-        held = list(held_for_all)
-        if unsettled is None or persona_id in unsettled:
-            held.append(MARKER_HELD_STAGED_RESULT)
-        try:
-            results.append(migrate_persona_db(
-                persona_db, persona_id=persona_id, output_dir=output_dir,
-                dry_run=dry_run, stamp=stamp, results_dir=results_dir,
-                playbook_names=playbook_names, hold_marker=held, cutover=cutover.epoch,
-            ))
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error(
-                "[system-notice-migration] persona %s migration failed", persona_id,
-                exc_info=True,
-            )
-            failed = StoreResult(
-                label=f"ペルソナ {persona_id}", path=str(persona_db), persona=True,
-                error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
-            )
-            results.append(failed)
-            _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
+    # 規則 5 の行の元の発言の行は本体 DB から引く (本体 DB が無ければ、規則 5 の行は
+    # 確認待ちになる)
+    with BuildingSourceRows(db_path) as source_rows:
+        for persona_id, persona_db in _iter_persona_dbs(saiverse_home):
+            held = list(held_for_all)
+            if unsettled is None or persona_id in unsettled:
+                held.append(MARKER_HELD_STAGED_RESULT)
+            try:
+                results.append(migrate_persona_db(
+                    persona_db, persona_id=persona_id, output_dir=output_dir,
+                    dry_run=dry_run, stamp=stamp, results_dir=results_dir,
+                    playbook_names=playbook_names, hold_marker=held, cutover=cutover.epoch,
+                    source_rows=source_rows,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.error(
+                    "[system-notice-migration] persona %s migration failed", persona_id,
+                    exc_info=True,
+                )
+                failed = StoreResult(
+                    label=f"ペルソナ {persona_id}", path=str(persona_db), persona=True,
+                    error=f"移行に失敗しました (変更は巻き戻し済み): {exc}",
+                )
+                results.append(failed)
+                _try_write_result_json(results_dir, f"persona_{persona_id}", failed)
 
     written: Optional[Path] = None
     if results_dir is None:

@@ -6,7 +6,9 @@ docs/intent/system_notice_delivery.md「追補 (2026-10-29)」の「移行の規
 - 規則 1〜4 (tool / internal / 実在する Playbook 名 / 退役した子ラインの結果の
   書き出し) は来歴の縛りとの AND で、タグ入りの role=user 行を通知にする。
 - 規則 5 (音声入力の案内文) は来歴の縛りを掛けず、通知の行と本文の無い音声の行に
-  分ける。音声の行は通知の直後に並び、ユーザー由来の metadata を持つ。
+  分ける。音声の行は通知の直後に並び、ユーザー由来の metadata を持つ。ここでは
+  元の発言の行がアドオンの発言の形 (``client_message_id`` 無し) の本体 DB を渡す
+  (出どころの条件は tests/test_system_notice_migration_voice_source.py)。
 - 規則 6 (印の無い role=system 行の perception タグ・感情パラメータ変動の知らせ)。
 - 変換した行からは確認待ちの印が理由を問わず外れる。
 - 所有者が確定した行 (``SYSTEM_NOTICE_REVIEWED_KEY``) は印も変換も受けない。
@@ -30,6 +32,7 @@ from database.system_notice_migration import (
     UNCLASSIFIED_REASON,
     UNKNOWN_SYSTEM_REASON,
     VOICE_INPUT_NOTICE_KIND,
+    BuildingSourceRows,
     known_playbook_names,
     marker_rules_version,
     migrate_persona_db,
@@ -110,10 +113,39 @@ def db(tmp_path):
     return path
 
 
+def _addon_source_db(tmp_path: Path) -> Path:
+    """``_VOICE_META`` の ``building_msg_ref`` が指す元の発言の行を持つ本体 DB。
+
+    音声入力を中継するアドオンの発言の形 (``client_message_id`` 無し)。規則 5 の出どころの
+    条件そのものは tests/test_system_notice_migration_voice_source.py。
+    """
+    path = tmp_path / "source_main.db"
+    if path.exists():
+        return path
+    from sqlalchemy import create_engine
+
+    from database.models import BuildingMessage
+
+    engine = create_engine(f"sqlite:///{path}")
+    BuildingMessage.__table__.create(engine)
+    engine.dispose()
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute(
+            "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
+            "heard_by, ingested_by, metadata_json, message_id) "
+            "VALUES ('b1', 7, 'user', ?, '2026-09-01T00:00:00+00:00', '[]', '[]', ?, 'b1:7')",
+            (f"<system>{_VOICE_TEXT}</system>", json.dumps(_VOICE_META, ensure_ascii=False)),
+        )
+        conn.commit()
+    return path
+
+
 def _migrate(db: Path, tmp_path: Path):
-    return migrate_persona_db(
-        db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP, playbook_names=PLAYBOOKS,
-    )
+    with BuildingSourceRows(_addon_source_db(tmp_path)) as source_rows:
+        return migrate_persona_db(
+            db, persona_id="p1", output_dir=tmp_path / "out", stamp=STAMP,
+            playbook_names=PLAYBOOKS, source_rows=source_rows,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -163,6 +163,33 @@ def _recorded(home: Path) -> datetime:
     return datetime.fromisoformat(data["cutover"])
 
 
+def _source_main_db(home: Path) -> Path:
+    """``_VOICE_META`` の ``building_msg_ref`` が指す元の発言の行だけを持つ本体 DB。
+
+    音声入力を中継するアドオンの発言の形 (``client_message_id`` 無し) なので、切り替わりの
+    前の音声の行は二行に分かれる (規則 5 の出どころの条件 — 本体 DB が無いと確認待ちに
+    なる)。本文はタグで始めない (本体 DB の走査の結果に混ぜない)。
+    """
+    from sqlalchemy import create_engine
+
+    from database.models import BuildingMessage
+
+    path = home / "user_data" / "database" / "saiverse.db"
+    path.parent.mkdir(parents=True)
+    engine = create_engine(f"sqlite:///{path}")
+    BuildingMessage.__table__.create(engine)
+    engine.dispose()
+    with closing(sqlite3.connect(str(path))) as conn:
+        conn.execute(
+            "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
+            "heard_by, ingested_by, metadata_json, message_id) "
+            "VALUES ('b1', 7, 'user', '音声', '2026-09-01T00:00:00+00:00', '[]', '[]', ?, 'b1:7')",
+            (json.dumps(_VOICE_META, ensure_ascii=False),),
+        )
+        conn.commit()
+    return path
+
+
 def _assert_held_for_review(rows, row_id, before):
     """切り替わりの後の行: role・本文・paired_action_text はそのまま、確認待ちの印だけが足される。"""
     role, content, meta, paired = rows[row_id]
@@ -206,9 +233,10 @@ def test_a_new_memory_without_a_marker_does_not_convert_rows_after_the_cutover(t
     """完了の印の無い記憶 (改修の後に作ったペルソナ) は全体を走査するが、後の行は変換しない。"""
     _record_cutover(tmp_path)
     db = _make_persona(tmp_path)
+    main = _source_main_db(tmp_path)
     before = _rows(db)
 
-    (result,), report = run_migration(db_path=None, saiverse_home=tmp_path)
+    (_main, result), report = run_migration(db_path=main, saiverse_home=tmp_path)
 
     rows = _rows(db)
     _assert_pre_rows_converted(rows)
@@ -233,9 +261,10 @@ def test_a_rescan_after_a_rules_version_bump_does_not_convert_rows_after_the_cut
     _record_cutover(tmp_path)
     db = _make_persona(tmp_path)
     _set_marker(db, "v2 2026-10-28T04:00:00+00:00")
+    main = _source_main_db(tmp_path)
     before = _rows(db)
 
-    (result,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+    (_main, result), _report = run_migration(db_path=main, saiverse_home=tmp_path)
 
     assert result.rescan_from_version == 2
     rows = _rows(db)
@@ -254,16 +283,17 @@ def test_a_rescan_after_a_held_marker_does_not_convert_rows_after_the_cutover(
     monkeypatch.setattr(mig, "_builtin_playbooks_dir", lambda: root)
     _record_cutover(tmp_path)
     db = _make_persona(tmp_path)
+    main = _source_main_db(tmp_path)
     before = _rows(db)
 
     for _ in range(2):
-        (held,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+        (_main, held), _report = run_migration(db_path=main, saiverse_home=tmp_path)
         assert held.marker_held == [mig.MARKER_HELD_PLAYBOOK_NAMES]
         assert _marker(db) is None
         _assert_post_rows_untouched(_rows(db), before)
 
     (root / "broken.json").write_text(json.dumps({"name": "x"}), encoding="utf-8")
-    (done,), _report = run_migration(db_path=None, saiverse_home=tmp_path)
+    (_main, done), _report = run_migration(db_path=main, saiverse_home=tmp_path)
     assert not done.marker_held
     rows = _rows(db)
     _assert_pre_rows_converted(rows)
