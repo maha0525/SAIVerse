@@ -10,8 +10,12 @@ import { AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
 // 確認待ちの記憶の行があるあいだサーバーが置く警告には、確定の画面を開くボタンを
 // 付ける。この警告を閉じても、設定の「便利機能」の入口 (SystemNoticeReviewEntry)
-// から同じ画面を開ける。
-import SystemNoticeReviewModal, { NOTICE_REVIEW_ALERT_ID } from "./SystemNoticeReviewModal";
+// から同じ画面を開ける。どちらから確定しても NOTICE_REVIEW_CHANGED_EVENT が出て、
+// バナーと入口の両方が警告を取り直す。
+import SystemNoticeReviewModal, {
+    NOTICE_REVIEW_ALERT_ID,
+    NOTICE_REVIEW_CHANGED_EVENT,
+} from "./SystemNoticeReviewModal";
 
 interface SystemAlert {
     id: string;
@@ -54,7 +58,13 @@ export default function SystemAlertBanner() {
 
     useEffect(() => {
         fetchAlerts();
+        window.addEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
+        return () => window.removeEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
     }, []);
+
+    const announceReviewChanged = () => {
+        window.dispatchEvent(new Event(NOTICE_REVIEW_CHANGED_EVENT));
+    };
 
     // 読めなくなった古い履歴ファイルを脇へ移す。ファイルが移っていること自体が
     // 「ユーザーが認識した」の記録になるので、確認済みフラグは持たない。
@@ -89,7 +99,7 @@ export default function SystemAlertBanner() {
     const reviewModal = reviewOpen ? (
         <SystemNoticeReviewModal
             onClose={() => setReviewOpen(false)}
-            onChanged={fetchAlerts}
+            onChanged={announceReviewChanged}
         />
     ) : null;
     if (visibleAlerts.length === 0) return reviewModal;

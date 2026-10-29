@@ -8695,6 +8695,10 @@
     "ja": "添付のあるメッセージは、添付ごとシステムのものになってしまうため「正式に変換」を選べません。",
     "en": "Messages with attachments cannot be converted to official, because the attachments would also become the system's."
   },
+  "components.SystemNoticeReviewModal.systemSplitNote": {
+    "ja": "音声入力の案内文です。「正式に変換」を選ぶと、案内文をシステム通知にし、音声はユーザーの発言として残します。",
+    "en": "This is the notice text sent with a voice input. \"Convert to official\" turns the notice text into a system notice and keeps the audio as the user's message."
+  },
   "components.SystemNoticeReviewModal.kindImage": {
     "ja": "画像 {count} 件",
     "en": "{count} image(s)"

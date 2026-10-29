@@ -40,6 +40,7 @@ function harness(initialAlerts) {
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
         if (name === './SystemNoticeReviewModal') return {
             __esModule: true, default: ReviewModal, NOTICE_REVIEW_ALERT_ID: 'system_notice_review_pending',
+            NOTICE_REVIEW_CHANGED_EVENT: 'saiverse:system-notice-review-changed',
         };
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
@@ -58,7 +59,14 @@ function harness(initialAlerts) {
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
-    global.window = { confirm: () => confirmed, alert: message => notices.push(message) };
+    const listeners = new Map();
+    global.window = {
+        confirm: () => confirmed,
+        alert: message => notices.push(message),
+        addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+        removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
+        dispatchEvent(event) { (listeners.get(event.type) || []).forEach(fn => fn(event)); return true; },
+    };
     function render() {
         cursor = 0;
         const tree = module.exports.default();

@@ -201,6 +201,22 @@ const posts = h => h.requests.filter(r => r.method === 'POST');
         && s.includes('components.SystemNoticeReviewModal.kindAudio')));
     assert.ok(strings.includes('saiverse://audio/voice.ogg'));
     assert.ok(strings.includes('components.SystemNoticeReviewModal.attachmentsNoSystem'));
+    assert.equal(strings.includes('components.SystemNoticeReviewModal.systemSplitNote'), false);
+
+    // A voice-input group whose "convert to official" splits the row into a
+    // notice and the user's audio says so, instead of the attachments note.
+    const splitActions = ['keep', 'system', 'user', 'delete'];
+    const voiceSplit = { ...withAudio, group_id: 'g4', actions: splitActions, system_split: true,
+        rows: [row('a', 'm5', splitActions, 'user', {
+            attachments: [{ kind: 'audio', ref: 'saiverse://audio/voice2.ogg' }],
+            attachment_counts: { audio: 1 }, system_split: true,
+        })] };
+    h = harness(listing([voiceSplit]));
+    tree = await h.mount();
+    const splitStrings = all(tree, node => node.type === 'span' || node.type === 'p' || node.type === 'li')
+        .map(node => node.props.children).flat().filter(x => typeof x === 'string');
+    assert.ok(splitStrings.includes('components.SystemNoticeReviewModal.systemSplitNote'));
+    assert.equal(splitStrings.includes('components.SystemNoticeReviewModal.attachmentsNoSystem'), false);
 
     // While some personas' memories could not be read, settling the last visible
     // row does not close the modal; the unreadable personas are named and a retry

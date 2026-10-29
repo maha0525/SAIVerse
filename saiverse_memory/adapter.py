@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1900,12 +1901,21 @@ class SAIMemoryAdapter:
         書くまでの間に別の書き手 (実行中の Pulse・記憶ブラウザの編集) が
         その行を変えることはない。
 
-        ``rewrite`` は ``{"role", "content", "metadata", "line_role", "created_at"}`` の辞書
-        (metadata は辞書として読めたときだけ辞書、それ以外は None) を受け取る。
+        ``rewrite`` は ``{"role", "content", "metadata", "line_role", "created_at",
+        "insert_after_free"}`` の辞書 (metadata は辞書として読めたときだけ辞書、それ以外は
+        None) を受け取る。``insert_after_free`` は引数なしの関数で、この行の直後に新しい
+        行を並べられるか (同じ created_at で後ろの rowid の行が無いか —
+        database/system_notice_migration.py の ``split_position_is_free``) を、同じ取引の
+        中で読んで返す。
         返り値:
 
         - ``{"role": ..., "content": ..., "metadata": ...}``: その 3 列を書き換える。
-          ``"line_role"`` の鍵があれば、その列も書き換える
+          ``"line_role"`` の鍵があれば、その列も書き換える。``"insert_after"`` の鍵
+          (``{"role", "content", "metadata", "line_role"}``、``line_role`` が None なら
+          この行の値を写す) があれば、同じ取引の中で新しい行を一つ、この行の直後
+          (同じ created_at・後ろの rowid) に足す。足す文と写す列は移行の二行分割と
+          同じ ``split_insert_statement``、id は storage.py の ``add_message`` と同じ ``uuid4``。
+          直後に並べられないときは ``RuntimeError`` で取引ごと巻き戻す
         - :attr:`MESSAGE_DELETE`: 行とその埋め込みを消す (:meth:`delete_message` と同じ範囲)
         - ``None``: 何も書かない
 
@@ -1920,14 +1930,23 @@ class SAIMemoryAdapter:
         """
         if not self._ready:
             return "unavailable"
+        from database.system_notice_migration import split_insert_statement, split_position_is_free
+
         with immediate_transaction(self.conn, self._db_lock):
             row = self.conn.execute(  # type: ignore[attr-defined]
-                "SELECT role, content, metadata, line_role, created_at FROM messages WHERE id=?",
+                "SELECT role, content, metadata, line_role, created_at, rowid FROM messages WHERE id=?",
                 (message_id,),
             ).fetchone()
             if row is None:
                 return "missing"
-            role, content, raw_meta, line_role, created_at = row
+            role, content, raw_meta, line_role, created_at, rowid = row
+            cols = {
+                r[1] for r in self.conn.execute("PRAGMA table_info(messages)").fetchall()  # type: ignore[attr-defined]
+            }
+
+            def _insert_after_free() -> bool:
+                return split_position_is_free(self.conn, cols, rowid, created_at)  # type: ignore[arg-type]
+
             metadata: Optional[Dict[str, Any]] = None
             if raw_meta:
                 try:
@@ -1939,6 +1958,7 @@ class SAIMemoryAdapter:
             result = rewrite({
                 "role": role, "content": content, "metadata": metadata,
                 "line_role": line_role, "created_at": created_at,
+                "insert_after_free": _insert_after_free,
             })
             if result is None:
                 return "unchanged"
@@ -1947,6 +1967,11 @@ class SAIMemoryAdapter:
                 self.conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
                 return "deleted"
             new_meta = result.get("metadata")
+            insert = result.get("insert_after")
+            if insert is not None and not _insert_after_free():
+                raise RuntimeError(
+                    f"cannot place a new row directly after message {message_id}"
+                )
             self.conn.execute(  # type: ignore[attr-defined]
                 "UPDATE messages SET role=?, content=?, metadata=? WHERE id=?",
                 (
@@ -1961,6 +1986,16 @@ class SAIMemoryAdapter:
                     "UPDATE messages SET line_role=? WHERE id=?",
                     (result["line_role"], message_id),
                 )
+            if insert is not None:
+                insert_meta = insert.get("metadata")
+                sql, params = split_insert_statement(
+                    cols, str(uuid.uuid4()), message_id,
+                    role=insert["role"],
+                    content=insert["content"],
+                    metadata_json=json.dumps(insert_meta, ensure_ascii=False) if insert_meta else None,
+                    line_role=insert.get("line_role"),
+                )
+                self.conn.execute(sql, params)  # type: ignore[attr-defined]
             return "updated"
 
     def delete_thread(self, thread_id: str) -> bool:

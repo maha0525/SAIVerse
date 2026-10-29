@@ -1134,11 +1134,7 @@ def _classify_persona_row(
     from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
     if starts_with_system_tag(content):
-        if (
-            isinstance(role, str) and role.lower() == "user"
-            and _speaker_has_attachments(role, metadata)
-            and is_voice_input_notice(strip_system_tags(content), metadata)
-        ):
+        if is_voice_split_row(role, content, metadata):
             return _RowMatch(
                 VOICE_INPUT_NOTICE_KIND, VOICE_INPUT_NOTICE_KIND, strip_system_tags(content), 3,
             )
@@ -1198,11 +1194,13 @@ VOICE_SOURCE_UNKNOWN_REASON = "音声入力の案内文の形だが、元の発�
 _VOICE_NOTICE_KEPT_KEYS = ("tags", "with", "source", "gateway_session_id", "vessel_id")
 
 
-def _split_position_is_free(conn: sqlite3.Connection, cols: set, rowid: Any, created_at: Any) -> bool:
+def split_position_is_free(conn: sqlite3.Connection, cols: AbstractSet[str], rowid: Any, created_at: Any) -> bool:
     """新しく足す行 (元の行と同じ created_at、末尾の rowid) が元の行の直後に並ぶか。
 
     記憶の読み出しは created_at, rowid の順に並べる。同じ created_at で元の行より
     後ろの rowid の行が (どのスレッドにでも) あると、足した行はその後ろに並ぶ。
+    ``cols`` は messages の列の名前。移行と確認の画面の二行分割
+    (saiverse/system_notice_review.py) が同じ判定を使う。
     """
     if "created_at" in cols:
         row = conn.execute(
@@ -1212,6 +1210,107 @@ def _split_position_is_free(conn: sqlite3.Connection, cols: set, rowid: Any, cre
     else:
         row = conn.execute("SELECT 1 FROM messages WHERE rowid > ? LIMIT 1", (rowid,)).fetchone()
     return row is None
+
+
+def is_voice_split_row(role: Any, content: Any, metadata: Optional[Dict[str, Any]]) -> bool:
+    """規則 5 の二行分割の対象の形か (role=user・本文が包みで始まる・発話者の添付を持つ・
+    剥がした本文と metadata が :func:`is_voice_input_notice`)。
+
+    移行の判定 (:func:`_classify_persona_row`) と、確認の画面の「正式に変換」
+    (saiverse/system_notice_review.py の ``allowed_actions``) が同じ関数を使う。
+    元の発言の行が画面からの送信かは見ない (移行は変換の手前で別に確かめ、確認の
+    画面では所有者が見て決める)。
+    """
+    if not isinstance(metadata, dict):
+        return False
+    return (
+        isinstance(role, str) and role.lower() == "user"
+        and starts_with_system_tag(content)
+        and _speaker_has_attachments(role, metadata)
+        and is_voice_input_notice(strip_system_tags(content), metadata)
+    )
+
+
+def voice_split_metadata(
+    metadata: Dict[str, Any], line_role: Any, kind: str = VOICE_INPUT_NOTICE_KIND,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[str]]:
+    """規則 5 の二行分割の、通知の行と音声の行の metadata と、音声の行の line_role。
+
+    返り値は ``(notice_meta, user_meta, user_line_role)``。``user_line_role`` が None の
+    ときは元の行の line_role をそのまま写す。移行 (:func:`_queue_voice_split`) と確認の
+    画面の「正式に変換」(saiverse/system_notice_review.py) が同じ関数を使う。
+
+    通知の metadata には、音声入力を中継した機構が書いた欄
+    (:data:`_VOICE_NOTICE_KEPT_KEYS`) と系統の印 ``__system_notice__`` (``kind``) だけを
+    置く — 添付 (``media``・``images``・``documents`` と、その項目の説明・アイテムの
+    参照)、ユーザーの発言の来歴 (建物履歴からの転記の印 ``building_msg_ref`` など)、
+    それに出どころの分からない欄は、ユーザーの持ち物として音声の行にだけ置く。添付が
+    通知にも残ると、ユーザーの画像や文書が機構の通知の添付物として二重に届く
+    (不変条件 7)。音声の行の metadata は元の行の metadata (確認待ちの印を除く全部)。
+
+    音声の行は実会話 (storage.py の ``filter_real_conversation_ids``) に入る形にする:
+    元の行の tags のうち ``MECHANISM_TAGS`` に入るものは写さず、元の行の line_role が
+    ``CHRONICLE_EXCLUDED_LINE_ROLES`` に入るなら ``USER_LINE_ROLE`` にする。外したものは
+    音声の行の ``REVIEW_CLEARED_KEY`` に残す (saiverse/system_notice_review.py の
+    ``ACTION_USER`` と同じ形)。
+    """
+    from sai_memory.memory.storage import (
+        CHRONICLE_EXCLUDED_LINE_ROLES,
+        MECHANISM_TAGS,
+        SYSTEM_NOTICE_KEY,
+        SYSTEM_NOTICE_REVIEW_KEY,
+    )
+    from saiverse.system_notice_review import REVIEW_CLEARED_KEY, USER_LINE_ROLE
+
+    notice_meta = {k: metadata[k] for k in _VOICE_NOTICE_KEPT_KEYS if k in metadata}
+    notice_meta[SYSTEM_NOTICE_KEY] = kind
+    user_meta = {k: v for k, v in metadata.items() if k != SYSTEM_NOTICE_REVIEW_KEY}
+    cleared: Dict[str, Any] = {}
+    tags = user_meta.get("tags")
+    if isinstance(tags, list):
+        removed = [t for t in tags if t in MECHANISM_TAGS]
+        if removed:
+            user_meta["tags"] = [t for t in tags if t not in MECHANISM_TAGS]
+            cleared["tags"] = removed
+    user_line_role: Optional[str] = None
+    if line_role in CHRONICLE_EXCLUDED_LINE_ROLES:
+        user_line_role = USER_LINE_ROLE
+        cleared["line_role"] = line_role
+    if cleared:
+        user_meta[REVIEW_CLEARED_KEY] = cleared
+    return notice_meta, user_meta, user_line_role
+
+
+def split_insert_statement(
+    cols: AbstractSet[str],
+    new_id: str,
+    source_id: Any,
+    *,
+    role: str,
+    content: str,
+    metadata_json: Optional[str],
+    line_role: Optional[str] = None,
+) -> Tuple[str, Tuple[Any, ...]]:
+    """元の行 (``source_id``) の直後に並ぶ新しい行を足す SQL と引数。
+
+    行の並びと所属を決める列 (:data:`_SPLIT_COPIED_COLUMNS` のうち ``cols`` にあるもの)
+    は元の行から写す。``line_role`` を渡したときは写さずにその値を書く。移行の
+    二行分割と、確認の画面の二行分割 (``SAIMemoryAdapter.rewrite_message`` の
+    ``insert_after``) が同じ文を使う。並びが元の行の直後になるかは
+    :func:`split_position_is_free` で先に確かめること。
+    """
+    copied = [c for c in _SPLIT_COPIED_COLUMNS if c in cols]
+    extra_cols = extra_vals = ""
+    extra_params: Tuple[Any, ...] = ()
+    if line_role is not None and "line_role" in cols:
+        copied.remove("line_role")
+        extra_cols, extra_vals, extra_params = ", line_role", ", ?", (line_role,)
+    copied_sql = "".join(f", {c}" for c in copied)
+    return (
+        f"INSERT INTO messages (id, role, content, metadata{extra_cols}{copied_sql}) "
+        f"SELECT ?, ?, ?, ?{extra_vals}{copied_sql} FROM messages WHERE id = ?",
+        (new_id, role, content, metadata_json, *extra_params, source_id),
+    )
 
 
 def _queue_voice_split(
@@ -1226,63 +1325,26 @@ def _queue_voice_split(
     """音声入力の行を、通知の行 (元の行) と本文の無い音声の行 (新しい行) に分ける。
 
     元の行はその場で role=system の通知にする (タグを剥がした案内文、
-    ``__system_notice__``)。通知の metadata には、音声入力を中継した機構が書いた欄
-    (:data:`_VOICE_NOTICE_KEPT_KEYS`) だけを残す — 添付 (``media``・``images``・
-    ``documents`` と、その項目の説明・アイテムの参照)、ユーザーの発言の来歴
-    (建物履歴からの転記の印 ``building_msg_ref`` など)、それに出どころの分からない
-    欄は、ユーザーの持ち物として新しい行にだけ置く。添付が通知にも残ると、ユーザーの
-    画像や文書が機構の通知の添付物として二重に届く (不変条件 7)。新しい行は
-    role=user・本文 ``""`` で、元の行の metadata (確認待ちの印を除く全部) を持つ。
-    id は ``add_message`` と同じく ``uuid4``。本文が空なので、``add_message`` を呼ぶ
-    記憶の書き込み (saiverse_memory/adapter.py) と同じく埋め込みの行は作らない。
-
-    新しい行は実会話 (storage.py の ``filter_real_conversation_ids``) に入る形にする:
-    元の行の tags のうち ``MECHANISM_TAGS`` に入るものは新しい行に写さず、元の行の
-    line_role が ``CHRONICLE_EXCLUDED_LINE_ROLES`` に入るなら新しい行は
-    ``USER_LINE_ROLE`` にする。外したものは新しい行の ``REVIEW_CLEARED_KEY`` に残す
-    (saiverse/system_notice_review.py の ``ACTION_USER`` と同じ形)。通知の行 (元の行)
-    の tags と line_role はそのまま。
+    ``__system_notice__``)。新しい行は role=user・本文 ``""``。両方の metadata と
+    新しい行の line_role は :func:`voice_split_metadata`、新しい行を足す文は
+    :func:`split_insert_statement` (確認の画面の「正式に変換」と共有)。通知の行
+    (元の行) の tags と line_role はそのまま。id は ``add_message`` と同じく
+    ``uuid4``。本文が空なので、``add_message`` を呼ぶ記憶の書き込み
+    (saiverse_memory/adapter.py) と同じく埋め込みの行は作らない。
     """
-    from sai_memory.memory.storage import (
-        CHRONICLE_EXCLUDED_LINE_ROLES,
-        MECHANISM_TAGS,
-        SYSTEM_NOTICE_KEY,
-        SYSTEM_NOTICE_REVIEW_KEY,
-    )
-    from saiverse.system_notice_review import REVIEW_CLEARED_KEY, USER_LINE_ROLE
-
-    notice_meta = {k: metadata[k] for k in _VOICE_NOTICE_KEPT_KEYS if k in metadata}
-    notice_meta[SYSTEM_NOTICE_KEY] = match.kind
-    user_meta = {k: v for k, v in metadata.items() if k != SYSTEM_NOTICE_REVIEW_KEY}
-    cleared: Dict[str, Any] = {}
-    tags = user_meta.get("tags")
-    if isinstance(tags, list):
-        removed = [t for t in tags if t in MECHANISM_TAGS]
-        if removed:
-            user_meta["tags"] = [t for t in tags if t not in MECHANISM_TAGS]
-            cleared["tags"] = removed
-    copied = [c for c in _SPLIT_COPIED_COLUMNS if c in cols]
+    line_role = None
     if "line_role" in cols:
         row = conn.execute("SELECT line_role FROM messages WHERE id = ?", (row_id,)).fetchone()
         line_role = row[0] if row is not None else None
-        if line_role in CHRONICLE_EXCLUDED_LINE_ROLES:
-            copied.remove("line_role")
-            cleared["line_role"] = line_role
-    if cleared:
-        user_meta[REVIEW_CLEARED_KEY] = cleared
+    notice_meta, user_meta, user_line_role = voice_split_metadata(metadata, line_role, match.kind)
     new_id = str(uuid.uuid4())
-    copied_sql = "".join(f", {c}" for c in copied)
-    extra_cols = ", line_role" if "line_role" in cleared else ""
-    extra_vals = ", ?" if "line_role" in cleared else ""
-    extra_params = (USER_LINE_ROLE,) if "line_role" in cleared else ()
     result.updates.append((
         "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
         (match.body, _dump_json(notice_meta), row_id),
     ))
-    result.updates.append((
-        f"INSERT INTO messages (id, role, content, metadata{extra_cols}{copied_sql}) "
-        f"SELECT ?, 'user', '', ?{extra_vals}{copied_sql} FROM messages WHERE id = ?",
-        (new_id, _dump_json(user_meta), *extra_params, row_id),
+    result.updates.append(split_insert_statement(
+        cols, new_id, row_id,
+        role="user", content="", metadata_json=_dump_json(user_meta), line_role=user_line_role,
     ))
     result.changes.append(Change("messages", str(row_id), match.label, content, match.body or ""))
     result.changes.append(Change(SPLIT_ADDED_TABLE, new_id, match.label, content, ""))
@@ -1555,7 +1617,7 @@ def _queue_conversion(
         held = _voice_source_reason(source_rows, metadata)
         if held is not None:
             return held
-        if not _split_position_is_free(conn, cols, rowid, created_at):
+        if not split_position_is_free(conn, cols, rowid, created_at):
             return SPLIT_POSITION_REASON
         _queue_voice_split(conn, result, cols, row_id, content, metadata, match)
         return None

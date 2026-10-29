@@ -5,12 +5,18 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
 import { useEffect, useState } from "react";
-import SystemNoticeReviewModal, { NOTICE_REVIEW_ALERT_ID } from "./SystemNoticeReviewModal";
+import SystemNoticeReviewModal, {
+    NOTICE_REVIEW_ALERT_ID,
+    NOTICE_REVIEW_CHANGED_EVENT,
+} from "./SystemNoticeReviewModal";
 
 // 確認待ちの行を確定する画面への常設の入口 (設定の「便利機能」に置く)。画面上部の
 // バナーは閉じられるので、閉じた後もここから同じ画面を開ける。出すかどうかは
 // バナーと同じく、サーバーが置く確認待ちの警告 (NOTICE_REVIEW_ALERT_ID) の有無で
 // 決める — 確認待ちの行があるか、記憶を読めなかったペルソナがある間だけ出る。
+// 確定の操作の後は NOTICE_REVIEW_CHANGED_EVENT を出し、バナーとこの入口の両方が
+// それを聞いて警告を取り直す (どちらから開いて確定しても、もう一方が古い警告を
+// 出し続けない)。
 
 interface ReviewAlert {
     id: string;
@@ -41,10 +47,16 @@ export default function SystemNoticeReviewEntry({ classNames = {} }: Props) {
 
     useEffect(() => {
         fetchAlert();
+        window.addEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlert);
+        return () => window.removeEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlert);
     }, []);
 
+    const announceChanged = () => {
+        window.dispatchEvent(new Event(NOTICE_REVIEW_CHANGED_EVENT));
+    };
+
     const modal = open ? (
-        <SystemNoticeReviewModal onClose={() => setOpen(false)} onChanged={fetchAlert} />
+        <SystemNoticeReviewModal onClose={() => setOpen(false)} onChanged={announceChanged} />
     ) : null;
     if (!alert) return modal;
 

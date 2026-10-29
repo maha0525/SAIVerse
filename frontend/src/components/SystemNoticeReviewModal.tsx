@@ -20,6 +20,12 @@ import styles from "./SystemNoticeReviewModal.module.css";
  * 有無で確定の画面への入口を出す。 */
 export const NOTICE_REVIEW_ALERT_ID = "system_notice_review_pending";
 
+/** 確定の操作の後に window へ出すイベントの名前。画面上部のバナー (SystemAlertBanner)
+ * と設定の「便利機能」の入口 (SystemNoticeReviewEntry) は警告をそれぞれ自分の状態に
+ * 持つので、どちらから確定しても両方がこれを聞いて /api/system/alerts を取り直す。
+ * 出すのは確定の画面を開いた側 (onChanged)。 */
+export const NOTICE_REVIEW_CHANGED_EVENT = "saiverse:system-notice-review-changed";
+
 type ReviewAction = "keep" | "system" | "user" | "delete";
 type AttachmentKind = "image" | "document" | "audio" | "video" | "other";
 
@@ -36,6 +42,8 @@ interface ReviewRow {
     version: string;
     attachments: { kind: AttachmentKind; ref: string }[];
     attachment_counts: Partial<Record<AttachmentKind, number>>;
+    /** 「正式に変換」が、案内文の通知と音声だけのユーザーの発言の二行に分ける操作になる */
+    system_split?: boolean;
 }
 
 interface ReviewGroup {
@@ -45,6 +53,8 @@ interface ReviewGroup {
     tags: string[];
     reason: string;
     actions: ReviewAction[];
+    /** 束の「正式に変換」が二行に分ける操作になる (ReviewRow.system_split と同じ) */
+    system_split?: boolean;
     count: number;
     personas: { persona_id: string; persona_name: string; count: number }[];
     rows: ReviewRow[];
@@ -64,7 +74,7 @@ interface ApplyResult {
 
 interface Props {
     onClose: () => void;
-    /** 確定の操作のあと、画面上部の警告を取り直すために呼ぶ */
+    /** 確定の操作のあと、警告を取り直すために呼ぶ (開いた側は NOTICE_REVIEW_CHANGED_EVENT を出す) */
     onChanged: () => void | Promise<void>;
 }
 
@@ -302,6 +312,11 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                                 {blockedByAttachments && (
                                     <p className={styles.muted}>
                                         {uiText("components.SystemNoticeReviewModal.attachmentsNoSystem")}
+                                    </p>
+                                )}
+                                {group.system_split && (
+                                    <p className={styles.muted}>
+                                        {uiText("components.SystemNoticeReviewModal.systemSplitNote")}
                                     </p>
                                 )}
                                 <div className={styles.actions}>

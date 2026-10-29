@@ -9,7 +9,13 @@ docs/intent/system_notice_delivery.md「追補 (2026-10-29)」の「確認待ち
   「選べる操作」として返し (:func:`allowed_actions`)、選べない操作は書き換えずに
   拒否する。ユーザーやペルソナの行が添付 (``media`` / ``images`` / ``documents``)
   を持つときは「正式に変換」を出さない — 行ごと role=system にすると、発話者の
-  添付が機構の通知の持ち物になる。
+  添付が機構の通知の持ち物になる。例外は移行の規則 5 の形の行
+  (``is_voice_split_row``): 「正式に変換」は行ごとの変換ではなく、移行と同じ
+  二行分割 (通知の行と、本文の無い音声だけの role=user の行) にする
+  (``voice_split_metadata`` を移行と共有。音声の行は
+  ``SAIMemoryAdapter.rewrite_message`` の ``insert_after`` で同じ取引の中で足す)。
+  音声の行を通知の直後に並べられない行 (``split_position_is_free`` が偽) には
+  出さない。
 - 一覧は各行の全文・添付・ハッシュ (``version`` — :func:`row_version`) を返す。
   確定の操作は行ごとに画面が見たハッシュを受け取り、書き込みの取引の中で今の行から
   作ったハッシュと比べて、違えば
@@ -53,8 +59,11 @@ from typing import Any, Callable, ContextManager, Dict, Iterable, List, Optional
 from database.system_notice_migration import (
     SYSTEM_CLOSE,
     SYSTEM_OPEN,
+    is_voice_split_row,
+    split_position_is_free,
     starts_with_system_tag,
     strip_system_tags,
+    voice_split_metadata,
 )
 from sai_memory.memory.storage import (
     CHRONICLE_EXCLUDED_LINE_ROLES,
@@ -219,12 +228,21 @@ def row_version(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def allowed_actions(role: Any, content: Any, metadata: Optional[Dict[str, Any]]) -> List[str]:
+def allowed_actions(
+    role: Any,
+    content: Any,
+    metadata: Optional[Dict[str, Any]],
+    *,
+    split_position_free: bool = True,
+) -> List[str]:
     """その行で選べる操作。確認待ちの印が無い行は空。
 
     「正式に変換」は、role=system の行か、添付を持たない行にだけ出す。role=user /
     role=assistant の行の添付は発話者のもので、行ごと role=system にすると機構の
-    通知の添付になる (docs/intent/system_notice_delivery.md 不変条件 7)。
+    通知の添付になる (docs/intent/system_notice_delivery.md 不変条件 7)。例外は
+    移行の規則 5 の形の行 (``is_voice_split_row``) で、「正式に変換」は二行分割
+    (:func:`splits_on_system`) になり、添付は音声の行に残る。``split_position_free``
+    (音声の行を通知の直後に並べられるか — ``split_position_is_free``) が偽なら出さない。
     「通常のユーザー発話に変換」は role=user の行にだけ出す — role=system や
     role=assistant の行に出すと、機構やペルソナの文がユーザーの名義になる。
     包みが本文全体を囲んでいない role=user の行 (ユーザー本人が本文の途中に
@@ -235,12 +253,20 @@ def allowed_actions(role: Any, content: Any, metadata: Optional[Dict[str, Any]])
         return []
     role_s = role.lower() if isinstance(role, str) else ""
     actions = [ACTION_KEEP]
-    if role_s == "system" or not attachment_items(metadata):
+    if splits_on_system(role, content, metadata):
+        if split_position_free:
+            actions.append(ACTION_SYSTEM)
+    elif role_s == "system" or not attachment_items(metadata):
         actions.append(ACTION_SYSTEM)
     if role_s == "user":
         actions.append(ACTION_USER)
     actions.append(ACTION_DELETE)
     return actions
+
+
+def splits_on_system(role: Any, content: Any, metadata: Optional[Dict[str, Any]]) -> bool:
+    """「正式に変換」がこの行では二行分割になるか (確認待ちの、規則 5 の形の行)。"""
+    return _is_pending(metadata) and is_voice_split_row(role, content, metadata)
 
 
 def rewrite_for_action(
@@ -253,9 +279,14 @@ def rewrite_for_action(
     """``action`` を当てた後の行 (``SAIMemoryAdapter.rewrite_message`` の ``rewrite``)。
 
     ``row`` は ``rewrite_message`` が渡す辞書 (role / content / metadata /
-    line_role / created_at)。``version`` を渡したときは、今の行のハッシュ (:func:`row_version`) と
+    line_role / created_at / insert_after_free)。``version`` を渡したときは、今の行のハッシュ (:func:`row_version`) と
     違えば :class:`RowChanged` を投げる。選べない操作なら :class:`ActionNotAllowed`
     を投げる (どちらも書き換えない)。
+
+    規則 5 の形の行 (:func:`splits_on_system`) の「正式に変換」は、移行の二行分割と
+    同じ結果を返す: この行は剥がした案内文の role=system の通知 (系統の印は移行と
+    同じ ``voice_input``、それに確定の記録)、``insert_after`` は本文の無い role=user の
+    音声の行 (metadata と line_role は移行と共有の ``voice_split_metadata``)。
 
     削除は ``SAIMemoryAdapter.MESSAGE_DELETE`` を返す。行が建物の履歴からの転記
     (``building_msg_ref``) なら、先に ``release_building_ref(ref)`` で建物の側の
@@ -270,9 +301,28 @@ def rewrite_for_action(
         role, content, metadata, row.get("created_at"), row.get("line_role"),
     ):
         raise RowChanged(action)
-    if action not in allowed_actions(role, content, metadata):
+    split = splits_on_system(role, content, metadata)
+    position_free = True
+    if split and action == ACTION_SYSTEM:
+        insert_after_free = row.get("insert_after_free")
+        position_free = bool(insert_after_free()) if callable(insert_after_free) else False
+    if action not in allowed_actions(role, content, metadata, split_position_free=position_free):
         raise ActionNotAllowed(action)
     assert metadata is not None  # allowed_actions が確認待ちの印を確かめている
+    if split and action == ACTION_SYSTEM:
+        notice_meta, user_meta, user_line_role = voice_split_metadata(
+            metadata, row.get("line_role"),
+        )
+        notice_meta[SYSTEM_NOTICE_REVIEWED_KEY] = ACTION_SYSTEM
+        return {
+            "role": "system",
+            "content": strip_system_tags(content),
+            "metadata": notice_meta,
+            "insert_after": {
+                "role": "user", "content": "", "metadata": user_meta,
+                "line_role": user_line_role,
+            },
+        }
     if action == ACTION_DELETE:
         ref = metadata.get(SAIMemoryAdapter.BUILDING_MSG_REF_META_KEY)
         if ref:
@@ -340,6 +390,8 @@ class ReviewRow:
     attachments: List[Dict[str, str]] = field(default_factory=list)
     #: 束ねる鍵に使う本文の書き出し
     head: str = ""
+    #: 「正式に変換」がこの行では二行分割になる (:func:`splits_on_system` で、かつ選べる)
+    system_split: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -355,6 +407,7 @@ class ReviewRow:
             "version": self.version,
             "attachments": self.attachments,
             "attachment_counts": attachment_counts(self.attachments),
+            "system_split": self.system_split,
         }
 
 
@@ -367,6 +420,8 @@ class ReviewGroup:
     reason: str
     actions: List[str]
     rows: List[ReviewRow] = field(default_factory=list)
+    #: 束の「正式に変換」が二行分割になる (:attr:`ReviewRow.system_split`)
+    system_split: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         personas: Dict[str, Dict[str, Any]] = {}
@@ -384,6 +439,7 @@ class ReviewGroup:
             "tags": self.tags,
             "reason": self.reason,
             "actions": self.actions,
+            "system_split": self.system_split,
             "count": len(self.rows),
             "personas": list(personas.values()),
             "rows": [r.to_dict() for r in self.rows],
@@ -407,13 +463,17 @@ def _head(content: Any) -> str:
     return ""
 
 
-def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str, Any], Any]]:
+def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str, Any], Any, bool]]:
     """記憶 DB を読み取り専用で開き、確認待ちの印を持つ行を返す。
 
-    各行は ``(id, role, content, created_at, metadata, line_role)``。``metadata`` の
-    列が無い古いスキーマには印が付いていない (移行が付けられない) ので空。
+    各行は ``(id, role, content, created_at, metadata, line_role, split_position_free)``。
+    ``split_position_free`` は、規則 5 の形の行 (:func:`splits_on_system`) について、
+    二行分割で足す音声の行を通知の直後に並べられるか (``split_position_is_free``。
+    確定の操作が ``rewrite_message`` の中で同じ判定をし直す)。ほかの行は True。
+    ``metadata`` の列が無い古いスキーマには印が付いていない (移行が付けられない) ので空。
     """
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    rows = []
     with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
         if not {"id", "role", "content", "metadata"} <= cols:
@@ -422,18 +482,21 @@ def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str
         created = "created_at" if "created_at" in cols else "NULL"
         line_role = "line_role" if "line_role" in cols else "NULL"
         raw_rows = conn.execute(
-            f"SELECT id, role, content, {created}, metadata, {line_role} FROM messages "
+            f"SELECT id, role, content, {created}, metadata, {line_role}, rowid FROM messages "
             f"WHERE instr(metadata, ?) > 0 ORDER BY {order}",
             (SYSTEM_NOTICE_REVIEW_KEY,),
         ).fetchall()
-    rows = []
-    for row_id, role, content, created_at, raw_meta, line_role_value in raw_rows:
-        try:
-            metadata = json.loads(raw_meta)
-        except (TypeError, ValueError):
-            continue
-        if _is_pending(metadata):
-            rows.append((row_id, role, content, created_at, metadata, line_role_value))
+        for row_id, role, content, created_at, raw_meta, line_role_value, rowid in raw_rows:
+            try:
+                metadata = json.loads(raw_meta)
+            except (TypeError, ValueError):
+                continue
+            if not _is_pending(metadata):
+                continue
+            position_free = True
+            if splits_on_system(role, content, metadata):
+                position_free = split_position_is_free(conn, cols, rowid, created_at)
+            rows.append((row_id, role, content, created_at, metadata, line_role_value, position_free))
     return rows
 
 
@@ -458,10 +521,13 @@ def collect_review_rows(
                 "persona_id": persona_id, "persona_name": persona_name, "error": str(exc),
             })
             continue
-        for row_id, role, content, created_at, metadata, line_role in pending:
+        for row_id, role, content, created_at, metadata, line_role, position_free in pending:
             text = content if isinstance(content, str) else ""
             raw_tags = metadata.get("tags")
             tags = sorted(t for t in raw_tags if isinstance(t, str)) if isinstance(raw_tags, list) else []
+            actions = allowed_actions(
+                role, content, metadata, split_position_free=position_free,
+            )
             rows.append(ReviewRow(
                 persona_id=persona_id,
                 persona_name=persona_name,
@@ -471,32 +537,41 @@ def collect_review_rows(
                 content=text,
                 reason=str(metadata.get(SYSTEM_NOTICE_REVIEW_KEY) or ""),
                 created_at=int(created_at) if isinstance(created_at, (int, float)) else None,
-                actions=allowed_actions(role, content, metadata),
+                actions=actions,
                 version=row_version(role, content, metadata, created_at, line_role),
                 attachments=attachment_items(metadata),
                 head=_head(text),
+                system_split=(
+                    ACTION_SYSTEM in actions and splits_on_system(role, content, metadata)
+                ),
             ))
     return rows, errors
 
 
 def group_review_rows(rows: Iterable[ReviewRow]) -> List[ReviewGroup]:
-    """同じ型 (role・本文の書き出し・タグの組・残した理由・選べる操作) の行を束ねる。
+    """同じ型 (role・本文の書き出し・タグの組・残した理由・選べる操作・「正式に変換」が
+    二行分割か) の行を束ねる。
 
     選べる操作を鍵に含めるので、束の中の行は全部同じ操作を選べる (束ごとの一括
     適用が、一部の行だけ拒否される形にならない)。添付の有無で「正式に変換」を
-    選べるかが変わるので、添付のある行と無い行も別の束になる。件数の多い束から
+    選べるかが変わるので、添付のある行と無い行も別の束になる。「正式に変換」が
+    二行分割になる行 (:attr:`ReviewRow.system_split`) も、行ごとの変換になる行とは
+    別の束にする (同じ操作の名前で結果が違う行を一括で当てない)。件数の多い束から
     並べる。
     """
     groups: Dict[Tuple[Any, ...], ReviewGroup] = {}
     for row in rows:
         gtags = _grouping_tags(row.tags)
-        key = (row.role.lower(), row.head, tuple(gtags), row.reason, tuple(row.actions))
+        key = (
+            row.role.lower(), row.head, tuple(gtags), row.reason, tuple(row.actions),
+            row.system_split,
+        )
         group = groups.get(key)
         if group is None:
             digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
             group = ReviewGroup(
                 group_id=digest, role=row.role, head=row.head, tags=gtags,
-                reason=row.reason, actions=list(row.actions),
+                reason=row.reason, actions=list(row.actions), system_split=row.system_split,
             )
             groups[key] = group
         group.rows.append(row)

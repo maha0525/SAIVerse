@@ -7,7 +7,9 @@ docs/intent/system_notice_delivery.md「追補」の「確認待ちの行の確�
   理由・選べる操作) で束ねる。各行は全文・添付・ハッシュ (version) を持つ
 - 行ごとの「選べる操作」: 「通常のユーザー発話に変換」は role=user の行にだけ
   出す (包みが本文全体を囲んでいなければ、本文を変えずに発話へ戻す)。発話者の
-  添付を持つ行には「正式に変換」を出さず、API でも拒否する
+  添付を持つ行には「正式に変換」を出さず、API でも拒否する。例外は移行の規則 5 の
+  形の行で、「正式に変換」は移行と同じ二行分割 (通知の行と、本文の無い音声の行) に
+  なる。音声の行を通知の直後に並べられなければ出さない
 - 4 つの操作の結果 (role・本文・通知の印・確認待ちの印・確定の記録)。発話への
   変換は実会話から外す印 (機構のタグ・line_role) も外して記録し、包みの内側の
   本文を一字も変えない
@@ -1377,3 +1379,198 @@ def test_a_row_whose_time_or_line_role_changed_after_listing_is_rejected(world):
         ("a-tool", "changed"), ("b-tool", "changed"),
     }
     assert (_raw_row(world.a_db, "a-tool"), _raw_row(world.b_db, "b-tool")) == before
+
+
+# ---------------------------------------------------------------------------
+# 境より後の音声入力の案内文 (Codex 7 巡目) — 「正式に変換」は二行分割
+# ---------------------------------------------------------------------------
+
+
+VOICE_TEXT = "ｺﾞﾄﾞｰから音声入力を受信しました。添付の音声を聴いて応答してください。"
+VOICE_CONTENT = f"<system>{VOICE_TEXT}</system>"
+VOICE_CUTOVER = 1_800_000_000
+
+
+def _voice_meta(name, ref):
+    return {
+        "tags": ["conversation", "event_message"], "with": ["user"], "source": "godot_voice",
+        "gateway_session_id": "g1",
+        "media": [{"type": "audio", "uri": f"saiverse://audio/{name}", "mime_type": "audio/ogg"}],
+        "building_msg_ref": ref,
+    }
+
+
+def _voice_main_db(path: Path, metas) -> Path:
+    """本体 DB の building_messages。``metas`` は (seq, metadata) — どれも client_message_id なし。"""
+    from sqlalchemy import create_engine
+
+    from database.models import BuildingMessage
+
+    engine = create_engine(f"sqlite:///{path}")
+    BuildingMessage.__table__.create(engine)
+    engine.dispose()
+    with contextlib.closing(sqlite3.connect(str(path))) as conn:
+        for seq, meta in metas:
+            conn.execute(
+                "INSERT INTO building_messages (building_id, seq, role, content, timestamp, "
+                "heard_by, ingested_by, metadata_json, message_id, client_message_id) "
+                "VALUES ('b1', ?, 'user', ?, '2026-09-01T00:00:00+00:00', '[]', '[]', ?, ?, NULL)",
+                (seq, VOICE_CONTENT, json.dumps(meta, ensure_ascii=False), f"b1:{seq}"),
+            )
+        conn.commit()
+    return path
+
+
+@pytest.fixture()
+def voice_world(tmp_path):
+    """境より前と後に一つずつ、音声入力を中継するアドオンの案内文の行がある記憶。"""
+    from database.system_notice_migration import BuildingSourceRows, migrate_persona_db
+
+    pre = _voice_meta("pre.ogg", "b1:b1:1")
+    post = _voice_meta("post.ogg", "b1:b1:2")
+    main = _voice_main_db(tmp_path / "saiverse.db", [(1, pre), (2, post)])
+    db_path = tmp_path / "personas" / "p" / "memory.db"
+    db_path.parent.mkdir(parents=True)
+    conn = init_db(str(db_path))
+    _insert(conn, "voice-pre", "user", VOICE_CONTENT, pre, VOICE_CUTOVER - 100, "meta_judgment")
+    _insert(conn, "reply-pre", "assistant", "pre reply", {"tags": ["conversation"]}, VOICE_CUTOVER - 90)
+    _insert(conn, "voice-post", "user", VOICE_CONTENT, post, VOICE_CUTOVER + 100, "meta_judgment")
+    _insert(conn, "reply-post", "assistant", "post reply", {"tags": ["conversation"]}, VOICE_CUTOVER + 110)
+    conn.commit()
+    conn.close()
+    with BuildingSourceRows(main) as source_rows:
+        migrate_persona_db(
+            db_path, persona_id="p", output_dir=tmp_path / "out", stamp="20261029_000000",
+            playbook_names=frozenset(), source_rows=source_rows, cutover=VOICE_CUTOVER,
+        )
+    adapter = _adapter(db_path)
+
+    @contextlib.contextmanager
+    def opener(_pid):
+        yield adapter
+
+    yield SimpleNamespace(db=db_path, adapter=adapter, opener=opener, pre=pre, post=post)
+    adapter.conn.close()
+
+
+def _ordered(db_path: Path):
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        return [
+            (r[0], r[1], r[2], json.loads(r[3]) if r[3] else None, r[4], r[5])
+            for r in conn.execute(
+                "SELECT id, role, content, metadata, created_at, line_role FROM messages "
+                "ORDER BY created_at, rowid"
+            ).fetchall()
+        ]
+
+
+def test_a_voice_notice_after_the_cutover_can_be_split_from_the_review_screen(voice_world):
+    from database.system_notice_migration import AFTER_CUTOVER_REASON, VOICE_INPUT_NOTICE_KIND
+
+    db = voice_world.db
+    # 境より前の行は移行が二行に分け、後の行は確認待ちに残る
+    assert _row(db, "voice-post")[2][SYSTEM_NOTICE_REVIEW_KEY] == AFTER_CUTOVER_REASON
+    listing = review.build_review_listing([("p", "P", db)])
+    assert listing["total"] == 1
+    group = listing["groups"][0]
+    assert group["actions"] == ["keep", "system", "user", "delete"]
+    assert group["system_split"] is True
+    row = group["rows"][0]
+    assert row["message_id"] == "voice-post"
+
+    result = review.apply_review_action(
+        "system", [("p", "voice-post", row["version"])], voice_world.opener,
+    )
+    assert result["rejected"] == []
+    assert result["applied"] == [{"persona_id": "p", "message_id": "voice-post", "result": "updated"}]
+
+    rows = _ordered(db)
+    ids = [r[0] for r in rows]
+    # 本文の無い音声の行は、通知の行の直後 (同じ created_at、後ろの rowid) に並ぶ
+    assert len(ids) == 6
+    pre_voice = rows[ids.index("voice-pre") + 1]
+    post_voice = rows[ids.index("voice-post") + 1]
+    assert ids[ids.index("voice-post") + 2] == "reply-post"
+    pre_notice = rows[ids.index("voice-pre")]
+    post_notice = rows[ids.index("voice-post")]
+
+    # 通知の行: 移行の分割と同じ形 (違いは所有者の確定の記録だけ)
+    assert post_notice[1:3] == ("system", VOICE_TEXT)
+    assert post_notice[3][SYSTEM_NOTICE_KEY] == VOICE_INPUT_NOTICE_KIND
+    assert post_notice[3][SYSTEM_NOTICE_REVIEWED_KEY] == "system"
+    assert SYSTEM_NOTICE_REVIEW_KEY not in post_notice[3]
+    assert {k: v for k, v in post_notice[3].items() if k != SYSTEM_NOTICE_REVIEWED_KEY} == pre_notice[3]
+    assert post_notice[5] == pre_notice[5] == "meta_judgment"
+    assert is_system_notice({"role": "system", "content": post_notice[2], "metadata": post_notice[3]})
+
+    # 音声の行: 本文なし・role=user・添付と来歴を持ち、移行の分割と同じ形
+    assert post_voice[1:3] == ("user", "")
+    assert post_voice[4] == VOICE_CUTOVER + 100
+    assert post_voice[3]["media"] == voice_world.post["media"]
+    assert post_voice[3]["building_msg_ref"] == "b1:b1:2"
+    same = {"media": None, "building_msg_ref": None}
+    assert {**post_voice[3], **same} == {**pre_voice[3], **same}
+    assert post_voice[3]["tags"] == ["conversation"]
+    assert post_voice[3][review.REVIEW_CLEARED_KEY] == {
+        "tags": ["event_message"], "line_role": "meta_judgment",
+    }
+    assert post_voice[5] == pre_voice[5] == review.USER_LINE_ROLE
+    assert SYSTEM_NOTICE_REVIEW_KEY not in post_voice[3]
+    # 音声の行は実会話に入り、確認待ちはもう残らない
+    conn = voice_world.adapter.conn
+    assert filter_real_conversation_ids(conn, [post_voice[0], "voice-post"]) == {post_voice[0]}
+    assert review.build_review_listing([("p", "P", db)])["total"] == 0
+
+
+def test_a_voice_split_is_not_offered_when_the_voice_row_cannot_follow_the_notice(voice_world):
+    """同じ時刻の後ろに別の行があると、音声の行を通知の直後に置けない (移行と同じ約束)。"""
+    conn = voice_world.adapter.conn
+    # 一覧の後に同じ時刻の行が足されても、確定の操作が書き込みの取引の中で判定し直す
+    seen = review.build_review_listing([("p", "P", voice_world.db)])["groups"][0]["rows"][0]
+    assert seen["actions"] == ["keep", "system", "user", "delete"]
+    _insert(conn, "same-second", "assistant", "x", {"tags": ["conversation"]}, VOICE_CUTOVER + 100)
+    conn.commit()
+    listing = review.build_review_listing([("p", "P", voice_world.db)])
+    row = listing["groups"][0]["rows"][0]
+    assert row["actions"] == ["keep", "user", "delete"]
+    assert listing["groups"][0]["system_split"] is False
+    assert row["version"] == seen["version"]
+    before = _ordered(voice_world.db)
+    result = review.apply_review_action(
+        "system", [("p", "voice-post", row["version"])], voice_world.opener,
+    )
+    assert result["applied"] == []
+    assert result["rejected"] == [{"persona_id": "p", "message_id": "voice-post", "reason": "not_allowed"}]
+    assert _ordered(voice_world.db) == before
+
+
+def test_voice_split_needs_the_whole_voice_input_shape():
+    """規則 5 の形でない添付つきの行には、今までどおり「正式に変換」を出さない。"""
+    pending = {SYSTEM_NOTICE_REVIEW_KEY: "x"}
+    voice = {**pending, **_voice_meta("a.ogg", "b1:b1:1")}
+    assert review.allowed_actions("user", VOICE_CONTENT, voice) == ["keep", "system", "user", "delete"]
+    image = {**voice, "media": [{"type": "image", "uri": "saiverse://image/a.png"}]}
+    not_voice_source = {**voice, "source": "screen"}
+    for role, content, meta in (
+        ("user", VOICE_CONTENT, image),
+        ("user", VOICE_CONTENT, not_voice_source),
+        ("user", "<system>別の文</system>", voice),
+        ("user", VOICE_TEXT, voice),  # 包みの無い本文
+    ):
+        assert review.allowed_actions(role, content, meta) == ["keep", "user", "delete"], (content, meta)
+    assert review.allowed_actions("assistant", VOICE_CONTENT, voice) == ["keep", "delete"]
+
+
+def test_voice_rows_and_other_attachment_rows_are_separate_groups(tmp_path):
+    pending = {SYSTEM_NOTICE_REVIEW_KEY: "x"}
+    voice = {**pending, **_voice_meta("a.ogg", "b1:b1:1")}
+    db = _make_persona(tmp_path, "p", [
+        ("voice", "user", VOICE_CONTENT, voice),
+        ("not-voice", "user", VOICE_CONTENT, {**voice, "source": "screen"}),
+    ])
+    groups = review.build_review_listing([("p", "P", db)])["groups"]
+    by_row = {g["rows"][0]["message_id"]: g for g in groups}
+    assert len(groups) == 2
+    assert by_row["voice"]["system_split"] is True
+    assert by_row["not-voice"]["system_split"] is False
+    assert by_row["not-voice"]["actions"] == ["keep", "user", "delete"]

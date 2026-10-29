@@ -38,6 +38,7 @@ function harness(initialAlerts) {
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
         if (name === './SystemNoticeReviewModal') return {
             __esModule: true, default: ReviewModal, NOTICE_REVIEW_ALERT_ID: REVIEW_ID,
+            NOTICE_REVIEW_CHANGED_EVENT: 'saiverse:system-notice-review-changed',
         };
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
@@ -50,6 +51,12 @@ function harness(initialAlerts) {
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
+    const listeners = new Map();
+    global.window = {
+        addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+        removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
+        dispatchEvent(event) { (listeners.get(event.type) || []).forEach(fn => fn(event)); return true; },
+    };
     const props = { classNames: { card: 'card', button: 'button' } };
     function render() {
         cursor = 0;
@@ -88,10 +95,13 @@ function all(tree, predicate) {
     assert.ok(modal);
 
     // Settling everything removes the server alert; the modal's change callback
-    // fetches again and the entry disappears once the modal is closed.
+    // announces the change, the entry fetches again and disappears once the modal
+    // is closed (the banner follows the same announcement —
+    // test-system-notice-review-alert-sync.cjs).
     h.setAlerts([]);
     const before = h.requests.length;
     await modal.props.onChanged();
+    await new Promise(setImmediate);
     assert.equal(h.requests.length, before + 1);
     modal.props.onClose();
     assert.equal(h.render(), null);
