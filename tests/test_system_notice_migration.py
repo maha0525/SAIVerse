@@ -64,12 +64,14 @@ _TAGGED_ROWS = [
     ),
     # 完全な組が二つ並んだ messages の行は、「一つの包みの中の引用」と区別できない
     # ので変換しない (messages は組が一つの行だけを剥がす。曖昧としてレポートへ)。
+    # 引用と末尾のプロンプトが同じなら旧形式の中断の再開文として版 5 が変換する
+    # (tests/test_system_notice_migration_rules_v4.py) ので、ここでは末尾を変えてある。
     (
         "schedule_resumed",
         "user",
         "<system>\n[前回の処理が中断されました]\n中断理由: 優先度の高いリクエストを処理しました\n"
         "前回のプロンプト: <system>\n[外部イベント通知]\nメンション\n</system>\n</system>\n\n"
-        "<system>\n[外部イベント通知]\nメンション\n</system>",
+        "<system>\n[外部イベント通知]\n別のメンション\n</system>",
         {"with": ["system"], "tags": ["conversation"]},
         None,
         None,

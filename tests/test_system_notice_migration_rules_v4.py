@@ -299,3 +299,98 @@ def test_rows_reviewed_by_the_owner_and_rows_already_marked_are_left(db, tmp_pat
 
     assert _rows(db) == before
     assert not result.changes and not result.skipped and not result.unknown_system_count
+
+
+# ---------------------------------------------------------------------------
+# 規則の版 5: 中断の再開文 (v0.3.27 より前の PulseController._build_resumption_prompt)
+# ---------------------------------------------------------------------------
+
+_RESUMED_PROMPT = "出かけて、「ニュースアベニュー」に来ました。"
+_RESUMED_HEAD = "[前回の処理が中断されました]\n中断理由: 優先度の高いリクエストを処理しました\n前回のプロンプト: "
+
+
+def _resumed(quoted: str, tail: str) -> str:
+    """旧形式の再開文の行の本文 (頭を包んだ組 + 空行 + 元のプロンプト)。"""
+    return f"<system>\n{_RESUMED_HEAD}{quoted}\n</system>\n\n{tail}"
+
+
+_WRAPPED = f"<system>\n{_RESUMED_PROMPT}\n</system>"
+_SLOT_META = {
+    "with": ["system"], "source": "day_plan_slot", "slot_kind": "出かける",
+    "slot_id": "c98e7b5aa5cc", "tags": ["conversation"],
+}
+
+
+def test_old_resumption_rows_become_schedule_notices(db, tmp_path):
+    """本番で確認待ちに残っていた形: 包みの組が二つ並ぶので版 3 までは剥がせず「タグの対応が
+    曖昧」で残った (版 4 の走査の後も)。版 5 の走査し直しで、今の書き手が書く形の本文の
+    schedule の通知にする。"""
+    pending = {**_SLOT_META, SYSTEM_NOTICE_REVIEW_KEY: "タグの対応が曖昧"}
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, "resumed", "user", _resumed(_WRAPPED, _WRAPPED), pending, created_at=100)
+        conn.commit()
+    _set_marker(db, "v4 2026-10-30T00:00:00+00:00")
+
+    result = _migrate(db, tmp_path, cutover=200)
+
+    role, content, meta = _rows(db)["resumed"]
+    assert role == "system"
+    assert content == f"{_RESUMED_HEAD}{_RESUMED_PROMPT}\n\n{_RESUMED_PROMPT}"
+    assert meta == {**_SLOT_META, SYSTEM_NOTICE_KEY: "schedule"}
+    assert [c.row_id for c in result.changes] == ["resumed"]
+
+
+@pytest.mark.parametrize("row_id, role, content, extra", [
+    # 引用と末尾のプロンプトが違う (誰かが形を真似て書き換えた行でありうる)
+    ("mismatch", "user", _resumed(_WRAPPED, "<system>\n別の文\n</system>"), {}),
+    # 末尾のプロンプトが包まれていない (元のプロンプトが機構の文と言えない)
+    ("bare_tail", "user", _resumed(_RESUMED_PROMPT, _RESUMED_PROMPT), {}),
+    # 建物履歴から転記された行 (ユーザーの発言の来歴)
+    ("from_building", "user", _resumed(_WRAPPED, _WRAPPED), {"building_msg_ref": "b1:b1:3"}),
+    # ペルソナの名義の行
+    ("assistant", "assistant", _resumed(_WRAPPED, _WRAPPED), {}),
+    # 書き手の来歴 (schedule_id / slot_id) が無い — 会話の取り込みが本人の発言として
+    # 元の時刻で保存した行は、同じ文面を貼り付けた発言でありうる
+    ("imported", "user", _resumed(_WRAPPED, _WRAPPED), None),
+])
+def test_rows_off_the_resumption_shape_are_not_converted(db, tmp_path, row_id, role, content, extra):
+    meta = {"tags": ["conversation"]} if extra is None else {**_SLOT_META, **extra}
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, row_id, role, content, meta, created_at=100)
+        conn.commit()
+
+    _migrate(db, tmp_path, cutover=200)
+
+    new_role, new_content, meta = _rows(db)[row_id]
+    assert (new_role, new_content) == (role, content)
+    assert SYSTEM_NOTICE_KEY not in meta
+
+
+def test_resumption_of_a_schedule_is_converted(db, tmp_path):
+    """スケジュールの発火を再開した行 (``schedule_id`` を持つ。要求の metadata が ``with`` を
+    ``user`` で上書きしていた世代もある) も同じく変換する。"""
+    schedule = "<system>\nスケジュールの実行時刻です。\n朝の散歩\n</system>"
+    meta = {"with": ["user"], "schedule_id": 2, "schedule_type": "periodic", "tags": ["conversation"]}
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, "sched", "user", _resumed(schedule, schedule), dict(meta), created_at=100)
+        conn.commit()
+
+    _migrate(db, tmp_path, cutover=200)
+
+    inner = "スケジュールの実行時刻です。\n朝の散歩"
+    assert _rows(db)["sched"] == (
+        "system", f"{_RESUMED_HEAD}{inner}\n\n{inner}", {**meta, SYSTEM_NOTICE_KEY: "schedule"},
+    )
+
+
+def test_resumption_rows_after_the_cutover_stay_for_review(db, tmp_path):
+    """ユーザー名義の行なので、時刻の境より後なら形が合っても確認待ち。"""
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, "late", "user", _resumed(_WRAPPED, _WRAPPED), dict(_SLOT_META), created_at=300)
+        conn.commit()
+
+    _migrate(db, tmp_path, cutover=200)
+
+    role, content, meta = _rows(db)["late"]
+    assert (role, content) == ("user", _resumed(_WRAPPED, _WRAPPED))
+    assert meta[SYSTEM_NOTICE_REVIEW_KEY] == AFTER_CUTOVER_REASON
