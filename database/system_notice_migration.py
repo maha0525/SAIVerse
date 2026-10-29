@@ -119,10 +119,13 @@ MIGRATION_MARKER_KEY = "system_notice_migration_done"
 #:   が書いた Stelis の開始の行、旧 ``_handle_movement`` が書いた別の City への移動の
 #:   失敗の案内、旧 ``get_since_last_user_conversation`` が書いた要約の行
 #:   (:func:`classify_unmarked_system_message`)
+#: - 版 5: v0.3.27 より前の ``PulseController._build_resumption_prompt`` が ``<system>``
+#:   で包んで書いた中断の再開文 (:func:`resumption_notice`)。版 4 の走査の後に本番の
+#:   確認の画面で見つかった
 #:
 #: 印の版が N の DB は、版 N より後に足した規則だけで走査し直す (各規則が自分の
 #: 版を持つ — :func:`_classify_persona_row`)。
-MIGRATION_RULES_VERSION = 4
+MIGRATION_RULES_VERSION = 5
 
 
 def _marker_value() -> str:
@@ -508,6 +511,51 @@ def is_voice_input_notice(body: Optional[str], metadata: Dict[str, Any]) -> bool
         and isinstance(source, str)
         and source.endswith(_VOICE_SOURCE_SUFFIX)
     )
+
+
+#: v0.3.27 より前の ``PulseController._build_resumption_prompt`` (sea/pulse_controller.py)
+#: が書いた中断の再開文の形。優先度の高い要求で中断した Pulse をやり直すとき、元の
+#: プロンプトを「前回のプロンプト」として引用し、その後ろに元のプロンプトをもう一度
+#: 並べる。当時は元のプロンプトも再開文の頭も ``<system>`` で包んでいたので、包みの組が
+#: 二つ並び、``strip_system_tags`` では剥がせなかった。
+_RESUMPTION_HEAD = (
+    "[前回の処理が中断されました]\n中断理由: 優先度の高いリクエストを処理しました\n前回のプロンプト: "
+)
+_RESUMPTION_RE = re.compile(
+    "<system>\n" + re.escape(_RESUMPTION_HEAD) + r"(?P<quoted>.*)\n</system>\n\n(?P<prompt>.*)",
+    re.DOTALL,
+)
+#: レポートの表記
+RESUMPTION_LABEL = "schedule(中断の再開文)"
+
+
+def resumption_notice(role: Any, content: Any, metadata: Dict[str, Any]) -> Optional[str]:
+    """旧形式の中断の再開文の行なら、今の書き手が書く形の本文。違えば None (規則の版 5)。
+
+    条件は全部の AND:
+
+    - role=user で、ユーザーの発言の来歴 (:func:`_has_user_utterance_provenance`) を持たない
+    - 本文の全体が :data:`_RESUMPTION_RE` の形で、引用した「前回のプロンプト」と末尾に
+      並べたプロンプトが一字も違わない
+    - そのプロンプトが ``<system>`` の包み一つで全体を囲んでいる (元のプロンプトが機構の
+      文 — スケジュールの発火文やコマの開始の文 — だったこと)
+
+    本文は、今の ``_build_resumption_prompt`` がタグ無しのプロンプトから組む形と同じに
+    する (頭の文 + 剥がしたプロンプト、空行、剥がしたプロンプト)。今の書き手はこの文を
+    スケジュールの Pulse の入力として、系統 ``schedule`` の通知で記録する
+    (sea/runtime.py の ``run_meta_user``)。
+    """
+    if not isinstance(role, str) or role.lower() != "user":
+        return None
+    if not isinstance(content, str) or _has_user_utterance_provenance(metadata):
+        return None
+    m = _RESUMPTION_RE.fullmatch(content)
+    if m is None or m.group("quoted") != m.group("prompt"):
+        return None
+    prompt = strip_system_tags(m.group("prompt"))
+    if prompt is None:
+        return None
+    return f"{_RESUMPTION_HEAD}{prompt}\n\n{prompt}"
 
 
 def classify_tagged_message_v3(
@@ -1221,6 +1269,8 @@ def _classify_persona_row(
     新しい行だけを変換する — 古い版の規則に当たる行は、その版の走査が変換したか
     確認待ちにしてある。
 
+    旧形式の中断の再開文 (:func:`resumption_notice`、版 5) も旧規則より先に見る。
+
     発話者の添付を持つ role=user の行で、規則 5 (音声入力の案内文) の形のものは、
     旧規則より先に規則 5 にする — 旧規則のタグ (``event_message`` など) を持っていても、
     規則 5 の出どころの確認と二行分割を通す。それ以外の規則に当たった、発話者の添付を
@@ -1233,6 +1283,11 @@ def _classify_persona_row(
             return _RowMatch(
                 VOICE_INPUT_NOTICE_KIND, VOICE_INPUT_NOTICE_KIND, strip_system_tags(content), 3,
             )
+        # 旧形式の中断の再開文 (版 5)。包みの組が二つ並ぶので、印の AND 判定に当たっても
+        # 本文を剥がせず「タグの対応が曖昧」になっていた形。形が狭いので先に見る
+        resumed = resumption_notice(role, content, metadata)
+        if resumed is not None:
+            return _RowMatch(LEGACY_NOTICE_KIND, RESUMPTION_LABEL, resumed, 5)
         kind = classify_tagged_message(role, content, metadata)
         if kind is not None:
             return _RowMatch(kind, kind, strip_system_tags(content), 1)
