@@ -6,7 +6,7 @@ import { useLocale } from '@/i18n/useLocale';
 
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
 
 interface SystemAlert {
@@ -26,6 +26,11 @@ export default function SystemAlertBanner() {
     const [alerts, setAlerts] = useState<SystemAlert[]>([]);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
     const [busyId, setBusyId] = useState<string | null>(null);
+    // 閉じたお知らせの id。バナーは画面最上部のヘッダー (地図・人々などのボタン列) に
+    // 覆い被さるので、読み終えたお知らせをユーザーが退かせる手段が要る。閉じるのは
+    // この画面を開いている間だけで、次の読み込みでまだ残っていれば再び表示される
+    // (知らせ続ける義務はサーバー側の警告の寿命が持つ)。
+    const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
 
     const fetchAlerts = async () => {
         try {
@@ -75,7 +80,12 @@ export default function SystemAlertBanner() {
         }
     };
 
-    if (alerts.length === 0) return null;
+    const visibleAlerts = alerts.filter((a) => !dismissedIds.has(a.id));
+    if (visibleAlerts.length === 0) return null;
+
+    const dismiss = (id: string) => {
+        setDismissedIds((prev) => new Set(prev).add(id));
+    };
 
     const toggle = (id: string) => {
         setExpandedIds((prev) => {
@@ -89,7 +99,7 @@ export default function SystemAlertBanner() {
     return (
         <>
             <div className={styles.banner}>
-                {alerts.map((alert) => {
+                {visibleAlerts.map((alert) => {
                     const expanded = expandedIds.has(alert.id);
                     const levelClass =
                         alert.level === "critical"
@@ -126,6 +136,15 @@ export default function SystemAlertBanner() {
                                         {busyId === alert.id ? uiText("components.SystemAlertBanner.text007") : uiText("components.SystemAlertBanner.text008")}
                                     </button>
                                 )}
+                                <button data-i18n="components.SystemAlertBanner.dismiss"
+                                    type="button"
+                                    className={styles.closeButton}
+                                    onClick={() => dismiss(alert.id)}
+                                    title={uiText("components.SystemAlertBanner.dismiss")}
+                                    aria-label={uiText("components.SystemAlertBanner.dismiss")}
+                                >
+                                    <X size={16} />
+                                </button>
                             </div>
                             {expanded && (
                                 <div className={styles.body}>
