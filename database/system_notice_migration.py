@@ -1866,13 +1866,17 @@ def _scan_persona_messages(
         ):
             # 前の版の走査が確認待ちに残した行 (前の版のレポートにある)。ただし、前の版が
             # 時刻の境だけを理由に残した role=system の行は、今の版では規則で判定する
-            # (ユーザーは role=system の行を送れない — 下の境の判定を参照)
+            # (下の境の判定を参照)
             continue
         if role_s != "system" and _created_after_cutover(row[5], cutover):
             # 新しい形式に切り替わった後の行。旧形式の形をしていても機構の書いた
             # ものと言い切れない (ユーザーが真似た発言でありうる) ので、所有者が決める。
-            # role=system の行はユーザーが送れないので、境の後でも規則で判定する
-            # (v0.3.27 の後も印の無いまま書いていた Stelis の開始の行など)
+            # role=system の行は境の後でも規則で判定する。移行が role=system の行に
+            # するのは系統の印を足すことだけで、名義も本文も書き換えない (本文を剥がす
+            # 規則は role=user / assistant の行にだけ当たる)。記憶ブラウザで所有者が
+            # 足した role=system の行に印が付くことはありうるが、名義と本文は所有者が
+            # 書いたまま残るので受け入れる (2026-10-30 まはー裁定)。v0.3.27 の後も印の
+            # 無いまま書いていた Stelis の開始の行などを、所有者に委ねずに片づけるため
             result.skipped.append(Skipped(
                 "messages", str(row_id), str(role),
                 sorted(_tags_of(metadata)), _head(content), reason=AFTER_CUTOVER_REASON,

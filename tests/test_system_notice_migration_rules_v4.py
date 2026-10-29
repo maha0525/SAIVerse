@@ -17,7 +17,7 @@ DB だけを使う。固定すること:
 - 版 3 の移行が確認待ちにした行は、版 4 の走査し直しで判定し直し、印が外れて通知に
   なる。版 4 の規則に当たらない確認待ちの行は、走査し直しでも数え直さない。
 - 新しい形式に切り替わった時刻より後に作られた行でも、role=system の行は版 4 の規則で
-  判定する (ユーザーは role=system の行を送れない)。境より後のユーザー名義の行は確認待ちの
+  判定する (印を足すだけで、名義も本文も変えない)。境より後のユーザー名義の行は確認待ちの
   まま (理由は ``AFTER_CUTOVER_REASON``)。
 - 所有者が確定した行は触らない。
 """
@@ -224,8 +224,9 @@ def test_rows_left_for_review_by_version_3_become_notices_on_the_rescan(db, tmp_
 
 
 def test_system_rows_created_after_the_cutover_are_still_judged(db, tmp_path):
-    """境は「ユーザーが真似て送った文を勝手に変換しない」ためのもの。role=system の行は
-    ユーザーが送れないので、境より後に作られても版 4 の規則で判定する。境より後の
+    """境は「ユーザーが真似て送った文を勝手に変換しない」ためのもの。role=system の行には
+    印を足すだけで名義も本文も変えないので、境より後に作られても版 4 の規則で判定する
+    (記憶ブラウザで所有者が足した行に印が付くことは受け入れた — 2026-10-30)。境より後の
     ユーザー名義の ``<system>`` の行は、従来どおり確認待ちに残る。"""
     with closing(sqlite3.connect(str(db))) as conn:
         _insert(conn, "old_switch", "system", "[thread switch] moved from p1:sns",
