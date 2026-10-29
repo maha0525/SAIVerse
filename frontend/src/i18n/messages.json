@@ -8463,6 +8463,14 @@
     "ja": "キャンセル",
     "en": "Cancel"
   },
+  "components.SystemAlertBanner.dismiss": {
+    "ja": "このお知らせを閉じる (次の起動時も残っていれば、また表示されます)",
+    "en": "Close this notice (it will show again on the next launch if it still applies)"
+  },
+  "components.SystemAlertBanner.dismissLabel": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
   "components.SystemAlertBanner.text001": {
     "ja": "読めなくなった古い履歴ファイルを、同じフォルダの中で名前を変えて脇へ移します。\n\n",
     "en": "Rename the unreadable old history file within the same folder to set it aside.\n\n"
