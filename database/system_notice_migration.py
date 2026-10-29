@@ -1855,11 +1855,19 @@ def _scan_persona_messages(
         match = _classify_persona_row(
             role, content, metadata, playbook_names=playbook_names,
         ) if can_mark else None
+        held_system_after_cutover = (
+            role_s == "system" and match is not None
+            and metadata.get(SYSTEM_NOTICE_REVIEW_KEY) == AFTER_CUTOVER_REASON
+        )
         if (
             rescan and metadata.get(SYSTEM_NOTICE_REVIEW_KEY)
             and (match is None or match.version <= rescan_from_version)
+            and not held_system_after_cutover
         ):
-            continue  # 前の版の走査が確認待ちに残した行 (前の版のレポートにある)
+            # 前の版の走査が確認待ちに残した行 (前の版のレポートにある)。ただし、前の版が
+            # 時刻の境だけを理由に残した role=system の行は、今の版では規則で判定する
+            # (ユーザーは role=system の行を送れない — 下の境の判定を参照)
+            continue
         if role_s != "system" and _created_after_cutover(row[5], cutover):
             # 新しい形式に切り替わった後の行。旧形式の形をしていても機構の書いた
             # ものと言い切れない (ユーザーが真似た発言でありうる) ので、所有者が決める。

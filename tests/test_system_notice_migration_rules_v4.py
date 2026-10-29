@@ -261,6 +261,29 @@ def test_system_rows_created_after_the_cutover_are_still_judged(db, tmp_path):
     assert {s.row_id: s.reason for s in result.skipped} == {"new_user": AFTER_CUTOVER_REASON}
 
 
+def test_system_rows_held_only_for_the_cutover_are_judged_on_rescan(db, tmp_path):
+    """前の版が時刻の境だけを理由に確認待ちにした role=system の行は、規則の版が上がった
+    走査し直しで、前の版の規則 (ここでは版 1 の spell) でも判定し直す。ユーザー名義の
+    行は前の版の判断のまま。"""
+    with closing(sqlite3.connect(str(db))) as conn:
+        _insert(conn, "held_spell", "system", "[Spell Result]\nok",
+                {"tags": ["spell"], SYSTEM_NOTICE_REVIEW_KEY: AFTER_CUTOVER_REASON}, created_at=300)
+        _insert(conn, "held_user", "user", "<system>Email sent.</system>",
+                {"tags": ["conversation", "tool"], SYSTEM_NOTICE_REVIEW_KEY: AFTER_CUTOVER_REASON},
+                created_at=300)
+        conn.commit()
+    _set_marker(db, "v3 2026-10-29T00:00:00+00:00")
+    before = _rows(db)
+
+    _migrate(db, tmp_path, cutover=200)
+
+    rows = _rows(db)
+    assert rows["held_spell"] == ("system", "[Spell Result]\nok", {
+        "tags": ["spell"], SYSTEM_NOTICE_KEY: "spell_result",
+    })
+    assert rows["held_user"] == before["held_user"]
+
+
 def test_rows_reviewed_by_the_owner_and_rows_already_marked_are_left(db, tmp_path):
     reviewed = {"other_thread_messages": _LINK, SYSTEM_NOTICE_REVIEWED_KEY: "keep"}
     marked = {"tags": ["conversation"], SYSTEM_NOTICE_KEY: CHATGPT_IMPORT_KIND}
