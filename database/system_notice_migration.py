@@ -19,14 +19,25 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
    ``is_system_notice`` が偽になり、自動想起の種などから外れる。tags から系統を
    推定できるものに印を付ける。推定できない行は触らない。
 
+規則の版 3 (docs/intent/system_notice_delivery.md「追補」の移行の規則の第二版) で、
+1 の印を持たない行のうち、作った側が機構だと言い切れる型 (tool / internal タグ・
+実在する Playbook 名のタグ・退役した子ラインの結果の書き出し・音声入力の案内文) と、
+2 の perception タグ・感情パラメータ変動の知らせを足した。音声入力の案内文の行は、
+通知の行と本文の無い音声の行の二行に分ける (:func:`_queue_voice_split`)。所有者が
+確認待ちの行を確定した記録 (``SYSTEM_NOTICE_REVIEWED_KEY``) を持つ行には触れない。
+
 ほかに、同じ本文の形を持つ列・表を最終形へ揃える: messages の
 ``paired_action_text`` 列、``perception_batches`` (kind=``realtime_and_recall``)
 の ``rendered_text``、本体 DB の ``building_messages`` (音声通話の痕跡が
 role=user + タグで載った世代)、``execution_ledger`` / ``execution_outbox`` に
 凍結された本文 (まだ送り直し・記録し直しがありうる行だけ)。
 
-「本文が ``<system>`` で始まるか」を意味の判定に使うのはこの移行の一回だけ
-(不変条件 2 の例外)。常設のコードからこのモジュールを呼ばない。
+「本文が ``<system>`` で始まるか」を意味の判定に使うのは、起動時のこの移行と、
+所有者が確認待ちの行を確定する画面 (saiverse/system_notice_review.py) だけ
+(不変条件 2 の例外 — 後者は所有者の手による管理の操作として認めたもの)。画面が
+使うのは確認待ちの行のタグの剥がし方 (:func:`strip_system_tags` /
+:func:`starts_with_system_tag`) だけで、それ以外の常設のコードからこのモジュールを
+呼ばない。
 
 起動時の入口は :func:`run_startup_system_notice_migration` (main.py が
 ペルソナの読み込みより前に呼ぶ)。ペルソナごとの記憶 DB は ``embed_metadata``
@@ -50,13 +61,14 @@ import argparse
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import AbstractSet, Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +88,13 @@ MIGRATION_MARKER_KEY = "system_notice_migration_done"
 #: - 版 1: 印の AND 判定・印の無い role=system の推定・列と表の剥がし
 #: - 版 2: 旧世代のスケジュール発火文・外部イベント通知の個別条件
 #:   (:func:`legacy_notice`)
-MIGRATION_RULES_VERSION = 2
+#: - 版 3: docs/intent/system_notice_delivery.md「追補」の移行の規則の第二版
+#:   (:func:`classify_tagged_message_v3` と、:func:`classify_unmarked_system_message`
+#:   の ``perception`` タグ・感情パラメータ変動の行)
+#:
+#: 印の版が N の DB は、版 N より後に足した規則だけで走査し直す (各規則が自分の
+#: 版を持つ — :func:`_classify_persona_row`)。
+MIGRATION_RULES_VERSION = 3
 
 
 def _marker_value() -> str:
@@ -313,6 +331,20 @@ LEGACY_NOTICE_KIND = "schedule"
 _BUILDING_MSG_REF_KEY = "building_msg_ref"
 
 
+def _has_user_utterance_provenance(metadata: Dict[str, Any]) -> bool:
+    """記憶 DB の行が、ユーザーの発言の来歴の印を持つか (来歴の縛り)。
+
+    建物履歴からの転記の印 (``building_msg_ref``) と、通話の文字起こしの印
+    (``voice_call`` / ``voice_transcript``)。docs/intent/system_notice_delivery.md
+    「移行」の来歴の縛り。
+    """
+    return bool(
+        _BUILDING_MSG_REF_KEY in metadata
+        or metadata.get("voice_call")
+        or metadata.get("voice_transcript")
+    )
+
+
 def legacy_notice(
     role: Any, content: Any, metadata: Dict[str, Any],
 ) -> Optional[Tuple[str, str]]:
@@ -350,9 +382,7 @@ def legacy_notice(
     tags = {t for t in _tags_of(metadata) if not t.startswith("pulse:")}
     if tags != {"conversation"}:
         return None
-    if _BUILDING_MSG_REF_KEY in metadata or metadata.get("voice_call") or metadata.get(
-        "voice_transcript"
-    ):
+    if _has_user_utterance_provenance(metadata):
         return None
     body = strip_system_tags(content)
     if body is None:
@@ -366,22 +396,188 @@ def legacy_notice(
     return None
 
 
-def classify_unmarked_system_message(metadata: Dict[str, Any]) -> Optional[str]:
-    """印 (``__system_notice__``) の無い role=system 行の系統名。推定できなければ None。"""
+#: 規則 3 (tags に Playbook 名がそのまま入っている行) で Playbook 名に数えない
+#: タグ。この移行の判定そのものに使うタグで、同名の Playbook があっても系統の
+#: 根拠にしない。
+_GENERAL_TAGS: FrozenSet[str] = frozenset({
+    "conversation", "internal", "tool", "event_message", "sluice", "day_plan",
+    "curation", "perception", "version_upgrade", _DIGEST_TAG, "track_context",
+    "track_chronicle_insert", "situation_change", "interrupted", "spell", "pre_spell",
+    "handy_tool", "permission", "denied", "error", "exec",
+})
+
+#: 退役した Playbook (builtin_data/playbooks/archive/ の memory_research など) の
+#: MEMORIZE が書いた子ラインの結果の書き出し。:data:`_SUBLINE_REPORT_PREFIX` とは
+#: 別の文面。
+_ARCHIVED_SUBLINE_REPORT_PREFIX = "サブプレイブック実行結果"
+
+#: 音声入力のときにアドオンが本文に添えた定型の案内文 (タグを剥がした本文の全体)。
+#: 名前の部分は供給元ごとに違うので任意の短い文字列にする。
+_VOICE_INPUT_NOTICE_RE = re.compile(
+    r"\S.{0,40}?\s?から音声入力を受信しました。添付の音声を(?:聴いて応答して|聞いて)ください。"
+)
+#: 音声入力の案内文を通知に変えた行の系統名。
+VOICE_INPUT_NOTICE_KIND = "voice_input"
+#: 音声入力のアドオンが metadata の ``source`` に書く値の末尾。
+_VOICE_SOURCE_SUFFIX = "_voice"
+
+
+def _has_audio_media(metadata: Dict[str, Any]) -> bool:
+    media = metadata.get("media")
+    if not isinstance(media, list):
+        return False
+    return any(isinstance(m, dict) and m.get("type") == "audio" for m in media)
+
+
+def is_voice_input_notice(body: Optional[str], metadata: Dict[str, Any]) -> bool:
+    """タグを剥がした本文が音声入力の定型の案内文で、行が音声入力の発言の形か (規則 5)。
+
+    来歴の縛りは掛けない — これはユーザーの音声の発言そのものの行なので、建物
+    履歴からの転記の印を持っている。条件は本文が案内文の形・metadata の media に
+    音声がある・``source`` が ``_voice`` で終わる、の AND。
+    """
+    if not isinstance(body, str) or _VOICE_INPUT_NOTICE_RE.fullmatch(body) is None:
+        return False
+    source = metadata.get("source")
+    return (
+        _has_audio_media(metadata)
+        and isinstance(source, str)
+        and source.endswith(_VOICE_SOURCE_SUFFIX)
+    )
+
+
+def classify_tagged_message_v3(
+    role: Any,
+    content: Any,
+    metadata: Dict[str, Any],
+    *,
+    playbook_names: AbstractSet[str] = frozenset(),
+) -> Optional[str]:
+    """版 3 で足した、タグ入り本文の role=user 行の規則。系統名を返す。対象外は None。
+
+    docs/intent/system_notice_delivery.md「追補」の移行の規則の第二版の 1〜5 と 7。
+    :func:`classify_tagged_message` と :func:`legacy_notice` が系統を決められなかった
+    行にだけ使う (:func:`_classify_persona_row`)。上から最初に当たったもの一つ:
+
+    1. tags に ``tool`` → ``tool_result``
+    2. tags に ``internal`` → ``playbook_memorize``
+    4. 剥がした本文が :data:`_ARCHIVED_SUBLINE_REPORT_PREFIX` で始まる →
+       ``subline_report`` (退役した Playbook の結果報告の行は tags に Playbook 名を
+       持つので、3 より先に見る — 既存の判定が ``playbook:`` タグの行で書き出しを
+       先に見るのと同じ順)
+    3. tags に実在する Playbook 名 (``playbook_names``、:data:`_GENERAL_TAGS` を
+       除く) → ``playbook_memorize``
+    5. 音声入力の案内文 (:func:`is_voice_input_notice`) → :data:`VOICE_INPUT_NOTICE_KIND`
+       (呼び出し側が二行に分割する)
+
+    1〜4 には来歴の縛り (:func:`_has_user_utterance_provenance`) を AND で掛ける。
+    5 には掛けない。規則 7 (定型の機構テキスト) は、本番の写しで出どころのコードを
+    特定できた文面が無かったので、今は持たない。
+    """
+    if not starts_with_system_tag(content):
+        return None
+    if not isinstance(role, str) or role.lower() != "user":
+        return None
+    tags = {t for t in _tags_of(metadata) if not t.startswith("pulse:")}
+    if not _has_user_utterance_provenance(metadata):
+        if "tool" in tags:
+            return "tool_result"
+        if "internal" in tags:
+            return "playbook_memorize"
+        if (strip_system_tags(content) or "").startswith(_ARCHIVED_SUBLINE_REPORT_PREFIX):
+            return "subline_report"
+        if (tags - _GENERAL_TAGS) & set(playbook_names):
+            return "playbook_memorize"
+    if is_voice_input_notice(strip_system_tags(content), metadata):
+        return VOICE_INPUT_NOTICE_KIND
+    return None
+
+
+#: 旧 persona/mixins/emotion.py (2026-06 に撤去) の ``_format_emotion_summary`` が
+#: 組んで、``add_to_persona_only`` で role=system のまま記憶に書いた感情パラメータの
+#: 変動の知らせ。一行は ``<名前>: mean <±差> → <値>, var <±差> → <値>``。
+_EMOTION_SUMMARY_RE = re.compile(
+    r'<div class="note-box">感情パラメータ変動<br>'
+    r"[^<>:]+: mean [+-]\d+\.\d → -?\d+\.\d, var [+-]\d+\.\d → -?\d+\.\d"
+    r"(?:<br>[^<>:]+: mean [+-]\d+\.\d → -?\d+\.\d, var [+-]\d+\.\d → -?\d+\.\d)*"
+    r"</div>"
+)
+#: その系統名 (出どころの関数名から)。
+EMOTION_SUMMARY_KIND = "emotion_summary"
+
+
+def _unmarked_system_rule(
+    metadata: Dict[str, Any], content: Any = None,
+) -> Optional[Tuple[str, int]]:
+    """印の無い role=system 行の (系統名, その規則を足した版)。推定できなければ None。"""
     tags = _tags_of(metadata)
     if "spell" in tags or "pre_spell" in tags:
-        return "spell_result"
+        return "spell_result", 1
     if "handy_tool" in tags:
-        return "handy_tool"
+        return "handy_tool", 1
     if {"permission", "denied"} <= tags:
-        return "playbook_permission"
+        return "playbook_permission", 1
     if {"error", "exec"} <= tags:
-        return "playbook_exec_error"
+        return "playbook_exec_error", 1
     if "tool" in tags:
-        return "tool_result"
+        return "tool_result", 1
     if _has_playbook_tag(tags):
-        return "playbook_memorize"
+        return "playbook_memorize", 1
+    # 版 3 (規則 6)
+    if "perception" in tags:
+        return "perception", 3
+    if isinstance(content, str) and _EMOTION_SUMMARY_RE.fullmatch(content):
+        return EMOTION_SUMMARY_KIND, 3
     return None
+
+
+def classify_unmarked_system_message(
+    metadata: Dict[str, Any], content: Any = None,
+) -> Optional[str]:
+    """印 (``__system_notice__``) の無い role=system 行の系統名。推定できなければ None。
+
+    tags から推定する (版 1)。版 3 で、``perception`` タグの行 (知覚の旧世代) と、
+    本文が感情パラメータの変動の知らせ (:data:`_EMOTION_SUMMARY_RE`) の行を足した。
+    """
+    hit = _unmarked_system_rule(metadata, content)
+    return hit[0] if hit else None
+
+
+def _builtin_playbooks_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "builtin_data" / "playbooks"
+
+
+def known_playbook_names(main_db: Optional[Path] = None) -> FrozenSet[str]:
+    """規則 3 の「実在する Playbook 名」。
+
+    builtin_data/playbooks/ (archive も含む) のファイルの ``name`` と、本体 DB の
+    ``playbooks`` 表の ``name``。読めないファイル・表は飛ばす (読み取り専用で開く)。
+    """
+    names = set()
+    root = _builtin_playbooks_dir()
+    if root.is_dir():
+        for path in root.rglob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            name = data.get("name") if isinstance(data, dict) else None
+            if isinstance(name, str) and name:
+                names.add(name)
+    if main_db is not None and main_db.is_file():
+        try:
+            with closing(_open_readonly(main_db)) as conn:
+                if _table_exists(conn, "playbooks"):
+                    names.update(
+                        r[0] for r in conn.execute("SELECT name FROM playbooks")
+                        if isinstance(r[0], str) and r[0]
+                    )
+        except sqlite3.Error:
+            LOGGER.warning(
+                "[system-notice-migration] could not read playbook names from %s",
+                main_db, exc_info=True,
+            )
+    return frozenset(names)
 
 
 # ---------------------------------------------------------------------------
@@ -645,148 +841,295 @@ def _parse_json_object(raw: Any) -> Optional[Dict[str, Any]]:
 def _notice_metadata(metadata: Dict[str, Any], kind: str) -> Dict[str, Any]:
     """通知に変換する行の新しい metadata (通知の印を足す)。
 
-    前の走査が「系統を判定できなかった」として付けた確認待ちの印は外す — 版 1 の
-    移行で確認待ちにした旧世代の発火文を、版 2 の走査し直しで通知にするとき、
-    印が残ると「まだ確認が要る行」に見え続ける。他の理由の確認待ちの印は、この
-    変換が解消するものではないので残す。
+    確認待ちの印 (``SYSTEM_NOTICE_REVIEW_KEY``) は理由を問わず外す — 変換した行は
+    もう確認を待っていない。印が残ると、確認待ちの行を確定する画面の入口が消え
+    なくなり、「実会話」からの除外も続く。
     """
     from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, SYSTEM_NOTICE_REVIEW_KEY
 
     new_meta = dict(metadata)
     new_meta[SYSTEM_NOTICE_KEY] = kind
-    if new_meta.get(SYSTEM_NOTICE_REVIEW_KEY) == UNCLASSIFIED_REASON:
-        del new_meta[SYSTEM_NOTICE_REVIEW_KEY]
+    new_meta.pop(SYSTEM_NOTICE_REVIEW_KEY, None)
     return new_meta
 
 
-def _scan_legacy_rescan(conn: sqlite3.Connection, result: StoreResult, order: str) -> None:
-    """版 1 で移行を済ませた記憶 DB に、版 2 で足した旧世代の判定だけを当てる (書かない)。
+@dataclass(frozen=True)
+class _RowMatch:
+    """記憶 DB の messages の一行に当たった規則。"""
 
-    版 1 の走査で印の判定 (:func:`classify_tagged_message`) が系統を決めた行は
-    変換済みか曖昧として確認待ちにしてあるので見ない。変換済みの行はタグで
-    始まらないので、そもそも読まれない (二重に変換しない)。変換しない行は版 1 の
-    レポートに載っていて確認待ちの印も付いているので、ここでは数えない。
+    #: ``__system_notice__`` に書く系統名。
+    kind: str
+    #: レポートの件数とサンプルの表記。
+    label: str
+    #: 剥がした本文。印を付けるだけの role=system 行は元の本文。None はタグの対応が曖昧。
+    body: Optional[str]
+    #: その規則を足した版 (:data:`MIGRATION_RULES_VERSION`)。
+    version: int
+    #: role=system の行に印を付けるだけか (本文と role は変えない)。
+    mark_only: bool = False
+
+
+def _classify_persona_row(
+    role: Any,
+    content: Any,
+    metadata: Dict[str, Any],
+    *,
+    playbook_names: AbstractSet[str],
+) -> Optional[_RowMatch]:
+    """記憶 DB の messages の一行に当たる規則 (無ければ None)。
+
+    上から最初に当たったもの一つ: 印の AND 判定 (:func:`classify_tagged_message`、
+    版 1) → 旧世代の個別条件 (:func:`legacy_notice`、版 2) → 版 3 の規則
+    (:func:`classify_tagged_message_v3`)。印の無い role=system 行は
+    :func:`_unmarked_system_rule`。走査し直しは、当たった規則の版が印の版より
+    新しい行だけを変換する — 古い版の規則に当たる行は、その版の走査が変換したか
+    確認待ちにしてある。
     """
-    rows = conn.execute(
-        "SELECT id, role, content, metadata FROM messages "
-        f"WHERE substr(content, 1, ?) = ? ORDER BY {order}",
-        (len(SYSTEM_OPEN), SYSTEM_OPEN),
-    ).fetchall()
-    for row_id, role, content, raw_meta in rows:
-        metadata = _load_json(raw_meta)
-        if classify_tagged_message(role, content, metadata) is not None:
-            continue
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
+    if starts_with_system_tag(content):
+        kind = classify_tagged_message(role, content, metadata)
+        if kind is not None:
+            return _RowMatch(kind, kind, strip_system_tags(content), 1)
         legacy = legacy_notice(role, content, metadata)
-        if legacy is None:
-            continue
-        label, body = legacy
+        if legacy is not None:
+            label, body = legacy
+            return _RowMatch(LEGACY_NOTICE_KIND, label, body, 2)
+        kind = classify_tagged_message_v3(
+            role, content, metadata, playbook_names=playbook_names,
+        )
+        if kind is not None:
+            return _RowMatch(kind, kind, strip_system_tags(content), 3)
+        return None
+    role_s = role.lower() if isinstance(role, str) else ""
+    if role_s != "system" or metadata.get(SYSTEM_NOTICE_KEY):
+        return None
+    hit = _unmarked_system_rule(metadata, content)
+    if hit is None:
+        return None
+    kind, version = hit
+    return _RowMatch(kind, kind, str(content or ""), version, mark_only=True)
+
+
+#: 音声入力の行を二行に分けるとき、元の行から新しい行へ写す列 (行の並びと所属を
+#: 決める列。sai_memory/memory/storage.py の ``add_message`` が書く列のうち、
+#: 応答の行だけが持つ ``paired_action_text`` / ``thought_signature`` /
+#: ``spell_origin_id`` / ``spell_seq`` は写さない)。
+_SPLIT_COPIED_COLUMNS = (
+    "thread_id", "resource_id", "created_at", "origin_track_id", "line_role", "line_id",
+    "scope", "pulse_id", "origin_episode",
+)
+#: 音声入力の行を分けて足した行の、レポートの件数とサンプルの表の表記 (行の数は
+#: 変換した行の数に数えない)。
+SPLIT_ADDED_TABLE = "messages(音声の行を分けて足した行)"
+#: 二行に分けた後の新しい行が、元の行の直後に並べられない (同じ時刻で後ろの
+#: rowid の行が既にある) ので、変換せずに残した行の理由。
+SPLIT_POSITION_REASON = "同じ時刻の後ろに別の行があり、音声の行を通知の直後に置けない"
+
+
+def _split_position_is_free(conn: sqlite3.Connection, cols: set, rowid: Any, created_at: Any) -> bool:
+    """新しく足す行 (元の行と同じ created_at、末尾の rowid) が元の行の直後に並ぶか。
+
+    記憶の読み出しは created_at, rowid の順に並べる。同じ created_at で元の行より
+    後ろの rowid の行が (どのスレッドにでも) あると、足した行はその後ろに並ぶ。
+    """
+    if "created_at" in cols:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE created_at IS ? AND rowid > ? LIMIT 1",
+            (created_at, rowid),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT 1 FROM messages WHERE rowid > ? LIMIT 1", (rowid,)).fetchone()
+    return row is None
+
+
+def _queue_voice_split(
+    result: StoreResult,
+    cols: set,
+    row_id: Any,
+    content: str,
+    metadata: Dict[str, Any],
+    match: _RowMatch,
+) -> None:
+    """音声入力の行を、通知の行 (元の行) と本文の無い音声の行 (新しい行) に分ける。
+
+    元の行はその場で role=system の通知にする (タグを剥がした案内文、
+    ``__system_notice__``)。ユーザーの発言の来歴 (``media`` と建物履歴からの転記の
+    印 ``building_msg_ref``) は通知に残さない。新しい行は role=user・本文 ``""`` で、
+    元の行の metadata (確認待ちの印を除く全部) を持つ。id は ``add_message`` と同じく
+    ``uuid4``。本文が空なので、``add_message`` を呼ぶ記憶の書き込み
+    (saiverse_memory/adapter.py) と同じく埋め込みの行は作らない。
+    """
+    from sai_memory.memory.storage import SYSTEM_NOTICE_REVIEW_KEY
+
+    notice_meta = _notice_metadata(metadata, match.kind)
+    notice_meta.pop("media", None)
+    notice_meta.pop(_BUILDING_MSG_REF_KEY, None)
+    user_meta = {k: v for k, v in metadata.items() if k != SYSTEM_NOTICE_REVIEW_KEY}
+    new_id = str(uuid.uuid4())
+    copied = [c for c in _SPLIT_COPIED_COLUMNS if c in cols]
+    copied_sql = "".join(f", {c}" for c in copied)
+    result.updates.append((
+        "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
+        (match.body, _dump_json(notice_meta), row_id),
+    ))
+    result.updates.append((
+        f"INSERT INTO messages (id, role, content, metadata{copied_sql}) "
+        f"SELECT ?, 'user', '', ?{copied_sql} FROM messages WHERE id = ?",
+        (new_id, _dump_json(user_meta), row_id),
+    ))
+    result.changes.append(Change("messages", str(row_id), match.label, content, match.body or ""))
+    result.changes.append(Change(SPLIT_ADDED_TABLE, new_id, match.label, content, ""))
+
+
+def _queue_conversion(
+    conn: sqlite3.Connection,
+    result: StoreResult,
+    cols: set,
+    row: Tuple[Any, ...],
+    metadata: Dict[str, Any],
+    match: _RowMatch,
+) -> Optional[str]:
+    """当たった規則の変換を ``result`` に積む。変換できなければ残す理由を返す。"""
+    row_id, role, content, _raw_meta, rowid, created_at = row
+    if match.mark_only:
         result.updates.append((
-            "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
-            (body, _dump_json(_notice_metadata(metadata, LEGACY_NOTICE_KIND)), row_id),
+            "UPDATE messages SET metadata = ? WHERE id = ?",
+            (_dump_json(_notice_metadata(metadata, match.kind)), row_id),
         ))
-        result.changes.append(Change("messages", str(row_id), label, content, body))
+        result.changes.append(Change(
+            "messages(印の付与)", str(row_id), match.label, str(content or ""), str(content or ""),
+        ))
+        return None
+    if match.body is None:
+        return AMBIGUOUS_TAGS_REASON
+    if match.kind == VOICE_INPUT_NOTICE_KIND:
+        if not _split_position_is_free(conn, cols, rowid, created_at):
+            return SPLIT_POSITION_REASON
+        _queue_voice_split(result, cols, row_id, content, metadata, match)
+        return None
+    result.updates.append((
+        "UPDATE messages SET role = 'system', content = ?, metadata = ? WHERE id = ?",
+        (match.body, _dump_json(_notice_metadata(metadata, match.kind)), row_id),
+    ))
+    result.changes.append(Change("messages", str(row_id), match.label, content, match.body))
+    return None
 
 
 def scan_persona_conn(
-    conn: sqlite3.Connection, result: StoreResult, *, legacy_only: bool = False,
+    conn: sqlite3.Connection,
+    result: StoreResult,
+    *,
+    rescan_from_version: Optional[int] = None,
+    playbook_names: Optional[AbstractSet[str]] = None,
 ) -> None:
     """ペルソナの記憶 DB を読んで、変換を ``result`` に積む (書かない)。
 
-    - messages: タグ入り本文の行 (判定は :func:`classify_tagged_message`、
-      決められなければ旧世代の個別条件 :func:`legacy_notice`) と、
-      印の無い role=system 行 (:func:`classify_unmarked_system_message`)。
+    - messages: タグ入り本文の行と、印の無い role=system 行
+      (判定は :func:`_classify_persona_row`)。
     - messages.paired_action_text: 列そのものが機構だけが書く指示文の控えなので、
       タグで始まる値は剥がす。
     - perception_batches (kind=realtime_and_recall).rendered_text。
 
-    ``legacy_only`` は版 1 で移行を済ませた DB の走査し直し
-    (:func:`_scan_legacy_rescan`)。
-    """
-    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+    ``rescan_from_version`` は、その版で移行を済ませた DB の走査し直し — その版より
+    後に足した規則に当たる messages の行だけを変換する (変換しない行は前の版の
+    レポートと確認待ちの印にあるので数えない。paired_action_text と
+    perception_batches の規則は版 1 から変わっていない)。
 
+    所有者が確定した行 (``SYSTEM_NOTICE_REVIEWED_KEY`` を持つ行) は、確認待ちの
+    印も付けず変換もしない。
+    """
     if not _table_exists(conn, "messages"):
         return
     cols = _columns(conn, "messages")
     if not {"id", "role", "content"} <= cols:
         # 判定に要る列が無い DB は対象が無い (変換もしない)
         return
-    if legacy_only:
-        if "metadata" in cols:  # metadata の無い行は旧世代の条件に当たらない
-            _scan_legacy_rescan(
-                conn, result, "created_at, rowid" if "created_at" in cols else "rowid",
-            )
+    if playbook_names is None:
+        playbook_names = known_playbook_names()
+    rescan = rescan_from_version is not None
+    _scan_persona_messages(
+        conn, result, cols,
+        rescan_from_version=rescan_from_version, playbook_names=playbook_names,
+    )
+    if rescan:
         return
+    _scan_persona_other_columns(conn, result, cols)
+
+
+def _scan_persona_messages(
+    conn: sqlite3.Connection,
+    result: StoreResult,
+    cols: set,
+    *,
+    rescan_from_version: Optional[int],
+    playbook_names: AbstractSet[str],
+) -> None:
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, SYSTEM_NOTICE_REVIEWED_KEY
+
+    rescan = rescan_from_version is not None
     meta_col = _col_or_null(cols, "metadata")
-    # 確認待ちの印は metadata の列に書く。列の無い古いスキーマでは付けられないので、
-    # 付けるべき行があれば ``review_marks_deferred`` を立てる — 完了の印を見送り、
+    created_col = _col_or_null(cols, "created_at")
+    # 確認待ちの印も変換も metadata の列に書く。列の無い古いスキーマでは書けないので、
+    # 印を付けるべき行があれば ``review_marks_deferred`` を立てる — 完了の印を見送り、
     # 通常の初期化 (init_db) が列を足した後の起動で走査し直して印を付ける。
     can_mark = "metadata" in cols
+    if rescan and not can_mark:
+        return
     order = "created_at, rowid" if "created_at" in cols else "rowid"
     rows = conn.execute(
-        f"SELECT id, role, content, {meta_col} FROM messages "
+        f"SELECT id, role, content, {meta_col}, rowid, {created_col} FROM messages "
         "WHERE substr(content, 1, ?) = ? OR role = 'system' "
         f"ORDER BY {order}",
         (len(SYSTEM_OPEN), SYSTEM_OPEN),
     ).fetchall()
-    for row_id, role, content, raw_meta in rows:
+    for row in rows:
+        row_id, role, content, raw_meta = row[:4]
         metadata = _load_json(raw_meta)
-        role_s = role.lower() if isinstance(role, str) else ""
-        if starts_with_system_tag(content):
-            kind = classify_tagged_message(role, content, metadata)
-            body = strip_system_tags(content) if kind is not None else None
-            label = kind
-            if kind is None:
-                # 印で系統を決められなかった行のうち、旧世代の発火文の個別条件に
-                # 当たるもの (確認待ちの印は付けない)
-                legacy = legacy_notice(role, content, metadata)
-                if legacy is not None:
-                    kind = LEGACY_NOTICE_KIND
-                    label, body = legacy
-            if kind is None or body is None:
-                result.skipped.append(Skipped(
-                    "messages", str(row_id), str(role),
-                    sorted(_tags_of(metadata)), _head(content),
-                    reason="" if kind is None else AMBIGUOUS_TAGS_REASON,
-                ))
-                if can_mark:
-                    _mark_for_review(
-                        result, row_id, raw_meta, metadata,
-                        UNCLASSIFIED_REASON if kind is None else AMBIGUOUS_TAGS_REASON,
-                    )
-                else:
-                    result.review_marks_deferred = True
+        if metadata.get(SYSTEM_NOTICE_REVIEWED_KEY):
+            continue  # 所有者が確定した行 (確認待ちの行の確定の画面)
+        if not starts_with_system_tag(content) and (
+            not isinstance(role, str) or role.lower() != "system"
+            or metadata.get(SYSTEM_NOTICE_KEY)
+        ):
+            continue  # 印の付いた role=system 行 (通知として済んでいる)
+        match = _classify_persona_row(
+            role, content, metadata, playbook_names=playbook_names,
+        ) if can_mark else None
+        if rescan:
+            if match is None or match.version <= rescan_from_version:
                 continue
-            result.updates.append((
-                "UPDATE messages SET role = 'system', content = ?, metadata = ? "
-                "WHERE id = ?",
-                (body, _dump_json(_notice_metadata(metadata, kind)), row_id),
+            # 走査し直しでは、変換できない行 (曖昧など) は前の版の確認待ちの印のまま残す
+            _queue_conversion(conn, result, cols, row, metadata, match)
+            continue
+        reason = (
+            _queue_conversion(conn, result, cols, row, metadata, match)
+            if match is not None else None
+        )
+        if match is not None and reason is None:
+            continue
+        if starts_with_system_tag(content):
+            result.skipped.append(Skipped(
+                "messages", str(row_id), str(role),
+                sorted(_tags_of(metadata)), _head(content), reason=reason or "",
             ))
-            result.changes.append(Change("messages", str(row_id), label, content, body))
-            continue
-        if role_s != "system" or metadata.get(SYSTEM_NOTICE_KEY):
-            continue
-        kind = classify_unmarked_system_message(metadata)
-        if kind is None:
+            review_reason = reason or UNCLASSIFIED_REASON
+        else:
             result.unknown_system_count += 1
             if len(result.unknown_system_samples) < UNKNOWN_SYSTEM_LIST_LIMIT:
                 result.unknown_system_samples.append(Skipped(
                     "messages", str(row_id), str(role),
                     sorted(_tags_of(metadata)), _head(content),
                 ))
-            if can_mark:
-                _mark_for_review(result, row_id, raw_meta, metadata, UNKNOWN_SYSTEM_REASON)
-            else:
-                result.review_marks_deferred = True
-            continue
-        new_meta = dict(metadata)
-        new_meta[SYSTEM_NOTICE_KEY] = kind
-        result.updates.append((
-            "UPDATE messages SET metadata = ? WHERE id = ?",
-            (_dump_json(new_meta), row_id),
-        ))
-        result.changes.append(Change(
-            "messages(印の付与)", str(row_id), kind, str(content or ""), str(content or ""),
-        ))
+            review_reason = UNKNOWN_SYSTEM_REASON
+        if can_mark:
+            _mark_for_review(result, row_id, raw_meta, metadata, review_reason)
+        else:
+            result.review_marks_deferred = True
+
+
+def _scan_persona_other_columns(conn: sqlite3.Connection, result: StoreResult, cols: set) -> None:
+    order = "created_at, rowid" if "created_at" in cols else "rowid"
 
     # 旧世界の MEMORIZE の結果 (building_move / document_create / document_search /
     # generate_image など) は role=user・タグ無しの本文で保存された世代がある。
@@ -1128,12 +1471,13 @@ def migrate_persona_db(
     dry_run: bool = False,
     stamp: str,
     results_dir: Optional[Path] = None,
+    playbook_names: Optional[AbstractSet[str]] = None,
 ) -> StoreResult:
     """一つのペルソナの記憶 DB を移行する。
 
     今の版 (:data:`MIGRATION_RULES_VERSION`) の印 (:data:`MIGRATION_MARKER_KEY`) が
     立っていれば何もしない。古い版の印なら、その後の版で足した規則だけで走査し
-    直し (``legacy_only`` — 変換済みの行は条件から外れているので素通りする)、
+    直し (``rescan_from_version`` — 変換済みの行は条件から外れているので素通りする)、
     印を今の版に書き換える。印が無ければ全体を走査する。どちらも
     書き込みの取引 (``BEGIN IMMEDIATE`` — 他のプロセスの書き込みを止める) を
     取り、その中で印をもう一度確かめ (別のプロセスが先に終えていれば何も
@@ -1165,7 +1509,9 @@ def migrate_persona_db(
             return result
         if dry_run:
             result.rescan_from_version = done
-            scan_persona_conn(conn, result, legacy_only=done is not None)
+            scan_persona_conn(
+                conn, result, rescan_from_version=done, playbook_names=playbook_names,
+            )
             return result
 
     staged: Optional[Path] = None
@@ -1180,9 +1526,10 @@ def migrate_persona_db(
                 result.already_done = True
                 return result
             # 古い版の印がある DB は、その後の版で足した規則だけで走査し直す
-            # (版 1 → 2 で足したのは旧世代の個別条件だけ)
             result.rescan_from_version = done
-            scan_persona_conn(conn, result, legacy_only=done is not None)
+            scan_persona_conn(
+                conn, result, rescan_from_version=done, playbook_names=playbook_names,
+            )
             if result.updates:
                 backup = output_dir / persona_id / _snapshot_name("memory.db", stamp)
                 try:
@@ -1549,9 +1896,9 @@ def render_report(results: Sequence[StoreResult], *, dry_run: bool, stamp: str) 
         if res.rescan_from_version is not None:
             lines.append(
                 f"- 走査し直し: 規則の版 {res.rescan_from_version} で移行を済ませた記憶なので、"
-                f"版 {MIGRATION_RULES_VERSION} までに足した規則 (旧世代のスケジュール発火文・"
-                "外部イベント通知) だけを当て直した。前の版で変換しなかった行は、前の版の"
-                "レポートと確認待ちの印にある"
+                f"版 {res.rescan_from_version + 1}〜{MIGRATION_RULES_VERSION} で足した規則"
+                "だけを当て直した。前の版で変換しなかった行は、前の版のレポートと"
+                "確認待ちの印にある"
             )
         if res.review_marks_deferred:
             lines.append(
@@ -1867,11 +2214,14 @@ def run_migration(
             results.append(failed)
             _try_write_result_json(results_dir, "main", failed)
 
+    # 規則 3 の「実在する Playbook 名」は移行の時点の世界で一度だけ決める
+    playbook_names = known_playbook_names(db_path)
     for persona_id, persona_db in _iter_persona_dbs(saiverse_home):
         try:
             results.append(migrate_persona_db(
                 persona_db, persona_id=persona_id, output_dir=output_dir,
                 dry_run=dry_run, stamp=stamp, results_dir=results_dir,
+                playbook_names=playbook_names,
             ))
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
@@ -1935,19 +2285,12 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
 
     home = get_saiverse_home()
     alerts: List[Dict[str, Any]] = []
+    # レポートは開発者向けのファイルなので、作り直しは画面に出さずログにだけ残す
+    # (regenerate_pending_reports が作り直したパスを info で記録する)
     try:
-        regenerated = regenerate_pending_reports(home)
+        regenerate_pending_reports(home)
     except Exception:  # noqa: BLE001
         LOGGER.error("[system-notice-migration] report regeneration failed", exc_info=True)
-        regenerated = []
-    if regenerated:
-        alerts.append({
-            "id": "system_notice_migration_report_regenerated",
-            "level": "info",
-            "title": "前回書けなかったシステム通知の移行のレポートを作り直しました",
-            "message": "レポート: " + ", ".join(str(p) for p in regenerated),
-            "details": {},
-        })
     try:
         results, report = run_migration(db_path=Path(db_path), saiverse_home=home)
     except Exception:  # noqa: BLE001
@@ -1959,14 +2302,16 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "message": "起動時の移行が途中で止まりました。次の起動で再試行します。ログを確認してください。",
             "details": {},
         }]
+    # 確認待ちの行の件数と、レポートのファイルの場所は画面に出さない
+    # (docs/intent/system_notice_delivery.md「追補」— 確認待ちの行の案内は、
+    # 確認待ちの行を確定する画面が自分の入口として出す)。
     failed = [r for r in results if r.error]
-    # 人の確認が要る行 (変換しなかった行・推定できなかった行・旧 MEMORIZE の候補)。
-    # レポートの材料 (結果の JSON) に書いた DB の分だけ数える — 本体 DB の残りは
-    # 前回と同じ行ならレポートの材料にしないので、毎起動で知らせない。
     saved = [r for r in results if r.result_saved]
-    # 材料に書けなかった DB の分も、この起動の手元の結果から数える
     unsaved = [r for r in results if r.result_save_failed]
-    review_rows = sum(sum(r.leftover_counts()) for r in saved + unsaved)
+    converted_rows = sum(
+        n for r in results if not r.error
+        for (table, _kind), n in r.counts().items() if table != SPLIT_ADDED_TABLE
+    )
     # 古いスキーマで確認待ちの印を付けられず、完了の印を見送った記憶
     deferred_note = (
         " 一部の記憶は古い形のため確認待ちの印を付けられなかったので、移行を完了扱いに"
@@ -1987,7 +2332,7 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
                     if any(r.persona and not r.error for r in unsaved) else ""
                 )
                 + (
-                    "本体 DB の確認が要る行は次の起動でもう一度報告します"
+                    "本体 DB の残した行は次の起動のレポートにもう一度載せます"
                     + (
                         " (変換した件数はこの起動のログにあります)"
                         if any(not r.persona and r.changes for r in unsaved) else ""
@@ -1995,14 +2340,12 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
                     + "。"
                     if any(not r.persona for r in unsaved) else ""
                 )
-                + (f"確認が要る行: {review_rows} 件。" if review_rows else "")
             ),
             "details": {"unsaved": [r.label for r in unsaved]},
         })
     if saved and report is None:
-        # 材料は書けたのにレポートが書けなかった。移行の成否と確認が要る行の
-        # 件数は分かっているので、レポートを待たずに知らせる (レポートは次の
-        # 起動で材料から作り直す — regenerate_pending_reports)。
+        # 材料は書けたのにレポートが書けなかった (レポートは次の起動で材料から
+        # 作り直す — regenerate_pending_reports)。
         converted = any(r.changes for r in saved)
         alerts.append({
             "id": "system_notice_migration_report_failed",
@@ -2011,7 +2354,6 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "message": (
                 ("移行は完了しましたが、" if converted and not failed else "")
                 + "結果のレポートの書き出しに失敗しました (次の起動で作り直します)。"
-                + f"確認が要る行: {review_rows} 件。"
             ),
             "details": {},
         })
@@ -2020,34 +2362,19 @@ def run_startup_system_notice_migration(db_path: str) -> List[Dict[str, Any]]:
             "id": "system_notice_migration_failed",
             "level": "warning",
             "title": "システム通知の記録の移行が一部の記録でできませんでした",
-            "message": (
-                "移行できなかった記録は元のまま残っていて、次の起動で再試行します。"
-                + (f" 詳細: {report}" if report else "")
-            ),
+            "message": "移行できなかった記録は元のまま残っていて、次の起動で再試行します。",
             "details": {"failed": [r.label for r in failed]},
         })
-    elif report is not None and any(r.changes for r in results):
+    elif report is not None and converted_rows:
         alerts.append({
             "id": "system_notice_migration_done",
             "level": "info",
             "title": "システム通知の記録を新しい形式へ移行しました",
-            "message": f"移行前の写しと結果のレポートを保存しました: {report}" + (
-                f" 変換せずに残した、確認が要る行が {review_rows} 件あります (レポートに一覧があります)。"
-                if review_rows else ""
-            ) + deferred_note,
-            "details": {},
-        })
-    elif report is not None and review_rows:
-        alerts.append({
-            "id": "system_notice_migration_review",
-            "level": "warning",
-            "title": "システム通知の記録の移行で、確認が要る行があります",
             "message": (
-                f"変換せずに残した行・種類を推定できなかった行が {review_rows} 件あります。"
-                f"一覧はレポートにあります: {report}"
-                + deferred_note
+                f"{converted_rows} 件の記録を新しい形式へ変換しました。移行前の写しを"
+                "保存してあります。" + deferred_note
             ),
-            "details": {},
+            "details": {"converted": converted_rows},
         })
     return alerts
 
