@@ -17,19 +17,22 @@ const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
 
 function Overlay() { return null; }
 
-function row(pid, mid, actions, role = 'user') {
+const LONG = 'x'.repeat(5000);
+
+function row(pid, mid, actions, role = 'user', extra = {}) {
     return {
         persona_id: pid, persona_name: pid.toUpperCase(), message_id: mid, role, tags: ['tool'],
-        content: 'Email sent.', content_truncated: false, reason: 'r', created_at: 1000, actions,
+        content: 'Email sent.', reason: 'r', created_at: 1000, actions,
+        version: `v-${mid}`, attachments: [], attachment_counts: {}, ...extra,
     };
 }
 
-function listing(groups) {
-    return { total: groups.reduce((n, g) => n + g.rows.length, 0), groups, errors: [] };
+function listing(groups, errors = []) {
+    return { total: groups.reduce((n, g) => n + g.rows.length, 0), groups, errors };
 }
 
 function harness(initialListing) {
-    const states = [], effects = [], requests = [], notices = [];
+    const states = [], effects = [], requests = [], notices = [], questions = [];
     let cursor = 0, mounted = false, confirmed = false, closed = 0, changed = 0;
     let serverListing = initialListing;
     let applyResponse = () => ({ applied: [], rejected: [], remaining: 0 });
@@ -50,7 +53,9 @@ function harness(initialListing) {
         if (name === 'lucide-react') return {};
         if (name === './common/ModalOverlay') return { __esModule: true, default: Overlay };
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
-        if (name === '@/i18n/core') return { t: (key, params) => (params && 'count' in params ? `${key}:${params.count}` : key) };
+        if (name === '@/i18n/core') return {
+            t: (key, params) => (params ? `${key}:${JSON.stringify(params)}` : key),
+        };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, options) => {
             const method = options?.method || 'GET';
@@ -69,7 +74,10 @@ function harness(initialListing) {
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
-    global.window = { confirm: () => confirmed, alert: message => notices.push(message) };
+    global.window = {
+        confirm: question => { questions.push(question); return confirmed; },
+        alert: message => notices.push(message),
+    };
     const props = { onClose: () => { closed++; }, onChanged: async () => { changed++; } };
     function render() {
         cursor = 0;
@@ -78,12 +86,13 @@ function harness(initialListing) {
         return tree;
     }
     return {
-        render, requests, notices,
+        module, render, requests, notices, questions,
         get closed() { return closed; },
         get changed() { return changed; },
         async mount() { render(); effects.forEach(effect => effect()); await new Promise(setImmediate); return render(); },
         confirm(value) { confirmed = value; },
         onApply(fn) { applyResponse = fn; },
+        setServer(value) { serverListing = value; },
     };
 }
 
@@ -98,12 +107,15 @@ const text = node => {
 };
 const actionButtons = tree => all(tree, node => node.type === 'button' && /^components\.SystemNoticeReviewModal\.action/.test(text(node)));
 const sections = tree => all(tree, node => node.type === 'section');
+const pres = tree => all(tree, node => node.type === 'pre');
+const posts = h => h.requests.filter(r => r.method === 'POST');
 
 (async () => {
     const userable = { group_id: 'g1', role: 'user', head: 'Email sent.', tags: ['tool'], reason: 'r',
         actions: ['keep', 'system', 'user', 'delete'], count: 2,
         personas: [{ persona_id: 'a', persona_name: 'A', count: 1 }, { persona_id: 'b', persona_name: 'B', count: 1 }],
-        rows: [row('a', 'm1', ['keep', 'system', 'user', 'delete']), row('b', 'm2', ['keep', 'system', 'user', 'delete'])] };
+        rows: [row('a', 'm1', ['keep', 'system', 'user', 'delete'], 'user', { content: LONG }),
+            row('b', 'm2', ['keep', 'system', 'user', 'delete'])] };
     const persona = { group_id: 'g2', role: 'assistant', head: 'memo', tags: [], reason: 'r',
         actions: ['keep', 'system', 'delete'], count: 1,
         personas: [{ persona_id: 'a', persona_name: 'A', count: 1 }],
@@ -119,41 +131,97 @@ const sections = tree => all(tree, node => node.type === 'section');
         'components.SystemNoticeReviewModal.actionUser', 'components.SystemNoticeReviewModal.actionDelete',
     ]);
     assert.ok(!actionButtons(second).map(text).includes('components.SystemNoticeReviewModal.actionUser'));
+    // The full text is shown, not a cut-off preview.
+    assert.equal(pres(first)[0].props.children, LONG);
 
-    // Applying a group sends every row of that group, then refreshes alerts and the list.
+    // A group action asks first and names how many rows it touches; cancelling sends nothing.
+    await actionButtons(first)[1].props.onClick();
+    assert.equal(posts(h).length, 0);
+    assert.match(h.questions.at(-1), /^components\.SystemNoticeReviewModal\.confirmApplyMany:/);
+    assert.equal(JSON.parse(h.questions.at(-1).split(':').slice(1).join(':')).count, 2);
+
+    // Confirmed, it sends every row of that group with the version the screen saw,
+    // then refreshes alerts and the list.
+    h.confirm(true);
     h.onApply(body => ({ applied: body.items, rejected: [], remaining: 1, next: listing([persona]) }));
     await actionButtons(first)[1].props.onClick();
-    const post = h.requests.find(r => r.method === 'POST');
-    assert.deepEqual(post.body, { action: 'system', items: [
-        { persona_id: 'a', message_id: 'm1' }, { persona_id: 'b', message_id: 'm2' },
+    assert.deepEqual(posts(h).at(-1).body, { action: 'system', items: [
+        { persona_id: 'a', message_id: 'm1', version: 'v-m1' },
+        { persona_id: 'b', message_id: 'm2', version: 'v-m2' },
     ] });
     assert.equal(h.changed, 1);
     tree = h.render();
     assert.equal(sections(tree).length, 1);
     assert.equal(h.closed, 0);
 
-    // Delete asks first; cancelling sends nothing.
-    const posts = () => h.requests.filter(r => r.method === 'POST').length;
-    const before = posts();
-    await actionButtons(sections(tree)[0]).at(-1).props.onClick();
-    assert.equal(posts(), before);
-
-    // Rows can be chosen one by one after expanding the group.
+    // A single-row action other than delete does not ask.
+    h.confirm(false);
     const expand = all(sections(tree)[0], node => node.type === 'button' && 'aria-expanded' in node.props)[0];
     expand.props.onClick();
     tree = h.render();
-    const rowItems = all(tree, node => node.type === 'li');
+    let rowItems = all(tree, node => node.type === 'li');
     assert.equal(rowItems.length, 1);
+    const asked = h.questions.length;
+    h.onApply(body => ({ applied: [], rejected: body.items.map(i => ({ ...i, reason: 'changed' })), remaining: 1 }));
+    await actionButtons(rowItems[0])[0].props.onClick();
+    assert.equal(h.questions.length, asked);
+    // Rows whose content changed since the list was loaded are reported as such.
+    assert.match(h.notices.at(-1), /^components\.SystemNoticeReviewModal\.rejectedChanged:/);
+
+    // Delete asks first even for one row; cancelling sends nothing.
+    const before = posts(h).length;
+    tree = h.render();
+    rowItems = all(tree, node => node.type === 'li');
+    await actionButtons(rowItems[0]).at(-1).props.onClick();
+    assert.equal(posts(h).length, before);
 
     // Confirmed delete of the last row closes the modal once nothing is left,
     // and rejected rows are reported.
     h.confirm(true);
     h.onApply(body => ({ applied: [], rejected: body.items.map(i => ({ ...i, reason: 'not_allowed' })), remaining: 0, next: listing([]) }));
     await actionButtons(rowItems[0]).at(-1).props.onClick();
-    const last = h.requests.filter(r => r.method === 'POST').at(-1);
-    assert.deepEqual(last.body, { action: 'delete', items: [{ persona_id: 'a', message_id: 'm3' }] });
-    assert.equal(h.notices.length, 1);
+    assert.deepEqual(posts(h).at(-1).body, { action: 'delete', items: [{ persona_id: 'a', message_id: 'm3', version: 'v-m3' }] });
+    assert.match(h.notices.at(-1), /^components\.SystemNoticeReviewModal\.rejected:/);
     assert.equal(h.closed, 1);
-    assert.equal(h.changed, 2);
-    console.log('Notice review modal: per-group actions, group apply, delete confirmation, row choice, reload, and close-when-empty passed.');
+
+    // Attachments are listed with kinds and counts, and a group whose rows carry
+    // attachments explains why "convert to official" is missing.
+    const withAudio = { group_id: 'g3', role: 'user', head: 'voice', tags: [], reason: 'r',
+        actions: ['keep', 'user', 'delete'], count: 1,
+        personas: [{ persona_id: 'a', persona_name: 'A', count: 1 }],
+        rows: [row('a', 'm4', ['keep', 'user', 'delete'], 'user', {
+            attachments: [{ kind: 'audio', ref: 'saiverse://audio/voice.ogg' }],
+            attachment_counts: { audio: 1 },
+        })] };
+    h = harness(listing([withAudio]));
+    tree = await h.mount();
+    const strings = all(tree, node => node.type === 'span' || node.type === 'p' || node.type === 'li')
+        .map(node => node.props.children).flat().filter(x => typeof x === 'string');
+    assert.ok(strings.some(s => s.startsWith('components.SystemNoticeReviewModal.attachments:')
+        && s.includes('components.SystemNoticeReviewModal.kindAudio')));
+    assert.ok(strings.includes('saiverse://audio/voice.ogg'));
+    assert.ok(strings.includes('components.SystemNoticeReviewModal.attachmentsNoSystem'));
+
+    // While some personas' memories could not be read, settling the last visible
+    // row does not close the modal; the unreadable personas are named and a retry
+    // reloads the list.
+    const unreadable = [{ persona_id: 'c', persona_name: 'Carol', error: 'locked' }];
+    h = harness(listing([withAudio], unreadable));
+    tree = await h.mount();
+    assert.ok(all(tree, node => node.type === 'p').some(node => String(node.props.children).includes('Carol')));
+    h.confirm(true);
+    h.onApply(body => ({ applied: body.items, rejected: [], remaining: 0, next: listing([], unreadable) }));
+    await actionButtons(sections(tree)[0]).at(-1).props.onClick();
+    assert.equal(h.closed, 0);
+    tree = h.render();
+    const retry = all(tree, node => node.type === 'button' && text(node) === 'components.SystemNoticeReviewModal.retry')[0];
+    assert.ok(retry);
+    const gets = () => h.requests.filter(r => r.method === 'GET').length;
+    const loads = gets();
+    h.setServer(listing([]));
+    await retry.props.onClick();
+    assert.equal(gets(), loads + 1);
+    assert.equal(all(h.render(), node => node.type === 'p').some(node => String(node.props.children).includes('Carol')), false);
+
+    console.log('Notice review modal: per-group actions, full text, counted confirmation, versions, changed rows, attachments, unreadable memories, delete confirmation, and close-when-empty passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

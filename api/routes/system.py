@@ -437,6 +437,9 @@ async def archive_unreadable_legacy_log(building_id: str):
 class SystemNoticeReviewItem(BaseModel):
     persona_id: str
     message_id: str
+    #: 一覧が返した行のハッシュ。今の行から作ったハッシュと違えば書き換えずに拒否する
+    #: (reason=changed)。
+    version: str
 
 
 class SystemNoticeReviewApplyRequest(BaseModel):
@@ -449,7 +452,8 @@ def list_system_notice_review():
     """確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった行) の一覧。
 
     同じ型の行を束ね、束と行ごとに「選べる操作」を付けて返す
-    (docs/intent/system_notice_delivery.md「確認待ちの行の確定」)。
+    (docs/intent/system_notice_delivery.md「確認待ちの行の確定」)。各行は本文の
+    全文・添付 (種類と参照)・行のハッシュ (``version`` — 確定の操作に渡す) を持つ。
     """
     from saiverse.system_notice_review import build_review_listing, known_persona_dbs
 
@@ -464,13 +468,16 @@ def apply_system_notice_review(request: SystemNoticeReviewApplyRequest):
     """確認待ちの行に所有者が選んだ操作 (keep / system / user / delete) を当てる。
 
     書き込みは記憶ブラウザの編集 API と同じ ``get_adapter`` を通る。選べない操作を
-    指定された行は書き換えずに ``rejected`` に入れて返す。当てた後に確認待ちの
-    行を数え直し、0 件になれば画面の警告を外す。
+    指定された行 (not_allowed)・一覧の後で中身が変わった行 (changed) は書き換えずに
+    ``rejected`` に入れて返す。建物の履歴から転記された行の削除は、先に建物の側の
+    取り込み済みの印を確実にする (取り込み直しで行が復活しないように)。当てた後に
+    確認待ちの行を数え直し、0 件で読めない記憶も無ければ画面の警告を外す。
     """
     from api.routes.people.utils import get_adapter
     from saiverse.system_notice_review import (
         ACTIONS,
         apply_review_action,
+        mark_building_ref_ingested,
         refresh_review_alert,
     )
 
@@ -479,10 +486,12 @@ def apply_system_notice_review(request: SystemNoticeReviewApplyRequest):
         raise HTTPException(status_code=503, detail="Manager not ready")
     if request.action not in ACTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown action: {request.action}")
+    session_factory = getattr(manager, "SessionLocal", None)
     result = apply_review_action(
         request.action,
-        [(item.persona_id, item.message_id) for item in request.items],
+        [(item.persona_id, item.message_id, item.version) for item in request.items],
         lambda persona_id: get_adapter(persona_id, manager),
+        lambda persona_id, ref: mark_building_ref_ingested(session_factory, ref, persona_id),
     )
     remaining = refresh_review_alert(manager)
     return {**result, "remaining": remaining}

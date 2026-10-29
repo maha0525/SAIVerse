@@ -12,8 +12,16 @@ import styles from "./SystemNoticeReviewModal.module.css";
 // 確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった記憶の行) を
 // 所有者が確定する画面。docs/intent/system_notice_delivery.md「確認待ちの行の確定」。
 // 選べる操作は行ごとにサーバーが決めて返す (この画面は本文を見て判定しない)。
+// 各行は全文・添付・行のハッシュ (version) を持つ。確定の操作には画面が見たハッシュを送り、
+// サーバーはその後に中身が変わった行を書き換えずに拒否する (reason=changed)。
+
+/** 確認待ちの行があるあいだサーバーが置く警告の id (saiverse/system_notice_review.py
+ * の REVIEW_ALERT_ID)。画面上部のバナーと設定の「便利機能」の入口が、この警告の
+ * 有無で確定の画面への入口を出す。 */
+export const NOTICE_REVIEW_ALERT_ID = "system_notice_review_pending";
 
 type ReviewAction = "keep" | "system" | "user" | "delete";
+type AttachmentKind = "image" | "document" | "audio" | "video" | "other";
 
 interface ReviewRow {
     persona_id: string;
@@ -22,10 +30,12 @@ interface ReviewRow {
     role: string;
     tags: string[];
     content: string;
-    content_truncated: boolean;
     reason: string;
     created_at: number | null;
     actions: ReviewAction[];
+    version: string;
+    attachments: { kind: AttachmentKind; ref: string }[];
+    attachment_counts: Partial<Record<AttachmentKind, number>>;
 }
 
 interface ReviewGroup {
@@ -43,7 +53,7 @@ interface ReviewGroup {
 interface ReviewListing {
     total: number;
     groups: ReviewGroup[];
-    errors: { persona_id: string; error: string }[];
+    errors: { persona_id: string; persona_name?: string; error: string }[];
 }
 
 interface ApplyResult {
@@ -57,6 +67,8 @@ interface Props {
     /** 確定の操作のあと、画面上部の警告を取り直すために呼ぶ */
     onChanged: () => void | Promise<void>;
 }
+
+const ATTACHMENT_KIND_ORDER: AttachmentKind[] = ["image", "document", "audio", "video", "other"];
 
 function actionLabel(action: ReviewAction): string {
     switch (action) {
@@ -73,6 +85,24 @@ function roleLabel(role: string): string {
     if (r === "assistant" || r === "model") return uiText("components.SystemNoticeReviewModal.rolePersona");
     if (r === "system") return uiText("components.SystemNoticeReviewModal.roleSystem");
     return role;
+}
+
+function kindLabel(kind: AttachmentKind, count: number): string {
+    switch (kind) {
+        case "image": return uiText("components.SystemNoticeReviewModal.kindImage", { count });
+        case "document": return uiText("components.SystemNoticeReviewModal.kindDocument", { count });
+        case "audio": return uiText("components.SystemNoticeReviewModal.kindAudio", { count });
+        case "video": return uiText("components.SystemNoticeReviewModal.kindVideo", { count });
+        default: return uiText("components.SystemNoticeReviewModal.kindOther", { count });
+    }
+}
+
+function attachmentSummary(row: ReviewRow): string {
+    const counts = row.attachment_counts || {};
+    return ATTACHMENT_KIND_ORDER
+        .filter((kind) => (counts[kind] || 0) > 0)
+        .map((kind) => kindLabel(kind, counts[kind] || 0))
+        .join(", ");
 }
 
 export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
@@ -105,24 +135,31 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
 
     const apply = async (action: ReviewAction, rows: ReviewRow[]) => {
         if (rows.length === 0 || busy) return;
+        // 束ごとの一括の操作は、どの操作でも対象の件数を見せて確かめる。
+        // 一件ずつの操作は、元に戻せない削除だけ確かめる。
+        let question: string | null = null;
         if (action === "delete") {
-            const ok = window.confirm(
-                rows.length === 1
-                    ? uiText("components.SystemNoticeReviewModal.confirmDeleteOne")
-                    : uiText("components.SystemNoticeReviewModal.confirmDeleteMany", { count: rows.length }),
-            );
-            if (!ok) return;
+            question = rows.length === 1
+                ? uiText("components.SystemNoticeReviewModal.confirmDeleteOne")
+                : uiText("components.SystemNoticeReviewModal.confirmDeleteMany", { count: rows.length });
+        } else if (rows.length > 1) {
+            question = uiText("components.SystemNoticeReviewModal.confirmApplyMany", {
+                count: rows.length, action: actionLabel(action),
+            });
         }
+        if (question !== null && !window.confirm(question)) return;
         setBusy(true);
         try {
-            // 送るのは行の識別 (ペルソナと行の id) だけ。どの行に何を当ててよいかは
-            // サーバーが行ごとに確かめ直す。
+            // 送るのは行の識別 (ペルソナと行の id) と、画面が見た行のハッシュ。どの行に何を
+            // 当ててよいか・見た内容のままかは、サーバーが行ごとに確かめ直す。
             const res = await apiFetch("/api/system/notice-review/apply", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     action,
-                    items: rows.map((r) => ({ persona_id: r.persona_id, message_id: r.message_id })),
+                    items: rows.map((r) => ({
+                        persona_id: r.persona_id, message_id: r.message_id, version: r.version,
+                    })),
                 }),
             });
             if (!res.ok) {
@@ -130,14 +167,32 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                 return;
             }
             const result: ApplyResult = await res.json();
-            if (result.rejected.length > 0) {
-                window.alert(uiText("components.SystemNoticeReviewModal.rejected", { count: result.rejected.length }));
+            const changed = result.rejected.filter((r) => r.reason === "changed").length;
+            const otherRejected = result.rejected.length - changed;
+            if (changed > 0) {
+                window.alert(uiText("components.SystemNoticeReviewModal.rejectedChanged", { count: changed }));
+            }
+            if (otherRejected > 0) {
+                window.alert(uiText("components.SystemNoticeReviewModal.rejected", { count: otherRejected }));
             }
             await onChanged();
             const next = await load();
-            if (next && next.total === 0) onClose();
+            // 読めなかったペルソナが残っているあいだは閉じない (確認待ちの行が
+            // そこに残っているかもしれないので、読み直しの手段を見せ続ける)。
+            if (next && next.total === 0 && next.errors.length === 0) onClose();
         } catch {
             window.alert(uiText("components.SystemNoticeReviewModal.networkError"));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const retry = async () => {
+        if (busy) return;
+        setBusy(true);
+        try {
+            await load();
+            await onChanged();
         } finally {
             setBusy(false);
         }
@@ -164,6 +219,22 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
         </button>
     );
 
+    const attachmentBlock = (row: ReviewRow) => {
+        if (!row.attachments || row.attachments.length === 0) return null;
+        return (
+            <div className={styles.attachments}>
+                <span>
+                    {uiText("components.SystemNoticeReviewModal.attachments", { list: attachmentSummary(row) })}
+                </span>
+                <ul className={styles.attachmentRefs}>
+                    {row.attachments.map((item, i) => (
+                        <li key={`${i}:${item.ref}`}>{item.ref}</li>
+                    ))}
+                </ul>
+            </div>
+        );
+    };
+
     return (
         <ModalOverlay onClose={onClose} className={styles.overlayAboveBanner}>
             <div className={styles.modal} role="dialog" aria-modal="true">
@@ -186,18 +257,30 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                         <p className={styles.muted}>{uiText("components.SystemNoticeReviewModal.loading")}</p>
                     )}
                     {listing && listing.errors.length > 0 && (
-                        <p className={styles.error}>
-                            {uiText("components.SystemNoticeReviewModal.readErrors", {
-                                names: listing.errors.map((e) => e.persona_id).join(", "),
-                            })}
-                        </p>
+                        <div className={styles.errorBox}>
+                            <p className={styles.error}>
+                                {uiText("components.SystemNoticeReviewModal.readErrors", {
+                                    names: listing.errors.map((e) => e.persona_name || e.persona_id).join(", "),
+                                })}
+                            </p>
+                            <button
+                                type="button"
+                                className={styles.actionButton}
+                                onClick={retry}
+                                disabled={busy}
+                            >
+                                {uiText("components.SystemNoticeReviewModal.retry")}
+                            </button>
+                        </div>
                     )}
-                    {listing && listing.total === 0 && (
+                    {listing && listing.total === 0 && listing.errors.length === 0 && (
                         <p className={styles.muted}>{uiText("components.SystemNoticeReviewModal.empty")}</p>
                     )}
                     {listing && listing.groups.map((group) => {
                         const open = openGroups.has(group.group_id);
                         const example = group.rows[0];
+                        const blockedByAttachments = !group.actions.includes("system")
+                            && group.rows.some((r) => (r.attachments || []).length > 0);
                         return (
                             <section key={group.group_id} className={styles.group}>
                                 <div className={styles.groupHeader}>
@@ -211,13 +294,15 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                                             .join(", ")}
                                     </span>
                                 </div>
-                                {example && (
-                                    <pre className={styles.content}>
-                                        {example.content}{example.content_truncated ? "…" : ""}
-                                    </pre>
-                                )}
+                                {example && <pre className={styles.content}>{example.content}</pre>}
+                                {example && attachmentBlock(example)}
                                 {group.tags.length > 0 && (
                                     <div className={styles.tags}>{group.tags.join(" ")}</div>
+                                )}
+                                {blockedByAttachments && (
+                                    <p className={styles.muted}>
+                                        {uiText("components.SystemNoticeReviewModal.attachmentsNoSystem")}
+                                    </p>
                                 )}
                                 <div className={styles.actions}>
                                     <span className={styles.actionsLabel}>
@@ -247,9 +332,8 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                                                         </span>
                                                     ) : null}
                                                 </div>
-                                                <pre className={styles.content}>
-                                                    {row.content}{row.content_truncated ? "…" : ""}
-                                                </pre>
+                                                <pre className={styles.content}>{row.content}</pre>
+                                                {attachmentBlock(row)}
                                                 <div className={styles.actions}>
                                                     {row.actions.map((action) => actionButton(action, [row], action))}
                                                 </div>

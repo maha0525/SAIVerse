@@ -38,7 +38,9 @@ function harness(initialAlerts) {
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
         if (name === 'lucide-react') return {};
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
-        if (name === './SystemNoticeReviewModal') return { __esModule: true, default: ReviewModal };
+        if (name === './SystemNoticeReviewModal') return {
+            __esModule: true, default: ReviewModal, NOTICE_REVIEW_ALERT_ID: 'system_notice_review_pending',
+        };
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, options) => {

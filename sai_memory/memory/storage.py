@@ -1312,6 +1312,35 @@ SYSTEM_NOTICE_REVIEW_KEY = "__system_notice_review__"
 SYSTEM_NOTICE_REVIEWED_KEY = "__system_notice_reviewed__"
 SYSTEM_NOTICE_REVIEWED_KEEP = "keep"
 
+
+def is_author_unsettled(metadata: Any) -> bool:
+    """書き手 (機構か発話者か) が決まっていない行か。
+
+    確認待ちの印 (``SYSTEM_NOTICE_REVIEW_KEY``) を持つ行と、所有者が「そのまま
+    にする」で確定した行 (``SYSTEM_NOTICE_REVIEWED_KEY`` が ``"keep"``)。どちらも
+    role は保存されたまま (多くは role=user) だが、中身は機構の文でありうる。
+    「実会話」(:func:`_conversation_exclusion`) はこれらの行を外し、あらすじと
+    Memopedia の材料 (sai_memory/arasuji/generator.py の ``material_text_for``、
+    sai_memory/memopedia/generator.py) は発話として渡さない。
+
+    SQL の側の同じ判定は :func:`_author_unsettled_sql`。二つの形が同じ行を
+    選ぶことは tests/test_system_notice_review.py が固定している。
+    """
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get(SYSTEM_NOTICE_REVIEW_KEY) is not None:
+        return True
+    return metadata.get(SYSTEM_NOTICE_REVIEWED_KEY) == SYSTEM_NOTICE_REVIEWED_KEEP
+
+
+def _author_unsettled_sql() -> str:
+    """:func:`is_author_unsettled` の SQL の形 (``metadata`` 列に対する真偽式)。"""
+    return (
+        f"(json_extract(metadata, '$.\"{SYSTEM_NOTICE_REVIEW_KEY}\"') IS NOT NULL"
+        f" OR COALESCE(json_extract(metadata, '$.\"{SYSTEM_NOTICE_REVIEWED_KEY}\"'), '')"
+        f" = '{SYSTEM_NOTICE_REVIEWED_KEEP}')"
+    )
+
 #: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
 #: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
 #: ``_compose_messages`` が人格指示の system メッセージの metadata に ``True`` で
@@ -2777,9 +2806,7 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             SELECT 1 FROM json_each(metadata, '$.tags')
             WHERE json_each.value IN ({tag_placeholders})
         )
-        AND json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEW_KEY}"') IS NULL
-        AND COALESCE(json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEWED_KEY}"'), '')
-            != '{SYSTEM_NOTICE_REVIEWED_KEEP}'
+        AND NOT {_author_unsettled_sql()}
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES

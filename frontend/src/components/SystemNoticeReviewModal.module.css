@@ -223,6 +223,29 @@
     color: #334155;
 }
 
+.errorBox {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.attachments {
+    font-size: 0.8rem;
+    color: #334155;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.attachmentRefs {
+    margin: 0.2rem 0 0;
+    padding-left: 1.2rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
 /* ---- dark mode ---- */
 
 :global([data-theme="dark"]) .modal {
@@ -301,8 +324,13 @@
 }
 
 :global([data-theme="dark"]) .expandButton,
-:global([data-theme="dark"]) .rowMeta {
+:global([data-theme="dark"]) .rowMeta,
+:global([data-theme="dark"]) .attachments {
     color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .attachmentRefs {
+    color: #94a3b8;
 }
 
 :global([data-theme="dark"]) .row {

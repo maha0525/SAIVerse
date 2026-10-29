@@ -8576,8 +8576,16 @@
     "en": "{count} messages need your review"
   },
   "api.systemNoticeReview.alertMessage": {
-    "ja": "以前のバージョンで保存されたメッセージのうち、正式なシステムメッセージかどうかを自動で判断できなかったものが残っています。「確認する」から、どう扱うかを選んでください。",
-    "en": "Some messages saved by earlier versions could not be identified automatically as official system messages. Choose how to handle them from \"Review\"."
+    "ja": "以前のバージョンで保存されたメッセージのうち、正式なシステムメッセージかどうかを自動で判断できなかったものが残っています。「確認する」から、どう扱うかを選んでください。このお知らせを閉じても、設定の「便利機能」から開けます。",
+    "en": "Some messages saved by earlier versions could not be identified automatically as official system messages. Choose how to handle them from \"Review\". After closing this notice, you can still open it from \"Utilities\" in the settings."
+  },
+  "api.systemNoticeReview.alertUnreadableTitle": {
+    "ja": "確認が必要なメッセージが残っているか分からないペルソナがあります",
+    "en": "Some personas could not be checked for messages that need review"
+  },
+  "api.systemNoticeReview.alertMessageUnreadable": {
+    "ja": "次のペルソナの記録を読み込めなかったため、確認が必要なメッセージが残っているか分かりません: {names}。「確認する」から読み込みをやり直せます。このお知らせを閉じても、設定の「便利機能」から開けます。",
+    "en": "The records of these personas could not be read, so it is unknown whether messages that need review remain: {names}. You can try reading them again from \"Review\". After closing this notice, you can still open it from \"Utilities\" in the settings."
   },
   "components.SystemNoticeReviewModal.question": {
     "ja": "これらは正式なシステムメッセージとして残しても良いですか？",
@@ -8666,6 +8674,54 @@
   "components.SystemNoticeReviewModal.roleSystem": {
     "ja": "システム",
     "en": "System"
+  },
+  "components.SystemNoticeReviewModal.confirmApplyMany": {
+    "ja": "{count} 件のメッセージに「{action}」を適用します。対象の全文は「一件ずつ選ぶ」を開くと確かめられます。よろしいですか？",
+    "en": "Apply \"{action}\" to {count} messages? You can check the full text of each one by opening \"Choose one by one\"."
+  },
+  "components.SystemNoticeReviewModal.rejectedChanged": {
+    "ja": "{count} 件は、一覧を読み込んだ後に内容が変わっていたため適用しませんでした。一覧を読み直したので、内容を確かめてから選び直してください。",
+    "en": "{count} messages were not changed because their content changed after the list was loaded. The list has been reloaded; please check them and choose again."
+  },
+  "components.SystemNoticeReviewModal.retry": {
+    "ja": "読み込みをやり直す",
+    "en": "Try reading again"
+  },
+  "components.SystemNoticeReviewModal.attachments": {
+    "ja": "添付: {list}",
+    "en": "Attachments: {list}"
+  },
+  "components.SystemNoticeReviewModal.attachmentsNoSystem": {
+    "ja": "添付のあるメッセージは、添付ごとシステムのものになってしまうため「正式に変換」を選べません。",
+    "en": "Messages with attachments cannot be converted to official, because the attachments would also become the system's."
+  },
+  "components.SystemNoticeReviewModal.kindImage": {
+    "ja": "画像 {count} 件",
+    "en": "{count} image(s)"
+  },
+  "components.SystemNoticeReviewModal.kindDocument": {
+    "ja": "ドキュメント {count} 件",
+    "en": "{count} document(s)"
+  },
+  "components.SystemNoticeReviewModal.kindAudio": {
+    "ja": "音声 {count} 件",
+    "en": "{count} audio file(s)"
+  },
+  "components.SystemNoticeReviewModal.kindVideo": {
+    "ja": "動画 {count} 件",
+    "en": "{count} video(s)"
+  },
+  "components.SystemNoticeReviewModal.kindOther": {
+    "ja": "その他 {count} 件",
+    "en": "{count} other file(s)"
+  },
+  "components.SystemNoticeReviewEntry.title": {
+    "ja": "確認が必要なメッセージ",
+    "en": "Messages that need review"
+  },
+  "components.SystemNoticeReviewEntry.open": {
+    "ja": "確認する",
+    "en": "Review"
   },
   "components.ToolModeSelector.text001": {
     "ja": "自動",
@@ -12338,5 +12394,89 @@
   "components.PersonaWizard.packImportFailed": {
     "ja": "パックから迎えられませんでした: {p1}",
     "en": "Could not welcome the persona from the pack: {p1}"
+  },
+  "api.systemNoticeMigration.abortedTitle": {
+    "ja": "システム通知の記録の移行に失敗しました",
+    "en": "Migrating system notice records failed"
+  },
+  "api.systemNoticeMigration.abortedMessage": {
+    "ja": "起動時の移行が途中で止まりました。次の起動で再試行します。ログを確認してください。",
+    "en": "The migration at startup stopped partway. It will be retried on the next start. Please check the log."
+  },
+  "api.systemNoticeMigration.failedTitle": {
+    "ja": "システム通知の記録の移行が一部の記録でできませんでした",
+    "en": "Some system notice records could not be migrated"
+  },
+  "api.systemNoticeMigration.failedMessage": {
+    "ja": "移行できなかった記録は元のまま残っていて、次の起動で再試行します。",
+    "en": "Records that could not be migrated are left as they were and will be retried on the next start."
+  },
+  "api.systemNoticeMigration.resultUnsavedTitle": {
+    "ja": "システム通知の記録の移行結果を一部保存できず、レポートに詳細が欠けています",
+    "en": "Some results of migrating system notice records could not be saved, so the report is missing details"
+  },
+  "api.systemNoticeMigration.resultUnsavedMessage": {
+    "ja": "移行の結果をレポートの材料に保存できなかった記録があります (一覧は下にあります)。{personaNote}{mainNote}",
+    "en": "The migration results of some records could not be saved for the report (listed below).{personaNote}{mainNote}"
+  },
+  "api.systemNoticeMigration.resultUnsavedPersonaNote": {
+    "ja": "移行を済ませたペルソナの記憶の結果は仮の名前で残してあり、次の起動でレポートに載せ直します。",
+    "en": " The results for persona memories that were migrated are kept under a temporary name and will be added to the report on the next start."
+  },
+  "api.systemNoticeMigration.resultUnsavedMainNote": {
+    "ja": "本体 DB の残した行は次の起動のレポートにもう一度載せます。",
+    "en": " Rows left unchanged in the main database will be listed again in the report of the next start."
+  },
+  "api.systemNoticeMigration.resultUnsavedMainNoteWithLog": {
+    "ja": "本体 DB の残した行は次の起動のレポートにもう一度載せます (変換した件数はこの起動のログにあります)。",
+    "en": " Rows left unchanged in the main database will be listed again in the report of the next start (the number of converted rows is in the log of this start)."
+  },
+  "api.systemNoticeMigration.reportFailedTitle": {
+    "ja": "システム通知の記録の移行のレポートを書き出せませんでした",
+    "en": "Could not write the report of the system notice record migration"
+  },
+  "api.systemNoticeMigration.reportFailedMessage": {
+    "ja": "結果のレポートの書き出しに失敗しました (次の起動で作り直します)。",
+    "en": "Writing the result report failed (it will be regenerated on the next start)."
+  },
+  "api.systemNoticeMigration.reportFailedMessageAfterDone": {
+    "ja": "移行は完了しましたが、結果のレポートの書き出しに失敗しました (次の起動で作り直します)。",
+    "en": "The migration completed, but writing the result report failed (it will be regenerated on the next start)."
+  },
+  "api.systemNoticeMigration.doneTitle": {
+    "ja": "システム通知の記録を新しい形式へ移行しました",
+    "en": "System notice records were migrated to the new format"
+  },
+  "api.systemNoticeMigration.doneMessage": {
+    "ja": "{count} 件の記録を新しい形式へ変換しました。移行前の写しを保存してあります。{deferredNote}",
+    "en": "Converted {count} records to the new format. A copy from before the migration has been saved.{deferredNote}"
+  },
+  "api.systemNoticeMigration.doneDeferredNote": {
+    "ja": "一部の記憶は古い形のため確認待ちの印を付けられなかったので、移行を完了扱いにせず、次の起動で印を付け直します。",
+    "en": " Some memories are in an old format, so rows needing review could not be marked; the migration is not treated as complete and the marks will be added on the next start."
+  },
+  "api.systemNoticeMigration.heldTitle": {
+    "ja": "システム通知の記録の移行を完了扱いにできませんでした",
+    "en": "The migration of system notice records could not be treated as complete"
+  },
+  "api.systemNoticeMigration.heldMessage": {
+    "ja": "{playbookNote}{stagedNote}変換できた記録は変換しました。移行は完了扱いにせず、次の起動でもう一度確かめます。",
+    "en": "{playbookNote}{stagedNote}Records that could be converted were converted. The migration is not treated as complete and will be checked again on the next start."
+  },
+  "api.systemNoticeMigration.heldPlaybookNote": {
+    "ja": "Playbook の一覧を一部読めませんでした。",
+    "en": "Part of the playbook list could not be read. "
+  },
+  "api.systemNoticeMigration.heldStagedNote": {
+    "ja": "前回の移行の結果のファイルをまだ確かめられていません。",
+    "en": "The result file of the previous migration could not be checked yet. "
+  },
+  "api.systemNoticeMigration.mainDbLabel": {
+    "ja": "本体 DB",
+    "en": "Main database"
+  },
+  "api.systemNoticeMigration.personaLabel": {
+    "ja": "ペルソナ {id}",
+    "en": "Persona {id}"
   }
 }

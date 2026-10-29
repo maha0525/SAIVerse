@@ -27,6 +27,7 @@ from sai_memory.memory.storage import (
     Message,
     get_message,
     get_all_messages_for_search,
+    is_author_unsettled,
 )
 from sai_memory.memory.recall import semantic_recall_groups
 from sai_memory.memopedia import Memopedia
@@ -264,9 +265,17 @@ def format_search_results(hits: List[SearchHit], processed_ids: Set[str]) -> str
 
 
 def format_messages_for_extraction(messages: List[Message]) -> str:
-    """Format messages for LLM prompt."""
+    """Format messages for LLM prompt.
+
+    書き手が決まっていない行 (``storage.is_author_unsettled`` — 確認待ちの印か、
+    「そのままにする」で確定した行) は渡さない。role=user のまま保存されているが
+    中身は機構の文でありうるので、``[user]`` の発話として抽出させない
+    (あらすじの材料 ``material_text_for`` と同じ判定)。
+    """
     lines = []
     for msg in messages:
+        if is_author_unsettled(getattr(msg, "metadata", None)):
+            continue
         role = "assistant" if msg.role == "model" else msg.role
         content = (msg.content or "").strip()
         if content:

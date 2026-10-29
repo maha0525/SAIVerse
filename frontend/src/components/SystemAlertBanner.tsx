@@ -8,11 +8,10 @@ import { useLocale } from '@/i18n/useLocale';
 import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
-import SystemNoticeReviewModal from "./SystemNoticeReviewModal";
-
-// 確認待ちの記憶の行があるあいだサーバーが置く警告 (saiverse/system_notice_review.py
-// の REVIEW_ALERT_ID)。この警告には確定の画面を開くボタンを付ける。
-const NOTICE_REVIEW_ALERT_ID = "system_notice_review_pending";
+// 確認待ちの記憶の行があるあいだサーバーが置く警告には、確定の画面を開くボタンを
+// 付ける。この警告を閉じても、設定の「便利機能」の入口 (SystemNoticeReviewEntry)
+// から同じ画面を開ける。
+import SystemNoticeReviewModal, { NOTICE_REVIEW_ALERT_ID } from "./SystemNoticeReviewModal";
 
 interface SystemAlert {
     id: string;

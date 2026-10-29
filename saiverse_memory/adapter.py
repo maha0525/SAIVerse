@@ -1891,18 +1891,21 @@ class SAIMemoryAdapter:
     def rewrite_message(
         self,
         message_id: str,
-        rewrite: Callable[[str, str, Optional[Dict[str, Any]]], Any],
+        rewrite: Callable[[Dict[str, Any]], Any],
     ) -> str:
-        """1 行の role / content / metadata を読み、``rewrite`` の決めたとおりに書き換えるか消す。
+        """1 行を読み、``rewrite`` の決めたとおりに書き換えるか消す。
 
         読みと書きを同じ書き込みの取引 (:meth:`update_message` と同じ
         ``immediate_transaction`` と ``_db_lock``) の中で行うので、読んでから
         書くまでの間に別の書き手 (実行中の Pulse・記憶ブラウザの編集) が
         その行を変えることはない。
 
-        ``rewrite(role, content, metadata)`` の返り値:
+        ``rewrite`` は ``{"role", "content", "metadata", "line_role"}`` の辞書
+        (metadata は辞書として読めたときだけ辞書、それ以外は None) を受け取る。
+        返り値:
 
-        - ``{"role": ..., "content": ..., "metadata": ...}``: その 3 列を書き換える
+        - ``{"role": ..., "content": ..., "metadata": ...}``: その 3 列を書き換える。
+          ``"line_role"`` の鍵があれば、その列も書き換える
         - :attr:`MESSAGE_DELETE`: 行とその埋め込みを消す (:meth:`delete_message` と同じ範囲)
         - ``None``: 何も書かない
 
@@ -1919,11 +1922,12 @@ class SAIMemoryAdapter:
             return "unavailable"
         with immediate_transaction(self.conn, self._db_lock):
             row = self.conn.execute(  # type: ignore[attr-defined]
-                "SELECT role, content, metadata FROM messages WHERE id=?", (message_id,),
+                "SELECT role, content, metadata, line_role FROM messages WHERE id=?",
+                (message_id,),
             ).fetchone()
             if row is None:
                 return "missing"
-            role, content, raw_meta = row
+            role, content, raw_meta, line_role = row
             metadata: Optional[Dict[str, Any]] = None
             if raw_meta:
                 try:
@@ -1932,7 +1936,10 @@ class SAIMemoryAdapter:
                     decoded = None
                 if isinstance(decoded, dict):
                     metadata = decoded
-            result = rewrite(role, content, metadata)
+            result = rewrite({
+                "role": role, "content": content, "metadata": metadata,
+                "line_role": line_role,
+            })
             if result is None:
                 return "unchanged"
             if result == self.MESSAGE_DELETE:
@@ -1949,6 +1956,11 @@ class SAIMemoryAdapter:
                     message_id,
                 ),
             )
+            if "line_role" in result:
+                self.conn.execute(  # type: ignore[attr-defined]
+                    "UPDATE messages SET line_role=? WHERE id=?",
+                    (result["line_role"], message_id),
+                )
             return "updated"
 
     def delete_thread(self, thread_id: str) -> bool:
