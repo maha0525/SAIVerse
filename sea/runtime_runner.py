@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sea.message_stamp import record_presented_message_ids
 from sea.playbook_models import PlaybookSchema
+from sea.progress_events import PHASE_BUILDING_REQUEST, emit_progress, provider_label
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +69,10 @@ def run_playbook(
 
     def wrapped_event_callback(event: Dict[str, Any]) -> None:
         if event_callback:
-            if event.get("type") == "status":
+            # 書き換えるのはノードの足跡 ("<playbook> / <node>") だけ。node を
+            # 持たない status は段階 (phase) か利用者向けの文 (記憶の非常整理の
+            # 通知など) で、本文を連鎖の名前で潰すと画面に開発用の名前が出る。
+            if event.get("type") == "status" and "node" in event:
                 node = event.get("node", "")
                 event["content"] = f"{current_chain} / {node}"
                 event["playbook_chain"] = current_chain
@@ -151,6 +155,11 @@ def run_playbook(
         _prepared_model_key = resolve_execution_context(
             persona, None, state=_ec_probe_state,
         ).model_key
+        # 文脈の組み立て (履歴・記憶・head) が「送るデータの構築」の本体。
+        emit_progress(
+            wrapped_event_callback, PHASE_BUILDING_REQUEST, persona=persona,
+            provider=provider_label(_prepared_model_key),
+        )
         # call-local anchor (beat_execution_context.md §3.2): _prepare_context が
         # 今回の prefix に採用した anchor を out-param で受け取り、state 経由で
         # LLM 成功後の touch_anchor_after_llm_call(anchor_id=...) まで運ぶ。

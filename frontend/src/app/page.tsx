@@ -20,6 +20,7 @@ import ChatOptions from '@/components/ChatOptions';
 import ChatInput, { type ChatInputHandle } from '@/components/ChatInput';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
+import { describeChatProgress, progressTextForStatusEvent, type ChatProgressParams, type ChatProgressPhase } from '@/lib/chatProgress';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
@@ -382,8 +383,21 @@ export default function Home() {
     // only tracks emptiness for the send button.
     const chatInputRef = useRef<ChatInputHandle>(null);
     const [isInputEmpty, setIsInputEmpty] = useState(true);
+    // 応答を待つ間の表示文。null 以外は「応答待ち」の印も兼ねる (送信ボタン等を閉じる)。
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
-    // metabolism 完了メッセージを 2 秒見せてから 'Thinking...' に戻す遅延タイマー。
+    // 記憶の整理の表示より前に出ていた「いま何をしているか」。整理の完了を 2 秒
+    // 見せた後はここへ戻す (整理の間に次の段階が届いていればそれが入っている)。
+    const progressLabelRef = useRef<string | null>(null);
+    // 段階の表示 (文言は lib/chatProgress.ts)。開発用の名前は出さない。
+    const showProgressLabel = (label: string | null) => {
+        if (!label) return;
+        progressLabelRef.current = label;
+        setLoadingStatus(label);
+    };
+    const showProgress = (phase: ChatProgressPhase, params?: ChatProgressParams) => {
+        showProgressLabel(describeChatProgress(phase, params));
+    };
+    // metabolism 完了メッセージを 2 秒見せてから元の表示に戻す遅延タイマー。
     // ストリームが閉じる finally / cancelled でクリアしないと、後始末で
     // loadingStatus=null にした後にこのタイマーが発火してスピナーが復活し、
     // 二度と消えなくなる (記憶整理が応答の最後の処理だった場合に多発)。
@@ -402,9 +416,23 @@ export default function Home() {
     const previousScrollHeightRef = useRef<number>(0);
     const isProcessingRef = useRef(false); // Suppress polling during active request
 
-    // User identity cache (for optimistic message display)
-    const userDisplayNameRef = useRef<string>('');
-    const userAvatarRef = useRef<string>('');
+    // 自分の名前とアバター。送信直後の吹き出し (サーバーの行が届く前) と、
+    // 名乗りの無いユーザーの行に使う。/api/user/status を読むたびに更新する —
+    // 起動時の一回だけだと、起動時に繋がらなかった回やプロフィールを変えた後に
+    // 「あなた」(旧 "You") のまま残る。
+    const [userIdentity, setUserIdentity] = useState<{ name: string; avatar: string }>({ name: '', avatar: '' });
+    const rememberUserIdentity = useCallback((data: { display_name?: unknown; avatar?: unknown } | null | undefined) => {
+        if (!data) return;
+        setUserIdentity(prev => {
+            const name = typeof data.display_name === 'string' && data.display_name.trim()
+                ? data.display_name : prev.name;
+            const avatar = 'avatar' in data
+                ? (typeof data.avatar === 'string' ? data.avatar : '')
+                : prev.avatar;
+            // 5 秒おきの状態の追従でも呼ばれるので、変わらないときは同じ物を返して再描画させない
+            return name === prev.name && avatar === prev.avatar ? prev : { name, avatar };
+        });
+    }, []);
 
     // New States
     const [isLeftOpen, setIsLeftOpen] = useState(false);
@@ -1174,8 +1202,7 @@ export default function Home() {
                     setLostBuildingNotice(null);
                     updateServerBuildingId(data.current_building_id);
                 }
-                if (data?.display_name) userDisplayNameRef.current = data.display_name;
-                if (data?.avatar) userAvatarRef.current = data.avatar;
+                rememberUserIdentity(data);
                 applyActiveGame(data?.active_game ?? null);
                 // Start both ordinary and game history only after the room and game
                 // refs are known. A request without a room cannot confirm pagination.
@@ -1521,6 +1548,7 @@ export default function Home() {
                 const res = await apiFetch('/api/user/status');
                 if (!res.ok) return;
                 const data = await res.json();
+                rememberUserIdentity(data);
                 const serverBid: string | null = data.current_building_id ?? null;
                 const oldServerBid = serverCurrentBuildingIdRef.current;
                 const game = (data.active_game as ActiveGame | undefined) ?? null;
@@ -1967,6 +1995,7 @@ export default function Home() {
                 metabolismStatusTimerRef.current = null;
             }
             setLoadingStatus(null);
+            progressLabelRef.current = null;
             // Finalize any orphaned _streaming messages left after the stream ends
             // (e.g. activity events that arrived after the last streaming_complete)
             setMessages(prev => {
@@ -2171,9 +2200,11 @@ export default function Home() {
                             !m?._persona_id || !evtPersonaId || m._persona_id === evtPersonaId;
 
                         if (event.type === 'status') {
-                            setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
+                            // 段階 (phase) の文言か、サーバーが利用者向けに書いた文。
+                            // Playbook / ノード名だけの status では表示を変えない。
+                            showProgressLabel(progressTextForStatusEvent(event));
                         } else if (event.type === 'think') {
-                            setLoadingStatus(`Thinking: ${event.content.substring(0, 50)}${event.content.length > 50 ? '...' : ''}`);
+                            showProgress('thinking', { persona: event.persona_name });
                         } else if (event.type === 'activity') {
                             // Activity trace: accumulate tool/memorize steps
                             const entry: ActivityEntry = { action: event.action, name: event.name, ...(event.playbook && { playbook: event.playbook }), status: event.status };
@@ -2228,7 +2259,8 @@ export default function Home() {
                                     ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                 }];
                             });
-                            setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
+                            // 済んだ活動の名前 (ツール名) は表示に出さない — 次の段階が届く
+                            if (event.status === 'started') showProgress('running_tool', { tool: event.name });
                         } else if (event.type === 'auto_recall') {
                             // 自動想起 (記憶アーキv2 §4.5): 末尾注入された「ふと浮かんだ記憶」を
                             // スペル結果と同じ折りたたみで表示する。本文はタグで囲まれて
@@ -2310,7 +2342,7 @@ export default function Home() {
                                     }];
                                 }
                             });
-                            setLoadingStatus('Thinking...');
+                            showProgress('thinking', { persona: event.persona_name });
                         } else if (event.type === 'streaming_chunk') {
                             if (String(event.content || '').trim()) replied = true;
                             // Streaming: append chunk to last message or create new one
@@ -2341,7 +2373,7 @@ export default function Home() {
                                     }];
                                 }
                             });
-                            setLoadingStatus('Streaming...');
+                            showProgress('replying', { persona: event.persona_name });
                         } else if (event.type === 'streaming_discard') {
                             // Tool call detected after streaming — discard streamed text
                             const evtPulseId: string | undefined = event.pulse_id || undefined;
@@ -2369,7 +2401,7 @@ export default function Home() {
                                 // 持ってくるので、これも道連れにならない。
                                 return prev.slice(0, -1);
                             });
-                            setLoadingStatus('Thinking...');
+                            showProgress('thinking', { persona: event.persona_name });
                         } else if (event.type === 'streaming_complete') {
                             // Extract images from metadata if present (e.g., from image generation)
                             let streamCompleteImages: MessageImage[] | undefined;
@@ -2437,7 +2469,7 @@ export default function Home() {
                                 }
                                 return prev;
                             });
-                            setLoadingStatus('Thinking...');
+                            showProgress('finishing');
                         } else if (event.type === 'speak_persisted') {
                             // ペルソナの発言が建物の記録に保存された合図。流し込みの
                             // 吹き出しは行の id を持たないので、ここで持たせる —
@@ -2581,7 +2613,7 @@ export default function Home() {
                                     ...(evtPersonaId && { persona_id: evtPersonaId }),
                                 }];
                             });
-                            setLoadingStatus('Thinking...');
+                            showProgress('finishing');
                         } else if (event.type === 'error') {
                             // W7: 位置競合エラー (not_in_building 等) はサーバの
                             // 確定現在地を同期する — 放置すると次回発言の
@@ -2665,10 +2697,10 @@ export default function Home() {
                                     if (metabolismStatusTimerRef.current) clearTimeout(metabolismStatusTimerRef.current);
                                     metabolismStatusTimerRef.current = setTimeout(() => {
                                         metabolismStatusTimerRef.current = null;
-                                        setLoadingStatus('Thinking...');
+                                        setLoadingStatus(progressLabelRef.current || describeChatProgress('preparing'));
                                     }, 2000);
                                 } else {
-                                    setLoadingStatus('Thinking...');
+                                    setLoadingStatus(progressLabelRef.current || describeChatProgress('preparing'));
                                 }
                             } else {
                                 // started, running, etc. — show content as loading status
@@ -2680,6 +2712,7 @@ export default function Home() {
                                 // サーバーが発言を受け取った証拠。通信が後で切れても
                                 // 「届いたかどうか分からない」ではなくなる。
                                 landedMessageId = event.message_id;
+                                showProgress('preparing');
                                 setMessages(prev => {
                                     // Find the last user message with a temp id and update it
                                     for (let i = prev.length - 1; i >= 0; i--) {
@@ -2998,14 +3031,17 @@ export default function Home() {
         const tempId = `temp-${Date.now()}`;
         const userMsg: Message = {
             id: tempId, role: 'user', content: text,
-            sender: userDisplayNameRef.current || undefined,
-            avatar: userAvatarRef.current || undefined,
+            sender: userIdentity.name || undefined,
+            avatar: userIdentity.avatar || undefined,
+            // base64 は FileReader.readAsDataURL の結果 = 既に "data:<mime>;base64,"
+            // 付きの data URL。もう一度前置きを付けると壊れた画像になり、サーバーの
+            // 行が届くまで代わりの文字 (alt) だけが出ていた。
             images: attachments
                 .filter(a => a.type === 'image' && a.base64)
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+                .map(a => ({ url: a.base64 as string, mime_type: a.mimeType })),
             audios: attachments
                 .filter(a => a.type === 'audio' && a.base64)
-                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
+                .map(a => ({ url: a.base64 as string, mime_type: a.mimeType })),
             // Video preview uses the blob URL (no base64 copy); it's only valid for
             // this session, but the next history fetch replaces it with a real
             // /api/media/video/<name> URL from the server.
@@ -3015,7 +3051,8 @@ export default function Home() {
         };
         setMessages(prev => [...prev, userMsg]);
         chatInputRef.current?.clear();
-        setLoadingStatus('Thinking...');
+        // 添付は同じ要求で送り、サーバーが保存してから発言を記録する
+        showProgress(attachments.length > 0 ? 'uploading' : 'recording');
 
         const currentAttachments = attachments;
         const currentPlaybook = selectedPlaybook;
@@ -3205,7 +3242,7 @@ export default function Home() {
         // 送信と同じく、ここも新しい応答ターンの入口 (続き・やり直し)。捨てないと、
         // 起きていないターンの発言に古い注記が貼られる。
         pendingReflexNoticeRef.current.clear();
-        setLoadingStatus('Thinking...');
+        showProgress('preparing');
         // 押した瞬間にボタンを下ろす。二度押しで二重に走らせない。
         setMessages(prev => prev.map(m => (
             m.id === messageId
@@ -3826,11 +3863,11 @@ export default function Home() {
                                 {!continuesSamePersona && (
                                     <div className={styles.cardHeader}>
                                         <img
-                                            src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
+                                            src={msg.avatar || (msg.role === 'user' ? (userIdentity.avatar || '/api/static/builtin_icons/user.png') : '/api/static/builtin_icons/host.png')}
                                         alt={uiText("app.page.label017")}
                                             className={styles.avatar}
                                         />
-                                        <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
+                                        <span data-i18n="app.page.userFallbackName" className={styles.sender}>{msg.sender || (msg.role === 'user' ? (userIdentity.name || uiText("app.page.userFallbackName")) : 'Assistant')}</span>
                                     </div>
                                 )}
                                 <div className={styles.cardBody}>
@@ -3840,7 +3877,7 @@ export default function Home() {
                                                 <img
                                                     key={imgIdx}
                                                     src={img.url}
-                                                    alt={`Attachment ${imgIdx + 1}`}
+                                                    alt={uiText("app.page.attachmentImageAlt", { p1: imgIdx + 1 })}
                                                     className={styles.messageImage}
                                                     onClick={() => window.open(img.url, '_blank')}
                                                 />
@@ -4137,9 +4174,7 @@ export default function Home() {
                     {loadingStatus && (
                         <div className={styles.loading} role="status" aria-label={loadingStatus}>
                             <span className={styles.loadingSpinner} aria-hidden="true" />
-                            {loadingStatus !== 'Thinking...' && (
-                                <span className={styles.loadingText}>{loadingStatus}</span>
-                            )}
+                            <span className={styles.loadingText}>{loadingStatus}</span>
                         </div>
                     )}
                     <div ref={messagesEndRef} />
