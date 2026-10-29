@@ -81,7 +81,26 @@
     font-size: 0.85rem;
 }
 
-.group {
+/* 一段目: ペルソナ */
+.persona {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.personaHeader {
+    margin: 0.4rem 0 0;
+    padding-bottom: 0.35rem;
+    border-bottom: 2px solid #e2e8f0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #1e293b;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* 二段目: そのペルソナの中の role ごとの並び */
+.kind {
     border: 1px solid #e2e8f0;
     border-radius: 0.75rem;
     padding: 0.9rem 1rem;
@@ -91,12 +110,17 @@
     gap: 0.6rem;
 }
 
-.groupHeader {
+.kindHeader {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    gap: 0.6rem;
-    font-size: 0.9rem;
+    gap: 0.5rem;
+    font-size: 0.95rem;
+}
+
+.kindTitle {
+    font-weight: 600;
+    color: #1e293b;
 }
 
 .count {
@@ -104,18 +128,18 @@
     color: #1e293b;
 }
 
-.role {
-    padding: 0.05rem 0.5rem;
-    border-radius: 999px;
-    background: #e2e8f0;
-    color: #475569;
-    font-size: 0.75rem;
+.count::before {
+    content: "— ";
+    font-weight: 400;
+    color: #94a3b8;
 }
 
-.personas {
-    color: #475569;
-    word-break: break-word;
-    overflow-wrap: anywhere;
+/* role ごとの一括の操作の列 (行ごとの操作と区別する) */
+.bulk {
+    padding: 0.5rem 0.65rem;
+    border-radius: 0.5rem;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
 }
 
 .content {
@@ -134,14 +158,6 @@
     overflow-x: hidden;
     max-height: 12rem;
     overflow-y: auto;
-}
-
-.tags {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
-    color: #64748b;
-    word-break: break-word;
-    overflow-wrap: anywhere;
 }
 
 .actions {
@@ -217,10 +233,84 @@
 .rowMeta {
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.6rem;
-    font-size: 0.85rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: #64748b;
+}
+
+.rowTime {
+    font-variant-numeric: tabular-nums;
+}
+
+.contextButton {
+    padding: 0.15rem 0.6rem;
+    border-radius: 0.4rem;
+    border: 1px solid #cbd5e1;
+    background: white;
     color: #334155;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.contextButton:hover {
+    background: #f1f5f9;
+}
+
+/* 行の前後の文脈 (対象の行を挟んで時間順) */
+.context {
+    list-style: none;
+    margin: 0;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    border: 1px dashed #cbd5e1;
+    background: #f1f5f9;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-width: 100%;
+}
+
+.contextItem {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.4rem;
+    min-width: 0;
+}
+
+.contextTarget {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+}
+
+.contextMeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
+.contextRole {
+    font-weight: 600;
+    color: #334155;
+}
+
+.contextContent {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #1e293b;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+    overflow-x: hidden;
+    max-height: 8rem;
+    overflow-y: auto;
 }
 
 .errorBox {
@@ -259,8 +349,23 @@
 }
 
 :global([data-theme="dark"]) .question,
-:global([data-theme="dark"]) .count {
+:global([data-theme="dark"]) .count,
+:global([data-theme="dark"]) .personaHeader,
+:global([data-theme="dark"]) .kindTitle {
     color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .personaHeader {
+    border-bottom-color: #334155;
+}
+
+:global([data-theme="dark"]) .count::before {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .bulk {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(165, 180, 252, 0.3);
 }
 
 :global([data-theme="dark"]) .closeButton {
@@ -282,20 +387,15 @@
 }
 
 :global([data-theme="dark"]) .muted,
-:global([data-theme="dark"]) .tags,
 :global([data-theme="dark"]) .actionsLabel,
-:global([data-theme="dark"]) .personas {
+:global([data-theme="dark"]) .rowMeta,
+:global([data-theme="dark"]) .contextMeta {
     color: #94a3b8;
 }
 
-:global([data-theme="dark"]) .group {
+:global([data-theme="dark"]) .kind {
     background: #0f172a;
     border-color: rgba(255, 255, 255, 0.08);
-}
-
-:global([data-theme="dark"]) .role {
-    background: #334155;
-    color: #e2e8f0;
 }
 
 :global([data-theme="dark"]) .content {
@@ -324,7 +424,6 @@
 }
 
 :global([data-theme="dark"]) .expandButton,
-:global([data-theme="dark"]) .rowMeta,
 :global([data-theme="dark"]) .attachments {
     color: #e2e8f0;
 }
@@ -335,4 +434,29 @@
 
 :global([data-theme="dark"]) .row {
     border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .contextButton {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .contextButton:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .context {
+    background: rgba(15, 23, 42, 0.6);
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .contextTarget {
+    background: rgba(251, 146, 60, 0.12);
+    border-color: rgba(251, 146, 60, 0.35);
+}
+
+:global([data-theme="dark"]) .contextRole,
+:global([data-theme="dark"]) .contextContent {
+    color: #e2e8f0;
 }

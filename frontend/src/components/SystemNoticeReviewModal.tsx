@@ -1,7 +1,7 @@
 "use client";
 import { apiFetch } from '@/i18n/api';
 
-import { t as uiText } from '@/i18n/core';
+import { getFormatLocale, t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
 import { useEffect, useState } from "react";
@@ -11,7 +11,13 @@ import styles from "./SystemNoticeReviewModal.module.css";
 
 // 確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった記憶の行) を
 // 所有者が確定する画面。docs/intent/system_notice_delivery.md「確認待ちの行の確定」。
-// 選べる操作は行ごとにサーバーが決めて返す (この画面は本文を見て判定しない)。
+// 一覧はペルソナごと、その中の role ごとに並ぶ (saiverse/system_notice_review.py の
+// build_review_listing)。role で分けるのは role によって選べる操作が変わるため。
+// 確認待ちの理由・タグ・line_role は所有者の選択に関わらないので出さない。
+// role の中は行を一件ずつ、日時・全文・添付で並べ、行ごとに前後の文脈を開ける
+// (GET /api/system/notice-review/context)。
+// 選べる操作は行ごとにサーバーが決めて返し、role ごとの一括の操作は全行の共通部分を
+// サーバーが返す (この画面は本文を見て判定しない)。
 // 各行は全文・添付・行のハッシュ (version) を持つ。確定の操作には画面が見たハッシュを送り、
 // サーバーはその後に中身が変わった行を書き換えずに拒否する (reason=changed)。
 
@@ -34,9 +40,7 @@ interface ReviewRow {
     persona_name: string;
     message_id: string;
     role: string;
-    tags: string[];
     content: string;
-    reason: string;
     created_at: number | null;
     actions: ReviewAction[];
     version: string;
@@ -46,23 +50,28 @@ interface ReviewRow {
     system_split?: boolean;
 }
 
-interface ReviewGroup {
-    group_id: string;
+/** 一人のペルソナの、同じ role の行 */
+interface ReviewKind {
+    kind_id: string;
     role: string;
-    head: string;
-    tags: string[];
-    reason: string;
-    actions: ReviewAction[];
-    /** 束の「正式に変換」が二行に分ける操作になる (ReviewRow.system_split と同じ) */
-    system_split?: boolean;
     count: number;
-    personas: { persona_id: string; persona_name: string; count: number }[];
+    /** この並びの全部の行に一括で当てられる操作 (行ごとの actions の共通部分) */
+    actions: ReviewAction[];
+    /** 一括の「正式に変換」が二行に分ける操作になる (全行が ReviewRow.system_split) */
+    system_split?: boolean;
     rows: ReviewRow[];
+}
+
+interface ReviewPersona {
+    persona_id: string;
+    persona_name: string;
+    count: number;
+    kinds: ReviewKind[];
 }
 
 interface ReviewListing {
     total: number;
-    groups: ReviewGroup[];
+    personas: ReviewPersona[];
     errors: { persona_id: string; persona_name?: string; error: string }[];
 }
 
@@ -72,6 +81,21 @@ interface ApplyResult {
     remaining: number;
 }
 
+/** 前後の文脈の一行 (saiverse/system_notice_review.py の build_review_context) */
+interface ContextMessage {
+    message_id: string;
+    role: string;
+    content: string;
+    created_at: number | null;
+    /** 確認待ちの対象の行 */
+    target: boolean;
+}
+
+type ContextState =
+    | { status: "loading" }
+    | { status: "loaded"; messages: ContextMessage[] }
+    | { status: "failed" };
+
 interface Props {
     onClose: () => void;
     /** 確定の操作のあと、警告を取り直すために呼ぶ (開いた側は NOTICE_REVIEW_CHANGED_EVENT を出す) */
@@ -79,6 +103,33 @@ interface Props {
 }
 
 const ATTACHMENT_KIND_ORDER: AttachmentKind[] = ["image", "document", "audio", "video", "other"];
+
+/** role ごとに最初に出す行の数。残りは「さらに N 件を表示」で開く。 */
+export const ROWS_SHOWN = 5;
+
+function hasAttachments(row: ReviewRow): boolean {
+    return (row.attachments || []).length > 0;
+}
+
+/** 添付があるために「正式に変換」を選べない行 (二行分割になる行は選べるので入らない) */
+function blockedByAttachments(row: ReviewRow): boolean {
+    return hasAttachments(row) && !row.actions.includes("system");
+}
+
+function rowKey(row: ReviewRow): string {
+    return `${row.persona_id}/${row.message_id}`;
+}
+
+/** created_at (秒) を利用者の地方時で年月日と時刻まで。無ければ「日時不明」。 */
+function formatTime(createdAt: number | null): string {
+    if (createdAt === null || createdAt === undefined) {
+        return uiText("components.SystemNoticeReviewModal.unknownTime");
+    }
+    return new Date(createdAt * 1000).toLocaleString(getFormatLocale(), {
+        year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+}
 
 function actionLabel(action: ReviewAction): string {
     switch (action) {
@@ -120,7 +171,11 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
     const [listing, setListing] = useState<ReviewListing | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
-    const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+    // ROWS_SHOWN 件より後ろの行も出している並びの kind_id
+    const [expandedKinds, setExpandedKinds] = useState<Set<string>>(new Set());
+    // 前後の文脈を開いている行 (rowKey) と、取りに行った結果
+    const [openContexts, setOpenContexts] = useState<Set<string>>(new Set());
+    const [contexts, setContexts] = useState<Record<string, ContextState>>({});
 
     const load = async (): Promise<ReviewListing | null> => {
         try {
@@ -145,7 +200,7 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
 
     const apply = async (action: ReviewAction, rows: ReviewRow[]) => {
         if (rows.length === 0 || busy) return;
-        // 束ごとの一括の操作は、どの操作でも対象の件数を見せて確かめる。
+        // role ごとの一括の操作は、どの操作でも対象の件数を見せて確かめる。
         // 一件ずつの操作は、元に戻せない削除だけ確かめる。
         let question: string | null = null;
         if (action === "delete") {
@@ -186,6 +241,8 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                 window.alert(uiText("components.SystemNoticeReviewModal.rejected", { count: otherRejected }));
             }
             await onChanged();
+            // 確定で記憶が変わったので、開いていた前後の文脈 (確定の前に取ったもの) は閉じる
+            setOpenContexts(new Set());
             const next = await load();
             // 読めなかったペルソナが残っているあいだは閉じない (確認待ちの行が
             // そこに残っているかもしれないので、読み直しの手段を見せ続ける)。
@@ -208,13 +265,42 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
         }
     };
 
-    const toggleGroup = (id: string) => {
-        setOpenGroups((prev) => {
+    const toggleKind = (id: string) => {
+        setExpandedKinds((prev) => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
             else next.add(id);
             return next;
         });
+    };
+
+    // 前後の文脈は、開くたびに取りに行く (閉じている行のためには取りに行かない)。
+    const toggleContext = async (row: ReviewRow) => {
+        const key = rowKey(row);
+        if (openContexts.has(key)) {
+            setOpenContexts((prev) => {
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
+            return;
+        }
+        setOpenContexts((prev) => new Set(prev).add(key));
+        setContexts((prev) => ({ ...prev, [key]: { status: "loading" } }));
+        let state: ContextState;
+        try {
+            const query = new URLSearchParams({ persona_id: row.persona_id, message_id: row.message_id });
+            const res = await apiFetch(`/api/system/notice-review/context?${query.toString()}`);
+            if (res.ok) {
+                const data: { messages: ContextMessage[] } = await res.json();
+                state = { status: "loaded", messages: data.messages || [] };
+            } else {
+                state = { status: "failed" };
+            }
+        } catch {
+            state = { status: "failed" };
+        }
+        setContexts((prev) => ({ ...prev, [key]: state }));
     };
 
     const actionButton = (action: ReviewAction, rows: ReviewRow[], key: string) => (
@@ -242,6 +328,34 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                     ))}
                 </ul>
             </div>
+        );
+    };
+
+    const contextBlock = (row: ReviewRow) => {
+        const key = rowKey(row);
+        if (!openContexts.has(key)) return null;
+        const state = contexts[key];
+        if (!state || state.status === "loading") {
+            return <p className={styles.muted}>{uiText("components.SystemNoticeReviewModal.contextLoading")}</p>;
+        }
+        if (state.status === "failed") {
+            return <p className={styles.error}>{uiText("components.SystemNoticeReviewModal.contextFailed")}</p>;
+        }
+        return (
+            <ol className={styles.context}>
+                {state.messages.map((msg) => (
+                    <li
+                        key={msg.message_id}
+                        className={`${styles.contextItem} ${msg.target ? styles.contextTarget : ""}`}
+                    >
+                        <div className={styles.contextMeta}>
+                            <span className={styles.contextRole}>{roleLabel(msg.role)}</span>
+                            <span>{formatTime(msg.created_at)}</span>
+                        </div>
+                        <pre className={styles.contextContent}>{msg.content}</pre>
+                    </li>
+                ))}
+            </ol>
         );
     };
 
@@ -286,79 +400,114 @@ export default function SystemNoticeReviewModal({ onClose, onChanged }: Props) {
                     {listing && listing.total === 0 && listing.errors.length === 0 && (
                         <p className={styles.muted}>{uiText("components.SystemNoticeReviewModal.empty")}</p>
                     )}
-                    {listing && listing.groups.map((group) => {
-                        const open = openGroups.has(group.group_id);
-                        const example = group.rows[0];
-                        const blockedByAttachments = !group.actions.includes("system")
-                            && group.rows.some((r) => (r.attachments || []).length > 0);
-                        return (
-                            <section key={group.group_id} className={styles.group}>
-                                <div className={styles.groupHeader}>
-                                    <span className={styles.count}>
-                                        {uiText("components.SystemNoticeReviewModal.groupCount", { count: group.count })}
-                                    </span>
-                                    <span className={styles.role}>{roleLabel(group.role)}</span>
-                                    <span className={styles.personas}>
-                                        {group.personas
-                                            .map((p) => (group.personas.length > 1 ? `${p.persona_name} (${p.count})` : p.persona_name))
-                                            .join(", ")}
-                                    </span>
-                                </div>
-                                {example && <pre className={styles.content}>{example.content}</pre>}
-                                {example && attachmentBlock(example)}
-                                {group.tags.length > 0 && (
-                                    <div className={styles.tags}>{group.tags.join(" ")}</div>
-                                )}
-                                {blockedByAttachments && (
-                                    <p className={styles.muted}>
-                                        {uiText("components.SystemNoticeReviewModal.attachmentsNoSystem")}
-                                    </p>
-                                )}
-                                {group.system_split && (
-                                    <p className={styles.muted}>
-                                        {uiText("components.SystemNoticeReviewModal.systemSplitNote")}
-                                    </p>
-                                )}
-                                <div className={styles.actions}>
-                                    <span className={styles.actionsLabel}>
-                                        {uiText("components.SystemNoticeReviewModal.applyAll", { count: group.count })}
-                                    </span>
-                                    {group.actions.map((action) => actionButton(action, group.rows, action))}
-                                </div>
-                                <button
-                                    type="button"
-                                    className={styles.expandButton}
-                                    onClick={() => toggleGroup(group.group_id)}
-                                    aria-expanded={open}
-                                >
-                                    {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                    {uiText("components.SystemNoticeReviewModal.chooseEach", { count: group.count })}
-                                </button>
-                                {open && (
-                                    <ul className={styles.rows}>
-                                        {group.rows.map((row) => (
-                                            <li key={`${row.persona_id}/${row.message_id}`} className={styles.row}>
-                                                <div className={styles.rowMeta}>
-                                                    <span>{row.persona_name}</span>
-                                                    <span className={styles.role}>{roleLabel(row.role)}</span>
-                                                    {row.created_at ? (
-                                                        <span className={styles.muted}>
-                                                            {new Date(row.created_at * 1000).toLocaleString()}
-                                                        </span>
-                                                    ) : null}
-                                                </div>
-                                                <pre className={styles.content}>{row.content}</pre>
-                                                {attachmentBlock(row)}
-                                                <div className={styles.actions}>
-                                                    {row.actions.map((action) => actionButton(action, [row], action))}
-                                                </div>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                            </section>
-                        );
-                    })}
+                    {listing && listing.personas.map((persona) => (
+                        <section key={persona.persona_id} className={styles.persona}>
+                            <h3 className={styles.personaHeader}>
+                                {uiText("components.SystemNoticeReviewModal.personaHeader", {
+                                    name: persona.persona_name, count: persona.count,
+                                })}
+                            </h3>
+                            {persona.kinds.map((kind) => {
+                                const expanded = expandedKinds.has(kind.kind_id);
+                                const shown = expanded ? kind.rows : kind.rows.slice(0, ROWS_SHOWN);
+                                const hidden = kind.rows.length - ROWS_SHOWN;
+                                // 全行に当てはまる説明は並びに一度だけ出し、一部の行だけなら
+                                // その行に出す (同じ文を行の数だけ並べない)。
+                                const allBlocked = kind.rows.length > 0 && kind.rows.every(blockedByAttachments);
+                                const allSplit = Boolean(kind.system_split);
+                                // 一括の操作に無い操作を選べる行がある (行のボタンからは選べる)
+                                const bulkSubset = kind.rows.some(
+                                    (r) => r.actions.some((a) => !kind.actions.includes(a)),
+                                );
+                                return (
+                                    <div key={kind.kind_id} className={styles.kind}>
+                                        <div className={styles.kindHeader}>
+                                            <span className={styles.kindTitle}>
+                                                {uiText("components.SystemNoticeReviewModal.kindTitle", { role: roleLabel(kind.role) })}
+                                            </span>
+                                            <span className={styles.count}>
+                                                {uiText("components.SystemNoticeReviewModal.groupCount", { count: kind.count })}
+                                            </span>
+                                        </div>
+                                        {allBlocked && (
+                                            <p className={styles.muted}>
+                                                {uiText("components.SystemNoticeReviewModal.attachmentsNoSystem")}
+                                            </p>
+                                        )}
+                                        {allSplit && (
+                                            <p className={styles.muted}>
+                                                {uiText("components.SystemNoticeReviewModal.systemSplitNote")}
+                                            </p>
+                                        )}
+                                        {kind.count > 1 && (
+                                            <div className={`${styles.actions} ${styles.bulk}`}>
+                                                <span className={styles.actionsLabel}>
+                                                    {uiText("components.SystemNoticeReviewModal.applyAll", { count: kind.count })}
+                                                </span>
+                                                {kind.actions.map((action) => actionButton(action, kind.rows, action))}
+                                            </div>
+                                        )}
+                                        {kind.count > 1 && bulkSubset && (
+                                            <p className={styles.muted}>
+                                                {uiText("components.SystemNoticeReviewModal.bulkSubsetNote")}
+                                            </p>
+                                        )}
+                                        <ul className={styles.rows}>
+                                            {shown.map((row) => {
+                                                const contextOpen = openContexts.has(rowKey(row));
+                                                return (
+                                                    <li key={rowKey(row)} className={styles.row}>
+                                                        <div className={styles.rowMeta}>
+                                                            <span className={styles.rowTime}>{formatTime(row.created_at)}</span>
+                                                            <button
+                                                                type="button"
+                                                                className={styles.contextButton}
+                                                                onClick={() => toggleContext(row)}
+                                                                aria-expanded={contextOpen}
+                                                            >
+                                                                {contextOpen
+                                                                    ? uiText("components.SystemNoticeReviewModal.contextHide")
+                                                                    : uiText("components.SystemNoticeReviewModal.contextShow")}
+                                                            </button>
+                                                        </div>
+                                                        <pre className={styles.content}>{row.content}</pre>
+                                                        {attachmentBlock(row)}
+                                                        {!allBlocked && blockedByAttachments(row) && (
+                                                            <p className={styles.muted}>
+                                                                {uiText("components.SystemNoticeReviewModal.attachmentsNoSystem")}
+                                                            </p>
+                                                        )}
+                                                        {!allSplit && row.system_split && (
+                                                            <p className={styles.muted}>
+                                                                {uiText("components.SystemNoticeReviewModal.systemSplitNote")}
+                                                            </p>
+                                                        )}
+                                                        <div className={styles.actions}>
+                                                            {row.actions.map((action) => actionButton(action, [row], action))}
+                                                        </div>
+                                                        {contextBlock(row)}
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                        {hidden > 0 && (
+                                            <button
+                                                type="button"
+                                                className={styles.expandButton}
+                                                onClick={() => toggleKind(kind.kind_id)}
+                                                aria-expanded={expanded}
+                                            >
+                                                {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                                {expanded
+                                                    ? uiText("components.SystemNoticeReviewModal.showLess", { count: ROWS_SHOWN })
+                                                    : uiText("components.SystemNoticeReviewModal.showMore", { count: hidden })}
+                                            </button>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </section>
+                    ))}
                 </div>
             </div>
         </ModalOverlay>

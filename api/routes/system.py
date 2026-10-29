@@ -451,8 +451,10 @@ class SystemNoticeReviewApplyRequest(BaseModel):
 def list_system_notice_review():
     """確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった行) の一覧。
 
-    同じ型の行を束ね、束と行ごとに「選べる操作」を付けて返す
-    (docs/intent/system_notice_delivery.md「確認待ちの行の確定」)。各行は本文の
+    ペルソナごと・その中の role ごとに並べ、role ごとの並びには一括で当てられる
+    操作、行にはその行で選べる操作を付けて返す
+    (docs/intent/system_notice_delivery.md「確認待ちの行の確定」。形は
+    ``saiverse.system_notice_review.build_review_listing``)。各行は本文の
     全文・添付 (種類と参照)・行のハッシュ (``version`` — 確定の操作に渡す) を持つ。
     取り直したついでに、同じ結果から画面の警告も置き直す (一時的に読めなかった記憶が
     読めるようになったとき、確定する行が無くても警告が外れるように)。
@@ -472,6 +474,38 @@ def list_system_notice_review():
     except Exception:  # noqa: BLE001 — 警告の置き直しの失敗で一覧を止めない
         LOGGER.warning("[system-notice-review] failed to replace the alert on relisting", exc_info=True)
     return listing
+
+
+@router.get("/notice-review/context")
+def get_system_notice_review_context(persona_id: str, message_id: str):
+    """確認待ちの行の前後の文脈 (同じスレッドの前の 3 件と後ろの 3 件) を読み取り専用で返す。
+
+    確定の画面の「前後を見る」が使う。前後は記憶 DB の正典の順 (created_at, rowid)
+    で取り、確認待ちの行や書き手の決まっていない行も外さない。何も書き換えない
+    (形は ``saiverse.system_notice_review.build_review_context``)。ペルソナは一覧と
+    同じ範囲 (``known_persona_dbs``) から引き、無いペルソナ・無い行は 404。
+    """
+    from saiverse.system_notice_review import build_review_context, known_persona_dbs
+
+    manager = app_state.manager
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    db_path = next(
+        (path for pid, _name, path in known_persona_dbs(manager) if pid == persona_id), None,
+    )
+    if db_path is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    try:
+        context = build_review_context(db_path, message_id)
+    except Exception as exc:  # noqa: BLE001 — 読めない記憶は画面に失敗として返す
+        LOGGER.warning(
+            "[system-notice-review] failed to read context of %s/%s: %s",
+            persona_id, message_id, exc, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Could not read the memory")
+    if context is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"persona_id": persona_id, **context}
 
 
 @router.post("/notice-review/apply")

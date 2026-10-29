@@ -3,8 +3,13 @@
 docs/intent/system_notice_delivery.md「追補」の「確認待ちの行の確定 (利用者の画面)」。
 ここで固定するのは:
 
-- 確認待ちの印を持つ行だけを全ペルソナから集め、同じ型 (role・書き出し・タグ・
-  理由・選べる操作) で束ねる。各行は全文・添付・ハッシュ (version) を持つ
+- 確認待ちの印を持つ行だけを全ペルソナから集め、ペルソナごと (名前の順)・その中の
+  role ごと (タグ・line_role・理由・本文は鍵に入れない) に並べる。各行は全文・添付・
+  ハッシュ (version) を持つ。role ごとの一括の操作は、全行で選べる操作の共通部分
+  (二行分割になる行と行ごとの変換になる行が混ざれば「正式に変換」を外す)。
+  role ごとの並びは理由・タグ・line_role を返さない (画面は理由の説明を出さない)
+- 行の前後の文脈 (同じスレッドの前後 3 件、正典の順、確認待ちの行も外さない) を
+  読み取り専用で返す
 - 行ごとの「選べる操作」: 「通常のユーザー発話に変換」は role=user の行にだけ
   出す (包みが本文全体を囲んでいなければ、本文を変えずに発話へ戻す)。発話者の
   添付を持つ行には「正式に変換」を出さず、API でも拒否する。例外は移行の規則 5 の
@@ -191,27 +196,106 @@ def test_known_persona_dbs_skip_memory_without_a_persona(world):
     assert [(pid, name) for pid, name, _ in world.dbs] == [("alice", "Alice"), ("bob", "Bob")]
 
 
-def test_listing_collects_only_pending_rows_and_groups_by_shape(world):
+def _listed_kinds(listing):
+    return [kind for persona in listing["personas"] for kind in persona["kinds"]]
+
+
+def _listed_rows(listing):
+    return [row for kind in _listed_kinds(listing) for row in kind["rows"]]
+
+
+def test_listing_collects_only_pending_rows_per_persona(world):
     listing = review.build_review_listing(world.dbs)
     assert listing["total"] == 5
     assert listing["errors"] == []
-    ids = {r["message_id"] for g in listing["groups"] for r in g["rows"]}
+    ids = {r["message_id"] for r in _listed_rows(listing)}
     assert ids == {"a-tool", "a-assistant", "a-ambiguous", "a-system", "b-tool"}
 
-    # 同じ型の行は、ペルソナをまたいで一つの束になる (pulse: のタグは鍵に含めない)
-    top = listing["groups"][0]
-    assert top["count"] == 2
-    assert top["head"] == "Email sent."
-    assert top["tags"] == ["conversation", "tool"]
-    assert top["reason"] == UNCLASSIFIED
-    assert {p["persona_id"]: p["count"] for p in top["personas"]} == {"alice": 1, "bob": 1}
-    assert top["actions"] == ["keep", "system", "user", "delete"]
+    # 一段目はペルソナ (名前の順) で、件数はそのペルソナの確認待ちの行の数。同じ形の
+    # 行 (a-tool と b-tool) でも、ペルソナをまたいで一つにまとめない
+    assert [(p["persona_id"], p["persona_name"], p["count"]) for p in listing["personas"]] == [
+        ("alice", "Alice", 4), ("bob", "Bob", 1),
+    ]
+    alice, bob = listing["personas"]
+    # alice は user (a-tool と a-ambiguous — 理由が違っても同じ並び)・assistant・system
+    assert [(k["role"], k["count"]) for k in alice["kinds"]] == [
+        ("user", 2), ("assistant", 1), ("system", 1),
+    ]
+    assert [r["message_id"] for r in alice["kinds"][0]["rows"]] == ["a-tool", "a-ambiguous"]
+    [kind] = bob["kinds"]
+    assert kind["role"] == "user"
+    # role ごとの並びは理由・タグ・line_role を持たない (画面は理由の説明を出さない)
+    assert set(kind) == {"kind_id", "role", "count", "actions", "system_split", "rows"}
+    assert kind["count"] == 1
+    assert kind["actions"] == ["keep", "system", "user", "delete"]
+    assert "head" not in kind
+    [row] = kind["rows"]
     # 本文は表示用で、保存された本文そのまま (剥がしていない)
-    assert top["rows"][0]["content"] == "<system>Email sent.</system>"
-    assert top["rows"][0]["version"] == _version(world.a_db, "a-tool")
-    assert top["rows"][0]["attachments"] == []
-    assert top["rows"][0]["attachment_counts"] == {}
-    assert len(listing["groups"]) == 4
+    assert row["content"] == "<system>Email sent.</system>"
+    assert row["version"] == _version(world.b_db, "b-tool")
+    assert row["tags"] == ["conversation", "pulse:9", "tool"]
+    assert row["attachments"] == []
+    assert row["attachment_counts"] == {}
+
+
+def test_rows_are_grouped_by_role_only(tmp_path):
+    """並びの鍵は role だけ。本文・タグ・line_role・理由が違っても同じ role なら同じ並びに
+    入り、role が違えば別の並びになる。並びの中は行が一件ずつ、記憶 DB の順で並ぶ。"""
+    pending = {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}
+    db = _make_persona(tmp_path, "p", [
+        ("m1", "user", "<system>Email sent.</system>", pending),
+        ("m2", "user", "<system>Something entirely different</system>", pending),
+        ("m3", "user", "<system>Email sent.</system>", {**pending, "tags": ["conversation", "pulse:3"]}),
+        ("m4", "user", "<system>Email sent.</system>", {**pending, SYSTEM_NOTICE_REVIEW_KEY: AMBIGUOUS}),
+        ("m5", "user", "<system>Email sent.</system>", pending, "meta_judgment"),
+        ("m6", "User", "<system>Email sent.</system>", {**pending, "tags": ["conversation", "tool"]}),
+        ("m7", "assistant", "<system>Email sent.</system>", pending),
+        ("m8", "system", "spell result", {"tags": ["mystery"], SYSTEM_NOTICE_REVIEW_KEY: UNKNOWN_SYSTEM}),
+        # role=model は画面ではペルソナの名義なので、assistant と同じ並びに入る
+        ("m9", "model", "<system>Email sent.</system>", pending),
+    ])
+    listing = review.build_review_listing([("p", "P", db)])
+    [persona] = listing["personas"]
+    assert persona["count"] == 9
+    kinds = persona["kinds"]
+    # 件数の多い並びが先、同じ件数なら role の順
+    assert [[r["message_id"] for r in k["rows"]] for k in kinds] == [
+        ["m1", "m2", "m3", "m4", "m5", "m6"], ["m7", "m9"], ["m8"],
+    ]
+    assert [(k["role"], k["count"]) for k in kinds] == [("user", 6), ("assistant", 2), ("system", 1)]
+    # 各行は自分の全文を持つ (代表の一件に畳まない)
+    assert kinds[0]["rows"][1]["content"] == "<system>Something entirely different</system>"
+    assert kinds[0]["actions"] == ["keep", "system", "user", "delete"]
+    assert kinds[1]["actions"] == ["keep", "system", "delete"]
+    assert len({k["kind_id"] for k in kinds}) == 3
+    for kind in kinds:
+        assert not {"tags", "line_role", "reason", "reason_code"} & set(kind)
+
+
+def test_the_review_screen_has_no_reason_descriptions():
+    """確認待ちの理由の説明は画面に出さない (文言表にも鍵を残さない)。"""
+    assert not hasattr(review, "REVIEW_REASON_CODES")
+    table = json.loads(
+        (Path(__file__).resolve().parent.parent / "frontend" / "src" / "i18n" / "messages.json")
+        .read_text(encoding="utf-8"),
+    )
+    prefix = "components.SystemNoticeReviewModal."
+    leftover = [
+        key for key in table
+        if key.startswith(prefix + "reason") or key in (prefix + "kindTags", prefix + "kindLineRole")
+    ]
+    assert leftover == []
+
+
+def test_personas_are_ordered_by_name(tmp_path):
+    rows = [("m", "user", "<system>x</system>", {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED})]
+    dbs = [
+        ("p1", "carol", _make_persona(tmp_path, "p1", rows)),
+        ("p2", "Alice", _make_persona(tmp_path, "p2", rows)),
+        ("p3", "bob", _make_persona(tmp_path, "p3", rows)),
+    ]
+    listing = review.build_review_listing(dbs)
+    assert [p["persona_name"] for p in listing["personas"]] == ["Alice", "bob", "carol"]
 
 
 def test_listing_returns_the_full_text(tmp_path):
@@ -221,7 +305,7 @@ def test_listing_returns_the_full_text(tmp_path):
         ("m", "user", long_body, {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}),
     ])
     listing = review.build_review_listing([("p", "P", db)])
-    row = listing["groups"][0]["rows"][0]
+    [row] = _listed_rows(listing)
     assert row["content"] == long_body
     assert "content_truncated" not in row
 
@@ -278,7 +362,7 @@ def test_listing_returns_attachment_kinds_and_counts(tmp_path):
             "documents": [DOC],
         }),
     ])
-    row = review.build_review_listing([("p", "P", db)])["groups"][0]["rows"][0]
+    [row] = _listed_rows(review.build_review_listing([("p", "P", db)]))
     assert row["attachment_counts"] == {"audio": 1, "image": 2, "document": 1}
     assert row["attachments"] == [
         {"kind": "audio", "ref": "saiverse://audio/voice.ogg"},
@@ -591,10 +675,7 @@ def test_second_apply_on_the_same_row_is_rejected(world):
 def test_a_row_changed_after_listing_is_rejected_without_writing(world):
     """一覧の後に別の書き手が本文や metadata を変えた行には、所有者の選択を当てない。"""
     listing = review.build_review_listing(world.dbs)
-    seen = {
-        (r["persona_id"], r["message_id"]): r["version"]
-        for g in listing["groups"] for r in g["rows"]
-    }
+    seen = {(r["persona_id"], r["message_id"]): r["version"] for r in _listed_rows(listing)}
     # 記憶ブラウザの編集が本文を書き換えた (確認待ちの印は残る)
     conn = world.adapters["alice"].conn
     conn.execute("UPDATE messages SET content='<system>別の本文</system>' WHERE id='a-tool'")
@@ -815,9 +896,7 @@ def test_api_lists_and_applies_through_get_adapter(world, monkeypatch):
 
     listing = client.get("/api/system/notice-review").json()
     assert listing["total"] == 5
-    version = {
-        r["message_id"]: r["version"] for g in listing["groups"] for r in g["rows"]
-    }
+    version = {r["message_id"]: r["version"] for r in _listed_rows(listing)}
 
     bad = client.post("/api/system/notice-review/apply", json={"action": "rename", "items": []})
     assert bad.status_code == 400
@@ -1397,10 +1476,7 @@ def test_message_uri_text_search_window_includes_the_hit(recall_db):
 
 def test_a_row_whose_time_or_line_role_changed_after_listing_is_rejected(world):
     listing = review.build_review_listing(world.dbs)
-    seen = {
-        (r["persona_id"], r["message_id"]): r["version"]
-        for g in listing["groups"] for r in g["rows"]
-    }
+    seen = {(r["persona_id"], r["message_id"]): r["version"] for r in _listed_rows(listing)}
     a_conn = world.adapters["alice"].conn
     b_conn = world.adapters["bob"].conn
     # 記憶ブラウザで日時だけが変わった行と、line_role だけが変わった行
@@ -1511,11 +1587,12 @@ def test_a_voice_notice_after_the_cutover_can_be_split_from_the_review_screen(vo
     assert _row(db, "voice-post")[2][SYSTEM_NOTICE_REVIEW_KEY] == AFTER_CUTOVER_REASON
     listing = review.build_review_listing([("p", "P", db)])
     assert listing["total"] == 1
-    group = listing["groups"][0]
-    assert group["actions"] == ["keep", "system", "user", "delete"]
-    assert group["system_split"] is True
-    row = group["rows"][0]
+    [kind] = _listed_kinds(listing)
+    assert kind["actions"] == ["keep", "system", "user", "delete"]
+    assert kind["system_split"] is True
+    row = kind["rows"][0]
     assert row["message_id"] == "voice-post"
+    assert row["system_split"] is True
 
     result = review.apply_review_action(
         "system", [("p", "voice-post", row["version"])], voice_world.opener,
@@ -1565,14 +1642,15 @@ def test_a_voice_split_is_not_offered_when_the_voice_row_cannot_follow_the_notic
     """同じ時刻の後ろに別の行があると、音声の行を通知の直後に置けない (移行と同じ約束)。"""
     conn = voice_world.adapter.conn
     # 一覧の後に同じ時刻の行が足されても、確定の操作が書き込みの取引の中で判定し直す
-    seen = review.build_review_listing([("p", "P", voice_world.db)])["groups"][0]["rows"][0]
+    [seen] = _listed_rows(review.build_review_listing([("p", "P", voice_world.db)]))
     assert seen["actions"] == ["keep", "system", "user", "delete"]
     _insert(conn, "same-second", "assistant", "x", {"tags": ["conversation"]}, VOICE_CUTOVER + 100)
     conn.commit()
     listing = review.build_review_listing([("p", "P", voice_world.db)])
-    row = listing["groups"][0]["rows"][0]
+    [kind] = _listed_kinds(listing)
+    [row] = kind["rows"]
     assert row["actions"] == ["keep", "user", "delete"]
-    assert listing["groups"][0]["system_split"] is False
+    assert kind["system_split"] is False
     assert row["version"] == seen["version"]
     before = _ordered(voice_world.db)
     result = review.apply_review_action(
@@ -1600,16 +1678,156 @@ def test_voice_split_needs_the_whole_voice_input_shape():
     assert review.allowed_actions("assistant", VOICE_CONTENT, voice) == ["keep", "delete"]
 
 
-def test_voice_rows_and_other_attachment_rows_are_separate_groups(tmp_path):
+def test_bulk_system_is_withheld_when_split_and_whole_row_conversions_are_mixed(tmp_path):
+    """同じ role の並びに二行分割になる行と行ごとの変換になる行が混ざると、一括の「正式に変換」を出さない。
+
+    同じ操作の名前で結果が違う行に一括で当てないため。行ごとの操作からは選べる。
+    """
+    pending = {SYSTEM_NOTICE_REVIEW_KEY: "x"}
+    voice = {**pending, **_voice_meta("a.ogg", "b1:b1:1")}
+    plain = {k: v for k, v in voice.items() if k != "media"}
+    db = _make_persona(tmp_path, "p", [
+        ("voice", "user", VOICE_CONTENT, voice),
+        ("plain", "user", VOICE_CONTENT, plain),
+    ])
+    listing = review.build_review_listing([("p", "P", db)])
+    # 二つは同じ並び (同じ role)
+    [kind] = _listed_kinds(listing)
+    by_row = {r["message_id"]: r for r in kind["rows"]}
+    assert by_row["voice"]["system_split"] is True
+    assert by_row["voice"]["actions"] == ["keep", "system", "user", "delete"]
+    assert by_row["plain"]["system_split"] is False
+    assert by_row["plain"]["actions"] == ["keep", "system", "user", "delete"]
+    assert kind["actions"] == ["keep", "user", "delete"]
+    assert kind["system_split"] is False
+
+    # 二行分割になる行だけの並びなら、一括でも選べて system_split が立つ
+    db2 = _make_persona(tmp_path, "q", [("voice", "user", VOICE_CONTENT, voice)])
+    [only_voice] = _listed_kinds(review.build_review_listing([("q", "Q", db2)]))
+    assert only_voice["actions"] == ["keep", "system", "user", "delete"]
+    assert only_voice["system_split"] is True
+
+
+def test_bulk_actions_are_the_actions_every_row_of_the_kind_allows(tmp_path):
+    """添付の有無で選べる操作が違う行も同じ role の並びに入り、一括の操作は共通部分だけ。"""
     pending = {SYSTEM_NOTICE_REVIEW_KEY: "x"}
     voice = {**pending, **_voice_meta("a.ogg", "b1:b1:1")}
     db = _make_persona(tmp_path, "p", [
         ("voice", "user", VOICE_CONTENT, voice),
         ("not-voice", "user", VOICE_CONTENT, {**voice, "source": "screen"}),
     ])
-    groups = review.build_review_listing([("p", "P", db)])["groups"]
-    by_row = {g["rows"][0]["message_id"]: g for g in groups}
-    assert len(groups) == 2
-    assert by_row["voice"]["system_split"] is True
-    assert by_row["not-voice"]["system_split"] is False
+    [kind] = _listed_kinds(review.build_review_listing([("p", "P", db)]))
+    by_row = {r["message_id"]: r for r in kind["rows"]}
+    assert by_row["voice"]["actions"] == ["keep", "system", "user", "delete"]
     assert by_row["not-voice"]["actions"] == ["keep", "user", "delete"]
+    assert kind["actions"] == ["keep", "user", "delete"]
+    assert kind["system_split"] is False
+
+
+# ---------------------------------------------------------------------------
+# 前後の文脈
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def context_db(tmp_path):
+    """スレッド t1 に 9 行 (うち 2 行は同じ時刻)、同じ時刻帯のスレッド t2 に 2 行。"""
+    db_path = tmp_path / "personas" / "p" / "memory.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(str(db_path))
+    rows = [
+        ("c0", "t1", "user", "zero", {"tags": ["conversation"]}, 100),
+        ("o0", "t2", "user", "other thread", {"tags": ["conversation"]}, 101),
+        ("c1", "t1", "assistant", "one", {"tags": ["conversation"]}, 101),
+        ("c2", "t1", "system", "two", None, 102),
+        ("c3", "t1", "user", "three", {"tags": ["conversation"]}, 103),
+        # 対象の行 (確認待ち)
+        ("c4", "t1", "user", "<system>four</system>",
+         {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}, 104),
+        # 同じ時刻の行は rowid の順。確認待ちの行も文脈としては外さない
+        ("c5", "t1", "user", "<system>five</system>",
+         {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}, 105),
+        ("c6", "t1", "assistant", "six", {"tags": ["conversation"]}, 105),
+        ("o1", "t2", "assistant", "other thread 2", {"tags": ["conversation"]}, 106),
+        ("c7", "t1", "assistant", "seven", {"tags": ["conversation"]}, 107),
+        ("c8", "t1", "user", "eight", {"tags": ["conversation"]}, 108),
+    ]
+    for mid, thread, role, content, meta, created_at in rows:
+        conn.execute(
+            "INSERT INTO messages (id, thread_id, role, content, resource_id, created_at, metadata) "
+            "VALUES (?, ?, ?, ?, 'r', ?, ?)",
+            (mid, thread, role, content, created_at,
+             json.dumps(meta, ensure_ascii=False) if meta is not None else None),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _context_ids(context):
+    return [m["message_id"] for m in context["messages"]]
+
+
+def test_context_returns_three_before_and_three_after_in_order(context_db):
+    before = context_db.read_bytes()
+    context = review.build_review_context(context_db, "c4")
+    assert context["message_id"] == "c4"
+    # 別のスレッドの行 (o0・o1) は入らない。時間順で、対象の行を挟む
+    assert _context_ids(context) == ["c1", "c2", "c3", "c4", "c5", "c6", "c7"]
+    assert [m["target"] for m in context["messages"]] == [False, False, False, True, False, False, False]
+    first, *_ = context["messages"]
+    assert first == {
+        "message_id": "c1", "role": "assistant", "content": "one", "created_at": 101, "target": False,
+    }
+    # 確認待ちの行も、本文をそのまま出す
+    assert context["messages"][4]["content"] == "<system>five</system>"
+    # 読み取りだけで、記憶 DB を書き換えない
+    assert context_db.read_bytes() == before
+
+
+def test_context_near_the_ends_of_the_thread_has_fewer_rows(context_db):
+    assert _context_ids(review.build_review_context(context_db, "c0")) == ["c0", "c1", "c2", "c3"]
+    assert _context_ids(review.build_review_context(context_db, "c8")) == ["c5", "c6", "c7", "c8"]
+    # 同じ時刻の二行は rowid の順で前後が決まる
+    assert _context_ids(review.build_review_context(context_db, "c6")) == [
+        "c3", "c4", "c5", "c6", "c7", "c8",
+    ]
+
+
+def test_context_of_a_missing_row_is_none(context_db):
+    assert review.build_review_context(context_db, "nope") is None
+
+
+def test_api_returns_context_and_404s(world, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routes import system as system_routes
+    from saiverse import app_state
+
+    monkeypatch.setenv("SAIVERSE_HOME", str(world.home))
+    monkeypatch.setattr(app_state, "manager", world.manager)
+    app = FastAPI()
+    app.include_router(system_routes.router, prefix="/api/system")
+    client = TestClient(app)
+
+    before = world.a_db.read_bytes()
+    res = client.get(
+        "/api/system/notice-review/context",
+        params={"persona_id": "alice", "message_id": "a-ambiguous"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["persona_id"] == "alice"
+    assert body["message_id"] == "a-ambiguous"
+    assert _context_ids(body) == [
+        "a-tool", "a-assistant", "a-ambiguous", "a-system", "a-plain", "a-settled",
+    ]
+    assert world.a_db.read_bytes() == before
+    # 一覧と同じ範囲に無いペルソナ (本体 DB に登録の無い記憶を含む) と、無い行は 404
+    for params in (
+        {"persona_id": "orphan", "message_id": "o-1"},
+        {"persona_id": "../alice", "message_id": "a-tool"},
+        {"persona_id": "alice", "message_id": "nope"},
+    ):
+        assert client.get("/api/system/notice-review/context", params=params).status_code == 404
