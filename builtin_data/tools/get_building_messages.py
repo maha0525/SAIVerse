@@ -156,7 +156,8 @@ def _append_and_mark(
 
     Returns:
         True: 記憶に行がある状態で印を付けた (追記した、または照会で見つけた)。
-        False: 建物の行に既にこのペルソナの印があり、何も足さなかった。呼び出し側は
+        False: 建物の行に既にこのペルソナの印があるか、建物の行が取り下げで消えていて、
+        何も足さなかった。呼び出し側は
         この候補を「追記を試みた」と数えない (``_transcribe_message`` の
         ``append_attempted`` が False) — 数えると、``_ingest_round`` が次の候補の
         ``building_msg_ref`` 照会を省き、記憶に追記済みで印だけが無い次の行を
@@ -218,6 +219,11 @@ def _append_and_mark(
 def _marked_in_building_db(m: Dict[str, Any], persona_id: str, manager: Any) -> bool:
     """建物の行の ``ingested_by`` を本体 DB から読み直し、このペルソナの印があるか。
 
+    建物の行が本体 DB に無い (``fetch_ingested_by`` が None) ときも True — ラウンドが
+    履歴を読んだ後に、所有者が未読の発言を取り下げた
+    (``database.building_messages.withdraw_building_message_in_db``)。取り下げられた
+    発言を記憶へ写さず、印があるのと同じく消費として扱う。
+
     本体 DB を引けない (manager・building_id・message_id のどれかが無い) ときは
     False (写しの判定のまま進む)。
     """
@@ -229,7 +235,13 @@ def _marked_in_building_db(m: Dict[str, Any], persona_id: str, manager: Any) -> 
     from database.building_messages import fetch_ingested_by
 
     current = fetch_ingested_by(session_factory, building_id, message_id)
-    return bool(current) and persona_id in current
+    if current is None:
+        LOGGER.info(
+            "[building_ingest] building row %s:%s is gone (withdrawn) after this round "
+            "read it; not appending", building_id, message_id,
+        )
+        return True
+    return persona_id in current
 
 
 def _transcribe_message(

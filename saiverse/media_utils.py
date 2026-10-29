@@ -796,6 +796,29 @@ def resize_image_for_llm_context(
         return data, mime_type
 
 
+def _media_item_is(item: Any, type_key: str, mime_prefix: str) -> bool:
+    """A media[] entry is of kind ``type_key``.
+
+    The ``type`` field decides (case-insensitive) when present; otherwise the
+    ``mime_type`` must start with ``mime_prefix`` (case-insensitive).
+    """
+    if not isinstance(item, dict):
+        return False
+    item_type = str(item.get("type") or "").lower()
+    if item_type:
+        return item_type == type_key
+    return str(item.get("mime_type") or "").lower().startswith(mime_prefix)
+
+
+def is_audio_media_item(item: Any) -> bool:
+    """A media[] entry is audio, by the same rule :func:`iter_audio_media` selects with.
+
+    database/system_notice_migration.py uses this for its audio checks so that the
+    migration and the reader agree on which entries are audio.
+    """
+    return _media_item_is(item, "audio", "audio/")
+
+
 def _iter_typed_media(
     metadata: Any,
     type_key: str,
@@ -805,7 +828,8 @@ def _iter_typed_media(
     """Internal helper for iter_audio_media / iter_video_media.
 
     Selects media[] entries whose `type` field matches type_key, or whose
-    mime_type starts with mime_prefix when type is unspecified.
+    mime_type starts with mime_prefix when type is unspecified
+    (:func:`_media_item_is`).
     """
     results: List[Dict[str, Any]] = []
     if not isinstance(metadata, dict):
@@ -816,18 +840,8 @@ def _iter_typed_media(
         return results
 
     for item in media:
-        if not isinstance(item, dict):
+        if not _media_item_is(item, type_key, mime_prefix):
             continue
-
-        # Filter by type or mime prefix
-        item_type = str(item.get("type") or "").lower()
-        item_mime = str(item.get("mime_type") or "").lower()
-        if item_type:
-            if item_type != type_key:
-                continue
-        else:
-            if not item_mime.startswith(mime_prefix):
-                continue
 
         # Resolve path
         uri = item.get("uri")

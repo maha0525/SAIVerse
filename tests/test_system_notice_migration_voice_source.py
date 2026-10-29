@@ -5,7 +5,7 @@ docs/intent/system_notice_delivery.md「追補」の規則 5。合成した一�
 
 - 記憶の行の元の行 (本体 DB の ``building_messages`` の行) を引き、その行が画面からの
   送信の印 ``client_message_id`` を持てば、案内文の形でも変換せず確認待ちにする
-  (:data:`VOICE_SENT_FROM_SCREEN_REASON`)。持たなければ (音声入力を中継するアドオンの
+  (:data:`SENT_FROM_SCREEN_REASON`)。持たなければ (音声入力を中継するアドオンの
   発言) 従来どおり二行に分ける。
 - 元の行は ``building_msg_ref`` で引く。``building_msg_ref`` を持たない行 (転記が印を
   刻む前の行) は、音声の ``media`` の ``uri`` が同じ ``role='user'`` の行で引く。
@@ -26,9 +26,9 @@ import pytest
 from database.system_notice_migration import (
     CUTOVER_FILE_NAME,
     OUTPUT_DIR_NAME,
+    SENT_FROM_SCREEN_REASON,
     SPLIT_ADDED_TABLE,
     VOICE_INPUT_NOTICE_KIND,
-    VOICE_SENT_FROM_SCREEN_REASON,
     VOICE_SOURCE_UNKNOWN_REASON,
     BuildingSourceRows,
     migrate_persona_db,
@@ -148,11 +148,11 @@ def test_a_row_sent_from_the_screen_is_held_for_review_even_before_the_cutover(t
         result = _migrate(db, tmp_path, source_rows)
 
     rows = _rows(db)
-    _assert_held(rows, "screen", screen, VOICE_SENT_FROM_SCREEN_REASON)
+    _assert_held(rows, "screen", screen, SENT_FROM_SCREEN_REASON)
     _assert_split(rows, "addon", addon)
     assert len(rows) == 3  # 足した音声の行はアドオンの一行の分だけ
     assert [(s.row_id, s.reason) for s in result.skipped] == [
-        ("screen", VOICE_SENT_FROM_SCREEN_REASON),
+        ("screen", SENT_FROM_SCREEN_REASON),
     ]
     assert result.counts() == {
         ("messages", VOICE_INPUT_NOTICE_KIND): 1,
@@ -248,12 +248,12 @@ def test_rows_without_a_ref_are_found_by_the_audio_uri(tmp_path):
 
     rows = _rows(db)
     _assert_split(rows, "addon", addon)
-    _assert_held(rows, "screen", screen, VOICE_SENT_FROM_SCREEN_REASON)
+    _assert_held(rows, "screen", screen, SENT_FROM_SCREEN_REASON)
     _assert_held(rows, "twice", twice, VOICE_SOURCE_UNKNOWN_REASON)
     _assert_held(rows, "nowhere", nowhere, VOICE_SOURCE_UNKNOWN_REASON)
     assert sorted((s.row_id, s.reason) for s in result.skipped) == [
         ("nowhere", VOICE_SOURCE_UNKNOWN_REASON),
-        ("screen", VOICE_SENT_FROM_SCREEN_REASON),
+        ("screen", SENT_FROM_SCREEN_REASON),
         ("twice", VOICE_SOURCE_UNKNOWN_REASON),
     ]
 
@@ -280,14 +280,14 @@ def test_run_migration_looks_up_the_main_db(tmp_path, dry_run):
 
     assert not main_result.error
     assert sorted((s.row_id, s.reason) for s in persona.skipped) == [
-        ("screen", VOICE_SENT_FROM_SCREEN_REASON),
+        ("screen", SENT_FROM_SCREEN_REASON),
     ]
     assert persona.counts()[("messages", VOICE_INPUT_NOTICE_KIND)] == 1
     rows = _rows(db)
     if dry_run:
         assert rows == before
         return
-    _assert_held(rows, "screen", screen, VOICE_SENT_FROM_SCREEN_REASON)
+    _assert_held(rows, "screen", screen, SENT_FROM_SCREEN_REASON)
     _assert_split(rows, "addon", addon)
 
 

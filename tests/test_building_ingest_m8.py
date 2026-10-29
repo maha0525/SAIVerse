@@ -407,6 +407,33 @@ class BuildingIngestM8Test(unittest.TestCase):
                 self.assertIn(self.LISTENER, self._ingested_by(floating["message_id"]))
                 self.assertEqual(self.persona.pulse_cursors[self.BID], int(floating["seq"]))
 
+    def test_a_message_withdrawn_after_the_round_read_it_is_not_appended(self):
+        """ラウンドが履歴を読んだ後に、所有者が未読の発言を取り下げた (Codex 4 巡目)。
+
+        読み直しで建物の行が見つからないときは、印があるのと同じく記憶へ足さず、
+        消費として扱う — 取り下げられた発言を記憶へ写さない。"""
+        withdrawn = self._insert("user", "取り下げられる発言")
+        after = self._insert("user", "その後の発言")
+        hm = self.persona.history_manager
+        real_history = hm.get_building_history
+
+        def history_then_withdrawn(building_id):
+            rows = real_history(building_id)
+            from database.building_messages import withdraw_building_message_in_db
+            ok, code, _ = withdraw_building_message_in_db(
+                self.SessionLocal, self.BID, withdrawn["message_id"]
+            )
+            assert ok, code
+            return rows
+
+        hm.get_building_history = history_then_withdrawn
+        count = auto_ingest_building_messages(self.persona, self.manager)
+
+        self.assertEqual(self.adapter.appended_count("取り下げられる発言"), 0)
+        self.assertEqual(self.adapter.appended_count("その後の発言"), 1)
+        self.assertEqual(count, 1)
+        self.assertEqual(self.persona.pulse_cursors[self.BID], int(after["seq"]))
+
     # ------------------------------------------------------------------
     # tool 版 (get_building_messages) — 共通核の配線と件数表示
     # ------------------------------------------------------------------

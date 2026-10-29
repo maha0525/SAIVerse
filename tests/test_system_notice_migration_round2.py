@@ -35,8 +35,8 @@ from database.system_notice_migration import (
     MIGRATION_MARKER_KEY,
     OUTPUT_DIR_NAME,
     RESULTS_DIR_NAME,
+    SENT_FROM_SCREEN_REASON,
     VOICE_INPUT_NOTICE_KIND,
-    VOICE_SENT_FROM_SCREEN_REASON,
     VOICE_SOURCE_UNKNOWN_REASON,
     BuildingSourceRows,
     CutoverUnavailable,
@@ -363,7 +363,7 @@ def test_a_voice_row_with_a_legacy_tag_goes_through_the_source_check(tmp_path, c
         assert len(rows) == 2
     else:
         assert rows["voice"][:2] == ("user", _VOICE_CONTENT)
-        assert _meta(db, "voice")[SYSTEM_NOTICE_REVIEW_KEY] == VOICE_SENT_FROM_SCREEN_REASON
+        assert _meta(db, "voice")[SYSTEM_NOTICE_REVIEW_KEY] == SENT_FROM_SCREEN_REASON
         assert len(rows) == 1
 
 

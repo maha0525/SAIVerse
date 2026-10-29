@@ -24,9 +24,11 @@ docs/intent/system_notice_delivery.md「設計 > 移行」。供給側 (第 1 �
 実在する Playbook 名のタグ・退役した子ラインの結果の書き出し・音声入力の案内文) と、
 2 の perception タグ・感情パラメータ変動の知らせを足した。音声入力の案内文の行は、
 通知の行と本文の無い音声の行の二行に分ける (:func:`_queue_voice_split`)。ただし
-元の発言の行 (本体 DB の ``building_messages``) が画面からの送信の印
-``client_message_id`` を持つ行と、元の行を確かめられない行は分けずに確認待ちにする
-(:class:`BuildingSourceRows`)。所有者が確認待ちの行を確定した記録
+元の行を確かめられない音声入力の行は分けずに確認待ちにする。
+
+元の発言の行 (本体 DB の ``building_messages`` — :class:`BuildingSourceRows`) が画面
+からの送信の印 ``client_message_id`` を持つ行は、どの版のどの規則に当たっても変換せず
+確認待ちにする (:data:`SENT_FROM_SCREEN_REASON`)。所有者が確認待ちの行を確定した記録
 (``SYSTEM_NOTICE_REVIEWED_KEY``) を持つ行には触れない。
 
 規則で変換するのは、この環境で新しい形式に切り替わった時刻 (:func:`resolve_cutover`
@@ -76,11 +78,10 @@ import math
 import os
 import re
 import sqlite3
-import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AbstractSet, Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -460,10 +461,19 @@ def _speaker_has_attachments(role: Any, metadata: Dict[str, Any]) -> bool:
 
 
 def _has_audio_media(metadata: Dict[str, Any]) -> bool:
+    """metadata の ``media`` に音声の項目が一つでもあるか。
+
+    項目が音声かの判定は、音声を読み取る側 (``saiverse.media_utils.iter_audio_media``) と
+    同じ :func:`saiverse.media_utils.is_audio_media_item` — ``type`` があれば大文字小文字を
+    区別せずに ``audio`` か、無ければ ``mime_type`` が ``audio/`` で始まるか。元の発言の
+    行の引き当て (:class:`BuildingSourceRows`) も同じ関数を使う。
+    """
+    from saiverse.media_utils import is_audio_media_item
+
     media = metadata.get("media")
     if not isinstance(media, list):
         return False
-    return any(isinstance(m, dict) and m.get("type") == "audio" for m in media)
+    return any(is_audio_media_item(m) for m in media)
 
 
 def is_voice_input_notice(body: Optional[str], metadata: Dict[str, Any]) -> bool:
@@ -1169,13 +1179,13 @@ SPLIT_ADDED_TABLE = "messages(音声の行を分けて足した行)"
 #: 二行に分けた後の新しい行が、元の行の直後に並べられない (同じ時刻で後ろの
 #: rowid の行が既にある) ので、変換せずに残した行の理由。
 SPLIT_POSITION_REASON = "同じ時刻の後ろに別の行があり、音声の行を通知の直後に置けない"
-#: 規則 5 に当たったが、元の発言の行 (本体 DB の ``building_messages`` の行 —
+#: 規則に当たったが、元の発言の行 (本体 DB の ``building_messages`` の行 —
 #: :class:`BuildingSourceRows`) が画面からの送信の印 ``client_message_id`` を持つので、
-#: 変換せずに残した行の理由。画面やチャットの送信 API から、人が案内文を真似て音声
-#: つきで送った発言でありうる。
-VOICE_SENT_FROM_SCREEN_REASON = (
-    "音声入力の案内文の形だが、元の発言の行が画面からの送信の印 (client_message_id) を持つ"
-)
+#: 変換せずに残した行の理由。どの版のどの規則に当たった行でも同じ
+#: (:func:`_queue_conversion`)。画面やチャットの送信 API から人が送った発言で、旧形式の
+#: 本文や tags は送り手が真似て書けるので、機構の書いたものと言い切れない。本体 DB の
+#: ``voice_call`` の行も、この印を持てば変換しない (:func:`scan_main_conn`)。
+SENT_FROM_SCREEN_REASON = "元の発言の行が画面からの送信の印 (client_message_id) を持つ"
 #: 規則 5 に当たったが、元の発言の行を本体 DB で一つに決められなかった (見つからない・
 #: 複数ある・本体 DB を読めない) ので、変換せずに残した行の理由。
 VOICE_SOURCE_UNKNOWN_REASON = "音声入力の案内文の形だが、元の発言の行を本体 DB で確かめられなかった"
@@ -1253,14 +1263,16 @@ _SOURCE_ROW_COLUMNS = frozenset({
 
 
 class BuildingSourceRows:
-    """記憶の行の元になった発言の行 (本体 DB の ``building_messages``) を引く (規則 5 の出どころの条件)。
+    """記憶の行の元になった発言の行 (本体 DB の ``building_messages``) を引く (出どころの条件)。
 
-    規則 5 の形 (案内文・音声の ``media``・``source`` が ``_voice`` で終わる) は、
-    チャットの送信 API の送り手も作れる (``source`` は送り手が書ける欄で、音声は
-    添付として付けられる)。音声入力を中継するアドオン (stackchan・Godot ほか) は
-    ``handle_user_input_stream`` を ``client_message_id`` なしで呼び、画面からの送信は
-    必ず ``client_message_id`` を付ける。だから元の行がこの印を持つかで分ける
-    (:meth:`sent_from_screen`)。
+    旧形式の本文・tags・規則 5 の形 (案内文・音声の ``media``・``source`` が
+    ``_voice`` で終わる) は、チャットの送信 API の送り手も作れる (``tags`` や
+    ``source`` は送り手が書ける欄で、音声は添付として付けられる)。音声入力を中継する
+    アドオン (stackchan・Godot ほか) は ``handle_user_input_stream`` を
+    ``client_message_id`` なしで呼び、画面からの送信は必ず ``client_message_id`` を
+    付ける。だから元の行がこの印を持つかで分ける (:meth:`sent_from_screen`)。
+    ``building_msg_ref`` を持つ行はどの規則でも (:func:`_queue_conversion`)、持たない
+    行は規則 5 でだけ (音声の ``uri`` で) 引く。
 
     元の行の引き方:
 
@@ -1270,8 +1282,8 @@ class BuildingSourceRows:
       ``:`` が入りうるので、区切りの位置を全部試す。
     - 持たなければ (転記が印を刻む前の行)、音声の ``media`` の ``uri`` が同じ
       ``role='user'`` の行。音声のファイル名は受け取るたびに一意に作られる。比べるのは
-      各行の ``metadata_json`` を JSON として解釈した ``media`` の、``type`` が
-      ``audio`` の項目の ``uri`` (生の JSON の文字列では探さない — 同じ uri がエスケープ
+      各行の ``metadata_json`` を JSON として解釈した ``media`` の、音声の項目
+      (:func:`saiverse.media_utils.is_audio_media_item`) の ``uri`` (生の JSON の文字列では探さない — 同じ uri がエスケープ
       の違う表現で保存されていると、文字列の検索では候補から漏れて、一つに決まったと
       誤認する)。初めて uri で引くときに ``role='user'`` の行を一度だけ全部読んで、
       uri から行への対応を作る (:meth:`_audio_uri_index`)。読んだ行の中に
@@ -1354,12 +1366,15 @@ class BuildingSourceRows:
         return bool(client_message_id)
 
     def _audio_uri_index(self, conn: sqlite3.Connection) -> Dict[str, Dict[Any, Any]]:
-        """音声の uri → その uri を音声 (``type`` が ``audio``) として持つ role=user の行。
+        """音声の uri → その uri を音声として持つ role=user の行。
 
-        ``metadata_json`` を読めない行は対応に載せられないので、
+        項目が音声かは :func:`saiverse.media_utils.is_audio_media_item` (音声を読み取る側と
+        同じ判定) で決める。``metadata_json`` を読めない行は対応に載せられないので、
         ``_uri_index_complete`` を偽にする (:meth:`_find` が uri での引き当てを
         「決められない」にする)。
         """
+        from saiverse.media_utils import is_audio_media_item
+
         if self._uri_index is not None:
             return self._uri_index
         index: Dict[str, Dict[Any, Any]] = {}
@@ -1386,7 +1401,7 @@ class BuildingSourceRows:
                 complete = False
                 continue
             for m in media:
-                if not isinstance(m, dict) or m.get("type") != "audio":
+                if not is_audio_media_item(m):
                     continue
                 uri = m.get("uri")
                 if isinstance(uri, str) and uri:
@@ -1422,9 +1437,11 @@ class BuildingSourceRows:
                 ):
                     found[row_id] = client_message_id
             return found
+        from saiverse.media_utils import is_audio_media_item
+
         media = metadata.get("media")
         uris = {
-            m.get("uri") for m in media if isinstance(m, dict) and m.get("type") == "audio"
+            m.get("uri") for m in media if is_audio_media_item(m)
         } if isinstance(media, list) else set()
         uris = {uri for uri in uris if isinstance(uri, str) and uri}
         if not uris:
@@ -1449,7 +1466,7 @@ def _voice_source_reason(
     sent = source_rows.sent_from_screen(metadata) if source_rows is not None else None
     if sent is None:
         return VOICE_SOURCE_UNKNOWN_REASON
-    return VOICE_SENT_FROM_SCREEN_REASON if sent else None
+    return SENT_FROM_SCREEN_REASON if sent else None
 
 
 def _queue_conversion(
@@ -1464,6 +1481,13 @@ def _queue_conversion(
 ) -> Optional[str]:
     """当たった規則の変換を ``result`` に積む。変換できなければ残す理由を返す。
 
+    ``building_msg_ref`` を持つ行は、元の発言の行 (:class:`BuildingSourceRows`) が画面
+    からの送信の印 ``client_message_id`` を持てば、どの規則に当たっても変換しない
+    (:data:`SENT_FROM_SCREEN_REASON`)。規則同士の優先順や版に関係なく、ここを通らない
+    変換は無い。元の行を一つに決められないときは、規則 5 だけを確認待ちにし
+    (:func:`_voice_source_reason`)、ほかの規則は今までどおり変換する — 判定の材料が
+    無いのは、転記が印を刻む前の行と同じ。
+
     発話者の添付を持つ行は、規則 5 の二行分割のほかは変換しない
     (:data:`SPEAKER_ATTACHMENT_REASON`)。印を付けるだけの role=system の行は発話者の
     行ではないので対象外。role=user の行は、ユーザーの発言の来歴
@@ -1473,6 +1497,11 @@ def _queue_conversion(
     """
     row_id, role, content, _raw_meta, rowid, created_at = row
     role_s = role.lower() if isinstance(role, str) else ""
+    if (
+        match.kind != VOICE_INPUT_NOTICE_KIND and _BUILDING_MSG_REF_KEY in metadata
+        and source_rows is not None and source_rows.sent_from_screen(metadata) is True
+    ):
+        return SENT_FROM_SCREEN_REASON
     if (
         not match.mark_only and match.kind != VOICE_INPUT_NOTICE_KIND
         and _speaker_has_attachments(role, metadata)
@@ -1660,7 +1689,9 @@ def _scan_persona_messages(
         )
         if match is not None and reason is None:
             continue
-        if tagged:
+        if tagged or reason is not None:
+            # 規則に当たったのに変換しなかった印の無い role=system 行 (元の発言の行が
+            # 画面からの送信 — SENT_FROM_SCREEN_REASON) も、理由つきでここに載せる
             result.skipped.append(Skipped(
                 "messages", str(row_id), str(role),
                 sorted(_tags_of(metadata)), _head(content), reason=reason or "",
@@ -2306,7 +2337,8 @@ def scan_main_conn(
 
     - building_messages: 音声通話の痕跡 (role=user + タグ + event_message +
       ``voice_call``) を、今の形 (role=host・タグ無し、saiverse/voice_call.py の
-      ``_building_entry``) にする。印の無い旧世代のスケジュール発火文・外部
+      ``_building_entry``) にする。ただし画面からの送信の印 ``client_message_id`` を
+      持つ行は変換しない (:data:`SENT_FROM_SCREEN_REASON`)。印の無い旧世代のスケジュール発火文・外部
       イベント通知 (:func:`legacy_notice`。書き手の世代の列で来歴を縛る —
       :func:`_written_by_old_writer`) も同じ形にする。
     - execution_ledger: on_event の prepared 行の ``dispatch_envelope.user_input``
@@ -2344,6 +2376,14 @@ def scan_main_conn(
                 and "event_message" in tags
                 and metadata.get("voice_call") is True
             )
+            if is_voice_call and client_mid:
+                # 画面からの送信の印を持つ行は、tags と metadata を送り手が真似て書けるので、
+                # 通話の痕跡と言い切れない (記憶 DB の SENT_FROM_SCREEN_REASON と同じ扱い)
+                result.skipped.append(Skipped(
+                    "building_messages", str(row_id), str(role), sorted(tags), _head(content),
+                    reason=SENT_FROM_SCREEN_REASON,
+                ))
+                continue
             body = strip_system_tags(content) if is_voice_call else None
             label = "voice_call"
             if not is_voice_call and _written_by_old_writer(legacy_seq, legacy_mid, client_mid):
@@ -2966,6 +3006,9 @@ def _file_written_at(path: Path) -> datetime:
 #: 起動ごとの結果のフォルダの名前の先頭 (``<時刻>_<pid>_<乱数>`` の ``<時刻>``。
 #: その起動の地方時を秒まで — :func:`run_migration` の ``stamp``)。
 _RUN_FOLDER_STAMP = re.compile(r"^(\d{8}_\d{6})(?:_|$)")
+#: 地方時の UTC からのずれの最大 (UTC+14)。タイムゾーンを持たない地方時の時刻から、
+#: ありうる最も早い UTC を出すのに使う (:func:`_legacy_run_folder_started_at`)。
+_MAX_UTC_OFFSET = timedelta(hours=14)
 
 
 def _legacy_run_folder_started_at(run_dir: Path, results: Sequence[Path]) -> datetime:
@@ -2975,9 +3018,12 @@ def _legacy_run_folder_started_at(run_dir: Path, results: Sequence[Path]) -> dat
     その間の版は ``RUN`` を書かずに結果の JSON だけを書いた — それは正当な保存形式で、
     壊れた記録ではない。
 
-    - フォルダ名の先頭の時刻 (その起動の地方時、秒まで) を読めれば、それをこの
-      計算機の地方時として UTC に直す。秒に切り捨てた起動の時刻なので、実際の起動より
-      遅いことはない。
+    - フォルダ名の先頭の時刻 (その起動の地方時、秒まで) を読めれば、その時刻を UTC と
+      見なしたうえで :data:`_MAX_UTC_OFFSET` (14 時間) 引いた時刻。名前の時刻は
+      タイムゾーンを持たないので、今の計算機のタイムゾーンで読み直すと、起動の後に
+      タイムゾーンを変えた環境で境が遅れる (遅れた分の改修後の行が自動で変換される)。
+      地方時の UTC からのずれは最大 +14 時間なので、引いた時刻はありうる最も早い UTC
+      で、実際の起動より遅いことはない。
     - 読めなければ、フォルダの中の結果の JSON の更新時刻のうち最も早いもの (その起動
       より後に書いた時刻なので、起動より早いことはない)。
     - どちらも取れなければ :class:`CutoverUnavailable`。
@@ -2985,8 +3031,9 @@ def _legacy_run_folder_started_at(run_dir: Path, results: Sequence[Path]) -> dat
     match = _RUN_FOLDER_STAMP.match(run_dir.name)
     if match:
         try:
-            return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S").astimezone(timezone.utc)
-        except (ValueError, OverflowError, OSError):
+            named = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            return named - _MAX_UTC_OFFSET
+        except (ValueError, OverflowError):
             pass  # 日付として成り立たない名前 — 更新時刻で決める
     times: List[datetime] = []
     for path in results:
@@ -3091,8 +3138,9 @@ def _record_cutover(path: Path, cutover: Cutover, *, saiverse_home: Path) -> Cut
     既に記録があれば書き換えない — 同時に起動した別のプロセスが先に記録していれば、
     その時刻を返す。中身を OS に確定させた仮のファイルを、上書きしない固いリンクで
     正式な名前に付ける (書きかけの記録が正式な名前で残らない)。固いリンクを作れない
-    ファイルシステムでも、正式な名前に直接は書かず、確定させた仮のファイルを名前の
-    付け替え (:func:`_publish_without_link`) で公開する。書けなければ
+    ファイルシステムでは、Windows でだけ、確定させた仮のファイルを名前の付け替え
+    (:func:`_publish_without_link`) で公開する。Windows 以外では境を記録できない
+    ものとして :class:`CutoverUnavailable` を送る。書けなければ
     :class:`CutoverUnavailable`。
     """
     data = {
@@ -3141,172 +3189,20 @@ def _publish_without_link(tmp: Path, path: Path) -> None:
     - Windows の ``os.rename`` は、付け替え先の名前が既にあると FileExistsError で
       失敗する。付け替えそのものが排他になるので、先に記録したプロセスの記録を
       上書きしない。
-    - それ以外の OS の ``os.rename`` は既存の名前を上書きする。正式な名前が無いことの
-      確認と付け替えを、同じフォルダに ``O_CREAT | O_EXCL`` で作るロックのファイル
-      (``cutover.json`` + :data:`CUTOVER_LOCK_SUFFIX`) を持っている間だけ行う
-      (:func:`_publish_under_lock`)。確認と付け替えの間に別のプロセスが割り込んで、
-      先に公開した記録を上書きすることがない。
+    - それ以外の OS の ``os.rename`` は既存の名前を上書きするので、同時に起動した別の
+      プロセスが先に記録した境を後の時刻で上書きしうる。上書きしない公開の手段が
+      無いので記録せず、:class:`CutoverUnavailable` を送る (その起動は何も変換せず、
+      起動時の警告で知らせる — :func:`run_startup_system_notice_migration`)。
     """
-    if os.name == "nt":
-        try:
-            os.rename(tmp, path)
-        except FileExistsError:
-            pass  # 別のプロセスが先に記録した
-        return
-    _publish_under_lock(tmp, path)
-
-
-#: ``cutover.json`` の公開の間だけ持つロックのファイルの名前の末尾 (固いリンクを作れない
-#: POSIX だけで使う — :func:`_publish_under_lock`)。
-CUTOVER_LOCK_SUFFIX = ".lock"
-#: ロックを別のプロセスが持っているとき、その公開を待つ長さ (秒)。持っている間にする
-#: のは存在の確認と名前の付け替えだけなので、走っているプロセスなら一瞬で終わる。
-_CUTOVER_LOCK_WAIT_SECONDS = 2.0
-#: これより古いロックのファイルは、持ち主を確かめられなくても前の起動の残骸とみなす (秒)。
-_CUTOVER_LOCK_STALE_SECONDS = 30.0
-
-
-def _publish_under_lock(tmp: Path, path: Path) -> None:
-    """固いリンクを作れない POSIX で、``tmp`` を ``path`` として公開する (先に公開した記録は上書きしない)。
-
-    ロックのファイル ``path`` + :data:`CUTOVER_LOCK_SUFFIX` を ``O_CREAT | O_EXCL`` で
-    作れたプロセスだけが、正式な名前が無いことを確かめて付け替える。作れないとき:
-
-    - 正式な名前が既にあれば、先に公開した別のプロセスの記録なので何もしない
-      (呼び出し側 :func:`_record_cutover` がその記録を読み直して従う)。
-    - ロックが前の起動の残骸 (:func:`_clear_stale_cutover_lock`) なら片づけて作り直す。
-    - それ以外は持ち主の公開を :data:`_CUTOVER_LOCK_WAIT_SECONDS` まで待つ。待っても
-      記録が現れなければ何もしない — 呼び出し側は記録を読めずに
-      :class:`CutoverUnavailable` を送り、この起動は何も変換しない。
-
-    公開した後、ロックを消す前に止まった場合は、記録が既にあるので次の起動は記録を
-    読んでこの関数に来ない。
-    """
-    lock = path.with_name(path.name + CUTOVER_LOCK_SUFFIX)
-    deadline = time.monotonic() + _CUTOVER_LOCK_WAIT_SECONDS
-    while True:
-        owned = _create_cutover_lock(lock)
-        if owned is not None:
-            break
-        if path.exists():
-            return  # 別のプロセスが先に記録した
-        if _clear_stale_cutover_lock(lock):
-            continue
-        if time.monotonic() >= deadline:
-            LOGGER.warning(
-                "[system-notice-migration] another process holds %s; the cutover time is not "
-                "recorded on this start", lock,
-            )
-            return
-        time.sleep(0.05)
-    try:
-        if not path.exists():
-            os.rename(tmp, path)
-    finally:
-        _release_cutover_lock(lock, owned)
-
-
-def _create_cutover_lock(lock: Path) -> Optional[bytes]:
-    """ロックのファイルを新しく作り、書いた中身を返す。既にあれば None。"""
-    content = json.dumps({
-        "pid": os.getpid(),
-        "process_created_at": _process_created_at(os.getpid()),
-        "token": uuid.uuid4().hex,
-    }).encode("utf-8")
-    try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return None
-    try:
-        os.write(fd, content)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    return content
-
-
-def _release_cutover_lock(lock: Path, owned: bytes) -> None:
-    """自分が作ったロックのファイルを消す (中身が自分の書いたものでなければ消さない)。"""
-    try:
-        if lock.read_bytes() == owned:
-            lock.unlink()
-    except OSError:
-        LOGGER.warning("[system-notice-migration] could not remove %s", lock, exc_info=True)
-
-
-def _cutover_lock_owner_alive(raw: bytes) -> bool:
-    """ロックのファイルの持ち主のプロセスがまだ走っているか (分からなければ真)。"""
-    try:
-        info = json.loads(raw.decode("utf-8"))
-        pid = int(info["pid"])
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return True  # 作った直後で中身がまだ無い — 古さで判断する
-    if pid == os.getpid():
-        return True
-    try:
-        import psutil
-
-        if not psutil.pid_exists(pid):
-            return False
-    except Exception:  # noqa: BLE001 — 生死を確かめられなければ走っている側に倒す
-        return True
-    expected = info.get("process_created_at")
-    actual = _process_created_at(pid)
-    if isinstance(expected, (int, float)) and actual is not None:
-        return abs(float(expected) - actual) <= 0.01
-    return True
-
-
-def _clear_stale_cutover_lock(lock: Path) -> bool:
-    """前の起動が残したロックのファイルなら片づけて真を返す。
-
-    残骸とみなすのは、持ち主のプロセスがもう居ない (:func:`_cutover_lock_owner_alive`)
-    か、:data:`_CUTOVER_LOCK_STALE_SECONDS` より古いとき (持っている間の仕事は一瞬で
-    終わる)。片づけるときは、読んだ中身と同じかを確かめるために一意の名前へ付け替えて
-    から読み直す — 同時に片づけようとした別のプロセスが作り直した新しいロックを
-    付け替えてしまった場合は、元の名前が空いていれば戻して偽を返す。
-    """
-    try:
-        raw = lock.read_bytes()
-        age = time.time() - lock.stat().st_mtime
-    except FileNotFoundError:
-        return True  # 持ち主が消した — 作り直す
-    except OSError:
-        return False
-    if age <= _CUTOVER_LOCK_STALE_SECONDS and _cutover_lock_owner_alive(raw):
-        return False
-    aside = lock.with_name(f"{lock.name}.{_unique_suffix()}.stale")
-    try:
-        os.rename(lock, aside)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    try:
-        moved = aside.read_bytes()
-    except OSError:
-        moved = None
-    if moved != raw:
-        # 別のプロセスが作り直したばかりのロックだった — 名前が空いていれば戻す
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except OSError:
-            pass
-        else:
-            try:
-                os.write(fd, moved or b"")
-            finally:
-                os.close(fd)
-    try:
-        aside.unlink()
-    except OSError:
-        LOGGER.warning("[system-notice-migration] could not remove %s", aside, exc_info=True)
-    if moved == raw:
-        LOGGER.warning(
-            "[system-notice-migration] removed %s left by a stopped process", lock,
+    if os.name != "nt":
+        raise CutoverUnavailable(
+            f"固いリンクを作れないファイルシステムなので、切り替わりの時刻を {path} に"
+            "上書きせずに記録できません"
         )
-        return True
-    return False
+    try:
+        os.rename(tmp, path)
+    except FileExistsError:
+        pass  # 別のプロセスが先に記録した
 
 
 def resolve_cutover(
