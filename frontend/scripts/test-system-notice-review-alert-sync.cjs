@@ -79,7 +79,8 @@ function mountable(name, props) {
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
     function render() {
         cursor = 0;
-        const tree = module.exports.default(props);
+        // React always passes a props object, even when the caller gives none
+        const tree = module.exports.default(props || {});
         mounted = true;
         return tree;
     }

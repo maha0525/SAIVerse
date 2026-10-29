@@ -20,7 +20,8 @@ function ReviewModal() { return null; }
 
 function harness(initialAlerts) {
     const states = [], effects = [], requests = [], notices = [];
-    let cursor = 0, mounted = false, confirmed = false;
+    const effectDeps = [], pendingEffects = [];
+    let cursor = 0, effectCursor = 0, mounted = false, confirmed = false, backendDown = false;
     let serverAlerts = initialAlerts, postResponse = { ok: true }, postGate;
     const hooks = {
         useState(initial) {
@@ -30,7 +31,15 @@ function harness(initialAlerts) {
                 states[index] = typeof value === 'function' ? value(states[index]) : value;
             }];
         },
-        useEffect(effect) { if (!mounted) effects.push(effect); },
+        // Runs on mount, and again on a later render only when a dependency changed
+        // (React's rule for an effect with a dependency array).
+        useEffect(effect, deps) {
+            const index = effectCursor++;
+            const prev = effectDeps[index];
+            effectDeps[index] = deps;
+            if (!mounted) { effects.push(effect); return; }
+            if (!deps || !prev || deps.some((d, k) => d !== prev[k])) pendingEffects.push(effect);
+        },
     };
     const jsx = (type, props) => ({ type, props });
     const localRequire = name => {
@@ -53,6 +62,7 @@ function harness(initialAlerts) {
                 return postResponse;
             }
             assert.equal(url, '/api/system/alerts');
+            if (backendDown) throw new Error('backend not reachable');
             return { ok: true, json: async () => ({ alerts: serverAlerts }) };
         } };
         throw new Error(`Unexpected dependency ${name}`);
@@ -67,15 +77,25 @@ function harness(initialAlerts) {
         removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
         dispatchEvent(event) { (listeners.get(event.type) || []).forEach(fn => fn(event)); return true; },
     };
-    function render() {
+    let props = {};
+    function render(nextProps) {
+        if (nextProps) props = nextProps;
         cursor = 0;
-        const tree = module.exports.default();
+        effectCursor = 0;
+        const tree = module.exports.default(props);
         mounted = true;
         return tree;
     }
     return {
         render, requests, notices,
         async mount() { render(); effects.forEach(effect => effect()); await new Promise(setImmediate); return render(); },
+        async rerender(nextProps) {
+            render(nextProps);
+            pendingEffects.splice(0).forEach(effect => effect());
+            await new Promise(setImmediate);
+            return render();
+        },
+        down(value) { backendDown = value; },
         confirm(value) { confirmed = value; },
         post(response, gate) { postResponse = response; postGate = gate; },
     };
@@ -97,6 +117,22 @@ const exampleAlerts = () => [
 (async () => {
     let h = harness([]);
     assert.equal(await h.mount(), null);
+
+    // The page opens before the backend finishes starting (or the backend restarts
+    // while the page stays open): the first fetch fails, and the banner must fetch
+    // again once the page is connected to the backend again — not on a timer.
+    h = harness(exampleAlerts());
+    h.down(true);
+    assert.equal(await h.mount(), null);
+    h.down(false);
+    assert.equal(await h.rerender({ backendConnected: false }), null);
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 1);
+    let reconnected = await h.rerender({ backendConnected: true });
+    assert.equal(headers(reconnected).length, 3);
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 2);
+    // Staying connected does not fetch again
+    await h.rerender({ backendConnected: true });
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 2);
 
     h = harness(exampleAlerts());
     let tree = await h.mount();
@@ -160,5 +196,5 @@ const exampleAlerts = () => [
     assert.equal(h.requests[before].url, '/api/system/alerts');
     modal.props.onClose();
     assert.equal(all(h.render(), node => node.type === ReviewModal).length, 0);
-    console.log('System alerts: expansion, cancel, failure, retry, busy state, unrelated alerts, and review entry passed.');
+    console.log('System alerts: refetch on reconnect, expansion, cancel, failure, retry, busy state, unrelated alerts, and review entry passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
