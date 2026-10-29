@@ -164,6 +164,8 @@ api/
 
 入退室ログの画面表示は `src/lib/movementNotices.ts` が全体・Building の優先順位を解決し、`src/hooks/useMovementNoticeSettings.ts` が設定変更を追随する。`useMovementNoticeAutoScroll.ts` は表示される新着だけでスクロールを追尾する。全体の操作欄は `src/components/settings/MovementNoticeSetting.tsx`、部屋別の操作欄は `BuildingSettingsModal.tsx`。`src/lib/buildingSettingsSave.ts` が部屋設定の保存待ちを持ち、閉じ直したフォームも保存前の値を読み直さない。`HistoryContinuation.tsx` は非表示の通知だけのページでも生の履歴カーソルで過去へ進める入口を残す。記録やペルソナの処理から分離した表示設定である（[intent](../intent/movement_notice_visibility.md)）。
 
+返事を待つ間のスピナーの文言は `src/lib/chatProgress.ts` だけが持ち、バックエンドの status イベントの段階 (`phase`、`sea/progress_events.py`) と画面の節目から決める。Playbook・ノードの名前は表示しない（[intent](../intent/chat_progress_display.md)）。
+
 `next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 
 ### scripts/
@@ -209,6 +211,7 @@ sea/
 ├── langgraph_runner.py   # LangGraph 統合
 ├── playbook_models.py    # ノード定義スキーマ（LLMNodeDef / ToolNodeDef 等）
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
+├── progress_events.py    # チャット画面の「いま何をしているか」の段階 (status の phase)。文言はフロントの lib/chatProgress.ts（chat_progress_display intent）
 ├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可

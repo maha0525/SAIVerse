@@ -12510,5 +12510,69 @@
   "api.systemNoticeMigration.personaLabel": {
     "ja": "ペルソナ {id}",
     "en": "Persona {id}"
+  },
+  "chatProgress.recording": {
+    "ja": "あなたの発言をデータベースに記録しています",
+    "en": "Saving your message to the database"
+  },
+  "chatProgress.uploading": {
+    "ja": "添付ファイルをアップロードしています",
+    "en": "Uploading your attachments"
+  },
+  "chatProgress.preparing": {
+    "ja": "返事の準備をしています",
+    "en": "Getting ready to reply"
+  },
+  "chatProgress.buildingRequest": {
+    "ja": "{provider}サーバーへの送信データを構築しています",
+    "en": "Building the request for the {provider} server"
+  },
+  "chatProgress.buildingRequestUnknown": {
+    "ja": "AIサーバーへの送信データを構築しています",
+    "en": "Building the request for the AI server"
+  },
+  "chatProgress.awaitingResponse": {
+    "ja": "{provider}サーバーからの応答を待っています",
+    "en": "Waiting for a response from the {provider} server"
+  },
+  "chatProgress.awaitingResponseUnknown": {
+    "ja": "AIサーバーからの応答を待っています",
+    "en": "Waiting for a response from the AI server"
+  },
+  "chatProgress.thinking": {
+    "ja": "{persona}が考えています",
+    "en": "{persona} is thinking"
+  },
+  "chatProgress.thinkingUnknown": {
+    "ja": "考えています",
+    "en": "Thinking"
+  },
+  "chatProgress.replying": {
+    "ja": "{persona}が返事をしています",
+    "en": "{persona} is replying"
+  },
+  "chatProgress.replyingUnknown": {
+    "ja": "返事をしています",
+    "en": "Replying"
+  },
+  "chatProgress.runningTool": {
+    "ja": "「{tool}」を実行しています",
+    "en": "Running \"{tool}\""
+  },
+  "chatProgress.runningToolUnknown": {
+    "ja": "ツールを実行しています",
+    "en": "Running a tool"
+  },
+  "chatProgress.finishing": {
+    "ja": "仕上げの処理をしています",
+    "en": "Finishing up"
+  },
+  "app.page.userFallbackName": {
+    "ja": "あなた",
+    "en": "You"
+  },
+  "app.page.attachmentImageAlt": {
+    "ja": "添付画像 {p1}",
+    "en": "Attachment {p1}"
   }
 }

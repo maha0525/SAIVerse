@@ -33,6 +33,8 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
 
     def _compile(*args, **kwargs):
         kwargs["event_callback"]({"type": "status", "node": "exec", "content": "ignored"})
+        # node の無い status (利用者向けの文) は連鎖の名前で潰さない
+        kwargs["event_callback"]({"type": "status", "content": "記憶の整理を行っています…"})
         return ["assistant response"]
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
@@ -46,7 +48,12 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
     )
 
     assert result == ["assistant response"]
-    assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
+    assert events == [
+        # 文脈を組み立てる前の段階 (接続先はこのテストの model では引けない)
+        {"type": "status", "phase": "building_request", "persona_id": "pid"},
+        {"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"},
+        {"type": "status", "content": "記憶の整理を行っています…"},
+    ]
 
 
 def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +124,10 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
     assert captured["prepare_pulse_id"] == captured["compile_pulse_id"]
     assert captured["parent_state"]["_playbook_chain"] == "meta_user/exec"
     assert captured["parent_state"]["_cancellation_token"] is token
-    assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
+    assert events == [
+        {"type": "status", "phase": "building_request", "persona_id": "pid"},
+        {"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"},
+    ]
 
 
 def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:

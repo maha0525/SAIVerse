@@ -69,8 +69,7 @@ function harness() {
     env.setCurrentBuildingId = () => {};
     env.setLostBuildingNotice = () => {};
     env.updateServerBuildingId = bid => { refs.serverCurrentBuildingIdRef.current = bid; };
-    env.userDisplayNameRef = { current: '' };
-    env.userAvatarRef = { current: null };
+    env.rememberUserIdentity = () => {};
     env.applyActiveGame = game => { refs.activeGameRef.current = game; };
     env.fetchBuildingInfo = () => {};
     const start = () => new Function(...Object.keys(env), startup)(...Object.values(env));
