@@ -66,6 +66,11 @@ from tools.core import parse_tool_result
 from tools.context import persona_context
 from tools.fuzzy import find_close_matches
 from sea.mode_spell_permissions import check_spell_permission
+from sea.progress_events import (
+    PHASE_RUNNING_TOOL,
+    emit_awaiting_response,
+    emit_progress,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -4306,6 +4311,10 @@ async def _run_spell_loop(
                     continue
                 # ok=False (実行中の例外 / レジストリ未登録) は success=False として
                 # round_records へ流れ、[Spell Error] + × ブロックになる (Phase 1)。
+                emit_progress(
+                    event_callback, PHASE_RUNNING_TOOL, persona=persona,
+                    tool=_spell_display_name(_spell.name, True),
+                )
                 _rtext, _rmeta, _ok = await _run_spell_tool_async(
                     _spell.name, _spell.args, persona, state, playbook.name,
                     event_callback, messages=messages,
@@ -4673,6 +4682,7 @@ async def _run_spell_loop(
             _retry_stream_error: Optional[Dict[str, Any]] = None
             _retry_cancelled = False
             _freeze_turn_block_before_send(messages, state)
+            emit_awaiting_response(event_callback, llm_client, persona)
             try:
                 if pipeline_streaming_state is not None:
                     _retry_stream = llm_client.generate_stream(
@@ -6157,6 +6167,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 使わないので、生成を始めた時点の現在地が吹き出しの居場所。
                     _tool_stream_bid = runtime._effective_building_id(persona, building_id)
                     _freeze_turn_block_before_send(messages, state)
+                    emit_awaiting_response(event_callback, llm_client, persona)
                     for stream_attempt in range(max_stream_retries):
                         text_chunks: list[str] = []
                         stream_iter = llm_client.generate_stream(
@@ -6358,6 +6369,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 else:
                     # ── Synchronous tool mode (original) ──
                     _freeze_turn_block_before_send(messages, state)
+                    emit_awaiting_response(event_callback, llm_client, persona)
                     result = llm_client.generate(
                         messages,
                         tools=tools_spec,
@@ -6706,6 +6718,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         )
 
                     _freeze_turn_block_before_send(messages, state)
+                    emit_awaiting_response(event_callback, llm_client, persona)
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
                             messages,
@@ -7420,6 +7433,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
                     _freeze_turn_block_before_send(messages, state)
+                    emit_awaiting_response(event_callback, llm_client, persona)
                     text = llm_client.generate(
                         messages,
                         tools=[],

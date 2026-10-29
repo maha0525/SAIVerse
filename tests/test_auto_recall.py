@@ -441,7 +441,7 @@ class TestVividRecall(AutoRecallBase):
             "CREATE TABLE message_embeddings (message_id TEXT, chunk_index INTEGER, vector TEXT)"
         )
         conn.execute(
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER)"
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER, metadata TEXT)"
         )
         conn.commit()
         return conn
@@ -594,7 +594,7 @@ class TestVividRecallMultiItem(AutoRecallBase):
             "CREATE TABLE message_embeddings (message_id TEXT, chunk_index INTEGER, vector TEXT)"
         )
         conn.execute(
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER)"
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, role TEXT, content TEXT, created_at INTEGER, metadata TEXT)"
         )
         conn.commit()
         return conn
@@ -896,6 +896,43 @@ class TestPerceptionBlockDoesNotHijackQuery(AutoRecallBase):
         self.assertEqual(auto_recall.build_query(messages), "見て")
         self.assertIs(auto_recall._latest_user_message(messages), messages[0])
         self.assertTrue(auto_recall._seed_is_user_utterance(messages))
+
+    def test_mechanism_notices_marked_later_are_not_conversational_messages(self):
+        """印の無い role=system で書かれていた機構の行は、書き手を直したとき・移行が
+        系統の印を付けた後も種にならない (以前は「入力の側」に数えられなかった)。"""
+        from tool_loader import load_builtin_tool
+
+        from database.system_notice_migration import (
+            CHATGPT_IMPORT_KIND,
+            CITY_DISPATCH_FAILURE_KIND,
+            EMOTION_SUMMARY_KIND,
+            SINCE_USER_CONVERSATION_SUMMARY_KIND,
+            STELIS_ANCHOR_KIND,
+            THREAD_SWITCH_KIND,
+        )
+        from scripts.import_chatgpt_conversations import CHATGPT_IMPORT_NOTICE_KIND
+        from sea.runtime_nodes import STELIS_ANCHOR_NOTICE_KIND
+
+        THREAD_SWITCH_NOTICE_KIND = load_builtin_tool("thread_switch").THREAD_SWITCH_NOTICE_KIND
+        kinds = {
+            THREAD_SWITCH_NOTICE_KIND, THREAD_SWITCH_KIND,
+            CHATGPT_IMPORT_NOTICE_KIND, CHATGPT_IMPORT_KIND,
+            STELIS_ANCHOR_NOTICE_KIND, STELIS_ANCHOR_KIND,
+            CITY_DISPATCH_FAILURE_KIND, SINCE_USER_CONVERSATION_SUMMARY_KIND,
+            # 規則の版 3 が印を付けた、知覚の旧世代の行と感情パラメータの変動の知らせ
+            "perception", EMOTION_SUMMARY_KIND,
+        }
+        self.assertLessEqual(kinds, auto_recall._NON_CONVERSATIONAL_NOTICES)
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                messages = [
+                    {"role": "user", "content": "十条の話"},
+                    {"role": "system", "content": "[Stelisスレッド: 小説執筆セッション]\n- 開始: …",
+                     "metadata": {"__system_notice__": kind}},
+                ]
+                self.assertEqual(auto_recall.build_query(messages), "十条の話")
+                self.assertIs(auto_recall._latest_user_message(messages), messages[0])
+                self.assertTrue(auto_recall._seed_is_user_utterance(messages))
 
     def test_head_system_message_is_not_a_conversational_message(self):
         """head の system メッセージ (人格指示) は種にならない。"""

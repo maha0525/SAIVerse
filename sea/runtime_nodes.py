@@ -11,6 +11,13 @@ from sea.runtime_utils import event_building_id
 
 LOGGER = logging.getLogger(__name__)
 
+#: ``lg_stelis_start_node`` が親のスレッドに書く Stelis の開始の行の系統名
+#: (``SYSTEM_NOTICE_KEY`` の値。docs/intent/system_notice_delivery.md)。行の
+#: metadata の ``type`` と同じ値。v0.3.27 の後も印の無いまま書かれていた行は、
+#: 起動時の移行 (database/system_notice_migration.py の ``STELIS_ANCHOR_KIND``、
+#: 規則の版 4) が同じ値の印を付ける。
+STELIS_ANCHOR_NOTICE_KIND = "stelis_anchor"
+
 
 def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
     from tools import TOOL_REGISTRY, canonicalize_tool_name
@@ -419,7 +426,17 @@ def lg_stelis_start_node(runtime: Any, node_def: Any, persona: Any, playbook: An
             state["stelis_error"] = "Failed to create Stelis thread"
             state["stelis_available"] = False
             return state
-        anchor_message = {"role": "system", "content": "", "metadata": {"type": "stelis_anchor", "stelis_thread_id": stelis.thread_id, "stelis_label": label, "created_at": int(time.time())}, "embedding_chunks": 0}
+        # 機構の行なので、role=system とシステム通知の印 (系統名) で書く。本文は空の
+        # まま保存し、読み出し (sai_memory.memory.storage.compose_message_content) が
+        # metadata の ``type`` を見て Stelis のスレッドの様子を組み立てる。
+        from sai_memory.memory.storage import system_notice_message
+
+        anchor_message = system_notice_message(
+            "",
+            STELIS_ANCHOR_NOTICE_KIND,
+            metadata={"type": "stelis_anchor", "stelis_thread_id": stelis.thread_id, "stelis_label": label, "created_at": int(time.time())},
+        )
+        anchor_message["embedding_chunks"] = 0
         memory_adapter.append_persona_message(anchor_message, thread_suffix=parent_thread_id.split(":")[-1] if ":" in parent_thread_id else parent_thread_id)
         # S4 (thread push/pop): 親 thread は PulseContext のスタック +
         # active_state.json の pulse_scoped_parent に記録され、end ノード不達

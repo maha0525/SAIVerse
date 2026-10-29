@@ -13,10 +13,30 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from sai_memory.memory.storage import system_notice_message
 from saiverse_memory import SAIMemoryAdapter
 from tools.utilities.chatgpt_importer import ChatGPTExport, ConversationRecord
 
 UTC = timezone.utc
+
+#: 取り込んだ会話の先頭に書く見出しの行の系統名 (``SYSTEM_NOTICE_KEY`` の値。
+#: docs/intent/system_notice_delivery.md)。v0.3.27 より前に印の無いまま書かれた見出しの
+#: 行は、起動時の移行 (database/system_notice_migration.py の ``CHATGPT_IMPORT_KIND``、
+#: 規則の版 4) が同じ値の印を付ける。
+CHATGPT_IMPORT_NOTICE_KIND = "chatgpt_import"
+
+
+def build_header_payload(record: ConversationRecord) -> dict:
+    """取り込んだ会話の先頭に置く見出しの行 (機構の行なので role=system とシステム通知の印)。"""
+    header_ts = record.create_time or record.update_time or datetime.now(tz=UTC)
+    origin_id = record.conversation_id or record.identifier
+    header_text = (
+        f"[Imported ChatGPT conversation \"{record.title}\" "
+        f"({origin_id}) created {format_datetime(header_ts)}]"
+    )
+    payload = system_notice_message(header_text, CHATGPT_IMPORT_NOTICE_KIND)
+    payload["timestamp"] = format_datetime(header_ts)
+    return payload
 
 
 def format_datetime(dt: Optional[datetime]) -> Optional[str]:
@@ -168,20 +188,7 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
             payloads = list(record.iter_memory_payloads(include_roles=include_roles))
             thread_suffix = resolve_thread_suffix(record, args.thread_suffix)
             if header_enabled:
-                header_ts = record.create_time or record.update_time or datetime.now(tz=UTC)
-                origin_id = record.conversation_id or record.identifier
-                header_text = (
-                    f"[Imported ChatGPT conversation \"{record.title}\" "
-                    f"({origin_id}) created {format_datetime(header_ts)}]"
-                )
-                payloads.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": header_text,
-                        "timestamp": format_datetime(header_ts),
-                    },
-                )
+                payloads.insert(0, build_header_payload(record))
 
             import_result = {
                 "id": record.identifier,

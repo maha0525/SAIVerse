@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from saiverse_memory import SAIMemoryAdapter
-from sai_memory.memory.storage import get_messages_last
+from sai_memory.memory.storage import get_messages_last, system_notice_message
 from tools.context import (
     get_active_persona_id,
     get_active_persona_path,
@@ -17,6 +17,12 @@ from tools.core import ToolResult, ToolSchema
 
 DEFAULT_RANGE_BEFORE = 8
 DEFAULT_RANGE_AFTER = 0
+
+#: 移動先のスレッドに書く行の系統名 (``SYSTEM_NOTICE_KEY`` の値。
+#: docs/intent/system_notice_delivery.md)。v0.3.27 より前に印の無いまま書かれた行は、
+#: 起動時の移行 (database/system_notice_migration.py の ``THREAD_SWITCH_KIND``、
+#: 規則の版 4) が同じ値の印を付ける。
+THREAD_SWITCH_NOTICE_KIND = "thread_switch"
 
 
 def switch_active_thread(
@@ -66,23 +72,20 @@ def _perform_switch(
     iso_timestamp = _normalise_timestamp(None)
     note = summary.strip() if summary and summary.strip() else f"[thread switch] moved from {origin_full}"
 
-    message_payload = {
-        "role": "system",
-        "content": note,
-        "timestamp": iso_timestamp,
-        "embedding_chunks": 0,
-    }
+    metadata: Dict[str, Any] = {}
     if anchor_msg is not None:
-        message_payload["metadata"] = {
-            "other_thread_messages": [
-                {
-                    "thread_id": origin_full,
-                    "message_id": anchor_msg.id,
-                    "range_before": link_range_before,
-                    "range_after": link_range_after,
-                }
-            ]
-        }
+        metadata["other_thread_messages"] = [
+            {
+                "thread_id": origin_full,
+                "message_id": anchor_msg.id,
+                "range_before": link_range_before,
+                "range_after": link_range_after,
+            }
+        ]
+    # 機構の行なので、role=system とシステム通知の印 (系統名) で書く
+    message_payload = system_notice_message(note, THREAD_SWITCH_NOTICE_KIND, metadata=metadata)
+    message_payload["timestamp"] = iso_timestamp
+    message_payload["embedding_chunks"] = 0
     # append_persona_message は adapter 内部で _db_lock を取る
     adapter.append_persona_message(message_payload, thread_suffix=target_suffix)
 

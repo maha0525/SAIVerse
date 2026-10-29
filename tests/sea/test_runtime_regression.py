@@ -33,6 +33,8 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
 
     def _compile(*args, **kwargs):
         kwargs["event_callback"]({"type": "status", "node": "exec", "content": "ignored"})
+        # node の無い status (利用者向けの文) は連鎖の名前で潰さない
+        kwargs["event_callback"]({"type": "status", "content": "記憶の整理を行っています…"})
         return ["assistant response"]
 
     runtime._compile_with_langgraph = Mock(side_effect=_compile)
@@ -46,7 +48,12 @@ def test_run_meta_user_returns_list_and_emits_status_callback() -> None:
     )
 
     assert result == ["assistant response"]
-    assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
+    assert events == [
+        # 文脈を組み立てる前の段階 (接続先はこのテストの model では引けない)
+        {"type": "status", "phase": "building_request", "persona_id": "pid"},
+        {"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"},
+        {"type": "status", "content": "記憶の整理を行っています…"},
+    ]
 
 
 def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +124,10 @@ def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> 
     assert captured["prepare_pulse_id"] == captured["compile_pulse_id"]
     assert captured["parent_state"]["_playbook_chain"] == "meta_user/exec"
     assert captured["parent_state"]["_cancellation_token"] is token
-    assert events == [{"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"}]
+    assert events == [
+        {"type": "status", "phase": "building_request", "persona_id": "pid"},
+        {"type": "status", "node": "exec", "content": "meta_user/exec / exec", "playbook_chain": "meta_user/exec"},
+    ]
 
 
 def test_run_meta_user_transitions_execution_state_running_to_idle() -> None:
@@ -355,6 +365,45 @@ def test_lg_stelis_nodes_manage_thread_state() -> None:
     assert state["stelis_parent_thread_id"] is None
     assert state["stelis_chronicle"] == "summary"
     assert active_calls == ["child-thread", "parent-thread"]
+
+
+def test_lg_stelis_start_node_writes_the_anchor_as_a_system_notice() -> None:
+    """Stelis の開始の行は、role=system とシステム通知の印 (系統名 ``stelis_anchor``) で
+    親のスレッドに書く (docs/intent/system_notice_delivery.md「保存」)。本文は空のままで、
+    読み出しが metadata の ``type`` から組み立てる。"""
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, is_system_notice
+    from sea.runtime_nodes import STELIS_ANCHOR_NOTICE_KIND
+
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="pb")
+    appended: list[tuple[dict, dict]] = []
+    memory = SimpleNamespace(
+        can_start_stelis=lambda max_depth: True,
+        get_current_thread=lambda: "pid:parent-thread",
+        _thread_id=lambda _: "fallback-thread",
+        start_stelis_thread=lambda **kwargs: SimpleNamespace(thread_id="pid:stelis_x", depth=1),
+        append_persona_message=lambda message, **kwargs: appended.append((message, kwargs)),
+        set_active_thread=lambda tid: None,
+    )
+    persona.sai_memory = memory
+
+    asyncio.run(runtime._lg_stelis_start_node(
+        SimpleNamespace(id="start", label="小説執筆セッション", stelis_config={}), persona, playbook,
+    )({}))
+
+    assert len(appended) == 1
+    message, kwargs = appended[0]
+    assert kwargs == {"thread_suffix": "parent-thread"}
+    assert message["role"] == "system"
+    assert message["content"] == ""
+    assert message["embedding_chunks"] == 0
+    meta = message["metadata"]
+    assert meta[SYSTEM_NOTICE_KEY] == STELIS_ANCHOR_NOTICE_KIND == "stelis_anchor"
+    assert meta["type"] == "stelis_anchor"
+    assert meta["stelis_thread_id"] == "pid:stelis_x"
+    assert meta["stelis_label"] == "小説執筆セッション"
+    assert isinstance(meta["created_at"], int)
+    assert is_system_notice(message)
 
 
 

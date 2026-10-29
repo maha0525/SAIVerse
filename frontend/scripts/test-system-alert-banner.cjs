@@ -15,9 +15,13 @@ const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     },
 }).outputText;
 
+// Stand-in for the review modal: the banner only decides when to mount it.
+function ReviewModal() { return null; }
+
 function harness(initialAlerts) {
     const states = [], effects = [], requests = [], notices = [];
-    let cursor = 0, mounted = false, confirmed = false;
+    const effectDeps = [], pendingEffects = [];
+    let cursor = 0, effectCursor = 0, mounted = false, confirmed = false, backendDown = false;
     let serverAlerts = initialAlerts, postResponse = { ok: true }, postGate;
     const hooks = {
         useState(initial) {
@@ -27,7 +31,15 @@ function harness(initialAlerts) {
                 states[index] = typeof value === 'function' ? value(states[index]) : value;
             }];
         },
-        useEffect(effect) { if (!mounted) effects.push(effect); },
+        // Runs on mount, and again on a later render only when a dependency changed
+        // (React's rule for an effect with a dependency array).
+        useEffect(effect, deps) {
+            const index = effectCursor++;
+            const prev = effectDeps[index];
+            effectDeps[index] = deps;
+            if (!mounted) { effects.push(effect); return; }
+            if (!deps || !prev || deps.some((d, k) => d !== prev[k])) pendingEffects.push(effect);
+        },
     };
     const jsx = (type, props) => ({ type, props });
     const localRequire = name => {
@@ -35,6 +47,10 @@ function harness(initialAlerts) {
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
         if (name === 'lucide-react') return {};
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
+        if (name === './SystemNoticeReviewModal') return {
+            __esModule: true, default: ReviewModal, NOTICE_REVIEW_ALERT_ID: 'system_notice_review_pending',
+            NOTICE_REVIEW_CHANGED_EVENT: 'saiverse:system-notice-review-changed',
+        };
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, options) => {
@@ -46,22 +62,40 @@ function harness(initialAlerts) {
                 return postResponse;
             }
             assert.equal(url, '/api/system/alerts');
+            if (backendDown) throw new Error('backend not reachable');
             return { ok: true, json: async () => ({ alerts: serverAlerts }) };
         } };
         throw new Error(`Unexpected dependency ${name}`);
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports);
-    global.window = { confirm: () => confirmed, alert: message => notices.push(message) };
-    function render() {
+    const listeners = new Map();
+    global.window = {
+        confirm: () => confirmed,
+        alert: message => notices.push(message),
+        addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+        removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
+        dispatchEvent(event) { (listeners.get(event.type) || []).forEach(fn => fn(event)); return true; },
+    };
+    let props = {};
+    function render(nextProps) {
+        if (nextProps) props = nextProps;
         cursor = 0;
-        const tree = module.exports.default();
+        effectCursor = 0;
+        const tree = module.exports.default(props);
         mounted = true;
         return tree;
     }
     return {
         render, requests, notices,
         async mount() { render(); effects.forEach(effect => effect()); await new Promise(setImmediate); return render(); },
+        async rerender(nextProps) {
+            render(nextProps);
+            pendingEffects.splice(0).forEach(effect => effect());
+            await new Promise(setImmediate);
+            return render();
+        },
+        down(value) { backendDown = value; },
         confirm(value) { confirmed = value; },
         post(response, gate) { postResponse = response; postGate = gate; },
     };
@@ -84,10 +118,27 @@ const exampleAlerts = () => [
     let h = harness([]);
     assert.equal(await h.mount(), null);
 
+    // The page opens before the backend finishes starting (or the backend restarts
+    // while the page stays open): the first fetch fails, and the banner must fetch
+    // again once the page is connected to the backend again — not on a timer.
+    h = harness(exampleAlerts());
+    h.down(true);
+    assert.equal(await h.mount(), null);
+    h.down(false);
+    assert.equal(await h.rerender({ backendConnected: false }), null);
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 1);
+    let reconnected = await h.rerender({ backendConnected: true });
+    assert.equal(headers(reconnected).length, 3);
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 2);
+    // Staying connected does not fetch again
+    await h.rerender({ backendConnected: true });
+    assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 2);
+
     h = harness(exampleAlerts());
     let tree = await h.mount();
     assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, false, false]);
-    assert.equal(all(tree, node => node.type === 'button').length, 4);
+    // 3 headers + 3 close buttons + 1 archive button
+    assert.equal(all(tree, node => node.type === 'button').length, 7);
     headers(tree)[1].props.onClick();
     assert.deepEqual(headers(h.render()).map(node => node.props['aria-expanded']), [true, true, false]);
     headers(h.render())[1].props.onClick();
@@ -125,5 +176,59 @@ const exampleAlerts = () => [
     assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, false]);
     assert.ok(h.requests.some(r => r.url === '/api/system/legacy-log/room%20%2F%201/archive' && r.method === 'POST'));
     assert.ok(h.requests.every(r => !r.url.includes('/quarantine')));
-    console.log('System alerts: expansion, cancel, failure, retry, busy state, and unrelated alerts passed.');
+
+    // The pending-review alert carries a button that mounts the review modal;
+    // other alerts do not. Closing the modal unmounts it, and the modal's change
+    // callback fetches the alerts again.
+    const reviewAlert = { id: 'system_notice_review_pending', level: 'warning', title: 'Review', message: 'm', details: {} };
+    h = harness([reviewAlert, { id: 'information', level: 'info', title: 'Information', message: 'Keep too' }]);
+    tree = await h.mount();
+    const reviewButtons = all(tree, node => node.type === 'button' && node.props['data-i18n'] === 'components.SystemAlertBanner.openNoticeReview');
+    assert.equal(reviewButtons.length, 1);
+    assert.equal(all(tree, node => node.type === ReviewModal).length, 0);
+    reviewButtons[0].props.onClick();
+    tree = h.render();
+    const modal = all(tree, node => node.type === ReviewModal)[0];
+    assert.ok(modal);
+    const before = h.requests.length;
+    await modal.props.onChanged();
+    assert.equal(h.requests.length, before + 1);
+    assert.equal(h.requests[before].url, '/api/system/alerts');
+    modal.props.onClose();
+    assert.equal(all(h.render(), node => node.type === ReviewModal).length, 0);
+
+    // An expanded alert whose details are empty ({}) or missing draws no details
+    // box; an alert with details draws one row per key.
+    h = harness([
+        { id: 'empty', level: 'warning', title: 'Empty', message: 'm', details: {} },
+        { id: 'none', level: 'info', title: 'None', message: 'm' },
+        { id: 'full', level: 'critical', title: 'Full', message: 'm', details: { kind: 'check_failed', path: 'p' } },
+    ]);
+    tree = await h.mount();
+    headers(tree)[0].props.onClick();
+    headers(h.render())[1].props.onClick();
+    tree = h.render();
+    assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, true, true]);
+    const detailBoxes = all(tree, node => node.type === 'dl');
+    assert.equal(detailBoxes.length, 1);
+    assert.equal(all(detailBoxes[0], node => node.type === 'dt').length, 2);
+
+    // Light is the default look; dark mode overrides it under [data-theme="dark"]
+    // (app/layout.tsx sets data-theme on <html>). Each level keeps its own
+    // left-edge colour in both themes, distinct from the other levels.
+    const css = fs.readFileSync(path.resolve(__dirname, '../src/components/SystemAlertBanner.module.css'), 'utf8');
+    const leftEdge = selector => {
+        const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const block = css.match(new RegExp(`(?:^|\\n)${escaped} \\{([^}]*)\\}`));
+        assert.ok(block, `missing rule ${selector}`);
+        return block[1].match(/border-left-color:\s*([^;]+);/)[1].trim();
+    };
+    for (const prefix of ['', ':global([data-theme="dark"]) ']) {
+        const edges = ['critical', 'warning', 'info'].map(level => leftEdge(`${prefix}.${level}`));
+        assert.equal(new Set(edges).size, 3, `${prefix || 'light'}: ${edges}`);
+    }
+    const lightAlert = css.match(/(?:^|\n)\.alert \{([^}]*)\}/)[1];
+    assert.match(lightAlert, /background:\s*#ffffff;/);
+    assert.ok(/:global\(\[data-theme="dark"\]\) \.alert \{[^}]*background:\s*#2a2a2a;/.test(css));
+    console.log('System alerts: refetch on reconnect, expansion, cancel, failure, retry, busy state, unrelated alerts, review entry, empty details, and light/dark level colours passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

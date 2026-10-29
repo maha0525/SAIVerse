@@ -130,11 +130,38 @@ def _append_and_mark(
     persona_id: str,
     history_manager: Any,
     check_provenance: bool,
-) -> None:
+) -> bool:
     """転記 entry を memory 先行で追記し、成功後に ingested marker を立てる。
 
     順序契約 (M8): 「memory append 成功 → marker 成功」を確認できたものだけが
     「転記成功」。途中失敗は例外 = ラウンド停止。
+
+    記憶へ足す直前に、建物の行の ``ingested_by`` を本体 DB から読み直し
+    (:func:`_marked_in_building_db`)、このペルソナの印が既にあれば足さずに
+    False を返す (呼び出し側は消費として扱う)。ラウンドの頭で読んだ写し ``m`` の
+    後に、確認の画面の削除 (saiverse/system_notice_review.py — 建物の行に印を
+    付けてから記憶の行を消す) が割り込むと、写しには印が無く、記憶の側の
+    ``building_msg_ref`` の照会も消えた行を見つけられないので、同じ発言を取り込み
+    直してしまう。読み直しは照会の後に行う — 照会が行を見つけられなかったなら
+    削除は印を付け終えているので、読み直しがその印を見る。照会
+    (``SAIMemoryAdapter.find_message_by_building_ref``) は記憶 DB の ``_db_lock``
+    の中で読み、削除 (``SAIMemoryAdapter.rewrite_message``) は同じ ``_db_lock`` と
+    ``immediate_transaction`` の中で、本体 DB の印をコミットしてから記憶の行を
+    消すので、照会が行を見ないときは必ず印が本体 DB にある。
+
+    照会を省く候補 (``check_provenance=False``) では、読み直しと追記の間に削除が
+    入りうるが、M8 の停止規律により記憶に追記済みで印の無い行は最初に確かめる
+    候補に限られ (同じペルソナのラウンドは ``sea.beat_gate.hold_beat`` で直列)、
+    照会を省く候補の ``building_msg_ref`` を持つ行は記憶に無いので、削除の対象も無い。
+
+    Returns:
+        True: 記憶に行がある状態で印を付けた (追記した、または照会で見つけた)。
+        False: 建物の行に既にこのペルソナの印があるか、建物の行が取り下げで消えていて、
+        何も足さなかった。呼び出し側は
+        この候補を「追記を試みた」と数えない (``_transcribe_message`` の
+        ``append_attempted`` が False) — 数えると、``_ingest_round`` が次の候補の
+        ``building_msg_ref`` 照会を省き、記憶に追記済みで印だけが無い次の行を
+        もう一度足す。
     """
     ref = _building_msg_ref(m)
     if ref:
@@ -162,12 +189,59 @@ def _append_and_mark(
             "re-marking only (no duplicate append)", ref,
         )
     else:
+        try:
+            marked = _marked_in_building_db(m, persona_id, manager)
+        except Exception as exc:
+            # 確かめられないまま足すと、所有者が消した行を戻しかねない —
+            # 照会の失敗と同じくラウンドを停止して次ラウンドで再試行する。
+            LOGGER.warning(
+                "[building_ingest] ingested_by re-read failed (ref=%s)",
+                ref, exc_info=True,
+            )
+            raise _TranscribeFailed(
+                f"ingested_by re-read failed (ref={ref})"
+            ) from exc
+        if marked:
+            LOGGER.info(
+                "[building_ingest] building row %s is already marked for %s "
+                "after this round read it; not appending", ref, persona_id,
+            )
+            return False
         status, _mid = history_manager.add_to_persona_only(
             entry, memory_first=True
         )
         if status == "failed":
             raise _TranscribeFailed(f"memory append failed (ref={ref})")
     _mark_ingested(m, persona_id, manager)
+    return True
+
+
+def _marked_in_building_db(m: Dict[str, Any], persona_id: str, manager: Any) -> bool:
+    """建物の行の ``ingested_by`` を本体 DB から読み直し、このペルソナの印があるか。
+
+    建物の行が本体 DB に無い (``fetch_ingested_by`` が None) ときも True — ラウンドが
+    履歴を読んだ後に、所有者が未読の発言を取り下げた
+    (``database.building_messages.withdraw_building_message_in_db``)。取り下げられた
+    発言を記憶へ写さず、印があるのと同じく消費として扱う。
+
+    本体 DB を引けない (manager・building_id・message_id のどれかが無い) ときは
+    False (写しの判定のまま進む)。
+    """
+    session_factory = getattr(manager, "SessionLocal", None) if manager else None
+    building_id = m.get("_building_id") or m.get("building_id")
+    message_id = m.get("message_id")
+    if not (session_factory and building_id and message_id):
+        return False
+    from database.building_messages import fetch_ingested_by
+
+    current = fetch_ingested_by(session_factory, building_id, message_id)
+    if current is None:
+        LOGGER.info(
+            "[building_ingest] building row %s:%s is gone (withdrawn) after this round "
+            "read it; not appending", building_id, message_id,
+        )
+        return True
+    return persona_id in current
 
 
 def _transcribe_message(
@@ -187,7 +261,9 @@ def _transcribe_message(
         ``(outcome, speaker_label, append_attempted)``。outcome は
         ``"ingested"`` (転記した) / ``"consumed_private"`` (発話はあったが
         非公開部のみでマークだけ = tool 版は件数に数える) / ``"consumed"``
-        (ルール上の消費 — マークのみ or 何もせず)。
+        (ルール上の消費 — マークのみ or 何もせず)。``append_attempted`` は
+        ``_append_and_mark`` が記憶の側を確かめて印を付けたときだけ True
+        (読み直しで既に印があり何も足さなかった候補は False)。
 
     Raises:
         転記失敗 (memory append の failed / marker の DB エラー) — 呼び出し元は
@@ -232,12 +308,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, False)
         return ("ingested", speaker, True)
 
     # System / movement / world events (role="host"). These come from
@@ -289,12 +366,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, False)
         return ("ingested", "システム", True)
 
     # Ingest user messages directly
@@ -307,12 +385,13 @@ def _transcribe_message(
         if isinstance(ts_value, str):
             entry["timestamp"] = ts_value
         _stamp_layer0(entry)
-        _append_and_mark(
+        if not _append_and_mark(
             entry, m,
             persona=persona, manager=manager, persona_id=persona_id,
             history_manager=history_manager,
             check_provenance=check_provenance,
-        )
+        ):
+            return ("consumed", None, False)
         return ("ingested", "ユーザー", True)
 
     # 上記のどの型でもない (自分自身の発話等) — 従来どおり対象外の素通り。
@@ -407,6 +486,8 @@ def _ingest_round(
     perceived: Dict[str, int] = {}
     # 最初の転記候補だけ provenance 照会 (M8: 宙に浮いた転記は高々 1 件で、
     # 必ず次ラウンドの最初の転記候補になる — 走査をラウンド 1 回に有界化)。
+    # 「最初の転記候補」は _append_and_mark が実際に記憶の側を確かめた候補で、
+    # 読み直しで既に印があり飛ばした候補は数えない (attempted=False)。
     provenance_pending = True
     stop_seq: Optional[int] = None
     for m in candidates:
