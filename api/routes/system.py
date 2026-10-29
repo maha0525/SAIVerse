@@ -434,6 +434,60 @@ async def archive_unreadable_legacy_log(building_id: str):
     }
 
 
+class SystemNoticeReviewItem(BaseModel):
+    persona_id: str
+    message_id: str
+
+
+class SystemNoticeReviewApplyRequest(BaseModel):
+    action: str
+    items: list[SystemNoticeReviewItem]
+
+
+@router.get("/notice-review")
+def list_system_notice_review():
+    """確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった行) の一覧。
+
+    同じ型の行を束ね、束と行ごとに「選べる操作」を付けて返す
+    (docs/intent/system_notice_delivery.md「確認待ちの行の確定」)。
+    """
+    from saiverse.system_notice_review import build_review_listing, known_persona_dbs
+
+    manager = app_state.manager
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    return build_review_listing(known_persona_dbs(manager))
+
+
+@router.post("/notice-review/apply")
+def apply_system_notice_review(request: SystemNoticeReviewApplyRequest):
+    """確認待ちの行に所有者が選んだ操作 (keep / system / user / delete) を当てる。
+
+    書き込みは記憶ブラウザの編集 API と同じ ``get_adapter`` を通る。選べない操作を
+    指定された行は書き換えずに ``rejected`` に入れて返す。当てた後に確認待ちの
+    行を数え直し、0 件になれば画面の警告を外す。
+    """
+    from api.routes.people.utils import get_adapter
+    from saiverse.system_notice_review import (
+        ACTIONS,
+        apply_review_action,
+        refresh_review_alert,
+    )
+
+    manager = app_state.manager
+    if manager is None:
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    if request.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {request.action}")
+    result = apply_review_action(
+        request.action,
+        [(item.persona_id, item.message_id) for item in request.items],
+        lambda persona_id: get_adapter(persona_id, manager),
+    )
+    remaining = refresh_review_alert(manager)
+    return {**result, "remaining": remaining}
+
+
 def _resolve_updater() -> tuple[Path, Path, str]:
     """(project path, updater script, venv python) for a detached updater run."""
     project_dir = app_state.project_dir

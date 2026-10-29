@@ -8567,6 +8567,106 @@
     "ja": "古いファイルの場所",
     "en": "Old file location"
   },
+  "components.SystemAlertBanner.openNoticeReview": {
+    "ja": "確認する",
+    "en": "Review"
+  },
+  "api.systemNoticeReview.alertTitle": {
+    "ja": "確認が必要なメッセージが {count} 件あります",
+    "en": "{count} messages need your review"
+  },
+  "api.systemNoticeReview.alertMessage": {
+    "ja": "以前のバージョンで保存されたメッセージのうち、正式なシステムメッセージかどうかを自動で判断できなかったものが残っています。「確認する」から、どう扱うかを選んでください。",
+    "en": "Some messages saved by earlier versions could not be identified automatically as official system messages. Choose how to handle them from \"Review\"."
+  },
+  "components.SystemNoticeReviewModal.question": {
+    "ja": "これらは正式なシステムメッセージとして残しても良いですか？",
+    "en": "May these be kept as official system messages?"
+  },
+  "components.SystemNoticeReviewModal.note": {
+    "ja": "v0.3.27 以降のバージョンでは <system> で囲んだだけのメッセージは、ペルソナから偽のシステムメッセージとみなされる可能性があります。",
+    "en": "In v0.3.27 and later, messages that are only wrapped in <system> may be treated by personas as fake system messages."
+  },
+  "components.SystemNoticeReviewModal.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.SystemNoticeReviewModal.loading": {
+    "ja": "読み込み中…",
+    "en": "Loading…"
+  },
+  "components.SystemNoticeReviewModal.loadFailed": {
+    "ja": "一覧を読み込めませんでした (HTTP {status})",
+    "en": "Could not load the list (HTTP {status})"
+  },
+  "components.SystemNoticeReviewModal.networkError": {
+    "ja": "通信に失敗しました。",
+    "en": "The request failed."
+  },
+  "components.SystemNoticeReviewModal.readErrors": {
+    "ja": "一部のペルソナの記録を読み込めませんでした: {names}",
+    "en": "Could not read the records of some personas: {names}"
+  },
+  "components.SystemNoticeReviewModal.empty": {
+    "ja": "確認が必要なメッセージはありません。",
+    "en": "No messages need review."
+  },
+  "components.SystemNoticeReviewModal.groupCount": {
+    "ja": "{count} 件",
+    "en": "{count} messages"
+  },
+  "components.SystemNoticeReviewModal.applyAll": {
+    "ja": "この {count} 件をまとめて:",
+    "en": "All {count} at once:"
+  },
+  "components.SystemNoticeReviewModal.chooseEach": {
+    "ja": "一件ずつ選ぶ ({count} 件)",
+    "en": "Choose one by one ({count})"
+  },
+  "components.SystemNoticeReviewModal.actionKeep": {
+    "ja": "そのままにする",
+    "en": "Keep as is"
+  },
+  "components.SystemNoticeReviewModal.actionSystem": {
+    "ja": "正式に変換",
+    "en": "Convert to official"
+  },
+  "components.SystemNoticeReviewModal.actionUser": {
+    "ja": "通常のユーザー発話に変換",
+    "en": "Convert to a normal user message"
+  },
+  "components.SystemNoticeReviewModal.actionDelete": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.SystemNoticeReviewModal.confirmDeleteOne": {
+    "ja": "このメッセージを削除します。元に戻せません。よろしいですか？",
+    "en": "Delete this message? This cannot be undone."
+  },
+  "components.SystemNoticeReviewModal.confirmDeleteMany": {
+    "ja": "{count} 件のメッセージを削除します。元に戻せません。よろしいですか？",
+    "en": "Delete {count} messages? This cannot be undone."
+  },
+  "components.SystemNoticeReviewModal.applyFailed": {
+    "ja": "適用できませんでした (HTTP {status})",
+    "en": "Could not apply (HTTP {status})"
+  },
+  "components.SystemNoticeReviewModal.rejected": {
+    "ja": "{count} 件には適用できませんでした (その操作を選べないか、すでに確定・削除されています)。一覧を読み直しました。",
+    "en": "Could not apply to {count} messages (the action is not available for them, or they were already settled or deleted). The list has been reloaded."
+  },
+  "components.SystemNoticeReviewModal.roleUser": {
+    "ja": "ユーザー",
+    "en": "User"
+  },
+  "components.SystemNoticeReviewModal.rolePersona": {
+    "ja": "ペルソナ",
+    "en": "Persona"
+  },
+  "components.SystemNoticeReviewModal.roleSystem": {
+    "ja": "システム",
+    "en": "System"
+  },
   "components.ToolModeSelector.text001": {
     "ja": "自動",
     "en": "Automatic"

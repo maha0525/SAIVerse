@@ -8,6 +8,11 @@ import { useLocale } from '@/i18n/useLocale';
 import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
+import SystemNoticeReviewModal from "./SystemNoticeReviewModal";
+
+// 確認待ちの記憶の行があるあいだサーバーが置く警告 (saiverse/system_notice_review.py
+// の REVIEW_ALERT_ID)。この警告には確定の画面を開くボタンを付ける。
+const NOTICE_REVIEW_ALERT_ID = "system_notice_review_pending";
 
 interface SystemAlert {
     id: string;
@@ -31,6 +36,7 @@ export default function SystemAlertBanner() {
     // この画面を開いている間だけで、次の読み込みでまだ残っていれば再び表示される
     // (知らせ続ける義務はサーバー側の警告の寿命が持つ)。
     const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+    const [reviewOpen, setReviewOpen] = useState(false);
 
     const fetchAlerts = async () => {
         try {
@@ -81,7 +87,13 @@ export default function SystemAlertBanner() {
     };
 
     const visibleAlerts = alerts.filter((a) => !dismissedIds.has(a.id));
-    if (visibleAlerts.length === 0) return null;
+    const reviewModal = reviewOpen ? (
+        <SystemNoticeReviewModal
+            onClose={() => setReviewOpen(false)}
+            onChanged={fetchAlerts}
+        />
+    ) : null;
+    if (visibleAlerts.length === 0) return reviewModal;
 
     const dismiss = (id: string) => {
         setDismissedIds((prev) => new Set(prev).add(id));
@@ -136,6 +148,15 @@ export default function SystemAlertBanner() {
                                         {busyId === alert.id ? uiText("components.SystemAlertBanner.text007") : uiText("components.SystemAlertBanner.text008")}
                                     </button>
                                 )}
+                                {alert.id === NOTICE_REVIEW_ALERT_ID && (
+                                    <button data-i18n="components.SystemAlertBanner.openNoticeReview"
+                                        type="button"
+                                        className={styles.secondaryButton}
+                                        onClick={() => setReviewOpen(true)}
+                                    >
+                                        {uiText("components.SystemAlertBanner.openNoticeReview")}
+                                    </button>
+                                )}
                                 <button data-i18n="components.SystemAlertBanner.dismiss components.SystemAlertBanner.dismissLabel"
                                     type="button"
                                     className={styles.closeButton}
@@ -166,6 +187,7 @@ export default function SystemAlertBanner() {
                     );
                 })}
             </div>
+            {reviewModal}
         </>
     );
 }

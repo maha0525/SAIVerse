@@ -1885,6 +1885,72 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to delete message %s: %s", message_id, exc)
             return False
 
+    #: :meth:`rewrite_message` の ``rewrite`` が「その行を消す」を表す返り値。
+    MESSAGE_DELETE = "delete"
+
+    def rewrite_message(
+        self,
+        message_id: str,
+        rewrite: Callable[[str, str, Optional[Dict[str, Any]]], Any],
+    ) -> str:
+        """1 行の role / content / metadata を読み、``rewrite`` の決めたとおりに書き換えるか消す。
+
+        読みと書きを同じ書き込みの取引 (:meth:`update_message` と同じ
+        ``immediate_transaction`` と ``_db_lock``) の中で行うので、読んでから
+        書くまでの間に別の書き手 (実行中の Pulse・記憶ブラウザの編集) が
+        その行を変えることはない。
+
+        ``rewrite(role, content, metadata)`` の返り値:
+
+        - ``{"role": ..., "content": ..., "metadata": ...}``: その 3 列を書き換える
+        - :attr:`MESSAGE_DELETE`: 行とその埋め込みを消す (:meth:`delete_message` と同じ範囲)
+        - ``None``: 何も書かない
+
+        ``rewrite`` が投げた例外は取引を巻き戻してそのまま呼び出し側へ届く
+        (書き換えを拒否する手段)。本文が変わっても埋め込みは作り直さない —
+        呼び出し側 (確認待ちの行の確定) が変えるのはタグの文字列だけで、移行が
+        剥がした行と同じ扱い (docs/intent/system_notice_delivery.md「移行」の
+        埋め込みベクトル)。
+
+        Returns: ``"updated"`` / ``"deleted"`` / ``"unchanged"`` / ``"missing"``
+        (行が無い) / ``"unavailable"`` (記憶 DB が開けていない)。
+        """
+        if not self._ready:
+            return "unavailable"
+        with immediate_transaction(self.conn, self._db_lock):
+            row = self.conn.execute(  # type: ignore[attr-defined]
+                "SELECT role, content, metadata FROM messages WHERE id=?", (message_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            role, content, raw_meta = row
+            metadata: Optional[Dict[str, Any]] = None
+            if raw_meta:
+                try:
+                    decoded = json.loads(raw_meta)
+                except (TypeError, ValueError):
+                    decoded = None
+                if isinstance(decoded, dict):
+                    metadata = decoded
+            result = rewrite(role, content, metadata)
+            if result is None:
+                return "unchanged"
+            if result == self.MESSAGE_DELETE:
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                return "deleted"
+            new_meta = result.get("metadata")
+            self.conn.execute(  # type: ignore[attr-defined]
+                "UPDATE messages SET role=?, content=?, metadata=? WHERE id=?",
+                (
+                    result["role"],
+                    result["content"],
+                    json.dumps(new_meta, ensure_ascii=False) if new_meta else None,
+                    message_id,
+                ),
+            )
+            return "updated"
+
     def delete_thread(self, thread_id: str) -> bool:
         if not self._ready:
             return False

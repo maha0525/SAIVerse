@@ -105,6 +105,8 @@ saiverse/
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
 ├── update_dependencies_alert.py # 起動前のパッケージの入れ直し（update_engine --check-complete）が失敗した
 │                           #   記録を読み、画面のバナー（startup_alerts）に載せる警告にする
+├── system_notice_review.py # システム通知の移行が確認待ちにした記憶の行を集めて束ね、所有者が画面で選んだ
+│                           #   操作（keep / system / user / delete）で確定する。件数に応じてバナーの警告を置き直す
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
 │                           #   v1 メタ判断の状況分類は 2026-08-14 に退役）
 ├── buildings.py            # Building モデルヘルパ
