@@ -454,6 +454,10 @@ def main():
     from saiverse.environment_alerts import environment_alerts
     manager.startup_alerts.extend(environment_alerts(Path(__file__).parent.resolve()))
     manager.startup_alerts.extend(system_notice_migration_alerts)
+    # Rows the migration could not classify stay marked until the owner settles them on
+    # the review screen; the banner entry follows that state, not this one startup.
+    from saiverse.system_notice_review import refresh_review_alert
+    refresh_review_alert(manager)
 
     # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
     # Performs diff-based update: new files are imported, changed files are updated,

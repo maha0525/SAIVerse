@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 377（tag グループ: 26）
+**エンドポイント数**: 379（tag グループ: 26）
 
 ## addon
 
@@ -406,6 +406,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/system/announcements` | Return announcements from the configured Gist. |
 | POST | `/api/system/channel` | Switch this install to the other release line, through the updater. |
 | POST | `/api/system/legacy-log/{building_id}/archive` | 読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。 |
+| GET | `/api/system/notice-review` | 確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった行) の一覧。 |
+| POST | `/api/system/notice-review/apply` | 確認待ちの行に所有者が選んだ操作 (keep / system / user / delete) を当てる。 |
 | POST | `/api/system/update` | Trigger a self-update: spawn detached updater, then shutdown. |
 | GET | `/api/system/version` | Return current version and check for updates. |
 

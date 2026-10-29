@@ -243,6 +243,46 @@ def fetch_max_seq(
         db.close()
 
 
+def fetch_ingested_by(
+    session_factory: Optional[Callable[[], "Session"]],
+    building_id: str,
+    message_id: str,
+) -> Optional[List[str]]:
+    """1 行の ``ingested_by`` を本体 DB から読み直す (行が無ければ None)。
+
+    転記 (builtin_data/tools/get_building_messages.py の ``_append_and_mark``) が、
+    記憶へ行を足す直前に「自分の印が既に付いていないか」を確かめるのに使う。転記は
+    ラウンドの頭で建物の履歴を読んだ写しで動くので、その後に付いた印 (確認の画面の
+    削除が、消す前に付ける印) は写しに無い。読めない値は ``_deserialize`` と同じく
+    空として扱う。DB エラーは例外のまま返す (確かめられなかったことを呼び出し側が
+    区別できるように)。
+    """
+    if session_factory is None:
+        return None
+    from database.models import BuildingMessage
+    db = session_factory()
+    try:
+        row = db.query(BuildingMessage.ingested_by).filter_by(
+            building_id=building_id, message_id=message_id
+        ).first()
+    finally:
+        db.close()
+    if row is None:
+        return None
+    if not row[0]:
+        return []
+    try:
+        parsed = json.loads(row[0])
+    except json.JSONDecodeError:
+        return []
+    return [str(p) for p in parsed if p] if isinstance(parsed, list) else []
+
+
+#: ``mark_ingested`` が、読んだ後に別の書き手が ``ingested_by`` を変えていたときに
+#: 読み直す回数の上限。越えたら例外 (呼び出し元は書けなかったとして扱う)。
+_MARK_INGESTED_MAX_ATTEMPTS = 20
+
+
 def mark_ingested(
     session_factory: Optional[Callable[[], "Session"]],
     building_id: str,
@@ -258,31 +298,62 @@ def mark_ingested(
     (Building→個人記憶の転記) が失敗を跨いで cursor を確定し、未マークの
     メッセージが再試行されないまま取り込み済み扱いになる。「既に登録済み /
     該当行なし」は決着 (False)、「書けなかった」は失敗 (例外) — 二つは別物。
+
+    複数のペルソナが同じ行へ並行して印を足しても、互いの印を消さない: 読んだ時点の
+    ``ingested_by`` の値を更新の条件に入れ (``withdraw_building_message`` と同じ
+    形)、その間に別の書き手が値を変えていたら読み直して足し直す。読んだ値をそのまま
+    上書きすると、間に入った別のペルソナの印が失われ、そのペルソナが同じ発言を
+    もう一度記憶へ取り込む。
     """
     if session_factory is None or not persona_id:
         return False
     from database.models import BuildingMessage
     db = session_factory()
     try:
-        row = db.query(BuildingMessage).filter_by(
-            building_id=building_id, message_id=message_id
-        ).first()
-        if row is None:
-            return False
-        ingested: List[str] = []
-        if row.ingested_by:
-            try:
-                parsed = json.loads(row.ingested_by)
-                if isinstance(parsed, list):
-                    ingested = [str(p) for p in parsed if p]
-            except json.JSONDecodeError:
-                ingested = []
-        if persona_id in ingested:
-            return False
-        ingested.append(persona_id)
-        row.ingested_by = json.dumps(sorted(set(ingested)), ensure_ascii=False)
-        db.commit()
-        return True
+        for _attempt in range(_MARK_INGESTED_MAX_ATTEMPTS):
+            row = db.query(
+                BuildingMessage.ingested_by,
+            ).filter_by(
+                building_id=building_id, message_id=message_id
+            ).first()
+            if row is None:
+                return False
+            original = row[0]
+            ingested: List[str] = []
+            if original:
+                try:
+                    parsed = json.loads(original)
+                    if isinstance(parsed, list):
+                        ingested = [str(p) for p in parsed if p]
+                except json.JSONDecodeError:
+                    ingested = []
+            if persona_id in ingested:
+                return False
+            ingested.append(persona_id)
+            same_value = (
+                BuildingMessage.ingested_by.is_(None)
+                if original is None
+                else BuildingMessage.ingested_by == original
+            )
+            updated = db.query(BuildingMessage).filter(
+                BuildingMessage.building_id == building_id,
+                BuildingMessage.message_id == message_id,
+                same_value,
+            ).update(
+                {BuildingMessage.ingested_by: json.dumps(sorted(set(ingested)), ensure_ascii=False)},
+                synchronize_session=False,
+            )
+            db.commit()
+            if updated:
+                return True
+            LOGGER.debug(
+                "mark_ingested: ingested_by changed while marking; re-reading "
+                "bid=%s msg_id=%s persona=%s", building_id, message_id, persona_id,
+            )
+        raise RuntimeError(
+            f"mark_ingested: ingested_by kept changing (bid={building_id} "
+            f"msg_id={message_id} persona={persona_id})"
+        )
     except Exception:
         db.rollback()
         LOGGER.warning(

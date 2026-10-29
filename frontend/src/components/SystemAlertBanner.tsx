@@ -6,8 +6,16 @@ import { useLocale } from '@/i18n/useLocale';
 
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
+// 確認待ちの記憶の行があるあいだサーバーが置く警告には、確定の画面を開くボタンを
+// 付ける。この警告を閉じても、設定の「便利機能」の入口 (SystemNoticeReviewEntry)
+// から同じ画面を開ける。どちらから確定しても NOTICE_REVIEW_CHANGED_EVENT が出て、
+// バナーと入口の両方が警告を取り直す。
+import SystemNoticeReviewModal, {
+    NOTICE_REVIEW_ALERT_ID,
+    NOTICE_REVIEW_CHANGED_EVENT,
+} from "./SystemNoticeReviewModal";
 
 interface SystemAlert {
     id: string;
@@ -21,11 +29,26 @@ interface AlertResponse {
     alerts: SystemAlert[];
 }
 
-export default function SystemAlertBanner() {
+interface Props {
+    /**
+     * 画面が裏側と繋がっているか (page.tsx の backendConnected)。警告は裏側の
+     * 起動時に作られるので、画面が裏側より先に開いた・裏側が再起動したときは、
+     * 繋がり直した時点で一度取り直す。
+     */
+    backendConnected?: boolean;
+}
+
+export default function SystemAlertBanner({ backendConnected = true }: Props) {
     useLocale();
     const [alerts, setAlerts] = useState<SystemAlert[]>([]);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
     const [busyId, setBusyId] = useState<string | null>(null);
+    // 閉じたお知らせの id。バナーは画面最上部のヘッダー (地図・人々などのボタン列) に
+    // 覆い被さるので、読み終えたお知らせをユーザーが退かせる手段が要る。閉じるのは
+    // この画面を開いている間だけで、次の読み込みでまだ残っていれば再び表示される
+    // (知らせ続ける義務はサーバー側の警告の寿命が持つ)。
+    const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+    const [reviewOpen, setReviewOpen] = useState(false);
 
     const fetchAlerts = async () => {
         try {
@@ -43,8 +66,17 @@ export default function SystemAlertBanner() {
     };
 
     useEffect(() => {
-        fetchAlerts();
+        window.addEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
+        return () => window.removeEventListener(NOTICE_REVIEW_CHANGED_EVENT, fetchAlerts);
     }, []);
+
+    useEffect(() => {
+        if (backendConnected) fetchAlerts();
+    }, [backendConnected]);
+
+    const announceReviewChanged = () => {
+        window.dispatchEvent(new Event(NOTICE_REVIEW_CHANGED_EVENT));
+    };
 
     // 読めなくなった古い履歴ファイルを脇へ移す。ファイルが移っていること自体が
     // 「ユーザーが認識した」の記録になるので、確認済みフラグは持たない。
@@ -75,7 +107,18 @@ export default function SystemAlertBanner() {
         }
     };
 
-    if (alerts.length === 0) return null;
+    const visibleAlerts = alerts.filter((a) => !dismissedIds.has(a.id));
+    const reviewModal = reviewOpen ? (
+        <SystemNoticeReviewModal
+            onClose={() => setReviewOpen(false)}
+            onChanged={announceReviewChanged}
+        />
+    ) : null;
+    if (visibleAlerts.length === 0) return reviewModal;
+
+    const dismiss = (id: string) => {
+        setDismissedIds((prev) => new Set(prev).add(id));
+    };
 
     const toggle = (id: string) => {
         setExpandedIds((prev) => {
@@ -89,7 +132,7 @@ export default function SystemAlertBanner() {
     return (
         <>
             <div className={styles.banner}>
-                {alerts.map((alert) => {
+                {visibleAlerts.map((alert) => {
                     const expanded = expandedIds.has(alert.id);
                     const levelClass =
                         alert.level === "critical"
@@ -126,6 +169,25 @@ export default function SystemAlertBanner() {
                                         {busyId === alert.id ? uiText("components.SystemAlertBanner.text007") : uiText("components.SystemAlertBanner.text008")}
                                     </button>
                                 )}
+                                {alert.id === NOTICE_REVIEW_ALERT_ID && (
+                                    <button data-i18n="components.SystemAlertBanner.openNoticeReview"
+                                        type="button"
+                                        className={styles.secondaryButton}
+                                        onClick={() => setReviewOpen(true)}
+                                    >
+                                        {uiText("components.SystemAlertBanner.openNoticeReview")}
+                                    </button>
+                                )}
+                                <button data-i18n="components.SystemAlertBanner.dismiss components.SystemAlertBanner.dismissLabel"
+                                    type="button"
+                                    className={styles.closeButton}
+                                    onClick={() => dismiss(alert.id)}
+                                    disabled={busyId === alert.id}
+                                    title={uiText("components.SystemAlertBanner.dismiss")}
+                                    aria-label={uiText("components.SystemAlertBanner.dismissLabel")}
+                                >
+                                    <X size={16} />
+                                </button>
                             </div>
                             {expanded && (
                                 <div className={styles.body}>
@@ -146,6 +208,7 @@ export default function SystemAlertBanner() {
                     );
                 })}
             </div>
+            {reviewModal}
         </>
     );
 }

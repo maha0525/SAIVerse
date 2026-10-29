@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +23,9 @@ from sai_memory.memory.storage import (
     add_message,
     Message,
     get_all_messages_for_search,
-    get_messages_around,
     get_messages_last,
     get_messages_paginated,
+    get_window_with_anchor,
     get_or_create_thread,
     get_thread_stats,
     get_thread_titles,
@@ -1885,6 +1886,118 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to delete message %s: %s", message_id, exc)
             return False
 
+    #: :meth:`rewrite_message` の ``rewrite`` が「その行を消す」を表す返り値。
+    MESSAGE_DELETE = "delete"
+
+    def rewrite_message(
+        self,
+        message_id: str,
+        rewrite: Callable[[Dict[str, Any]], Any],
+    ) -> str:
+        """1 行を読み、``rewrite`` の決めたとおりに書き換えるか消す。
+
+        読みと書きを同じ書き込みの取引 (:meth:`update_message` と同じ
+        ``immediate_transaction`` と ``_db_lock``) の中で行うので、読んでから
+        書くまでの間に別の書き手 (実行中の Pulse・記憶ブラウザの編集) が
+        その行を変えることはない。
+
+        ``rewrite`` は ``{"role", "content", "metadata", "line_role", "created_at",
+        "insert_after_free"}`` の辞書 (metadata は辞書として読めたときだけ辞書、それ以外は
+        None) を受け取る。``insert_after_free`` は引数なしの関数で、この行の直後に新しい
+        行を並べられるか (同じ created_at で後ろの rowid の行が無いか —
+        database/system_notice_migration.py の ``split_position_is_free``) を、同じ取引の
+        中で読んで返す。
+        返り値:
+
+        - ``{"role": ..., "content": ..., "metadata": ...}``: その 3 列を書き換える。
+          ``"line_role"`` の鍵があれば、その列も書き換える。``"insert_after"`` の鍵
+          (``{"role", "content", "metadata", "line_role"}``、``line_role`` が None なら
+          この行の値を写す) があれば、同じ取引の中で新しい行を一つ、この行の直後
+          (同じ created_at・後ろの rowid) に足す。足す文と写す列は移行の二行分割と
+          同じ ``split_insert_statement``、id は storage.py の ``add_message`` と同じ ``uuid4``。
+          直後に並べられないときは ``RuntimeError`` で取引ごと巻き戻す
+        - :attr:`MESSAGE_DELETE`: 行とその埋め込みを消す (:meth:`delete_message` と同じ範囲)
+        - ``None``: 何も書かない
+
+        ``rewrite`` が投げた例外は取引を巻き戻してそのまま呼び出し側へ届く
+        (書き換えを拒否する手段)。本文が変わっても埋め込みは作り直さない —
+        呼び出し側 (確認待ちの行の確定) が変えるのはタグの文字列だけで、移行が
+        剥がした行と同じ扱い (docs/intent/system_notice_delivery.md「移行」の
+        埋め込みベクトル)。
+
+        Returns: ``"updated"`` / ``"deleted"`` / ``"unchanged"`` / ``"missing"``
+        (行が無い) / ``"unavailable"`` (記憶 DB が開けていない)。
+        """
+        if not self._ready:
+            return "unavailable"
+        from database.system_notice_migration import split_insert_statement, split_position_is_free
+
+        with immediate_transaction(self.conn, self._db_lock):
+            row = self.conn.execute(  # type: ignore[attr-defined]
+                "SELECT role, content, metadata, line_role, created_at, rowid FROM messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            role, content, raw_meta, line_role, created_at, rowid = row
+            cols = {
+                r[1] for r in self.conn.execute("PRAGMA table_info(messages)").fetchall()  # type: ignore[attr-defined]
+            }
+
+            def _insert_after_free() -> bool:
+                return split_position_is_free(self.conn, cols, rowid, created_at)  # type: ignore[arg-type]
+
+            metadata: Optional[Dict[str, Any]] = None
+            if raw_meta:
+                try:
+                    decoded = json.loads(raw_meta)
+                except (TypeError, ValueError):
+                    decoded = None
+                if isinstance(decoded, dict):
+                    metadata = decoded
+            result = rewrite({
+                "role": role, "content": content, "metadata": metadata,
+                "line_role": line_role, "created_at": created_at,
+                "insert_after_free": _insert_after_free,
+            })
+            if result is None:
+                return "unchanged"
+            if result == self.MESSAGE_DELETE:
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                return "deleted"
+            new_meta = result.get("metadata")
+            insert = result.get("insert_after")
+            if insert is not None and not _insert_after_free():
+                raise RuntimeError(
+                    f"cannot place a new row directly after message {message_id}"
+                )
+            self.conn.execute(  # type: ignore[attr-defined]
+                "UPDATE messages SET role=?, content=?, metadata=? WHERE id=?",
+                (
+                    result["role"],
+                    result["content"],
+                    json.dumps(new_meta, ensure_ascii=False) if new_meta else None,
+                    message_id,
+                ),
+            )
+            if "line_role" in result:
+                self.conn.execute(  # type: ignore[attr-defined]
+                    "UPDATE messages SET line_role=? WHERE id=?",
+                    (result["line_role"], message_id),
+                )
+            if insert is not None:
+                insert_meta = insert.get("metadata")
+                sql, params = split_insert_statement(
+                    cols, str(uuid.uuid4()), message_id,
+                    role=insert["role"],
+                    content=insert["content"],
+                    metadata_json=json.dumps(insert_meta, ensure_ascii=False) if insert_meta else None,
+                    line_role=insert.get("line_role"),
+                )
+                self.conn.execute(sql, params)  # type: ignore[attr-defined]
+            return "updated"
+
     def delete_thread(self, thread_id: str) -> bool:
         if not self._ready:
             return False
@@ -2104,12 +2217,11 @@ class SAIMemoryAdapter:
                 for msg_id in top_ids:
                     msg = message_data[msg_id]
                     score = message_scores[msg_id]
-                    if before > 0 or after > 0:
-                        around = get_messages_around(self.conn, msg.thread_id, msg.id, before, after)
-                        bundle = [*around[:before], msg, *around[before:]]
-                        bundle.sort(key=lambda m: m.created_at)
-                    else:
-                        bundle = [msg]
+                    # 前と後を別々に取って当たりを挟む (正典順のまま。
+                    # created_at で並べ直すと同じ秒の行の順が崩れる)
+                    bundle = get_window_with_anchor(
+                        self.conn, msg, before, after, settled_only=True,
+                    )
                     formatted = [
                         (m, compose_message_content(self.conn, m))
                         for m in bundle
