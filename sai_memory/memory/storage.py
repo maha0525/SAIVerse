@@ -1302,6 +1302,16 @@ SYSTEM_NOTICE_KEY = "__system_notice__"
 #: ``SYSTEM_NOTICE_KEY`` と同じくサーバーだけが書ける。
 SYSTEM_NOTICE_REVIEW_KEY = "__system_notice_review__"
 
+#: 確認待ちの行を所有者が画面で確定した記録 (docs/intent/system_notice_delivery.md
+#: 「追補」の確認待ちの行の確定)。値は選んだ操作 (``"keep"`` / ``"system"`` /
+#: ``"user"``)。確定した行からは ``SYSTEM_NOTICE_REVIEW_KEY`` を消し、代わりに
+#: この鍵を書く。印を消すだけだと、完了の印の無い DB を移行が走査し直したときに
+#: また印が付いて所有者の判断が消えるので、移行はこの鍵を持つ行の印付けと変換を
+#: 両方とも飛ばす。``"keep"`` (そのままにする) の行は偽タグに見える本文のまま
+#: 残るので、「実会話」(``_conversation_exclusion``) から外したままにする。
+SYSTEM_NOTICE_REVIEWED_KEY = "__system_notice_reviewed__"
+SYSTEM_NOTICE_REVIEWED_KEEP = "keep"
+
 #: head (プロンプト先頭部) が組んだ system メッセージの印 (docs/intent/
 #: system_notice_delivery.md 不変条件 5)。sea/head_pipeline/integration.py の
 #: ``_compose_messages`` が人格指示の system メッセージの metadata に ``True`` で
@@ -2754,7 +2764,9 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
 
     移行が確認待ちとしてレポート送りにした行 (``SYSTEM_NOTICE_REVIEW_KEY`` の印を
     持つ行) も除外する — role=user のまま残るので role の条件では外れないが、
-    中身は機構の文でありうるため。
+    中身は機構の文でありうるため。所有者が「そのままにする」で確定した行
+    (``SYSTEM_NOTICE_REVIEWED_KEY`` が ``"keep"``) も、偽タグに見える本文のまま
+    なので除外し続ける。
     """
     tag_placeholders = ",".join("?" for _ in MECHANISM_TAGS)
     role_placeholders = ",".join("?" for _ in CHRONICLE_EXCLUDED_LINE_ROLES)
@@ -2766,6 +2778,8 @@ def _conversation_exclusion() -> Tuple[str, Tuple[str, ...]]:
             WHERE json_each.value IN ({tag_placeholders})
         )
         AND json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEW_KEY}"') IS NULL
+        AND COALESCE(json_extract(metadata, '$."{SYSTEM_NOTICE_REVIEWED_KEY}"'), '')
+            != '{SYSTEM_NOTICE_REVIEWED_KEEP}'
         AND (line_role IS NULL OR line_role NOT IN ({role_placeholders}))
     """
     return clause, MECHANISM_TAGS + CHRONICLE_EXCLUDED_LINE_ROLES
