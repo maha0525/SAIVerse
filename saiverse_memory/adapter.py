@@ -22,9 +22,9 @@ from sai_memory.memory.storage import (
     add_message,
     Message,
     get_all_messages_for_search,
-    get_messages_around,
     get_messages_last,
     get_messages_paginated,
+    get_window_with_anchor,
     get_or_create_thread,
     get_thread_stats,
     get_thread_titles,
@@ -2182,15 +2182,11 @@ class SAIMemoryAdapter:
                 for msg_id in top_ids:
                     msg = message_data[msg_id]
                     score = message_scores[msg_id]
-                    if before > 0 or after > 0:
-                        around = get_messages_around(
-                            self.conn, msg.thread_id, msg.id, before, after,
-                            settled_only=True,
-                        )
-                        bundle = [*around[:before], msg, *around[before:]]
-                        bundle.sort(key=lambda m: m.created_at)
-                    else:
-                        bundle = [msg]
+                    # 前と後を別々に取って当たりを挟む (正典順のまま。
+                    # created_at で並べ直すと同じ秒の行の順が崩れる)
+                    bundle = get_window_with_anchor(
+                        self.conn, msg, before, after, settled_only=True,
+                    )
                     formatted = [
                         (m, compose_message_content(self.conn, m))
                         for m in bundle

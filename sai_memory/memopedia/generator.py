@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Set
 from llm_clients.base import usage_event_time
 from sai_memory.memory.storage import (
     Message,
+    canonical_position_keys,
     get_message,
     get_all_messages_for_search,
     is_author_unsettled,
@@ -581,7 +582,10 @@ def generate_memopedia_page(
             LOGGER.warning(f"[Loop {loop + 1}] No context messages after filtering")
             continue
 
-        all_context_messages.sort(key=lambda m: m.created_at)
+        # 二つの当たりの窓を正典順 (created_at, rowid) で並べ直す — created_at
+        # だけだと、別の窓に入った同じ秒の行の順が崩れる
+        order = canonical_position_keys(conn, (m.id for m in all_context_messages))
+        all_context_messages.sort(key=lambda m: order.get(m.id, ((1, m.created_at), 0)))
         conversation = format_messages_for_extraction(all_context_messages)
         LOGGER.info(f"[Loop {loop + 1}] Extracting from {len(all_context_messages)} messages ({len(conversation)} chars)")
 

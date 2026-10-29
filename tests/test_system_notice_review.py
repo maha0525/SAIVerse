@@ -911,11 +911,13 @@ def test_semantic_recall_leaves_out_unsettled_rows_before_ranking_and_after_expa
         scope="thread", required_tags=["conversation"],
     )
     msgs = semantic_recall(recall_db.conn, _FakeEmbedder(), "q", **kwargs)
-    # 順位付けの前に u1・k1 が外れて s1 が選ばれ、広げた周辺からも u2 が外れる
-    assert [m.id for m in msgs] == ["n1", "s1", "n2"]
+    # 順位付けの前に u1・k1 が外れて s1 が選ばれ、広げた周辺 (前後 1 件ずつ =
+    # n1 と u2) からも u2 が外れる。外した u2 の代わりにその先の n2 を取らない
+    # (Codex 3 巡目 — 2 巡目のこの期待値は、外してから数える誤った順序を固定していた)
+    assert [m.id for m in msgs] == ["n1", "s1"]
     [(seed, bundle, _score)] = semantic_recall_groups(recall_db.conn, _FakeEmbedder(), "q", **kwargs)
     assert seed.id == "s1"
-    assert [m.id for m in bundle] == ["n1", "s1", "n2"]
+    assert [m.id for m in bundle] == ["n1", "s1"]
 
 
 def test_memopedia_search_hits_leave_out_unsettled_rows(recall_db, monkeypatch):
@@ -1073,6 +1075,278 @@ def test_delete_between_reading_the_building_row_and_appending_does_not_restore_
     assert outcome[0] == "consumed"
     assert _row(w.db, "m") is None
     assert _ingested_by(w) == ["p"]
+
+
+def test_delete_during_a_round_after_a_skipped_candidate_does_not_restore_the_row(
+    tmp_path, monkeypatch,
+):
+    """一件目を読み直しで飛ばした後の二件目 (記憶にあり、建物の側の印が無い) の
+    確かめの直後に削除が割り込んでも、行は戻らない (Codex 3 巡目)。
+
+    二件目にも ``building_msg_ref`` の照会が掛かるので、照会が行を見つけて
+    追記しない。照会を省くと、読み直しの直後の削除の後に同じ発言を足し直す。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from builtin_data.tools import get_building_messages as ingest
+    from database.building_messages import (
+        fetch_building_messages,
+        insert_building_message,
+        mark_ingested,
+    )
+    from database.models import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'main.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    building_id = "room"
+    first = insert_building_message(session_factory, building_id, {
+        "role": "user", "content": "先の発言", "heard_by": ["p"],
+    })
+    second = insert_building_message(session_factory, building_id, {
+        "role": "user", "content": "<system>hello</system>", "heard_by": ["p"],
+    })
+    ref = f"{building_id}:{second['message_id']}"
+    db = _make_persona(tmp_path, "p", [
+        ("m", "user", "<system>hello</system>",
+         {SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED, "building_msg_ref": ref}),
+    ])
+    adapter = _adapter(db)
+
+    @contextlib.contextmanager
+    def opener(_pid):
+        yield adapter
+
+    def history(bid):
+        rows = fetch_building_messages(session_factory, bid)
+        # 履歴を読んだ後に、一件目へ別の処理が印を付ける
+        mark_ingested(session_factory, building_id, first["message_id"], "p")
+        return rows
+
+    state = {"deleted": False}
+
+    def delete_once(checked_ref):
+        if checked_ref != ref or state["deleted"]:
+            return
+        state["deleted"] = True
+        result = review.apply_review_action(
+            "delete", [("p", "m", _version(db, "m"))], opener,
+            lambda pid, r: review.mark_building_ref_ingested(session_factory, r, pid),
+        )
+        assert [a["message_id"] for a in result["applied"]] == ["m"]
+
+    real_lookup = ingest._memory_has_building_ref
+    real_reread = ingest._marked_in_building_db
+
+    def lookup_then_delete(persona, checked_ref):
+        found = real_lookup(persona, checked_ref)
+        delete_once(checked_ref)
+        return found
+
+    def reread_then_delete(m, persona_id, manager):
+        marked = real_reread(m, persona_id, manager)
+        delete_once(ingest._building_msg_ref(m))
+        return marked
+
+    monkeypatch.setattr(ingest, "_memory_has_building_ref", lookup_then_delete)
+    monkeypatch.setattr(ingest, "_marked_in_building_db", reread_then_delete)
+    appended = []
+    persona = SimpleNamespace(
+        sai_memory=adapter, pulse_cursors={building_id: 0}, entry_markers={}, buildings={},
+    )
+    hm = SimpleNamespace(
+        get_building_history=history,
+        add_to_persona_only=lambda entry, **_: appended.append(entry) or ("synced", "x"),
+    )
+    try:
+        ingest._ingest_round(
+            persona=persona, manager=SimpleNamespace(SessionLocal=session_factory),
+            history_manager=hm, building_id=building_id, persona_id="p",
+            id_to_name_map={}, log_prefix="[test]",
+        )
+    finally:
+        adapter.conn.close()
+        engine.dispose()
+    assert state["deleted"]
+    assert appended == []
+    assert _row(db, "m") is None
+    rows = {r["message_id"]: r for r in fetch_building_messages(session_factory, building_id)}
+    assert rows[second["message_id"]]["ingested_by"] == ["p"]
+
+
+# ---------------------------------------------------------------------------
+# 周辺の行の広げと、確認待ちの行の除外の順序 (Codex 3 巡目)
+# ---------------------------------------------------------------------------
+
+
+def _pending():
+    return {"tags": ["conversation"], SYSTEM_NOTICE_REVIEW_KEY: UNCLASSIFIED}
+
+
+def test_window_takes_the_rows_first_then_leaves_out_unsettled_ones(tmp_path):
+    """前後それぞれ指定の件数を正典の順で取ってから、確認待ちを外す。外した分を
+    遠くの行で埋めない (前後両側・確認待ちが連続する窓)。"""
+    from sai_memory.memory.storage import get_messages_around
+
+    db = _make_persona(tmp_path, "p", [
+        ("far-before", "user", "遠い前", {"tags": ["conversation"]}),
+        ("near-before", "user", "<system>a</system>", _pending()),
+        ("anchor", "user", "当たり", {"tags": ["conversation"]}),
+        ("near-after-1", "user", "<system>b</system>", _pending()),
+        ("near-after-2", "user", "<system>c</system>", _pending()),
+        ("far-after", "assistant", "遠い後", {"tags": ["conversation"]}),
+    ])
+    conn = init_db(str(db))
+    try:
+        def ids(before, after):
+            return [m.id for m in get_messages_around(
+                conn, "t1", "anchor", before, after, settled_only=True,
+            )]
+
+        assert ids(1, 0) == []
+        assert ids(0, 1) == []
+        assert ids(0, 2) == []
+        assert ids(1, 2) == []
+        assert ids(2, 0) == ["far-before"]
+        assert ids(0, 3) == ["far-after"]
+        assert ids(2, 3) == ["far-before", "far-after"]
+        # 外さない呼び方は、これまでどおり確認待ちも数えて返す
+        assert [m.id for m in get_messages_around(conn, "t1", "anchor", 1, 1)] == [
+            "near-before", "near-after-1",
+        ]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 同じ秒の前後の行の順 (Codex 3 巡目)
+# ---------------------------------------------------------------------------
+
+
+def _same_second_db(tmp_path, rows):
+    """全行を同じ created_at で入れる (並びは rowid = 挿入順)。rows は
+    (id, role, 本文, metadata, 埋め込み)。"""
+    db = tmp_path / "personas" / "p" / "memory.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = init_db(str(db), check_same_thread=False)
+    for mid, role, content, meta, vec in rows:
+        _insert(conn, mid, role, content, meta, 5000)
+        conn.execute(
+            "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
+            (mid, json.dumps(vec)),
+        )
+    conn.commit()
+    return db, conn
+
+
+#: 正典の順は「確認待ち、当たり、後続」で、三行とも同じ秒。
+_SAME_SECOND_ROWS = [
+    ("pending", "user", "<system>機構の文</system>", _pending(), [0.0, 1.0]),
+    ("seed", "user", "当たりの発話 りんご", {"tags": ["conversation"]}, [1.0, 0.0]),
+    ("next", "assistant", "後続の応答", {"tags": ["conversation"]}, [0.0, 1.0]),
+]
+
+
+def test_semantic_recall_keeps_same_second_neighbours_in_canonical_order(tmp_path):
+    from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
+
+    db, conn = _same_second_db(tmp_path, _SAME_SECOND_ROWS)
+    kwargs = dict(
+        thread_id="t1", resource_id=None, topk=1, range_before=1, range_after=1,
+        scope="thread", required_tags=["conversation"],
+    )
+    try:
+        msgs = semantic_recall(conn, _FakeEmbedder(), "q", **kwargs)
+        [(seed, bundle, _score)] = semantic_recall_groups(conn, _FakeEmbedder(), "q", **kwargs)
+    finally:
+        conn.close()
+    assert [m.id for m in msgs] == ["seed", "next"]
+    assert seed.id == "seed"
+    assert [m.id for m in bundle] == ["seed", "next"]
+
+
+def test_semantic_recall_merges_bundles_of_the_same_second_in_canonical_order(tmp_path):
+    """当たりが複数あるとき、束を並べ直す順も正典の順 (同じ秒なら rowid)。"""
+    from sai_memory.memory.recall import semantic_recall
+
+    db, conn = _same_second_db(tmp_path, [
+        ("earlier", "user", "前の当たり", {"tags": ["conversation"]}, [0.8, 0.6]),
+        ("later", "user", "後の当たり", {"tags": ["conversation"]}, [1.0, 0.0]),
+    ])
+    try:
+        msgs = semantic_recall(
+            conn, _FakeEmbedder(), "q", thread_id="t1", resource_id=None, topk=2,
+            range_before=0, range_after=0, scope="thread", required_tags=["conversation"],
+        )
+    finally:
+        conn.close()
+    # 点数は後の行が高いが、返す順は正典の順
+    assert [m.id for m in msgs] == ["earlier", "later"]
+
+
+def test_hybrid_recall_keeps_same_second_neighbours_in_canonical_order(tmp_path):
+    db, conn = _same_second_db(tmp_path, _SAME_SECOND_ROWS)
+    conn.close()
+    adapter = _recall_adapter(SimpleNamespace(db=db))
+    try:
+        text = adapter.recall_hybrid("q", ["りんご"], max_chars=4000)
+    finally:
+        adapter.conn.close()
+    assert "機構の文" not in text
+    assert "当たりの発話" in text and "後続の応答" in text
+    assert text.index("当たりの発話") < text.index("後続の応答")
+
+
+def test_reads_around_an_id_keep_same_second_neighbours_in_canonical_order(
+    tmp_path, monkeypatch,
+):
+    """ID を指定した周辺の読み出し (``memory_read_around`` と
+    ``saiverse://self/message/<id>?window=``) も、同じ秒の後ろの行を当たりの前に
+    置かない。ID を指定した読み出しは確認待ちを外さない。"""
+    from builtin_data.tools import memory_read_around as around
+    from saiverse.uri_resolver import UriResolver
+
+    db, conn = _same_second_db(tmp_path, _SAME_SECOND_ROWS)
+    conn.close()
+    adapter = _recall_adapter(SimpleNamespace(db=db))
+
+    @contextlib.contextmanager
+    def opener():
+        yield adapter
+
+    monkeypatch.setattr(around, "get_active_persona_id", lambda: "p")
+    monkeypatch.setattr(around, "open_persona_memory", opener)
+    resolver = UriResolver(manager=None)
+    resolver._get_adapter = lambda _pid: adapter
+    try:
+        text = around.memory_read_around("seed", window=1)
+        resolved = resolver.resolve("saiverse://self/message/seed?window=1", persona_id="p")
+    finally:
+        adapter.conn.close()
+    for out in (text, resolved.content):
+        assert out.index("機構の文") < out.index("当たりの発話") < out.index("後続の応答")
+
+
+def test_message_uri_text_search_window_includes_the_hit(recall_db):
+    """本文検索の周辺は、当たりの行そのものを挟んで返す (印 ``<<<`` は当たりに付く)。"""
+    from saiverse.uri_resolver import UriResolver
+
+    adapter = _recall_adapter(recall_db)
+    resolver = UriResolver(manager=None)
+    resolver._get_adapter = lambda _pid: adapter
+    resolver._get_active_thread_id = lambda _adapter: "t1"
+    try:
+        resolved = resolver.resolve(
+            "saiverse://self/message/msg?contain=本人の発話&window=1", persona_id="p",
+        )
+    finally:
+        adapter.conn.close()
+    lines = resolved.content.split("\n\n")
+    # s1 の前は n1、後ろの u2 は確認待ちなので外れて、その先の n2 は取らない
+    assert len(lines) == 2
+    assert "前の発話" in lines[0]
+    assert "本人の発話" in lines[1] and lines[1].endswith("<<<")
 
 
 # ---------------------------------------------------------------------------

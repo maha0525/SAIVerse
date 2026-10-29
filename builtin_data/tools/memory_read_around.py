@@ -7,7 +7,7 @@ from typing import Optional
 
 from sai_memory.memory.storage import (
     get_message,
-    get_messages_around,
+    get_window_with_anchor,
 )
 from tools.context import get_active_persona_id, open_persona_memory
 from tools.core import ToolSchema
@@ -40,28 +40,10 @@ def memory_read_around(
         if not anchor:
             return f"(message not found: {message_id})"
 
-        # Get surrounding messages using efficient rowid-based query
+        # 前と後を別々に取って anchor を挟む (正典順 created_at, rowid のまま —
+        # created_at の比較で挿し込むと、同じ秒の後ろの行が anchor の前に並ぶ)
         with adapter._db_lock:
-            surrounding = get_messages_around(
-                adapter.conn,
-                thread_id=anchor.thread_id,
-                message_id=message_id,
-                before=window,
-                after=window,
-            )
-
-    # surrounding does NOT include the anchor; insert it at the right position
-    # Find where to insert: after all "before" messages (those with created_at <= anchor)
-    insert_idx = 0
-    for i, msg in enumerate(surrounding):
-        if msg.created_at <= anchor.created_at and msg.id != anchor.id:
-            insert_idx = i + 1
-        elif msg.created_at > anchor.created_at:
-            break
-        else:
-            insert_idx = i + 1
-
-    all_msgs = surrounding[:insert_idx] + [anchor] + surrounding[insert_idx:]
+            all_msgs = get_window_with_anchor(adapter.conn, anchor, window, window)
 
     # Format as conversation log
     lines = ["```"]

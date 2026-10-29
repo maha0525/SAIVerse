@@ -22,9 +22,10 @@ from sai_memory.config import (
 from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
     Message,
+    canonical_position_keys,
     get_embeddings_for_scope,
-    get_messages_around,
     get_messages_last,
+    get_window_with_anchor,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -282,10 +283,9 @@ def semantic_recall(
     expanded: List[Message] = []
     seen = set()
     for msg, score, chunk_index in picked:
-        around = get_messages_around(
-            conn, msg.thread_id, msg.id, range_before, range_after, settled_only=True,
+        bundle = get_window_with_anchor(
+            conn, msg, range_before, range_after, settled_only=True,
         )
-        bundle = [*around[:range_before], msg, *around[range_before:]] if (range_before or range_after) else [msg]
         for m in bundle:
             if m.id in seen:
                 continue
@@ -303,7 +303,10 @@ def semantic_recall(
                 preview=(m.content[:160] + "…" if len(m.content) > 160 else m.content),
             )
 
-    expanded.sort(key=lambda m: m.created_at)
+    # 当たりごとの束を正典順 (created_at, rowid) で並べ直す — created_at だけで
+    # 並べると、別の束に入った同じ秒の行が点数の順のまま残る。
+    keys = canonical_position_keys(conn, (m.id for m in expanded))
+    expanded.sort(key=lambda m: keys.get(m.id, ((1, m.created_at), 0)))
     return expanded
 
 
@@ -325,7 +328,8 @@ def semantic_recall_groups(
     """Return top-k recall groups as (seed, group_messages_sorted, score).
 
     - seed: the message that matched semantically
-    - group_messages_sorted: [before..., seed, after...] ordered by created_at
+    - group_messages_sorted: [before..., seed, after...] in canonical order
+      (created_at, rowid)
     - score: cosine similarity for the seed
     """
     vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
@@ -369,13 +373,10 @@ def semantic_recall_groups(
 
     groups: List[Tuple[Message, List[Message], float]] = []
     for seed, score, chunk_index in picked:
-        before_after = get_messages_around(
-            conn, seed.thread_id, seed.id, range_before, range_after, settled_only=True,
+        # 前と後を別々に取って当たりを挟む (正典順のまま。created_at で並べ直さない)
+        bundle = get_window_with_anchor(
+            conn, seed, range_before, range_after, settled_only=True,
         )
-        # Stitch into ordered bundle
-        bundle = [*before_after[:range_before], seed, *before_after[range_before:]] if (range_before or range_after) else [seed]
-        # Ensure chronological
-        bundle.sort(key=lambda m: m.created_at)
         groups.append((seed, bundle, score))
         debug(
             "memory:recall:group",

@@ -143,11 +143,24 @@ def _append_and_mark(
     付けてから記憶の行を消す) が割り込むと、写しには印が無く、記憶の側の
     ``building_msg_ref`` の照会も消えた行を見つけられないので、同じ発言を取り込み
     直してしまう。読み直しは照会の後に行う — 照会が行を見つけられなかったなら
-    削除は印を付け終えているので、読み直しがその印を見る。
+    削除は印を付け終えているので、読み直しがその印を見る。照会
+    (``SAIMemoryAdapter.find_message_by_building_ref``) は記憶 DB の ``_db_lock``
+    の中で読み、削除 (``SAIMemoryAdapter.rewrite_message``) は同じ ``_db_lock`` と
+    ``immediate_transaction`` の中で、本体 DB の印をコミットしてから記憶の行を
+    消すので、照会が行を見ないときは必ず印が本体 DB にある。
+
+    照会を省く候補 (``check_provenance=False``) では、読み直しと追記の間に削除が
+    入りうるが、M8 の停止規律により記憶に追記済みで印の無い行は最初に確かめる
+    候補に限られ (同じペルソナのラウンドは ``sea.beat_gate.hold_beat`` で直列)、
+    照会を省く候補の ``building_msg_ref`` を持つ行は記憶に無いので、削除の対象も無い。
 
     Returns:
         True: 記憶に行がある状態で印を付けた (追記した、または照会で見つけた)。
-        False: 建物の行に既にこのペルソナの印があり、何も足さなかった。
+        False: 建物の行に既にこのペルソナの印があり、何も足さなかった。呼び出し側は
+        この候補を「追記を試みた」と数えない (``_transcribe_message`` の
+        ``append_attempted`` が False) — 数えると、``_ingest_round`` が次の候補の
+        ``building_msg_ref`` 照会を省き、記憶に追記済みで印だけが無い次の行を
+        もう一度足す。
     """
     ref = _building_msg_ref(m)
     if ref:
@@ -236,7 +249,9 @@ def _transcribe_message(
         ``(outcome, speaker_label, append_attempted)``。outcome は
         ``"ingested"`` (転記した) / ``"consumed_private"`` (発話はあったが
         非公開部のみでマークだけ = tool 版は件数に数える) / ``"consumed"``
-        (ルール上の消費 — マークのみ or 何もせず)。
+        (ルール上の消費 — マークのみ or 何もせず)。``append_attempted`` は
+        ``_append_and_mark`` が記憶の側を確かめて印を付けたときだけ True
+        (読み直しで既に印があり何も足さなかった候補は False)。
 
     Raises:
         転記失敗 (memory append の failed / marker の DB エラー) — 呼び出し元は
@@ -287,7 +302,7 @@ def _transcribe_message(
             history_manager=history_manager,
             check_provenance=check_provenance,
         ):
-            return ("consumed", None, True)
+            return ("consumed", None, False)
         return ("ingested", speaker, True)
 
     # System / movement / world events (role="host"). These come from
@@ -345,7 +360,7 @@ def _transcribe_message(
             history_manager=history_manager,
             check_provenance=check_provenance,
         ):
-            return ("consumed", None, True)
+            return ("consumed", None, False)
         return ("ingested", "システム", True)
 
     # Ingest user messages directly
@@ -364,7 +379,7 @@ def _transcribe_message(
             history_manager=history_manager,
             check_provenance=check_provenance,
         ):
-            return ("consumed", None, True)
+            return ("consumed", None, False)
         return ("ingested", "ユーザー", True)
 
     # 上記のどの型でもない (自分自身の発話等) — 従来どおり対象外の素通り。
@@ -459,6 +474,8 @@ def _ingest_round(
     perceived: Dict[str, int] = {}
     # 最初の転記候補だけ provenance 照会 (M8: 宙に浮いた転記は高々 1 件で、
     # 必ず次ラウンドの最初の転記候補になる — 走査をラウンド 1 回に有界化)。
+    # 「最初の転記候補」は _append_and_mark が実際に記憶の側を確かめた候補で、
+    # 読み直しで既に印があり飛ばした候補は数えない (attempted=False)。
     provenance_pending = True
     stop_seq: Optional[int] = None
     for m in candidates:

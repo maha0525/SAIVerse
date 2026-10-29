@@ -1073,13 +1073,32 @@ def get_messages_around(
     (インポート・移植) が「後」側に化けて履歴表示と食い違った。created_at
     欠落 (NULL) の anchor も正典順の先頭側 (NULL 群) の位置として扱う。
 
-    ``settled_only=True`` は、書き手が決まっていない行 (:func:`author_settled_sql`)
-    を外して前後を数える — 検索の当たりの周辺を広げてモデルに渡す想起の経路用
-    (semantic_recall・semantic_recall_groups・SAIMemoryAdapter.recall_hybrid)。
+    ``settled_only=True`` は、前後それぞれ ``before``/``after`` 件を正典順で取って
+    から、その中の書き手が決まっていない行 (:func:`author_settled_sql`) を外す —
+    外した分をさらに遠くの行で埋めない (埋めると、当たりから離れた行が隣の文脈
+    としてモデルに渡る)。検索の当たりの周辺を広げてモデルに渡す想起の経路用
+    (semantic_recall・semantic_recall_groups・SAIMemoryAdapter.recall_hybrid・
+    ``saiverse://`` の本文検索)。返り値は前後を連結した一列なので、当たりを挟んで
+    並べる呼び出し側は前と後を別々に呼ぶ (``before`` か ``after`` の片方を 0 に
+    する) — 外した結果の件数で切り分けると前後を取り違える。
     """
     if before <= 0 and after <= 0:
         return []
-    settled = f" AND {author_settled_sql()}" if settled_only else ""
+
+    def _select(where_sql: str, order: str) -> str:
+        inner = (
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
+            "rowid AS canonical_rowid "
+            f"FROM messages WHERE thread_id=? AND {where_sql} "
+            f"ORDER BY created_at {order}, rowid {order} LIMIT ?"
+        )
+        if not settled_only:
+            return inner
+        return (
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            f"FROM ({inner}) WHERE {author_settled_sql()} "
+            f"ORDER BY created_at {order}, canonical_rowid {order}"
+        )
 
     cur = conn.execute(
         "SELECT created_at, rowid FROM messages WHERE id=? AND thread_id=?",
@@ -1097,12 +1116,9 @@ def get_messages_around(
             anchor_ts, anchor_rowid, inclusive=False
         )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            f"FROM messages WHERE thread_id=? AND {before_sql}{settled} "
-            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (thread_id, *before_params, before),
+            _select(before_sql, "DESC"), (thread_id, *before_params, before),
         )
-        before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
+        before_rows = [_row_to_message(r[:7]) for r in cur.fetchall()][::-1]
 
     after_rows: List[Message] = []
     if after > 0:
@@ -1110,14 +1126,39 @@ def get_messages_around(
             anchor_ts, anchor_rowid, inclusive=False
         )
         cur = conn.execute(
-            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            f"FROM messages WHERE thread_id=? AND {after_sql}{settled} "
-            "ORDER BY created_at ASC, rowid ASC LIMIT ?",
-            (thread_id, *after_params, after),
+            _select(after_sql, "ASC"), (thread_id, *after_params, after),
         )
-        after_rows = [_row_to_message(r) for r in cur.fetchall()]
+        after_rows = [_row_to_message(r[:7]) for r in cur.fetchall()]
 
     return before_rows + after_rows
+
+
+def get_window_with_anchor(
+    conn: sqlite3.Connection,
+    anchor: Message,
+    before: int,
+    after: int,
+    *,
+    settled_only: bool = False,
+) -> List[Message]:
+    """``anchor`` を挟んだ前後の窓 ``[前..., anchor, 後...]`` を正典順で返す。
+
+    前と後を :func:`get_messages_around` で別々に取って連結する — 一列で取った
+    結果を件数や ``created_at`` で切り分けると、``settled_only`` で前の行が
+    減ったときや同じ秒の行で、後の行を当たりの前に置く。``anchor`` は
+    ``anchor.thread_id`` の行として扱う。
+    """
+    before_rows = (
+        get_messages_around(
+            conn, anchor.thread_id, anchor.id, before, 0, settled_only=settled_only,
+        ) if before > 0 else []
+    )
+    after_rows = (
+        get_messages_around(
+            conn, anchor.thread_id, anchor.id, 0, after, settled_only=settled_only,
+        ) if after > 0 else []
+    )
+    return [*before_rows, anchor, *after_rows]
 
 
 def get_messages_around_timestamp(
@@ -2781,6 +2822,30 @@ def canonical_position_key(
     Python 比較で再現する消費者 (被覆補修の止め線など) 用。
     """
     return _canonical_key_of_row(created_at, rowid)
+
+
+def canonical_position_keys(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> Dict[str, Tuple[Tuple[int, int], int]]:
+    """``message_ids`` の各行の正典キー (:func:`canonical_position_key`)。
+
+    ``Message`` は rowid を持たないので、別々に取った行の列 (想起の当たりごとの束
+    など) を正典順に並べ直す呼び出し側が使う。``created_at`` だけで並べると、
+    同じ秒の行の順が崩れる。存在しない id は含めない。
+    """
+    ids = sorted({str(mid) for mid in message_ids if mid})
+    out: Dict[str, Tuple[Tuple[int, int], int]] = {}
+    chunk_size = 500  # SQLite の既定の変数上限 999 の内側
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        ph = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id, created_at, rowid FROM messages WHERE id IN ({ph})",
+            tuple(chunk),
+        )
+        for mid, created_at, rowid in cur.fetchall():
+            out[str(mid)] = _canonical_key_of_row(created_at, rowid)
+    return out
 
 
 def clip_messages_before_position(

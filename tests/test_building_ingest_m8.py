@@ -371,6 +371,42 @@ class BuildingIngestM8Test(unittest.TestCase):
         self.assertIn(self.LISTENER, self._ingested_by(m2["message_id"]))
         self.assertEqual(self.persona.pulse_cursors[self.BID], int(m3["seq"]))
 
+    def test_candidate_skipped_on_reread_keeps_the_provenance_lookup_for_the_next(self):
+        """``_append_and_mark`` が読み直しで追記を飛ばした候補は「追記を試みた」と
+        数えない — 次の候補の ``building_msg_ref`` 照会を省くと、記憶に既にある行を
+        もう一度足す (Codex 3 巡目)。飛ばした候補の型 (assistant / host / user) は
+        ``_transcribe_message`` の 3 経路。"""
+        for role, persona_id, content in (
+            ("assistant", "speaker", "話し手の発話"),
+            ("host", None, "扉が開いた"),
+            ("user", None, "先の発言"),
+        ):
+            with self.subTest(role=role):
+                self.setUp()
+                first = self._insert(role, content, persona_id=persona_id)
+                floating = self._insert("user", "宙に浮いた転記")
+                # 二件目は記憶に追記済みで、建物の側の印だけが無い
+                self.adapter.append_persona_message({
+                    "role": "user", "content": "宙に浮いた転記",
+                    "metadata": {
+                        BUILDING_MSG_REF_KEY: f"{self.BID}:{floating['message_id']}",
+                    },
+                })
+                hm = self.persona.history_manager
+                real_history = hm.get_building_history
+
+                def history_then_marked(building_id, _real=real_history, _mid=first["message_id"]):
+                    rows = _real(building_id)
+                    # 履歴を読んだ後に、一件目へ別の処理が印を付ける
+                    real_mark_ingested(self.SessionLocal, self.BID, _mid, self.LISTENER)
+                    return rows
+
+                hm.get_building_history = history_then_marked
+                auto_ingest_building_messages(self.persona, self.manager)
+                self.assertEqual(self.adapter.appended_count("宙に浮いた転記"), 1)
+                self.assertIn(self.LISTENER, self._ingested_by(floating["message_id"]))
+                self.assertEqual(self.persona.pulse_cursors[self.BID], int(floating["seq"]))
+
     # ------------------------------------------------------------------
     # tool 版 (get_building_messages) — 共通核の配線と件数表示
     # ------------------------------------------------------------------
