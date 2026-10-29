@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sai_memory.memory.storage import get_messages_last
+from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, get_messages_last, is_system_notice
 
 
 class DummyEmbedder:
@@ -112,6 +112,11 @@ class ThreadSwitchToolTest(unittest.TestCase):
             self.assertEqual(link_entry["thread_id"], "tester:sns")
             self.assertEqual(link_entry["range_before"], 1)
             self.assertEqual(link_entry["range_after"], 0)
+            # 機構の行なので、システム通知の印 (系統名) を持つ
+            self.assertEqual(new_message.metadata.get(SYSTEM_NOTICE_KEY), "thread_switch")
+            self.assertTrue(is_system_notice(
+                {"role": new_message.role, "metadata": new_message.metadata},
+            ))
 
         updated_state = json.loads(state_file.read_text(encoding="utf-8"))
         self.assertEqual(updated_state["active_thread_id"], talk_suffix)
@@ -152,6 +157,54 @@ class ThreadSwitchToolTest(unittest.TestCase):
             self.assertTrue(messages)
             inserted = messages[-1]
             self.assertEqual(inserted.role, "system")
+
+    def test_default_note_is_a_system_notice_the_migration_recognises(self) -> None:
+        """summary を渡さないときの本文も通知の印付きで書き、移行の規則 (版 4) と系統名が揃う。"""
+        from database.system_notice_migration import (
+            THREAD_SWITCH_KIND,
+            classify_unmarked_system_message,
+        )
+
+        adapter = self.adapter_cls("tester", persona_dir=self.persona_path, resource_id="tester")
+        try:
+            adapter.append_persona_message(
+                {
+                    "role": "user",
+                    "content": "元のスレッドの発言",
+                    "timestamp": "2025-03-01T00:00:00+00:00",
+                    "embedding_chunks": 0,
+                },
+                thread_suffix="sns",
+            )
+        finally:
+            adapter.close()
+        (self.persona_path / "active_state.json").write_text(
+            json.dumps({"active_thread_id": "sns"}), encoding="utf-8",
+        )
+
+        from tool_loader import load_builtin_tool
+        module = load_builtin_tool("thread_switch")
+        from tools.context import persona_context
+
+        with persona_context("tester", self.persona_path):
+            module.switch_active_thread(target_thread="talk")
+
+        adapter = self.adapter_cls("tester", persona_dir=self.persona_path, resource_id="tester")
+        self.addCleanup(lambda: adapter.close())
+        with adapter._db_lock:  # type: ignore[attr-defined]
+            inserted = get_messages_last(adapter.conn, "tester:talk", 5)[-1]
+        self.assertEqual(inserted.role, "system")
+        self.assertEqual(inserted.content, "[thread switch] moved from tester:sns")
+        self.assertEqual(inserted.metadata.get(SYSTEM_NOTICE_KEY), module.THREAD_SWITCH_NOTICE_KIND)
+        self.assertEqual(module.THREAD_SWITCH_NOTICE_KIND, THREAD_SWITCH_KIND)
+        # 印の無い旧い行として見ても、移行の規則は同じ系統名を返す
+        unmarked = {k: v for k, v in inserted.metadata.items() if k != SYSTEM_NOTICE_KEY}
+        self.assertEqual(
+            classify_unmarked_system_message(unmarked, inserted.content), THREAD_SWITCH_KIND,
+        )
+        self.assertEqual(
+            classify_unmarked_system_message({}, inserted.content), THREAD_SWITCH_KIND,
+        )
 
     def test_switch_without_origin_messages_raises(self) -> None:
         follow_suffix = "follow-no-origin"

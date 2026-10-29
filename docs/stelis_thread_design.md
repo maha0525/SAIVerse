@@ -161,11 +161,14 @@ Stelisスレッド開始時に、親スレッドに**Stelis Anchorメッセー�
     "type": "stelis_anchor",
     "stelis_thread_id": "air_city_a:stelis_abc123",
     "stelis_label": "Coding Session",
-    "created_at": 1706012345
+    "created_at": 1706012345,
+    "__system_notice__": "stelis_anchor"
   },
   "embedding_chunks": 0
 }
 ```
+
+`__system_notice__` はシステム通知の印 (docs/intent/system_notice_delivery.md「保存」)。2026-10-30 から `lg_stelis_start_node` がこの印を付けて書く。それより前に印の無いまま書かれた行には、起動時の移行の規則の版 4 が同じ印を付ける。
 
 ### 動的展開ルール
 

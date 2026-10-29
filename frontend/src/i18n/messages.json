@@ -8624,12 +8624,8 @@
     "en": "{count} messages"
   },
   "components.SystemNoticeReviewModal.applyAll": {
-    "ja": "この {count} 件をまとめて:",
-    "en": "All {count} at once:"
-  },
-  "components.SystemNoticeReviewModal.chooseEach": {
-    "ja": "一件ずつ選ぶ ({count} 件)",
-    "en": "Choose one by one ({count})"
+    "ja": "この {count} 件すべてを:",
+    "en": "All {count} of these:"
   },
   "components.SystemNoticeReviewModal.actionKeep": {
     "ja": "そのままにする",
@@ -8676,8 +8672,8 @@
     "en": "System"
   },
   "components.SystemNoticeReviewModal.confirmApplyMany": {
-    "ja": "{count} 件のメッセージに「{action}」を適用します。対象の全文は「一件ずつ選ぶ」を開くと確かめられます。よろしいですか？",
-    "en": "Apply \"{action}\" to {count} messages? You can check the full text of each one by opening \"Choose one by one\"."
+    "ja": "この {count} 件のメッセージすべてに「{action}」を適用します。それぞれの全文は一覧で確かめられます。よろしいですか？",
+    "en": "Apply \"{action}\" to all {count} of these messages? You can check the full text of each one in the list."
   },
   "components.SystemNoticeReviewModal.rejectedChanged": {
     "ja": "{count} 件は、一覧を読み込んだ後に内容が変わっていたため適用しませんでした。一覧を読み直したので、内容を確かめてから選び直してください。",
@@ -8692,12 +8688,12 @@
     "en": "Attachments: {list}"
   },
   "components.SystemNoticeReviewModal.attachmentsNoSystem": {
-    "ja": "添付のあるメッセージは、添付ごとシステムのものになってしまうため「正式に変換」を選べません。",
-    "en": "Messages with attachments cannot be converted to official, because the attachments would also become the system's."
+    "ja": "添付があるメッセージは、正式に変換できません。",
+    "en": "Messages with attachments cannot be converted to official."
   },
   "components.SystemNoticeReviewModal.systemSplitNote": {
-    "ja": "音声入力の案内文です。「正式に変換」を選ぶと、案内文をシステム通知にし、音声はユーザーの発言として残します。",
-    "en": "This is the notice text sent with a voice input. \"Convert to official\" turns the notice text into a system notice and keeps the audio as the user's message."
+    "ja": "正式に変換すると、案内文はシステムメッセージに、音声はユーザーの発言として残ります。",
+    "en": "Converting to official keeps the notice text as a system message and the audio as the user's message."
   },
   "components.SystemNoticeReviewModal.kindImage": {
     "ja": "画像 {count} 件",
@@ -8718,6 +8714,46 @@
   "components.SystemNoticeReviewModal.kindOther": {
     "ja": "その他 {count} 件",
     "en": "{count} other file(s)"
+  },
+  "components.SystemNoticeReviewModal.personaHeader": {
+    "ja": "{name} — 確認が必要なメッセージ {count} 件",
+    "en": "{name} — {count} messages to review"
+  },
+  "components.SystemNoticeReviewModal.kindTitle": {
+    "ja": "{role}の名義",
+    "en": "Attributed to {role}"
+  },
+  "components.SystemNoticeReviewModal.bulkSubsetNote": {
+    "ja": "一部のメッセージでしか選べない操作は、そのメッセージのボタンから選べます。",
+    "en": "Actions that only some of these messages allow are available on each message's own buttons."
+  },
+  "components.SystemNoticeReviewModal.showMore": {
+    "ja": "さらに {count} 件を表示",
+    "en": "Show {count} more"
+  },
+  "components.SystemNoticeReviewModal.showLess": {
+    "ja": "最初の {count} 件だけ表示",
+    "en": "Show only the first {count}"
+  },
+  "components.SystemNoticeReviewModal.unknownTime": {
+    "ja": "日時不明",
+    "en": "Unknown time"
+  },
+  "components.SystemNoticeReviewModal.contextShow": {
+    "ja": "前後を見る",
+    "en": "Show surrounding messages"
+  },
+  "components.SystemNoticeReviewModal.contextHide": {
+    "ja": "前後を閉じる",
+    "en": "Hide surrounding messages"
+  },
+  "components.SystemNoticeReviewModal.contextLoading": {
+    "ja": "前後のメッセージを読み込み中…",
+    "en": "Loading surrounding messages…"
+  },
+  "components.SystemNoticeReviewModal.contextFailed": {
+    "ja": "前後のメッセージを読み込めませんでした。",
+    "en": "Could not load the surrounding messages."
   },
   "components.SystemNoticeReviewEntry.title": {
     "ja": "確認が必要なメッセージ",

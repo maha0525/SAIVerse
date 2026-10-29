@@ -192,7 +192,8 @@ export default function SystemAlertBanner({ backendConnected = true }: Props) {
                             {expanded && (
                                 <div className={styles.body}>
                                     <p className={styles.message}>{alert.message}</p>
-                                    {alert.details && (
+                                    {/* details が空 ({}) の警告 (確認待ちの行の警告など) には欄を描かない */}
+                                    {alert.details && Object.keys(alert.details).length > 0 && (
                                         <dl className={styles.details}>
                                             {Object.entries(alert.details).map(([key, value]) => (
                                                 <div key={key} className={styles.detailRow}>

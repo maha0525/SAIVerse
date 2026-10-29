@@ -3,7 +3,8 @@
 docs/intent/system_notice_delivery.md「追補 (2026-10-29)」の「確認待ちの行の確定
 (利用者の画面)」。起動時の移行 (database/system_notice_migration.py) が、
 システム通知か発話かを決められずに確認待ちの印を付けた行を、全ペルソナの記憶 DB
-から集めて型ごとに束ね、所有者が選んだ操作で確定する。
+から集めてペルソナごと・その中の role ごとに並べ (:func:`group_review_rows`)、所有者が
+選んだ操作で確定する。
 
 - 操作は 4 つ (:data:`ACTIONS`)。行ごとに、その行の作りで嘘にならない操作だけを
   「選べる操作」として返し (:func:`allowed_actions`)、選べない操作は書き換えずに
@@ -21,6 +22,8 @@ docs/intent/system_notice_delivery.md「追補 (2026-10-29)」の「確認待ち
   作ったハッシュと比べて、違えば
   書き換えずに ``changed`` で拒否する (画面が見た内容と違う行に所有者の選択を
   当てない)。
+- 行ごとの前後の文脈 (同じスレッドの前後 3 件) は :func:`build_review_context` が
+  読み取り専用で返す (画面の「前後を見る」)。
 - 確定した行は ``SYSTEM_NOTICE_REVIEW_KEY`` を消し、``SYSTEM_NOTICE_REVIEWED_KEY``
   に選んだ操作を書く (削除は行ごと消えるので書かない)。移行はこの鍵を持つ行を
   飛ばす。「通常のユーザー発話に変換」は、実会話 (storage.py の
@@ -98,9 +101,6 @@ USER_LINE_ROLE = "main_line"
 
 #: 確認待ちの行がある間、``manager.startup_alerts`` に置く警告の id。
 REVIEW_ALERT_ID = "system_notice_review_pending"
-
-#: 束ねる鍵に使う本文の書き出しの長さ。
-HEAD_CHARS = 40
 
 #: 発話者が付けた添付の置き場 (api/routes/chat.py の /chat/send が書く 3 つ)。
 ATTACHMENT_FIELDS: Tuple[str, ...] = ("media", "images", "documents")
@@ -388,8 +388,8 @@ class ReviewRow:
     #: 確定の操作に渡す行のハッシュ (:func:`row_version`)
     version: str = ""
     attachments: List[Dict[str, str]] = field(default_factory=list)
-    #: 束ねる鍵に使う本文の書き出し
-    head: str = ""
+    #: 記憶 DB の line_role の列の値 (列が無い古いスキーマでは None)
+    line_role: Optional[str] = None
     #: 「正式に変換」がこの行では二行分割になる (:func:`splits_on_system` で、かつ選べる)
     system_split: bool = False
 
@@ -400,6 +400,7 @@ class ReviewRow:
             "message_id": self.message_id,
             "role": self.role,
             "tags": self.tags,
+            "line_role": self.line_role,
             "content": self.content,
             "reason": self.reason,
             "created_at": self.created_at,
@@ -412,55 +413,65 @@ class ReviewRow:
 
 
 @dataclass
-class ReviewGroup:
-    group_id: str
+class ReviewKind:
+    """一人のペルソナの確認待ちの行のうち、同じ role の行の並び。
+
+    鍵は role だけ (:func:`group_review_rows`)。タグ・line_role・確認待ちの理由・
+    本文は鍵に入れない。行は記憶 DB の順 (created_at, rowid) に並ぶ。
+    """
+
+    kind_id: str
     role: str
-    head: str
-    tags: List[str]
-    reason: str
-    actions: List[str]
     rows: List[ReviewRow] = field(default_factory=list)
-    #: 束の「正式に変換」が二行分割になる (:attr:`ReviewRow.system_split`)
-    system_split: bool = False
+
+    def bulk_actions(self) -> List[str]:
+        """この並びの全部の行に一括で当てられる操作 (:data:`ACTIONS` の順)。
+
+        各行の選べる操作 (:attr:`ReviewRow.actions`) の共通部分。ただし「正式に変換」が
+        二行分割になる行 (:attr:`ReviewRow.system_split`) と行ごとの変換になる行が
+        混ざるときは、「正式に変換」を一括の操作から外す — 同じ操作の名前で結果が
+        違う行に、一括で当てない。外れた操作は行ごとの操作からは選べる。
+        """
+        common = [
+            action for action in ACTIONS
+            if all(action in row.actions for row in self.rows)
+        ]
+        if ACTION_SYSTEM in common and len({row.system_split for row in self.rows}) > 1:
+            common.remove(ACTION_SYSTEM)
+        return common
 
     def to_dict(self) -> Dict[str, Any]:
-        personas: Dict[str, Dict[str, Any]] = {}
-        for row in self.rows:
-            entry = personas.setdefault(row.persona_id, {
-                "persona_id": row.persona_id,
-                "persona_name": row.persona_name,
-                "count": 0,
-            })
-            entry["count"] += 1
+        actions = self.bulk_actions()
         return {
-            "group_id": self.group_id,
+            "kind_id": self.kind_id,
             "role": self.role,
-            "head": self.head,
-            "tags": self.tags,
-            "reason": self.reason,
-            "actions": self.actions,
-            "system_split": self.system_split,
             "count": len(self.rows),
-            "personas": list(personas.values()),
+            "actions": actions,
+            # 一括の「正式に変換」が二行分割になる (選べるのは全行が二行分割のときだけ)
+            "system_split": ACTION_SYSTEM in actions and all(r.system_split for r in self.rows),
             "rows": [r.to_dict() for r in self.rows],
         }
 
 
-def _grouping_tags(tags: Sequence[str]) -> List[str]:
-    """束ねる鍵に使うタグ (Pulse ごとに値が変わる ``pulse:`` を除く)。"""
-    return sorted({t for t in tags if not t.startswith("pulse:")})
+@dataclass
+class ReviewPersona:
+    """一人のペルソナの確認待ちの行 (role ごとの並び)。"""
 
+    persona_id: str
+    persona_name: str
+    kinds: List[ReviewKind] = field(default_factory=list)
 
-def _head(content: Any) -> str:
-    """束ねる鍵に使う本文の書き出し (剥がせる行は剥がした本文の最初の行)。"""
-    text = content if isinstance(content, str) else ""
-    body = _stripped_body(text)
-    if body is not None:
-        text = body
-    for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:HEAD_CHARS]
-    return ""
+    @property
+    def count(self) -> int:
+        return sum(len(kind.rows) for kind in self.kinds)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "persona_id": self.persona_id,
+            "persona_name": self.persona_name,
+            "count": self.count,
+            "kinds": [kind.to_dict() for kind in self.kinds],
+        }
 
 
 def _read_pending_rows(db_path: Path) -> List[Tuple[Any, Any, Any, Any, Dict[str, Any], Any, bool]]:
@@ -540,7 +551,7 @@ def collect_review_rows(
                 actions=actions,
                 version=row_version(role, content, metadata, created_at, line_role),
                 attachments=attachment_items(metadata),
-                head=_head(text),
+                line_role=str(line_role) if line_role else None,
                 system_split=(
                     ACTION_SYSTEM in actions and splits_on_system(role, content, metadata)
                 ),
@@ -548,44 +559,109 @@ def collect_review_rows(
     return rows, errors
 
 
-def group_review_rows(rows: Iterable[ReviewRow]) -> List[ReviewGroup]:
-    """同じ型 (role・本文の書き出し・タグの組・残した理由・選べる操作・「正式に変換」が
-    二行分割か) の行を束ねる。
+def group_review_rows(rows: Iterable[ReviewRow]) -> List[ReviewPersona]:
+    """確認待ちの行を、ペルソナごと・その中の role ごとに並べる。
 
-    選べる操作を鍵に含めるので、束の中の行は全部同じ操作を選べる (束ごとの一括
-    適用が、一部の行だけ拒否される形にならない)。添付の有無で「正式に変換」を
-    選べるかが変わるので、添付のある行と無い行も別の束になる。「正式に変換」が
-    二行分割になる行 (:attr:`ReviewRow.system_split`) も、行ごとの変換になる行とは
-    別の束にする (同じ操作の名前で結果が違う行を一括で当てない)。件数の多い束から
-    並べる。
+    一段目はペルソナ (名前の順、同じ名前は id の順)。二段目は、そのペルソナの中の
+    role (大文字小文字は区別しない) で、鍵は ``(persona_id, role)`` だけ。role で
+    分けるのは、role によって選べる操作が変わるため (「通常のユーザー発話に変換」は
+    role=user の行だけ — :func:`allowed_actions`)。タグ・line_role・確認待ちの理由・
+    本文は鍵に入れない — どれも所有者の選択 (行の中身を読んで決める) に関わらない。
+    画面は並びの中の行を一件ずつ全文で並べる。
+
+    同じ role の中でも行ごとに選べる操作が違うことがある (添付の有無・二行分割の
+    可否)。一括の操作はその共通部分だけ (:meth:`ReviewKind.bulk_actions`)。並びは
+    件数の多い順で、同じ件数なら role の順。
     """
-    groups: Dict[Tuple[Any, ...], ReviewGroup] = {}
+    personas: Dict[str, ReviewPersona] = {}
+    kinds: Dict[Tuple[str, str], ReviewKind] = {}
     for row in rows:
-        gtags = _grouping_tags(row.tags)
-        key = (
-            row.role.lower(), row.head, tuple(gtags), row.reason, tuple(row.actions),
-            row.system_split,
-        )
-        group = groups.get(key)
-        if group is None:
+        persona = personas.get(row.persona_id)
+        if persona is None:
+            persona = ReviewPersona(persona_id=row.persona_id, persona_name=row.persona_name)
+            personas[row.persona_id] = persona
+        role_key = row.role.lower()
+        if role_key == "model":
+            # 画面ではどちらも「ペルソナの名義」なので、一つの並びにする
+            role_key = "assistant"
+        key = (row.persona_id, role_key)
+        kind = kinds.get(key)
+        if kind is None:
             digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
-            group = ReviewGroup(
-                group_id=digest, role=row.role, head=row.head, tags=gtags,
-                reason=row.reason, actions=list(row.actions), system_split=row.system_split,
-            )
-            groups[key] = group
-        group.rows.append(row)
-    return sorted(groups.values(), key=lambda g: (-len(g.rows), g.head))
+            kind = ReviewKind(kind_id=digest, role=row.role)
+            kinds[key] = kind
+            persona.kinds.append(kind)
+        kind.rows.append(row)
+    for persona in personas.values():
+        persona.kinds.sort(key=lambda k: (-len(k.rows), k.role.lower()))
+    return sorted(
+        personas.values(), key=lambda p: (p.persona_name.casefold(), p.persona_id),
+    )
 
 
 def build_review_listing(persona_dbs: Iterable[Tuple[str, str, Path]]) -> Dict[str, Any]:
-    """画面に返す一覧 (束と、読めなかった DB)。"""
+    """画面に返す一覧 (ペルソナごと・role ごとの並びと、読めなかった DB)。
+
+    形は ``{"total", "personas": [{"persona_id", "persona_name", "count", "kinds":
+    [{"kind_id", "role", "count", "actions", "system_split", "rows": [...]}]}],
+    "errors"}``。``kinds`` の各要素は一人のペルソナの同じ role の行。その ``actions`` は
+    一括で当てられる操作 (:meth:`ReviewKind.bulk_actions`)、行の ``actions`` は
+    その行で選べる操作。
+    """
     rows, errors = collect_review_rows(persona_dbs)
-    groups = group_review_rows(rows)
+    personas = group_review_rows(rows)
     return {
         "total": len(rows),
-        "groups": [g.to_dict() for g in groups],
+        "personas": [p.to_dict() for p in personas],
         "errors": errors,
+    }
+
+
+#: 前後の文脈 (:func:`build_review_context`) で、対象の行の前と後ろにそれぞれ出す件数。
+CONTEXT_BEFORE = 3
+CONTEXT_AFTER = 3
+
+
+def build_review_context(
+    db_path: Path,
+    message_id: str,
+    *,
+    before: int = CONTEXT_BEFORE,
+    after: int = CONTEXT_AFTER,
+) -> Optional[Dict[str, Any]]:
+    """確認待ちの行の前後の文脈 (同じスレッドの、前の ``before`` 件と後ろの ``after`` 件)。
+
+    記憶 DB を読み取り専用で開き、``get_window_with_anchor`` (正典の順
+    ``(created_at, rowid)``) で前後を取る。確認待ちの行や書き手の決まっていない行も
+    外さない (``settled_only=False``) — 所有者が対象の行の中身を確かめるための表示
+    なので。何も書き換えない。
+
+    返り値は ``{"message_id", "messages": [{"message_id", "role", "content",
+    "created_at", "target"}]}`` で、``messages`` は対象の行を挟んで時間順
+    (``target`` が真なのは対象の行だけ)。行が無ければ None。
+    """
+    from sai_memory.memory.storage import get_message, get_window_with_anchor
+
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
+        anchor = get_message(conn, str(message_id))
+        if anchor is None:
+            return None
+        window = get_window_with_anchor(conn, anchor, before, after)
+    return {
+        "message_id": anchor.id,
+        "messages": [
+            {
+                "message_id": msg.id,
+                "role": str(msg.role or ""),
+                "content": msg.content if isinstance(msg.content, str) else "",
+                "created_at": (
+                    int(msg.created_at) if isinstance(msg.created_at, (int, float)) else None
+                ),
+                "target": msg.id == anchor.id,
+            }
+            for msg in window
+        ],
     }
 
 

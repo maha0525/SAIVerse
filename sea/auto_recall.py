@@ -368,7 +368,36 @@ _QUERY_ROLES = frozenset({"user", "assistant"})
 #: (sea/runtime.py の ``_enrich_history_with_attachments``)。以前は発言の本文の
 #: 末尾に連結され、発言の言葉を読む側は足す前の本文を読んでいた
 #: (saiverse.media_utils.said_content) — その扱いを保つ。
-_NON_CONVERSATIONAL_NOTICES = frozenset({"attachment_note"})
+#:
+#: 残りは、印の無い role=system のまま書かれていて「入力の側」に数えられなかった
+#: 機構の行に、書き手を直したとき・起動時の移行 (database/system_notice_migration.py
+#: の規則の版 4) が系統の印を付けたもの。印が付いても検索の元に入れない — 以前の
+#: 扱いを保つ。
+#:
+#: - ``thread_switch``: builtin_data/tools/thread_switch.py の ``switch_active_thread``
+#:   が移動先のスレッドに書く行
+#: - ``chatgpt_import``: scripts/import_chatgpt_conversations.py が取り込んだ会話の
+#:   先頭に書く見出しの行
+#: - ``stelis_anchor``: sea/runtime_nodes.py の ``lg_stelis_start_node`` が親の
+#:   スレッドに書く行。読み出しで Stelis のスレッドのあらすじと末尾の行を本文に
+#:   組み立てる (sai_memory.memory.storage.compose_message_content) ので、検索の元に
+#:   入れると別のスレッドの中身が種になる
+#: - ``city_dispatch_failure`` / ``since_user_conversation_summary``: 削除済みの
+#:   書き手が書いた行 (移行だけが印を付ける)
+#: - ``perception`` / ``emotion_summary``: 規則の版 3 が印を付けた、知覚の旧世代の
+#:   行と、感情パラメータの変動の知らせ。今の世代の知覚 (送る直前に差し込む
+#:   ブロック) も ``CONSUMED_PERCEPTION_KEY`` で会話本文から外している — ユーザーが
+#:   言った言葉ではないので、旧世代もそれに揃える
+_NON_CONVERSATIONAL_NOTICES = frozenset({
+    "attachment_note",
+    "perception",
+    "emotion_summary",
+    "thread_switch",
+    "chatgpt_import",
+    "stelis_anchor",
+    "city_dispatch_failure",
+    "since_user_conversation_summary",
+})
 
 
 def _is_user_side(msg: Dict[str, Any]) -> bool:

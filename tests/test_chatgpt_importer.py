@@ -110,6 +110,87 @@ class ChatGPTImporterTest(unittest.TestCase):
         fallback = replace(record, conversation_id=None, identifier="alt-id")
         self.assertEqual(resolve_thread_suffix(fallback, None), "alt-id")
 
+    def test_import_writes_the_header_as_a_system_notice(self) -> None:
+        """取り込みの見出しは role=system とシステム通知の印 (系統名) で書く。"""
+        import argparse
+        from unittest.mock import patch
+
+        import scripts.import_chatgpt_conversations as importer
+        from database.system_notice_migration import (
+            CHATGPT_IMPORT_KIND,
+            classify_unmarked_system_message,
+        )
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY, is_system_notice
+
+        written = []
+
+        class _FakeAdapter:
+            def __init__(self, persona_id: str) -> None:
+                self.persona_id = persona_id
+
+            def is_ready(self) -> bool:
+                return True
+
+            def append_persona_message(self, payload, *, thread_suffix=None):
+                written.append((thread_suffix, payload))
+                return "id"
+
+            def backfill_missing_message_embeddings(self):
+                return {"embedded": 0, "total_missing": 0}
+
+            def reembed_stale_messages(self):
+                return {"embedded": 0, "total": 0}
+
+            def close(self) -> None:
+                pass
+
+        args = argparse.Namespace(
+            select=None, select_all=True, preview=40, roles="user,assistant",
+            thread_suffix=None, no_header=False, dry_run=False, persona="p1",
+            output="json",
+        )
+        with patch.object(importer, "SAIMemoryAdapter", _FakeAdapter):
+            importer.handle_import(ChatGPTExport(self.sample_path), args)
+
+        self.assertEqual(len(written), 3)
+        _suffix, header = written[0]
+        self.assertEqual(header["role"], "system")
+        self.assertEqual(header["metadata"][SYSTEM_NOTICE_KEY], importer.CHATGPT_IMPORT_NOTICE_KIND)
+        self.assertTrue(is_system_notice(header))
+        self.assertEqual(
+            header["content"],
+            '[Imported ChatGPT conversation "Sample Conversation" (chatgpt-uuid-1234) '
+            "created 2025-02-19T21:20:00Z]",
+        )
+        # 発言の行には通知の印を付けない
+        for _suffix, payload in written[1:]:
+            self.assertNotEqual(payload["role"], "system")
+            self.assertNotIn(SYSTEM_NOTICE_KEY, payload.get("metadata") or {})
+        # 書き手と、印の無い旧い見出しの行を見分ける移行の規則 (版 4) が同じ形と系統名を使う
+        self.assertEqual(importer.CHATGPT_IMPORT_NOTICE_KIND, CHATGPT_IMPORT_KIND)
+        self.assertEqual(
+            classify_unmarked_system_message({"tags": ["conversation"]}, header["content"]),
+            CHATGPT_IMPORT_KIND,
+        )
+
+    def test_header_with_title_as_identifier_is_still_recognised(self) -> None:
+        """会話の id が無く題が id に入る形 (括弧や引用符を含む題) も、移行の規則が同じ形と見る。"""
+        from database.system_notice_migration import (
+            CHATGPT_IMPORT_KIND,
+            classify_unmarked_system_message,
+        )
+        from scripts.import_chatgpt_conversations import build_header_payload
+
+        record = ChatGPTExport(self.sample_path).conversations[0]
+        odd = replace(
+            record, title='題 "引用" (括弧)\n二行目', conversation_id=None,
+            identifier='題 "引用" (括弧)\n二行目',
+        )
+        header = build_header_payload(odd)
+        self.assertEqual(
+            classify_unmarked_system_message({}, header["content"]), CHATGPT_IMPORT_KIND,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

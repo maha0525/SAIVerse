@@ -196,5 +196,39 @@ const exampleAlerts = () => [
     assert.equal(h.requests[before].url, '/api/system/alerts');
     modal.props.onClose();
     assert.equal(all(h.render(), node => node.type === ReviewModal).length, 0);
-    console.log('System alerts: refetch on reconnect, expansion, cancel, failure, retry, busy state, unrelated alerts, and review entry passed.');
+
+    // An expanded alert whose details are empty ({}) or missing draws no details
+    // box; an alert with details draws one row per key.
+    h = harness([
+        { id: 'empty', level: 'warning', title: 'Empty', message: 'm', details: {} },
+        { id: 'none', level: 'info', title: 'None', message: 'm' },
+        { id: 'full', level: 'critical', title: 'Full', message: 'm', details: { kind: 'check_failed', path: 'p' } },
+    ]);
+    tree = await h.mount();
+    headers(tree)[0].props.onClick();
+    headers(h.render())[1].props.onClick();
+    tree = h.render();
+    assert.deepEqual(headers(tree).map(node => node.props['aria-expanded']), [true, true, true]);
+    const detailBoxes = all(tree, node => node.type === 'dl');
+    assert.equal(detailBoxes.length, 1);
+    assert.equal(all(detailBoxes[0], node => node.type === 'dt').length, 2);
+
+    // Light is the default look; dark mode overrides it under [data-theme="dark"]
+    // (app/layout.tsx sets data-theme on <html>). Each level keeps its own
+    // left-edge colour in both themes, distinct from the other levels.
+    const css = fs.readFileSync(path.resolve(__dirname, '../src/components/SystemAlertBanner.module.css'), 'utf8');
+    const leftEdge = selector => {
+        const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const block = css.match(new RegExp(`(?:^|\\n)${escaped} \\{([^}]*)\\}`));
+        assert.ok(block, `missing rule ${selector}`);
+        return block[1].match(/border-left-color:\s*([^;]+);/)[1].trim();
+    };
+    for (const prefix of ['', ':global([data-theme="dark"]) ']) {
+        const edges = ['critical', 'warning', 'info'].map(level => leftEdge(`${prefix}.${level}`));
+        assert.equal(new Set(edges).size, 3, `${prefix || 'light'}: ${edges}`);
+    }
+    const lightAlert = css.match(/(?:^|\n)\.alert \{([^}]*)\}/)[1];
+    assert.match(lightAlert, /background:\s*#ffffff;/);
+    assert.ok(/:global\(\[data-theme="dark"\]\) \.alert \{[^}]*background:\s*#2a2a2a;/.test(css));
+    console.log('System alerts: refetch on reconnect, expansion, cancel, failure, retry, busy state, unrelated alerts, review entry, empty details, and light/dark level colours passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -11,28 +11,35 @@
     pointer-events: none;
 }
 
+/* ライトモードが既定。ダークモードは末尾の [data-theme="dark"] の節で上書きする
+   (app/layout.tsx が <html> の data-theme に light / dark を置く)。
+   critical / warning / info の区別は、左の帯・背景・アイコンの色で両方のテーマに残す。 */
 .alert {
     pointer-events: auto;
-    background: #2a2a2a;
+    background: #ffffff;
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12);
     overflow: hidden;
-    border-left: 6px solid #888;
+    border: 1px solid #e2e8f0;
+    border-left: 6px solid #94a3b8;
 }
 
 .critical {
-    background: #3a1818;
-    border-left-color: #ff4d4d;
+    background: #fef2f2;
+    border-color: #fecaca;
+    border-left-color: #dc2626;
 }
 
 .warning {
-    background: #3a2e18;
-    border-left-color: #ffaa33;
+    background: #fffbeb;
+    border-color: #fde68a;
+    border-left-color: #d97706;
 }
 
 .info {
-    background: #18283a;
-    border-left-color: #4d9eff;
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    border-left-color: #2563eb;
 }
 
 .headerRow {
@@ -49,7 +56,7 @@
     padding: 12px 16px;
     background: transparent;
     border: none;
-    color: #fff;
+    color: #1e293b;
     font-size: 15px;
     font-weight: 600;
     cursor: pointer;
@@ -57,7 +64,7 @@
 }
 
 .header:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(15, 23, 42, 0.04);
 }
 
 /* 取り消しの効く操作 (ファイルを脇へ移すなど)。破壊的でないことを色で分ける。 */
@@ -65,9 +72,9 @@
     margin: 8px 12px 8px 0;
     padding: 6px 14px;
     border-radius: 4px;
-    background: transparent;
-    color: #ddd;
-    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -76,8 +83,8 @@
 }
 
 .secondaryButton:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.6);
+    background: #f1f5f9;
+    border-color: #94a3b8;
 }
 
 .secondaryButton:disabled {
@@ -94,15 +101,15 @@
     border: none;
     border-radius: 4px;
     background: transparent;
-    color: #bbb;
+    color: #64748b;
     cursor: pointer;
     display: flex;
     align-items: center;
 }
 
 .closeButton:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.12);
-    color: #fff;
+    background: rgba(15, 23, 42, 0.06);
+    color: #1e293b;
 }
 
 .closeButton:disabled {
@@ -115,15 +122,15 @@
 }
 
 .critical .icon {
-    color: #ff6666;
+    color: #dc2626;
 }
 
 .warning .icon {
-    color: #ffbb55;
+    color: #d97706;
 }
 
 .info .icon {
-    color: #66b3ff;
+    color: #2563eb;
 }
 
 .title {
@@ -139,19 +146,20 @@
 
 .body {
     padding: 0 16px 14px 40px;
-    color: #ddd;
+    color: #475569;
     font-size: 14px;
     line-height: 1.6;
 }
 
 .message {
-    margin: 0 0 12px 0;
+    margin: 0;
 }
 
 .details {
-    margin: 0;
+    margin: 12px 0 0 0;
     padding: 10px 12px;
-    background: rgba(0, 0, 0, 0.25);
+    background: rgba(15, 23, 42, 0.04);
+    border: 1px solid #e2e8f0;
     border-radius: 4px;
     font-size: 13px;
 }
@@ -170,7 +178,7 @@
 .detailKey {
     margin: 0;
     font-weight: 600;
-    color: #aaa;
+    color: #64748b;
     font-size: 12px;
 }
 
@@ -179,5 +187,86 @@
     font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     word-break: break-all;
     overflow-wrap: anywhere;
+    color: #1e293b;
+}
+
+/* ---- dark mode ---- */
+
+:global([data-theme="dark"]) .alert {
+    background: #2a2a2a;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    border: none;
+    border-left: 6px solid #888;
+}
+
+:global([data-theme="dark"]) .critical {
+    background: #3a1818;
+    border-left-color: #ff4d4d;
+}
+
+:global([data-theme="dark"]) .warning {
+    background: #3a2e18;
+    border-left-color: #ffaa33;
+}
+
+:global([data-theme="dark"]) .info {
+    background: #18283a;
+    border-left-color: #4d9eff;
+}
+
+:global([data-theme="dark"]) .header {
+    color: #fff;
+}
+
+:global([data-theme="dark"]) .header:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+:global([data-theme="dark"]) .secondaryButton {
+    background: transparent;
+    color: #ddd;
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+:global([data-theme="dark"]) .secondaryButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.6);
+}
+
+:global([data-theme="dark"]) .closeButton {
+    color: #bbb;
+}
+
+:global([data-theme="dark"]) .closeButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+:global([data-theme="dark"]) .critical .icon {
+    color: #ff6666;
+}
+
+:global([data-theme="dark"]) .warning .icon {
+    color: #ffbb55;
+}
+
+:global([data-theme="dark"]) .info .icon {
+    color: #66b3ff;
+}
+
+:global([data-theme="dark"]) .body {
+    color: #ddd;
+}
+
+:global([data-theme="dark"]) .details {
+    background: rgba(0, 0, 0, 0.25);
+    border-color: transparent;
+}
+
+:global([data-theme="dark"]) .detailKey {
+    color: #aaa;
+}
+
+:global([data-theme="dark"]) .detailValue {
     color: #fff;
 }
