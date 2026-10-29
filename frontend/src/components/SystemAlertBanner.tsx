@@ -136,12 +136,13 @@ export default function SystemAlertBanner() {
                                         {busyId === alert.id ? uiText("components.SystemAlertBanner.text007") : uiText("components.SystemAlertBanner.text008")}
                                     </button>
                                 )}
-                                <button data-i18n="components.SystemAlertBanner.dismiss"
+                                <button data-i18n="components.SystemAlertBanner.dismiss components.SystemAlertBanner.dismissLabel"
                                     type="button"
                                     className={styles.closeButton}
                                     onClick={() => dismiss(alert.id)}
+                                    disabled={busyId === alert.id}
                                     title={uiText("components.SystemAlertBanner.dismiss")}
-                                    aria-label={uiText("components.SystemAlertBanner.dismiss")}
+                                    aria-label={uiText("components.SystemAlertBanner.dismissLabel")}
                                 >
                                     <X size={16} />
                                 </button>

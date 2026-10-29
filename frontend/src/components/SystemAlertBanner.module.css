@@ -89,7 +89,7 @@
 .closeButton {
     flex-shrink: 0;
     align-self: center;
-    margin-right: 10px;
+    margin-right: 12px;
     padding: 6px;
     border: none;
     border-radius: 4px;
@@ -100,9 +100,14 @@
     align-items: center;
 }
 
-.closeButton:hover {
+.closeButton:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.12);
     color: #fff;
+}
+
+.closeButton:disabled {
+    opacity: 0.55;
+    cursor: default;
 }
 
 .icon {
