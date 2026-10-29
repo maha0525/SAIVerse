@@ -1413,4 +1413,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.26 -> 0.3.27 (system notice data migration runs at startup).",
     ),
+    # ---- v0.3.28 ----
+    # システム通知の追補。取りこぼした旧形式の変換は、起動時の移行
+    # (database/system_notice_migration.py) が規則の版を上げて走査し直して行い、
+    # 決められなかった行は所有者が確認の画面で確定するので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_28",
+        scope="city",
+        from_version="0.3.27",
+        to_version="0.3.28",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.27 -> 0.3.28 (system notice migration rescans at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_28",
+        scope="ai",
+        from_version="0.3.27",
+        to_version="0.3.28",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.27 -> 0.3.28 (system notice migration rescans at startup).",
+    ),
 ]
