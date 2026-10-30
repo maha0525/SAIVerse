@@ -82,7 +82,8 @@ def test_unreadable_legacy_log_does_not_block_db_writes_or_chat(world):
     assert response.json().keys() == {"history", "has_more"}
     assert [m["content"] for m in response.json()["history"]] == [row["content"] for row in rows]
     assert log.read_bytes() == b"{broken legacy log"
-    assert unrelated in client.get("/api/system/alerts").json()["alerts"]
+    # 一覧は各お知らせに、利用者がバナーで閉じたか (dismissed) を付けて返す
+    assert {**unrelated, "dismissed": False} in client.get("/api/system/alerts").json()["alerts"]
 
 
 def test_archiving_unreadable_log_preserves_db_and_other_alerts(world):
@@ -93,7 +94,7 @@ def test_archiving_unreadable_log_preserves_db_and_other_alerts(world):
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert manager.get_building_history("room") == before
-    assert client.get("/api/system/alerts").json() == {"alerts": [unrelated]}
+    assert client.get("/api/system/alerts").json() == {"alerts": [{**unrelated, "dismissed": False}]}
     assert not log.exists()
     assert next(log.parent.glob("log.json.unreadable_*")).read_bytes() == b"{broken legacy log"
     manager._init_building_histories()
