@@ -1,6 +1,16 @@
 
 import { apiFetch } from '@/i18n/api';
-import { MemoryImportProgress, MemoryImportRequest, NativePreviewData, PreviewData, ThreadSummary } from '@/components/memory/types';
+import {
+  ClaudeImportRequest,
+  ClaudeMemoryImportResult,
+  ClaudePreviewData,
+  ClaudePreviewErrorDetail,
+  MemoryImportProgress,
+  MemoryImportRequest,
+  NativePreviewData,
+  PreviewData,
+  ThreadSummary,
+} from '@/components/memory/types';
 
 async function parseJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -54,7 +64,41 @@ export async function importNative(personaId: string, file: File, skipEmbedding:
   return { ok: res.ok, data: await parseJson(res) };
 }
 
-export async function getImportStatus(personaId: string, type: 'extension' | 'official' | 'native'): Promise<MemoryImportProgress> {
+export async function previewClaudeImport(
+  personaId: string,
+  file: File,
+  expectedCategory?: string,
+): Promise<{ ok: boolean; data: ClaudePreviewData | { detail?: string | ClaudePreviewErrorDetail } }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (expectedCategory) formData.append('expected_category', expectedCategory);
+  const res = await apiFetch(`/api/people/${personaId}/import/claude/preview`, { method: 'POST', body: formData });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function importClaude(personaId: string, request: ClaudeImportRequest): Promise<{ ok: boolean; data: { detail?: string } }> {
+  const res = await apiFetch(`/api/people/${personaId}/import/claude`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function importClaudeMemories(
+  personaId: string,
+  cacheKey: string,
+  itemIds: string[],
+): Promise<{ ok: boolean; data: Partial<ClaudeMemoryImportResult> & { detail?: string } }> {
+  const res = await apiFetch(`/api/people/${personaId}/import/claude/memories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cache_key: cacheKey, item_ids: itemIds }),
+  });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function getImportStatus(personaId: string, type: 'extension' | 'official' | 'native' | 'claude'): Promise<MemoryImportProgress> {
   const res = await apiFetch(`/api/people/${personaId}/import/${type}/status`);
   return parseJson<MemoryImportProgress>(res);
 }

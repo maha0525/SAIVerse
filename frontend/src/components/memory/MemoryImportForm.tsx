@@ -4,12 +4,14 @@ import { useLocale } from '@/i18n/useLocale';
 import { AlertCircle, CheckSquare, Download, Loader2, MessageSquare, Square } from 'lucide-react';
 import React, { useState, useRef, useCallback } from 'react';
 
+import ClaudeImportPanel from './ClaudeImportPanel';
 import styles from './MemoryImport.module.css';
 import { formatImportDate, formatThreadDateRange } from './formatters';
 import { ImportSubTab, MemoryImportStep, NativePreviewData, PreviewData, ThreadSummary } from './types';
 
 interface Props {
   personaId: string;
+  onImportComplete?: () => void;
   activeSubTab: ImportSubTab;
   step: MemoryImportStep;
   isLoading: boolean;
@@ -61,6 +63,11 @@ export function MemoryImportForm(props: Props) {
   }, []);
 
   const mainContent = () => {
+    // Claude 公式エクスポートはカテゴリ別ドロップ枠と Memopedia 転記を持つため、
+    // 進行状態ごと自前で管理する独立パネルに任せる。
+    if (props.activeSubTab === 'claude') {
+      return <ClaudeImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} />;
+    }
     if (props.step === 'thread-select') {
       return <div className={styles.threadSelectContainer}>
         <div className={styles.threadSelectHeader}><MessageSquare size={24} /><h3 data-i18n="components.memory.MemoryImportForm.text001">{uiText("components.memory.MemoryImportForm.text001")}</h3></div>
@@ -106,6 +113,7 @@ export function MemoryImportForm(props: Props) {
     <>
       <div className={styles.subTabs}>
         <button data-i18n="components.memory.MemoryImportForm.text036" className={`${styles.subTab} ${props.activeSubTab === 'official' ? styles.active : ''}`} onClick={() => props.onTabChange('official')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.text036")}</button>
+        <button data-i18n="components.memory.MemoryImportForm.label003" className={`${styles.subTab} ${props.activeSubTab === 'claude' ? styles.active : ''}`} onClick={() => props.onTabChange('claude')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.label003")}</button>
         <button data-i18n="components.memory.MemoryImportForm.text037" className={`${styles.subTab} ${props.activeSubTab === 'extension' ? styles.active : ''}`} onClick={() => props.onTabChange('extension')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.text037")}</button>
         <button className={`${styles.subTab} ${props.activeSubTab === 'native' ? styles.active : ''}`} onClick={() => props.onTabChange('native')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.label002")}</button>
       </div>

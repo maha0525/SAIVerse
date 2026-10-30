@@ -1,4 +1,4 @@
-export type ImportSubTab = 'official' | 'extension' | 'native';
+export type ImportSubTab = 'official' | 'claude' | 'extension' | 'native';
 
 export type MemoryImportStep = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
 
@@ -34,6 +34,8 @@ export interface ConversationSummary {
   update_time: string | null;
   message_count: number;
   preview: string | null;
+  /** Claude projects のみ: プロジェクト指示 (prompt_template) を持つか */
+  has_instructions?: boolean | null;
 }
 
 export interface PreviewData {
@@ -56,6 +58,48 @@ export interface NativePreviewData {
   thread_count: number;
   total_messages: number;
   threads: NativePreviewThread[];
+}
+
+/** Claude 公式エクスポートのカテゴリ (インポート対象) */
+export type ClaudeCategory = 'conversations' | 'claude_code' | 'projects' | 'memories';
+
+export interface ClaudeMemoryItemSummary {
+  idx: number;
+  id: string;
+  kind: 'conversations_memory' | 'project_memory' | 'memory_file' | string;
+  title: string;
+  preview: string | null;
+  char_count: number;
+}
+
+export interface ClaudePreviewData {
+  category: ClaudeCategory | string;
+  conversations: ConversationSummary[];
+  memory_items: ClaudeMemoryItemSummary[];
+  cache_key: string;
+  total_count: number;
+}
+
+/** preview が 400 で返す構造化エラー (カテゴリ違い・対象外カテゴリの案内) */
+export interface ClaudePreviewErrorDetail {
+  code?: string;
+  detected_category?: string | null;
+  expected_category?: string | null;
+}
+
+export interface ClaudeImportRequest {
+  cache_key: string;
+  conversation_ids: string[];
+  skip_embedding: boolean;
+  append_instructions_to_system_prompt?: boolean;
+}
+
+export interface ClaudeMemoryImportResult {
+  success: boolean;
+  created: number;
+  skipped: number;
+  trunk_title: string;
+  message: string;
 }
 
 export interface MemoryImportRequest {
