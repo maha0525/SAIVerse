@@ -105,5 +105,11 @@ function all(tree, predicate) {
     assert.equal(h.requests.length, before + 1);
     modal.props.onClose();
     assert.equal(h.render(), null);
-    console.log('Notice review entry: hidden without pending rows, shown with them, opens the modal, and follows the alert.');
+
+    // Closing the alert in the top banner keeps the entry: the server marks the
+    // alert as dismissed instead of removing it, so this is the way back in.
+    const closed = harness([{ ...review, dismissed: true }]);
+    const closedTree = await closed.mount();
+    assert.equal(all(closedTree, node => node.type === 'div' && node.props.className === 'card').length, 1);
+    console.log('Notice review entry: hidden without pending rows, shown with them, opens the modal, and follows the alert (also after the banner closed it).');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -22,7 +22,7 @@ function harness(initialAlerts) {
     const states = [], effects = [], requests = [], notices = [];
     const effectDeps = [], pendingEffects = [];
     let cursor = 0, effectCursor = 0, mounted = false, confirmed = false, backendDown = false;
-    let serverAlerts = initialAlerts, postResponse = { ok: true }, postGate;
+    let serverAlerts = initialAlerts, postResponse = { ok: true }, postGate, dismissFails = false;
     const hooks = {
         useState(initial) {
             const index = cursor++;
@@ -55,6 +55,13 @@ function harness(initialAlerts) {
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, options) => {
             requests.push({ url, method: options?.method || 'GET' });
+            const dismissed = /^\/api\/system\/alerts\/([^/]+)\/dismiss$/.exec(url);
+            if (options?.method === 'POST' && dismissed) {
+                if (dismissFails) throw new Error('backend not reachable');
+                const id = decodeURIComponent(dismissed[1]);
+                serverAlerts = serverAlerts.map(a => (a.id === id ? { ...a, dismissed: true } : a));
+                return { ok: true, json: async () => ({ dismissed: true }) };
+            }
             if (options?.method === 'POST') {
                 if (postGate) await postGate;
                 if (postResponse instanceof Error) throw postResponse;
@@ -98,6 +105,9 @@ function harness(initialAlerts) {
         down(value) { backendDown = value; },
         confirm(value) { confirmed = value; },
         post(response, gate) { postResponse = response; postGate = gate; },
+        failDismiss(value) { dismissFails = value; },
+        server() { return serverAlerts.filter(a => !a.dismissed).map(a => a.id); },
+        serverAlerts() { return serverAlerts; },
     };
 }
 
@@ -108,6 +118,8 @@ function all(tree, predicate) {
 }
 const headers = tree => all(tree, node => node.type === 'button' && 'aria-expanded' in node.props);
 const archiveButton = tree => all(tree, node => node.type === 'button' && node.props.className === 'secondaryButton')[0];
+const closeButtons = tree => all(tree, node => node.type === 'button'
+    && String(node.props['data-i18n'] || '').includes('dismissLabel'));
 const exampleAlerts = () => [
     { id: 'critical', level: 'critical', title: 'Critical', message: 'Keep visible', details: { kind: 'check_failed' } },
     { id: 'legacy', level: 'warning', title: 'Old log', message: 'Unreadable', details: { building_id: 'room / 1', kind: 'unreadable' } },
@@ -133,6 +145,31 @@ const exampleAlerts = () => [
     // Staying connected does not fetch again
     await h.rerender({ backendConnected: true });
     assert.equal(h.requests.filter(r => r.url === '/api/system/alerts').length, 2);
+
+    // Closing an alert tells the server, so reopening the page does not show it
+    // again during this startup (2026-10-30: the migration-done alert came back on
+    // every page reload while it was only hidden inside the page).
+    h = harness(exampleAlerts());
+    let closing = await h.mount();
+    closeButtons(closing)[2].props.onClick();
+    await new Promise(setImmediate);
+    assert.deepEqual(h.requests.filter(r => r.method === 'POST').map(r => r.url),
+        ['/api/system/alerts/information/dismiss']);
+    assert.equal(headers(h.render()).length, 2);
+    assert.deepEqual(h.server(), ['critical', 'legacy']);
+    // The server keeps the alert (other screens follow it) but marks it closed; a
+    // page opened afterwards does not show it
+    assert.equal(h.serverAlerts().length, 3);
+    const reopened = harness(h.serverAlerts());
+    assert.equal(headers(await reopened.mount()).length, 2);
+    // If the server cannot be told, the alert still closes on this page
+    h = harness(exampleAlerts());
+    h.failDismiss(true);
+    closing = await h.mount();
+    closeButtons(closing)[0].props.onClick();
+    await new Promise(setImmediate);
+    assert.equal(headers(h.render()).length, 2);
+    assert.deepEqual(h.server(), ['critical', 'legacy', 'information']);
 
     h = harness(exampleAlerts());
     let tree = await h.mount();
@@ -230,5 +267,5 @@ const exampleAlerts = () => [
     const lightAlert = css.match(/(?:^|\n)\.alert \{([^}]*)\}/)[1];
     assert.match(lightAlert, /background:\s*#ffffff;/);
     assert.ok(/:global\(\[data-theme="dark"\]\) \.alert \{[^}]*background:\s*#2a2a2a;/.test(css));
-    console.log('System alerts: refetch on reconnect, expansion, cancel, failure, retry, busy state, unrelated alerts, review entry, empty details, and light/dark level colours passed.');
+    console.log('System alerts: refetch on reconnect, close remembered by the server, expansion, cancel, failure, retry, busy state, unrelated alerts, review entry, empty details, and light/dark level colours passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

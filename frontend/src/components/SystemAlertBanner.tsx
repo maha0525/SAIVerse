@@ -23,6 +23,8 @@ interface SystemAlert {
     title: string;
     message: string;
     details?: Record<string, unknown>;
+    /** 利用者がこの起動のあいだに閉じた (サーバーが覚えている) */
+    dismissed?: boolean;
 }
 
 interface AlertResponse {
@@ -44,9 +46,11 @@ export default function SystemAlertBanner({ backendConnected = true }: Props) {
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
     const [busyId, setBusyId] = useState<string | null>(null);
     // 閉じたお知らせの id。バナーは画面最上部のヘッダー (地図・人々などのボタン列) に
-    // 覆い被さるので、読み終えたお知らせをユーザーが退かせる手段が要る。閉じるのは
-    // この画面を開いている間だけで、次の読み込みでまだ残っていれば再び表示される
-    // (知らせ続ける義務はサーバー側の警告の寿命が持つ)。
+    // 覆い被さるので、読み終えたお知らせをユーザーが退かせる手段が要る。閉じたら
+    // サーバーにも伝え (POST /api/system/alerts/{id}/dismiss)、サーバーは一覧の
+    // お知らせに dismissed を付けて返す。画面の中だけで覚えると、ブラウザを開き直す
+    // たびに同じお知らせがまた出る。お知らせそのものは残る (設定の確認の画面の入口が
+    // それを見ている)。次の起動で同じ状態がまだあれば、起動時の処理がまた作る。
     const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
     const [reviewOpen, setReviewOpen] = useState(false);
 
@@ -107,7 +111,7 @@ export default function SystemAlertBanner({ backendConnected = true }: Props) {
         }
     };
 
-    const visibleAlerts = alerts.filter((a) => !dismissedIds.has(a.id));
+    const visibleAlerts = alerts.filter((a) => !a.dismissed && !dismissedIds.has(a.id));
     const reviewModal = reviewOpen ? (
         <SystemNoticeReviewModal
             onClose={() => setReviewOpen(false)}
@@ -118,6 +122,9 @@ export default function SystemAlertBanner({ backendConnected = true }: Props) {
 
     const dismiss = (id: string) => {
         setDismissedIds((prev) => new Set(prev).add(id));
+        // 伝えられなくても、この画面では閉じたままにする (開き直したときにまた出るだけ)
+        apiFetch(`/api/system/alerts/${encodeURIComponent(id)}/dismiss`, { method: "POST" })
+            .catch(() => undefined);
     };
 
     const toggle = (id: string) => {
