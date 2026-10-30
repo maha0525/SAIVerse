@@ -75,13 +75,48 @@ def _transcribe_memories_to_memopedia(memopedia, items) -> tuple[int, int]:
         memopedia.create_page(
             parent_id=trunk.id,
             title=item.title,
-            summary=item.to_summary_dict(preview_chars=100)["preview"] or "",
+            summary=item.summary or item.to_summary_dict(preview_chars=100)["preview"] or "",
             content=item.content,
             edit_source="claude_import",
         )
         existing_titles.add(item.title)
         created += 1
     return created, skipped
+
+
+def _add_core_memories(conn, items) -> tuple[list[tuple[int, str]], int]:
+    """全体記憶の見出しをコア記憶として追加する。
+
+    ユーザーが選んで入れるので、手動追加と同じ確認済み (confirmed=1) で書く。
+    生存中のコア記憶に同じ本文があればスキップする (再取り込みで二重にならない)。
+    容量目安を超えても切り詰めない (コア記憶の原則: 整理はペルソナに委ね、
+    システムは知らせるだけ)。((core_id, 本文) の一覧, スキップ数) を返す。
+    呼び出し側が adapter の錠前を持つこと。
+    """
+    from sai_memory.core_memory import add_core_memory, list_core_memories
+
+    existing = {m.content for m in list_core_memories(conn)}
+    added: list[tuple[int, str]] = []
+    skipped = 0
+    for item in items:
+        if item.content in existing:
+            skipped += 1
+            continue
+        core_id = add_core_memory(conn, item.content, confirmed=1)
+        existing.add(item.content)
+        added.append((core_id, item.content))
+    return added, skipped
+
+
+def _core_memory_import_notice(added: list[tuple[int, str]]) -> str:
+    """ペルソナへの知覚通知の本文。ユーザーの訂正通知と同じく内容まで見せる。"""
+    lines = [
+        f"ユーザーが Claude からの引っ越しで、あなたのコア記憶に {len(added)} 件を追加しました。",
+        "追加された内容:",
+    ]
+    for core_id, content in added:
+        lines.append(f"- core:{core_id}: {content}")
+    return "\n".join(lines)
 
 
 def _resolve_records(export_file, conversation_ids: list) -> list:
@@ -405,10 +440,13 @@ def import_claude_memories(
     request: ClaudeMemoryImportRequest,
     manager = Depends(get_manager),
 ):
-    """memories カテゴリの選択アイテムを Memopedia に転記する (同期)。
+    """memories カテゴリの選択アイテムを転記する (同期)。
 
-    転記先は「Claude引っ越し」幹ページ (root_terms の下、無ければ作る)。
-    同名ページが既にその幹の下にある場合は二重転記を避けてスキップする。
+    - 全体記憶の見出し (kind=core_memory) → コア記憶。追加した事実はユーザーの
+      訂正と同じく知覚バッファ経由でペルソナへ通知する (本人の記憶を黙って
+      書き足さない — memory_architecture_v2.md §5.1)。
+    - それ以外 → Memopedia「Claude引っ越し」幹 (root_terms の下、無ければ作る)。
+      同名ページが既にその幹の下にある場合は二重転記を避けてスキップする。
     """
     ensure_persona_exists(persona_id, manager)
 
@@ -429,23 +467,60 @@ def import_claude_memories(
     if not items:
         raise HTTPException(status_code=400, detail="No valid memory items found for the given selection.")
 
-    from sai_memory.memopedia import Memopedia
+    core_items = [item for item in items if item.is_core]
+    page_items = [item for item in items if not item.is_core]
 
+    from sai_memory.memopedia import Memopedia
+    from sai_memory.core_memory import total_core_memory_chars
+    from .core_memory import _notify_persona_correction, _resolve_budget
+
+    created = skipped = 0
+    core_added: list[tuple[int, str]] = []
+    core_skipped = 0
+    core_total_chars = 0
     with get_adapter(persona_id, manager) as adapter:
         try:
-            memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
-            created, skipped = _transcribe_memories_to_memopedia(memopedia, items)
+            if page_items:
+                memopedia = Memopedia(adapter.conn, db_lock=adapter._db_lock)
+                created, skipped = _transcribe_memories_to_memopedia(memopedia, page_items)
+            with adapter._db_lock:
+                if core_items:
+                    core_added, core_skipped = _add_core_memories(adapter.conn, core_items)
+                core_total_chars = total_core_memory_chars(adapter.conn)
         except HTTPException:
             raise
         except Exception as e:
             LOGGER.exception("Claude memories import failed for %s", persona_id)
-            raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+            raise HTTPException(status_code=500, detail=f"Memory import error: {e}")
+        if core_added:
+            _notify_persona_correction(
+                adapter,
+                _core_memory_import_notice(core_added),
+                reduce_key="claude_import:core",
+            )
 
+    core_budget = _resolve_budget(manager, persona_id)
+    parts = []
+    if page_items:
+        parts.append(
+            f"Imported {created} memory item(s) into Memopedia"
+            + (f" ({skipped} already existed)" if skipped else "")
+        )
+    if core_items:
+        parts.append(
+            f"added {len(core_added)} core memory item(s)"
+            + (f" ({core_skipped} already existed)" if core_skipped else "")
+        )
     return {
         "success": True,
         "created": created,
         "skipped": skipped,
         "trunk_title": _MEMOPEDIA_TRUNK_TITLE,
-        "message": f"Imported {created} memory item(s) into Memopedia"
-        + (f" ({skipped} already existed)" if skipped else "") + ".",
+        "core_created": len(core_added),
+        "core_skipped": core_skipped,
+        "core_total_chars": core_total_chars,
+        "core_budget": core_budget,
+        "memopedia_requested": len(page_items),
+        "core_requested": len(core_items),
+        "message": "; ".join(parts) + ".",
     }

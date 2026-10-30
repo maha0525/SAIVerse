@@ -26,7 +26,7 @@ UI にカテゴリ別のドロップ枠と手順ガイドを置き、どの枠�
   preview API (選択一覧) → import API (背景タスク) → `SAIMemoryAdapter.append_persona_message`
   (スレッド suffix = 元の uuid、`embedding_chunks=EMBEDDING_DEFERRED`) →
   取り込み完了後に `import_chatlog._launch_import_embedding` が埋め込みを後追い生成。
-  memories カテゴリだけは SAIMemory ではなく **Memopedia** へ転記する。
+  memories カテゴリだけは SAIMemory ではなく、全体記憶を**コア記憶**へ、それ以外を **Memopedia** へ転記する。
 - **不変条件と所有権**:
   - 「取り込みは LLM を呼ばない・課金しない」(memory-migration.md の契約) を守る。
     埋め込みはローカルの EmbeddingGemma のみ。
@@ -49,7 +49,7 @@ UI にカテゴリ別のドロップ枠と手順ガイドを置き、どの枠�
 | `conversations-*.zip` | 会話を選んでスレッドとして取り込み (ChatGPT 公式と同等の UX)。text ブロックのみ採用し、thinking / tool_use / tool_result / injected_prompt_block は捨てる。添付は `【添付: ファイル名】` の印だけ残す (中身は取り込まない — 肥大防止) |
 | `claude_code_cloud-*.zip` | `channel_session_transcripts.json` をセッション単位で、`channels/messages.json` をチャンネル単位でスレッドに再構成。text を持つ発言のみ。ツール実行だけのセッションはスレッドにしない |
 | `projects-*.zip` | プロジェクト指示 (prompt_template) を**スレッド冒頭の system メッセージ**に、資料 (docs) を続く system メッセージにしたスレッド。希望すれば選択プロジェクトの指示を**ペルソナのシステムプロンプト末尾に追記**できる (チェックボックス、既定 OFF) |
-| `memories-*.zip` | conversations_memory / project_memories / memory_files を項目単位で選び、Memopedia「Claude引っ越し」幹の下にページとして転記 |
+| `memories-*.zip` | 項目単位で選んで転記。**conversations_memory (全体記憶) はコア記憶**へ: Claude が常に参照していた記憶なので、`**見出し**` ごとに 1 件、`*小見出し*` があれば「見出し - 小見出し」で 1 件 (例「Brief history - Recent months: …」)。確認済み (confirmed=1) で追加し、同じ本文があればスキップ、追加した事実は知覚バッファでペルソナへ通知する (§5.1 のユーザー訂正と同じ扱い — 本人の記憶を黙って書き足さない)。容量目安を超えても切り詰めず、結果画面で知らせるだけ (コア記憶の原則)。**project_memories / memory_files は Memopedia**「Claude引っ越し」幹の下へ: 記憶ファイルの frontmatter は name → ページ名 (aliases は「name (別名, …)」で後置)、description → 概要、sources は捨て、その後ろを本文にする |
 | `frames-*.zip` | **取り込み対象外** (生成された HTML 等の成果物)。UI では無効の行として明示 |
 | manifest / `light_metadata-*.zip` | 取り込み対象外。アップロードされたら何であるか・どうすべきかを案内する |
 
@@ -78,4 +78,5 @@ UI にカテゴリ別のドロップ枠と手順ガイドを置き、どの枠�
 ## 経緯
 
 - 2026-10-30: まはーの依頼で新設。設計と初版実装 (ブランチ feature/claude-export-import)。
+- 2026-10-30: まはーの実機確認 (develop マージ後) を受けて 4 点を追加対応 (ブランチ feature/claude-import-refinements)。(1) 取り込み枠のアイコンがエクスポート向き (上矢印) だった → 取り込み向き (下矢印) に。(2) 取り込み後の「どのスレッドから続けるか」が API の返す順 (順序の約束なし) のままでばらばらだった → ChatGPT 取り込みと共通で最終発言の新しい順に並べる。(3) 記憶ファイルの frontmatter (name / description / sources / aliases) が本文にそのまま入っていた → ページ名・概要に振り分け。(4) 全体記憶を Memopedia の 1 ページではなく見出しごとのコア記憶に。
 - 2026-10-30: Codex レビュー (PR #442) の 2 件を修正。(1) 取り込み失敗で選択画面に戻ったときエラーが見えず、原因不明のまま再実行して重複取り込みを招きうる → 結果表示を全フェーズ共通にした。(2) 展開済みの claude_code_cloud 単体 JSON が一時ファイル名のせいで 0 件になる → 単体 JSON は要素のキーで transcript / チャンネル発言 / チャンネル一覧を判別する。全カテゴリの単体 JSON を一時名で読む回帰テストを追加。

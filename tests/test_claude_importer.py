@@ -19,6 +19,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.utilities.claude_importer import (
+    MEMORY_KIND_CORE,
+    split_core_memory_sections,
+    split_frontmatter,
     CATEGORY_CLAUDE_CODE,
     CATEGORY_CONVERSATIONS,
     CATEGORY_MEMORIES,
@@ -219,7 +222,9 @@ def test_memories_zip(tmp_path: Path) -> None:
     export = load_claude_export(src)
     assert export.category == CATEGORY_MEMORIES
     ids = [i.item_id for i in export.memory_items]
-    assert "conversations_memory" in ids
+    # 全体記憶は見出しごとのコア記憶になる
+    core = [i for i in export.memory_items if i.is_core]
+    assert [c.content for c in core] == ["Work context: 全体の記憶"]
     assert "project_memory:proj-uuid-123456789" in ids
     assert "memory_file:/areas/voice-ai.md" in ids
     # 空の項目は出ない
@@ -230,7 +235,7 @@ def test_memories_zip(tmp_path: Path) -> None:
     assert by_id["memory_file:/areas/no-name.md"].title == "no-name"
     # セレクタは idx でも id でも引ける
     assert export.get_memory_item("0") is export.memory_items[0]
-    assert export.get_memory_item("conversations_memory") is by_id["conversations_memory"]
+    assert export.get_memory_item(core[0].item_id) is core[0]
 
 
 def test_frames_and_manifest_are_guided_away(tmp_path: Path) -> None:
@@ -334,3 +339,113 @@ def test_single_json_does_not_depend_on_file_name(
     assert export.category == category
     assert len(export.conversations) == expected_records
     assert len(export.memory_items) == expected_items
+
+
+def test_memory_file_frontmatter_becomes_page_fields(tmp_path: Path) -> None:
+    """name → ページ名 (aliases は括弧で後置)、description → 概要、sources は捨てる、残りが本文。"""
+    memories = {"memory_files": [
+        {
+            "path": "/areas/comfyui-server.md",
+            "content": (
+                "---\nname: comfyui-server\n"
+                "description: 画像生成サーバー化するプロジェクト\n"
+                "sources: [chat]\naliases: [ComfyUI サーバー, 画像生成サーバー]\n---\n"
+                "- [stated] 古いゲーミングPC"
+            ),
+        },
+        {
+            # 引用符つき name、aliases/sources 無し、本文無し → description を本文に
+            "path": "/projects/p/index.md",
+            "content": "---\nname: \"アイフィ\"\ndescription: アイフィ — ペルソナの継続\n---",
+        },
+        {
+            # name と同じ別名は重ねない
+            "path": "/areas/saiverse.md",
+            "content": "---\nname: SAIVerse\ndescription: d\nsources: [backfill]\naliases: [SAIVerse]\n---\n本文",
+        },
+    ]}
+    src = tmp_path / "m.json"
+    src.write_text(json.dumps(memories, ensure_ascii=False), encoding="utf-8")
+    items = {i.item_id: i for i in load_claude_export(src).memory_items}
+
+    comfy = items["memory_file:/areas/comfyui-server.md"]
+    assert comfy.title == "comfyui-server (ComfyUI サーバー, 画像生成サーバー)"
+    assert comfy.summary == "画像生成サーバー化するプロジェクト"
+    assert comfy.content == "- [stated] 古いゲーミングPC"
+    assert "sources" not in comfy.content and "name:" not in comfy.content
+
+    aifi = items["memory_file:/projects/p/index.md"]
+    assert aifi.title == "アイフィ"
+    assert aifi.content == "アイフィ — ペルソナの継続"
+
+    assert items["memory_file:/areas/saiverse.md"].title == "SAIVerse"
+
+
+def test_split_frontmatter_without_frontmatter() -> None:
+    assert split_frontmatter("ただの本文\n---\nname: x") == ({}, "ただの本文\n---\nname: x")
+
+
+def test_core_memory_sections_follow_headings() -> None:
+    text = (
+        "**Work context**\n\nまはーはデザイナー。\n\n"
+        "**Brief history**\n\n*Recent months*\n\n最近の話。\n\n二段落目。\n\n"
+        "*Earlier context*\n\n前の話。\n\n---\n\n"
+        "**Other instructions**\n\n- **太字の箇条**: 中身\n- 二つ目"
+    )
+    assert split_core_memory_sections(text) == [
+        ("Work context", "まはーはデザイナー。"),
+        ("Brief history - Recent months", "最近の話。\n\n二段落目。"),
+        ("Brief history - Earlier context", "前の話。"),
+        ("Other instructions", "- **太字の箇条**: 中身\n- 二つ目"),
+    ]
+    src_items = load_claude_export(_write_json(text)).memory_items
+    core = [i.content for i in src_items if i.kind == MEMORY_KIND_CORE]
+    # 段落はラベルに続け、箇条書きだけ次の行から始める
+    assert core[0] == "Work context: まはーはデザイナー。"
+    assert core[1].startswith("Brief history - Recent months: 最近の話。")
+    assert core[3] == "Other instructions:\n- **太字の箇条**: 中身\n- 二つ目"
+
+
+def test_core_memory_without_headings_is_one_item() -> None:
+    assert split_core_memory_sections("見出しのない記憶") == [("", "見出しのない記憶")]
+
+
+def _write_json(conversations_memory: str) -> Path:
+    import tempfile
+    path = Path(tempfile.mkdtemp()) / "mem.json"
+    path.write_text(
+        json.dumps({"conversations_memory": conversations_memory}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_core_memories_are_added_once_and_notice_lists_them(tmp_path: Path) -> None:
+    """コア記憶は確認済みで追加し、同じ本文は再取り込みでスキップする。"""
+    from api.routes.people.import_claude import _add_core_memories, _core_memory_import_notice
+    from sai_memory.core_memory import init_core_memory_table, list_core_memories
+    from sai_memory.memopedia.storage import init_memopedia_tables
+    from tools.utilities.claude_importer import ClaudeMemoryItem
+
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    try:
+        init_memopedia_tables(conn)
+        init_core_memory_table(conn)
+        items = [
+            ClaudeMemoryItem(item_id="core_memory:0:A", kind=MEMORY_KIND_CORE, title="A", content="A: 一つ目"),
+            ClaudeMemoryItem(item_id="core_memory:1:B", kind=MEMORY_KIND_CORE, title="B", content="B: 二つ目"),
+        ]
+        added, skipped = _add_core_memories(conn, items)
+        assert skipped == 0 and [c for _, c in added] == ["A: 一つ目", "B: 二つ目"]
+        stored = list_core_memories(conn)
+        assert [m.content for m in stored] == ["A: 一つ目", "B: 二つ目"]
+        assert all(m.confirmed == 1 for m in stored)
+
+        notice = _core_memory_import_notice(added)
+        assert "2 件" in notice and f"core:{added[0][0]}: A: 一つ目" in notice
+
+        added, skipped = _add_core_memories(conn, items)
+        assert (added, skipped) == ([], 2)
+        assert len(list_core_memories(conn)) == 2
+    finally:
+        conn.close()
