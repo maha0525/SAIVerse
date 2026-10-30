@@ -357,7 +357,39 @@ async def get_system_alerts():
     manager = app_state.manager
     if manager is None or not hasattr(manager, "startup_alerts"):
         return {"alerts": []}
-    return {"alerts": list(manager.startup_alerts)}
+    dismissed = getattr(manager, "dismissed_alert_ids", None) or set()
+    return {"alerts": [
+        {**alert, "dismissed": alert.get("id") in dismissed} for alert in manager.startup_alerts
+    ]}
+
+
+@router.post("/alerts/{alert_id}/dismiss")
+async def dismiss_system_alert(alert_id: str):
+    """利用者が上部のバナーで閉じたお知らせを、この起動のあいだ閉じたままにする。
+
+    お知らせは起動時の処理が作り、次の起動まで ``manager.startup_alerts`` に残る。
+    閉じたことを画面の中だけで覚えると、ブラウザを開き直すたびに同じお知らせが
+    また出る (2026-10-30、移行の完了のお知らせで起きた)。
+
+    お知らせそのものは消さず、閉じた id を ``manager.dismissed_alert_ids`` に覚えて、
+    一覧の各お知らせに ``dismissed`` を付けて返す。バナーは閉じたものを出さない。
+    お知らせの有無で出し入れするほかの画面 (設定の「便利機能」の確認の画面の入口)
+    は、閉じたかどうかに関わらずお知らせを見る — 消すと、バナーを閉じた利用者が
+    確認の画面へ入る道まで消える。確認待ちのお知らせが件数の変化で置き直されても、
+    id が同じなので閉じたまま。覚えるのはこの起動のあいだだけで、次の起動で同じ
+    状態がまだあれば、起動時の処理が作るお知らせがまたバナーに出る。
+    """
+    manager = app_state.manager
+    if manager is None or not hasattr(manager, "startup_alerts"):
+        raise HTTPException(status_code=503, detail="Manager not ready")
+    dismissed = getattr(manager, "dismissed_alert_ids", None)
+    if dismissed is None:
+        dismissed = set()
+        manager.dismissed_alert_ids = dismissed
+    known = any(a.get("id") == alert_id for a in manager.startup_alerts)
+    if known:
+        dismissed.add(alert_id)
+    return {"dismissed": known}
 
 
 class LegacyLogArchiveResponse(BaseModel):
