@@ -12610,5 +12610,229 @@
   "app.page.attachmentImageAlt": {
     "ja": "添付画像 {p1}",
     "en": "Attachment {p1}"
+  },
+  "components.memory.MemoryImportForm.label003": {
+    "ja": "Claude 公式エクスポート",
+    "en": "Official Claude export"
+  },
+  "components.memory.ClaudeImportPanel.text001": {
+    "ja": "Claude からのエクスポート手順",
+    "en": "How to export from Claude"
+  },
+  "components.memory.ClaudeImportPanel.text002": {
+    "ja": "Claude の「設定 → プライバシー → データをエクスポート」を開く",
+    "en": "In Claude, open Settings → Privacy → Export data"
+  },
+  "components.memory.ClaudeImportPanel.text003": {
+    "ja": "期間を選んでエクスポートを実行する（受付メールの後、しばらくするとダウンロード用のメールが届く）",
+    "en": "Choose a period and run the export (after a confirmation email, a download email arrives a little later)"
+  },
+  "components.memory.ClaudeImportPanel.text004": {
+    "ja": "メールからダウンロードできるのは manifest（JSON ファイル）のみ。開くと中に複数の ZIP のダウンロード URL が並んでいる",
+    "en": "The email link downloads only a manifest (JSON file); inside it are download URLs for several ZIP files"
+  },
+  "components.memory.ClaudeImportPanel.text005": {
+    "ja": "manifest 内の各 export_url から ZIP をダウンロードする（リンクは 24 時間で失効し、一度開くと使えなくなることがあるため、開いたらすぐ保存する）",
+    "en": "Download each ZIP from the export_url entries in the manifest (links expire after 24 hours and may stop working once used, so save each file as soon as you open its link)"
+  },
+  "components.memory.ClaudeImportPanel.text006": {
+    "ja": "ダウンロードした ZIP を、下の対応する枠にドラッグ＆ドロップ（またはクリックして選択）してください。どの枠に入れるか迷っても、中身から自動判定してお知らせします。",
+    "en": "Drag and drop each downloaded ZIP onto its matching slot below (or click a slot to pick a file). If a file lands in the wrong slot, its contents are detected automatically and you will be told where it belongs."
+  },
+  "components.memory.ClaudeImportPanel.text010": {
+    "ja": "会話",
+    "en": "Conversations"
+  },
+  "components.memory.ClaudeImportPanel.text011": {
+    "ja": "通常のチャット。取り込みたい会話を選んで、このペルソナのスレッドとして取り込みます。",
+    "en": "Regular chats. Pick the conversations you want and import them as threads of this persona."
+  },
+  "components.memory.ClaudeImportPanel.text012": {
+    "ja": "Claude Code",
+    "en": "Claude Code"
+  },
+  "components.memory.ClaudeImportPanel.text013": {
+    "ja": "クラウドセッションの記録からスレッドを再構成して取り込みます（ツール実行だけの部分は除外されます）。",
+    "en": "Rebuilds threads from cloud session transcripts (tool-only parts are skipped)."
+  },
+  "components.memory.ClaudeImportPanel.text014": {
+    "ja": "プロジェクト",
+    "en": "Projects"
+  },
+  "components.memory.ClaudeImportPanel.text015": {
+    "ja": "プロジェクトの指示と資料をスレッドとして取り込みます。指示はスレッド冒頭に system ロールで入り、希望すればペルソナのシステムプロンプトにも追記できます。",
+    "en": "Imports each project's instructions and documents as a thread. Instructions go at the start of the thread as a system role, and can optionally be appended to the persona's system prompt."
+  },
+  "components.memory.ClaudeImportPanel.text016": {
+    "ja": "記憶",
+    "en": "Memories"
+  },
+  "components.memory.ClaudeImportPanel.text017": {
+    "ja": "Claude が蓄積した記憶を Memopedia に転記します。転記する項目を選べます。",
+    "en": "Transcribes the memories Claude accumulated into Memopedia. You can choose which items to transcribe."
+  },
+  "components.memory.ClaudeImportPanel.text018": {
+    "ja": "frames（取り込み対象外）",
+    "en": "frames (not imported)"
+  },
+  "components.memory.ClaudeImportPanel.text019": {
+    "ja": "生成された HTML などの成果物のため、SAIVerse には取り込みません。",
+    "en": "Contains generated artifacts such as HTML, so it is not imported into SAIVerse."
+  },
+  "components.memory.ClaudeImportPanel.text020": {
+    "ja": "Claude のエクスポートとして認識できませんでした。",
+    "en": "The file was not recognized as a Claude export."
+  },
+  "components.memory.ClaudeImportPanel.text021": {
+    "ja": "frames は生成された HTML などの成果物のため、取り込み対象外です。",
+    "en": "frames contains generated artifacts such as HTML and is not imported."
+  },
+  "components.memory.ClaudeImportPanel.text022": {
+    "ja": "これは manifest（ダウンロード先の一覧）です。中に書かれた各 export_url から ZIP をダウンロードし、その ZIP をアップロードしてください。",
+    "en": "This is the manifest (a list of download URLs). Download the ZIP files from the export_url entries inside it, then upload those ZIPs."
+  },
+  "components.memory.ClaudeImportPanel.text023": {
+    "ja": "light_metadata にはアカウント情報しか含まれないため、取り込み対象外です。",
+    "en": "light_metadata only contains account information and is not imported."
+  },
+  "components.memory.ClaudeImportPanel.text024": {
+    "ja": "このファイルは「{p1}」の枠に入れてください。",
+    "en": "This file belongs in the \"{p1}\" slot."
+  },
+  "components.memory.ClaudeImportPanel.text025": {
+    "ja": "ファイルに取り込める内容が見つかりませんでした。",
+    "en": "No importable content was found in the file."
+  },
+  "components.memory.ClaudeImportPanel.text030": {
+    "ja": "全体記憶",
+    "en": "Overall memory"
+  },
+  "components.memory.ClaudeImportPanel.text031": {
+    "ja": "プロジェクト記憶",
+    "en": "Project memory"
+  },
+  "components.memory.ClaudeImportPanel.text032": {
+    "ja": "記憶ファイル",
+    "en": "Memory file"
+  },
+  "components.memory.ClaudeImportPanel.text033": {
+    "ja": "Memopedia の「{p1}」に {p2} 件を転記しました（既存のためスキップ: {p3} 件）。",
+    "en": "Transcribed {p2} item(s) into Memopedia under \"{p1}\" ({p3} skipped as already present)."
+  },
+  "components.memory.ClaudeImportPanel.text034": {
+    "ja": "Memopedia へ転記する記憶を選択",
+    "en": "Select memories to transcribe into Memopedia"
+  },
+  "components.memory.ClaudeImportPanel.text035": {
+    "ja": "選んだ項目は Memopedia の「Claude引っ越し」の下にページとして転記されます。",
+    "en": "Selected items are transcribed as pages under the \"Claude引っ越し\" trunk in Memopedia."
+  },
+  "components.memory.ClaudeImportPanel.text036": {
+    "ja": "種類",
+    "en": "Kind"
+  },
+  "components.memory.ClaudeImportPanel.text037": {
+    "ja": "文字数",
+    "en": "Characters"
+  },
+  "components.memory.ClaudeImportPanel.text038": {
+    "ja": "{p1} 件を転記",
+    "en": "Transcribe {p1} item(s)"
+  },
+  "components.memory.ClaudeImportPanel.text040": {
+    "ja": "{p1} スレッドを自動設定しました。",
+    "en": "Automatically selected thread. {p1}"
+  },
+  "components.memory.ClaudeImportPanel.text041": {
+    "ja": "インポートが完了しました。",
+    "en": "Import complete."
+  },
+  "components.memory.ClaudeImportPanel.text042": {
+    "ja": "インポートに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.ClaudeImportPanel.text043": {
+    "ja": "インポート開始...",
+    "en": "Starting import..."
+  },
+  "components.memory.ClaudeImportPanel.text044": {
+    "ja": "インポート完了！アクティブスレッドを設定しました。",
+    "en": "Import complete! Active thread has been set."
+  },
+  "components.memory.ClaudeImportPanel.text045": {
+    "ja": "どのスレッドから会話を続けますか？",
+    "en": "Which thread should the conversation continue from?"
+  },
+  "components.memory.ClaudeImportPanel.text046": {
+    "ja": "{p1} 件",
+    "en": "{p1} items"
+  },
+  "components.memory.ClaudeImportPanel.text047": {
+    "ja": "(プレビューなし)",
+    "en": "(no preview)"
+  },
+  "components.memory.ClaudeImportPanel.text048": {
+    "ja": "スキップ",
+    "en": "Skip"
+  },
+  "components.memory.ClaudeImportPanel.text049": {
+    "ja": "このスレッドを使用",
+    "en": "Use this thread"
+  },
+  "components.memory.ClaudeImportPanel.text050": {
+    "ja": "記憶想起用のエンベディングを作成しますか？",
+    "en": "Generate embeddings for memory recall?"
+  },
+  "components.memory.ClaudeImportPanel.text051": {
+    "ja": "スキップ",
+    "en": "Skip"
+  },
+  "components.memory.ClaudeImportPanel.text052": {
+    "ja": "作成する",
+    "en": "Generate"
+  },
+  "components.memory.ClaudeImportPanel.text060": {
+    "ja": "インポートする会話を選択",
+    "en": "Select conversations to import"
+  },
+  "components.memory.ClaudeImportPanel.text061": {
+    "ja": "{p1} 件中 {p2} 件選択",
+    "en": "{p2} of {p1} selected"
+  },
+  "components.memory.ClaudeImportPanel.text062": {
+    "ja": "タイトル",
+    "en": "Title"
+  },
+  "components.memory.ClaudeImportPanel.text063": {
+    "ja": "メッセージ数",
+    "en": "Message count"
+  },
+  "components.memory.ClaudeImportPanel.text064": {
+    "ja": "作成日",
+    "en": "Created"
+  },
+  "components.memory.ClaudeImportPanel.text065": {
+    "ja": "プレビュー",
+    "en": "Preview"
+  },
+  "components.memory.ClaudeImportPanel.text066": {
+    "ja": "(無題)",
+    "en": "(untitled)"
+  },
+  "components.memory.ClaudeImportPanel.text067": {
+    "ja": "指示あり",
+    "en": "Has instructions"
+  },
+  "components.memory.ClaudeImportPanel.text068": {
+    "ja": "選択したプロジェクトの指示をペルソナのシステムプロンプトに追記する",
+    "en": "Append the selected projects' instructions to the persona's system prompt"
+  },
+  "components.memory.ClaudeImportPanel.text069": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.memory.ClaudeImportPanel.text070": {
+    "ja": "{p1} 件をインポート",
+    "en": "Import {p1} item(s)"
   }
 }

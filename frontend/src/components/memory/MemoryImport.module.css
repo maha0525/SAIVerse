@@ -756,3 +756,177 @@
     border-color: #fca5a5;
     color: #991b1b;
 }
+/* ---- Claude 公式エクスポート タブ (ClaudeImportPanel) ---- */
+
+.claudeContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.claudeGuide {
+    background-color: #1a1b1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+}
+
+.claudeGuide h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+    color: #ccc;
+}
+
+.claudeSteps {
+    margin: 0;
+    padding-left: 1.5rem;
+    color: #aaa;
+    font-size: 0.875rem;
+    line-height: 1.7;
+}
+
+.claudeNote {
+    margin: 0.75rem 0 0 0;
+    color: #888;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+}
+
+.claudeCategoryList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.claudeCategoryRow {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    border: 2px dashed #444;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    background-color: #1a1b1e;
+}
+
+.claudeCategoryRow:hover:not(.claudeCategoryDisabled) {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.05);
+}
+
+.claudeCategoryDisabled {
+    cursor: default;
+    opacity: 0.55;
+    border-style: solid;
+}
+
+.claudeCategoryIcon {
+    color: #4dabf7;
+    flex-shrink: 0;
+}
+
+.claudeCategoryDisabled .claudeCategoryIcon {
+    color: #888;
+}
+
+.claudeCategoryInfo {
+    flex: 1;
+    min-width: 0;
+}
+
+.claudeCategoryName {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    color: #ddd;
+    font-size: 0.9375rem;
+    font-weight: 600;
+}
+
+.claudeCategoryFile {
+    font-size: 0.75rem;
+    color: #888;
+    background-color: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+}
+
+.claudeCategoryDesc {
+    margin-top: 0.25rem;
+    color: #888;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.claudeCategoryUpload {
+    color: #666;
+    flex-shrink: 0;
+}
+
+.claudeBadge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    background-color: rgba(77, 171, 247, 0.15);
+    color: #4dabf7;
+    font-size: 0.6875rem;
+    white-space: nowrap;
+}
+
+.claudeAppendOption {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    color: #ccc;
+    font-size: 0.875rem;
+    cursor: pointer;
+}
+
+.claudeAppendOption input {
+    accent-color: #4dabf7;
+}
+
+:global([data-theme="light"]) .claudeGuide {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .claudeGuide h3 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .claudeSteps {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .claudeNote {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .claudeCategoryRow {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+}
+
+:global([data-theme="light"]) .claudeCategoryName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .claudeCategoryFile {
+    background-color: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .claudeCategoryDesc {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .claudeAppendOption {
+    color: #1f2937;
+}

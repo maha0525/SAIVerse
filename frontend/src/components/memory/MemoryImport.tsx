@@ -39,6 +39,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
       {memoryImport.step === 'importing' ? <MemoryImportProgress message={memoryImport.importProgress} /> : (
         <MemoryImportForm
           personaId={personaId}
+          onImportComplete={onImportComplete}
           activeSubTab={memoryImport.activeSubTab}
           step={memoryImport.step}
           isLoading={memoryImport.isLoading}

@@ -231,6 +231,8 @@ class ConversationSummary(BaseModel):
     update_time: Optional[str]
     message_count: int
     preview: Optional[str]
+    # Claude projects のみ: プロジェクト指示 (prompt_template) を持つか
+    has_instructions: Optional[bool] = None
 
 class PreviewResponse(BaseModel):
     conversations: List[ConversationSummary]
@@ -272,6 +274,39 @@ class ExtensionImportStatusResponse(BaseModel):
     embedding_failed: Optional[int] = None
     # One line on why embedding stopped or left messages without vectors.
     embedding_error: Optional[str] = None
+
+class ClaudeMemoryItemSummary(BaseModel):
+    """Claude エクスポート memories カテゴリの転記候補 1 件。"""
+    idx: int
+    id: str
+    kind: str  # conversations_memory / project_memory / memory_file
+    title: str
+    preview: Optional[str] = None
+    char_count: int = 0
+
+class ClaudePreviewResponse(BaseModel):
+    """Claude 公式エクスポートのプレビュー。category でどの ZIP かを返す。
+
+    conversations / claude_code / projects は conversations に会話一覧、
+    memories は memory_items に転記候補一覧が入る。
+    """
+    category: str
+    conversations: List[ConversationSummary] = []
+    memory_items: List[ClaudeMemoryItemSummary] = []
+    cache_key: str
+    total_count: int
+
+class ClaudeImportRequest(BaseModel):
+    cache_key: str
+    conversation_ids: List[str]  # conversation_id or idx as string
+    skip_embedding: bool = False
+    # projects のみ: 選択したプロジェクトの指示 (prompt_template) をペルソナの
+    # システムプロンプト末尾に追記する
+    append_instructions_to_system_prompt: bool = False
+
+class ClaudeMemoryImportRequest(BaseModel):
+    cache_key: str
+    item_ids: List[str]  # item id or idx as string
 
 class NativeImportStatusResponse(BaseModel):
     running: bool
