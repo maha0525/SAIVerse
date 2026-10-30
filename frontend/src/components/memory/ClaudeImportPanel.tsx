@@ -293,6 +293,16 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
     },
   }), []);
 
+  // 取り込みの成否は、どの画面に戻っても見えるよう各フェーズ共通で出す。
+  // 失敗後に選択画面へ戻したとき、原因が見えないまま再実行して重複取り込み
+  // を起こさないため。
+  const resultBanner = result && (
+    <div className={`${styles.result} ${result.type === 'success' ? styles.success : styles.error}`}>
+      {result.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+      <span>{result.message}</span>
+    </div>
+  );
+
   if (phase === 'importing') {
     return <MemoryImportProgress message={importProgress} />;
   }
@@ -313,6 +323,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
     return (
       <div className={styles.threadSelectContainer}>
         <div className={styles.threadSelectHeader}><MessageSquare size={24} /><h3 data-i18n="components.memory.ClaudeImportPanel.text045">{uiText('components.memory.ClaudeImportPanel.text045')}</h3></div>
+        {resultBanner}
         <div className={styles.threadList}>{threads.map((thread) => {
           const meta = [
             uiText('components.memory.ClaudeImportPanel.text046', { p1: thread.message_count ?? 0 }),
@@ -345,6 +356,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
           <h3 data-i18n="components.memory.ClaudeImportPanel.text060">{uiText('components.memory.ClaudeImportPanel.text060')}</h3>
           <span data-i18n="components.memory.ClaudeImportPanel.text061" className={styles.selectionCount}>{uiText('components.memory.ClaudeImportPanel.text061', { p1: preview.total_count, p2: selectedIds.size })}</span>
         </div>
+        {resultBanner}
         <div className={styles.tableContainer}><table className={styles.table}>
           <thead><tr>
             <th className={styles.checkboxCell} onClick={() => toggleSelectAll(preview.conversations.length)}>{allSelected ? <CheckSquare size={18} /> : <Square size={18} />}</th>
@@ -388,6 +400,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
           <h3 data-i18n="components.memory.ClaudeImportPanel.text034">{uiText('components.memory.ClaudeImportPanel.text034')}</h3>
           <span data-i18n="components.memory.ClaudeImportPanel.text061" className={styles.selectionCount}>{uiText('components.memory.ClaudeImportPanel.text061', { p1: preview.memory_items.length, p2: selectedIds.size })}</span>
         </div>
+        {resultBanner}
         <p data-i18n="components.memory.ClaudeImportPanel.text035" className={styles.claudeNote}>{uiText('components.memory.ClaudeImportPanel.text035')}</p>
         <div className={styles.tableContainer}><table className={styles.table}>
           <thead><tr>
@@ -432,12 +445,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
         <p data-i18n="components.memory.ClaudeImportPanel.text006" className={styles.claudeNote}>{uiText('components.memory.ClaudeImportPanel.text006')}</p>
       </div>
 
-      {result && (
-        <div className={`${styles.result} ${result.type === 'success' ? styles.success : styles.error}`}>
-          {result.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
-          <span>{result.message}</span>
-        </div>
-      )}
+      {resultBanner}
 
       <div className={styles.claudeCategoryList}>
         {CATEGORY_ROWS.map(({ category, fileHint, nameKey, descKey, Icon }) => (

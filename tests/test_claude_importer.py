@@ -294,3 +294,43 @@ def test_memories_transcription_to_memopedia(tmp_path: Path) -> None:
         assert len(children) == 2
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "category", "expected_records", "expected_items"),
+    [
+        # 展開済みの claude_code_cloud の各 JSON (ファイル名は一時名で失われる)
+        (
+            {"claude_code_cloud": [
+                {"session_id": "cse_1", "created_at": "2026-10-03T01:15:00Z", "role": "user",
+                 "content": [{"type": "text", "text": "調査を進めて"}]},
+                {"session_id": "cse_1", "created_at": "2026-10-03T01:16:00Z", "role": "assistant",
+                 "content": [{"type": "text", "text": "了解しました"}]},
+            ]},
+            CATEGORY_CLAUDE_CODE, 1, 0,
+        ),
+        (
+            {"claude_code_cloud": [
+                {"message_id": "cmsg_2", "channel_id": "chan_1", "text": "進捗どう？",
+                 "author_account_uuid": "acc-1", "created_at": "2026-10-03T02:00:00Z"},
+            ]},
+            CATEGORY_CLAUDE_CODE, 1, 0,
+        ),
+        (_sample_conversations(), CATEGORY_CONVERSATIONS, 2, 0),
+        (
+            {"uuid": "proj-1", "name": "P", "prompt_template": "指示", "docs": []},
+            CATEGORY_PROJECTS, 1, 0,
+        ),
+        ({"conversations_memory": "全体の記憶", "memory_files": []}, CATEGORY_MEMORIES, 0, 1),
+    ],
+)
+def test_single_json_does_not_depend_on_file_name(
+    tmp_path: Path, payload, category, expected_records, expected_items
+) -> None:
+    """API はアップロードを一時ファイル名で保存する。単体 JSON は名前に頼らず中身で読む。"""
+    src = tmp_path / "tmpab12cd34.json"
+    src.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    export = load_claude_export(src)
+    assert export.category == category
+    assert len(export.conversations) == expected_records
+    assert len(export.memory_items) == expected_items

@@ -344,20 +344,52 @@ def _unwrap_cloud(data: Any) -> list[Any]:
     return []
 
 
+_CLOUD_TRANSCRIPTS = "transcripts"
+_CLOUD_CHANNEL_MESSAGES = "channel_messages"
+_CLOUD_CHANNELS = "channels"
+
+
+def _cloud_kind_from_name(name: str) -> Optional[str]:
+    if _TRANSCRIPTS_RE.search(name):
+        return _CLOUD_TRANSCRIPTS
+    if _CHANNEL_MESSAGES_RE.search(name):
+        return _CLOUD_CHANNEL_MESSAGES
+    if _CHANNELS_RE.search(name):
+        return _CLOUD_CHANNELS
+    return None
+
+
+def _cloud_kind_from_items(items: list[dict[str, Any]]) -> Optional[str]:
+    """単体 JSON 用: 要素のキーから transcript / チャンネル発言 / チャンネル一覧を見分ける。
+
+    アップロードは一時ファイル名で保存されるので、単体 JSON ではファイル名に頼れない。
+    """
+    for item in items:
+        if "session_id" in item and "role" in item:
+            return _CLOUD_TRANSCRIPTS
+        if "message_id" in item and "channel_id" in item:
+            return _CLOUD_CHANNEL_MESSAGES
+    for item in items:
+        if "channel_id" in item and ("name" in item or "title" in item):
+            return _CLOUD_CHANNELS
+    return None
+
+
 def _load_claude_code(path: Path) -> ClaudeExportFile:
     transcripts: list[dict[str, Any]] = []
     channel_messages: list[dict[str, Any]] = []
     channel_names: dict[str, str] = {}
-    for name, data in _read_json_entries(
-        path, re.compile(r"\.json$")
-    ):
-        if _TRANSCRIPTS_RE.search(name):
-            transcripts = [i for i in _unwrap_cloud(data) if isinstance(i, dict)]
-        elif _CHANNEL_MESSAGES_RE.search(name):
-            channel_messages = [i for i in _unwrap_cloud(data) if isinstance(i, dict)]
-        elif _CHANNELS_RE.search(name):
-            for ch in _unwrap_cloud(data):
-                if isinstance(ch, dict) and ch.get("channel_id"):
+    is_zip = zipfile.is_zipfile(path)
+    for name, data in _read_json_entries(path, re.compile(r"\.json$")):
+        items = [i for i in _unwrap_cloud(data) if isinstance(i, dict)]
+        kind = _cloud_kind_from_name(name) if is_zip else _cloud_kind_from_items(items)
+        if kind == _CLOUD_TRANSCRIPTS:
+            transcripts = items
+        elif kind == _CLOUD_CHANNEL_MESSAGES:
+            channel_messages = items
+        elif kind == _CLOUD_CHANNELS:
+            for ch in items:
+                if ch.get("channel_id"):
                     label = ch.get("name") or ch.get("title")
                     if label:
                         channel_names[str(ch["channel_id"])] = str(label)
