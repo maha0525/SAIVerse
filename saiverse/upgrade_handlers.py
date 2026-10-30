@@ -1433,4 +1433,23 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.27 -> 0.3.28 (system notice migration rescans at startup).",
     ),
+    # ---- v0.3.29 ----
+    # 上部のバナーで閉じたお知らせを、ブラウザを開き直しても閉じたままにする修正だけで、
+    # 世界のデータには触らないので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_29",
+        scope="city",
+        from_version="0.3.28",
+        to_version="0.3.29",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.28 -> 0.3.29 (banner dismissal fix only).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_29",
+        scope="ai",
+        from_version="0.3.28",
+        to_version="0.3.29",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.28 -> 0.3.29 (banner dismissal fix only).",
+    ),
 ]
