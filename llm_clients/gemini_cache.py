@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from saiverse.gemini_timing import gemini_timing_scope
+
 LOGGER = logging.getLogger(__name__)
 
 # SAIVerse 由来の cache を識別する displayName prefix (orphan cleanup 用)。
@@ -324,10 +326,11 @@ class GeminiCacheController:
                 cfg_kwargs["system_instruction"] = system_instruction
             if contents:
                 cfg_kwargs["contents"] = contents
-            cache = client.caches.create(
-                model=model,
-                config=types.CreateCachedContentConfig(**cfg_kwargs),
-            )
+            with gemini_timing_scope("cache_create_auto"):
+                cache = client.caches.create(
+                    model=model,
+                    config=types.CreateCachedContentConfig(**cfg_kwargs),
+                )
             created_at = time.time()
         except Exception as exc:
             status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
@@ -640,10 +643,11 @@ class GeminiCacheController:
                 }
                 if system_instruction:
                     cfg_kwargs["system_instruction"] = system_instruction
-                cache = client.caches.create(
-                    model=model,
-                    config=types.CreateCachedContentConfig(**cfg_kwargs),
-                )
+                with gemini_timing_scope(f"cache_create_{mode}"):
+                    cache = client.caches.create(
+                        model=model,
+                        config=types.CreateCachedContentConfig(**cfg_kwargs),
+                    )
             except Exception as exc:
                 status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
                 if status == 404:

@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | 実装はブランチ codex/gemini-http-timing にあり、develop への取り込み待ち。次 = まはーが PR を確認し、取り込み・再起動後の通常利用でメティスが送信完了と応答待ちをログから分けて確認する。 | まはー (PR 確認と取り込み) → 私 (ログ確認) | [intent](../intent/gemini_request_timing.md) | 2026-10-31 |
 | 🟣 検証待ち | Claude 公式エクスポートの取り込み (引っ越しタブの Claude サブタブ) | 本体は develop に入り、実機確認で出た 4 点の追加対応はブランチ feature/claude-import-refinements の PR にある。次 = まはーが PR を確認し、実機で全体記憶がコア記憶に見出しごとに入ること、記憶ファイルのページ名・概要、スレッドの並び順を見る。 | まはー (PR 確認と実機確認) | [intent](../intent/claude_import.md) | 2026-10-30 |
 | 🟣 検証待ち | 返事を待つ間の表示 (送った直後の名前・開発用の段階名の撤去・添付画像の即時表示) | 実装はブランチ feature/chat-progress-display の PR にあり、まだ develop に入っていない。次 = まはーが PR を確認し、実機で送信から返事までの文言の移り変わりと、添付画像が送った瞬間に出ることを見る。 | まはー (PR 確認と実機確認) | [intent](../intent/chat_progress_display.md) | 2026-10-29 |
 | 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通る。Contributor 版の追加はブランチ feature/meta-muse-contributor の PR にある。次 = まはーが PR を確認し、会話の途中の system メッセージを user に変換する設定をやめるかを決める。 | まはー (PR 確認と変換の判断) | [intent](../intent/meta_muse_provider.md) | 2026-10-27 |
