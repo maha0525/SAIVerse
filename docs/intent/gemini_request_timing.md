@@ -1,6 +1,6 @@
 # Gemini の送信・応答時間の DEBUG 計測
 
-**ステータス**: 検証待ち — 実装・隔離検証はブランチ `codex/gemini-http-timing`。develop 向け PR の確認と、取り込み後の通常利用ログ確認を待つ。
+**ステータス**: 検証待ち — 実装・隔離検証は [PR #445](https://github.com/maha0525/SAIVerse/pull/445)（`codex/gemini-http-timing` → develop）。PR の確認と、取り込み後の通常利用ログ確認を待つ。
 
 ## 目的と範囲
 
@@ -43,3 +43,10 @@ HTTP/1.1 と HTTP/2 の trace に対応する。現在の Gemini 生成・キャ
 
 - 2026-10-31: 既存会話のログでは本文送信完了が欠けており、生成 API の最初の文字待ちとキャッシュ作成時間をアップロードと送信後の待ちへ分離できなかった。今後の記録を追加する依頼を受け、実装を開始。
 - 2026-10-31: 実 SDK 2.21.0 / httpx 0.28.1 / httpcore をメモリ内通信へ接続し、本文送信125msと応答ヘッダー待ち750msを別々に検出。インライン音声のbase64を含む実送信サイズ、アプリの生成入口・自動キャッシュ入口、SDK再試行、失敗、並行呼び出し、INFO抑制、ストリームcloseを含む関連114件・26サブテストを通した。ruff、差分の空白検査、in_flight関所も合格。develop向けPRの確認・取り込み後は、通常利用で新しいDEBUG記録を確認する。
+- 2026-10-31: develop 向け [PR #445](https://github.com/maha0525/SAIVerse/pull/445) を作成。次は PR の確認と取り込みで、まだ develop には入っていない。
+
+PR 作成前の台帳行（PR 番号への差し替え元）:
+
+```text
+| 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | 実装はブランチ codex/gemini-http-timing にあり、develop への取り込み待ち。次 = まはーが PR を確認し、取り込み・再起動後の通常利用でメティスが送信完了と応答待ちをログから分けて確認する。 | まはー (PR 確認と取り込み) → 私 (ログ確認) | [intent](../intent/gemini_request_timing.md) | 2026-10-31 |
+```
