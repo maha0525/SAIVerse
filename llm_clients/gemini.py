@@ -50,6 +50,21 @@ def _prompt_block_user_message(block_reason: str) -> str:
     return f"Geminiの安全性フィルターにより、応答がブロックされました（{block_reason}）。"
 
 
+def _billed_output_tokens(usage: Any) -> int:
+    """出力として課金されるトークン数を返す。
+
+    Gemini の ``candidates_token_count`` は思考を含まず、思考は
+    ``thoughts_token_count`` に分かれて届くが、課金は両方とも出力の単価になる。
+    OpenAI と Anthropic の出力トークンは思考込みなので、記録の意味もこれで揃う。
+    """
+    total = 0
+    for field in ("candidates_token_count", "thoughts_token_count"):
+        value = getattr(usage, field, None)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
 def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
     """Detect a structured-output parse failure raised *inside* the google-genai SDK.
 
@@ -2371,15 +2386,16 @@ class GeminiClient(LLMClient):
                             # Debug: log available fields in usage_metadata
                             logging.info("[DEBUG] Gemini usage_metadata attrs: %s",
                                         [a for a in dir(usage) if not a.startswith('_')])
-                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, cached=%s, total=%s",
+                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, thoughts=%s, cached=%s, total=%s",
                                         getattr(usage, "prompt_token_count", None),
                                         getattr(usage, "candidates_token_count", None),
+                                        getattr(usage, "thoughts_token_count", None),
                                         getattr(usage, "cached_content_token_count", None),
                                         getattr(usage, "total_token_count", None))
                             cached = getattr(usage, "cached_content_token_count", 0) or 0
                             self._store_usage(
                                 input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                                output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                                output_tokens=_billed_output_tokens(usage),
                                 cached_tokens=cached,
                             )
 
@@ -2451,14 +2467,15 @@ class GeminiClient(LLMClient):
                 if usage:
                     logging.info("[DEBUG] Gemini non-stream usage attrs: %s",
                                 [a for a in dir(usage) if not a.startswith('_')])
-                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, cached=%s",
+                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, thoughts=%s, cached=%s",
                                 getattr(usage, "prompt_token_count", None),
                                 getattr(usage, "candidates_token_count", None),
+                                getattr(usage, "thoughts_token_count", None),
                                 getattr(usage, "cached_content_token_count", None))
                     cached = getattr(usage, "cached_content_token_count", 0) or 0
                     self._store_usage(
                         input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                        output_tokens=_billed_output_tokens(usage),
                         cached_tokens=cached,
                     )
 
@@ -3083,14 +3100,15 @@ class GeminiClient(LLMClient):
             if usage:
                 logging.info("[DEBUG] generate_stream usage attrs: %s",
                             [a for a in dir(usage) if not a.startswith('_')])
-                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, cached=%s",
+                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, thoughts=%s, cached=%s",
                             getattr(usage, "prompt_token_count", None),
                             getattr(usage, "candidates_token_count", None),
+                            getattr(usage, "thoughts_token_count", None),
                             getattr(usage, "cached_content_token_count", None))
                 cached = getattr(usage, "cached_content_token_count", 0) or 0
                 self._store_usage(
                     input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                    output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    output_tokens=_billed_output_tokens(usage),
                     cached_tokens=cached,
                 )
 
