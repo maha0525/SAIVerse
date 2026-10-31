@@ -86,15 +86,30 @@ def _shorten(text: str, width: int = 60) -> str:
     return textwrap.shorten(cleaned, width=max(10, width), placeholder="…")
 
 
+#: 記憶アイテムの種類。``core_memory`` だけがコア記憶へ、他は Memopedia へ転記する。
+MEMORY_KIND_CORE = "core_memory"
+MEMORY_KIND_PROJECT = "project_memory"
+MEMORY_KIND_FILE = "memory_file"
+
+
 @dataclass
 class ClaudeMemoryItem:
-    """memories カテゴリの 1 転記候補 (Memopedia の 1 ページになる)。"""
+    """memories カテゴリの 1 転記候補。
+
+    ``core_memory`` はコア記憶 1 件、それ以外は Memopedia の 1 ページになる。
+    ``summary`` は Memopedia の概要 (記憶ファイルの frontmatter の description)。
+    """
 
     item_id: str
-    kind: str  # conversations_memory / project_memory / memory_file
+    kind: str  # core_memory / project_memory / memory_file
     title: str
     content: str
     updated_at: Optional[datetime] = None
+    summary: str = ""
+
+    @property
+    def is_core(self) -> bool:
+        return self.kind == MEMORY_KIND_CORE
 
     def to_summary_dict(self, *, preview_chars: int = 120) -> dict[str, Any]:
         return {
@@ -568,8 +583,151 @@ def _project_record(data: dict[str, Any]) -> Optional[ConversationRecord]:
 # --- memories --------------------------------------------------------------
 
 _MEMORIES_JSON_RE = re.compile(r"(^|/)memories/[^/]+\.json$")
-_FRONTMATTER_NAME_RE = re.compile(r"^name:\s*(.+)$", re.MULTILINE)
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+_FRONTMATTER_LINE_RE = re.compile(r"^([A-Za-z_][\w-]*):[ \t]*(.*)$")
+# 全体記憶の見出し (**Work context**) と小見出し (*Recent months*)。行全体が強調のときだけ見出しとみなす。
+_HEADING_RE = re.compile(r"^\*\*(?!\*)(.+?)\*\*$")
+_SUBHEADING_RE = re.compile(r"^\*(?!\*)(.+?)\*$")
+_LIST_START_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s")
 
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        return value[1:-1]
+    return value
+
+
+def _parse_frontmatter_value(raw: str) -> Any:
+    """Claude の記憶ファイルの frontmatter 値 (文字列 or ``[a, b]`` のフロー配列) を読む。"""
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        return [_unquote(part) for part in inner.split(",") if part.strip()]
+    return _unquote(raw)
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """``---`` で囲まれた先頭の frontmatter を (キー → 値, 本文) に分ける。
+
+    Claude の記憶ファイルは ``name`` / ``description`` / ``sources`` / ``aliases`` の
+    1 行 1 キーの単純な形なので、その範囲だけを読む (PyYAML に依存しない)。
+    frontmatter が無ければ ({}, text)。
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return {}, text
+    meta: dict[str, Any] = {}
+    for line in match.group(1).splitlines():
+        m = _FRONTMATTER_LINE_RE.match(line.strip())
+        if m:
+            meta[m.group(1)] = _parse_frontmatter_value(m.group(2))
+    return meta, text[match.end():].strip()
+
+
+def _memory_file_item(entry: dict[str, Any], fallback_index: int) -> Optional[ClaudeMemoryItem]:
+    """記憶ファイル 1 件を Memopedia ページの形にする。
+
+    name → ページ名 (aliases があれば「name (別名1, 別名2)」)、description → 概要、
+    sources は捨て、frontmatter の後ろを本文にする。本文が空なら description を本文にする。
+    """
+    content = str(entry.get("content") or "").strip()
+    if not content:
+        return None
+    mem_path = str(entry.get("path") or "")
+    meta, body = split_frontmatter(content)
+    name = str(meta.get("name") or "").strip() or Path(mem_path).stem or mem_path or "memory"
+    aliases = meta.get("aliases")
+    if isinstance(aliases, str):
+        aliases = [aliases] if aliases.strip() else []
+    alias_list = [
+        str(a).strip() for a in (aliases or [])
+        if str(a).strip() and str(a).strip() != name
+    ]
+    title = f"{name} ({', '.join(alias_list)})" if alias_list else name
+    description = str(meta.get("description") or "").strip()
+    if not body:
+        body = description
+    if not body:
+        return None
+    return ClaudeMemoryItem(
+        item_id=f"memory_file:{mem_path or fallback_index}",
+        kind=MEMORY_KIND_FILE,
+        title=title,
+        content=body,
+        updated_at=_parse_iso(entry.get("updated_at")),
+        summary=description,
+    )
+
+
+def split_core_memory_sections(text: str) -> list[tuple[str, str]]:
+    """全体記憶を見出しごとの (ラベル, 本文) に分ける。
+
+    ``**見出し**`` が区切り、その下の ``*小見出し*`` はさらに区切って
+    「見出し - 小見出し」のラベルにする。小見出しより前に見出し直下の本文が
+    あれば、それは見出しだけのラベルで 1 件にする。``---`` の区切り線は捨てる。
+    見出しが一つも無ければ、全文を 1 件 (ラベル空) で返す。
+    """
+    sections: list[tuple[str, str]] = []
+    heading: Optional[str] = None
+    subheading: Optional[str] = None
+    buffer: list[str] = []
+    saw_heading = False
+
+    def flush() -> None:
+        body = "\n".join(buffer).strip()
+        buffer.clear()
+        if not body:
+            return
+        if heading and subheading:
+            label = f"{heading} - {subheading}"
+        else:
+            label = heading or ""
+        sections.append((label, body))
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "---":
+            continue
+        head = _HEADING_RE.match(stripped)
+        if head:
+            flush()
+            heading, subheading = head.group(1).strip(), None
+            saw_heading = True
+            continue
+        sub = _SUBHEADING_RE.match(stripped)
+        if sub and heading:
+            flush()
+            subheading = sub.group(1).strip()
+            continue
+        buffer.append(line)
+    flush()
+    if not saw_heading:
+        whole = text.strip()
+        return [("", whole)] if whole else []
+    return sections
+
+
+def _core_memory_items(text: str) -> list[ClaudeMemoryItem]:
+    items: list[ClaudeMemoryItem] = []
+    for idx, (label, body) in enumerate(split_core_memory_sections(text)):
+        if label:
+            # 箇条書きで始まる本文だけ見出しの次の行から始める (段落はラベルに続ける)
+            sep = "\n" if _LIST_START_RE.match(body) else " "
+            content = f"{label}:{sep}{body}"
+        else:
+            content = body
+        items.append(
+            ClaudeMemoryItem(
+                item_id=f"core_memory:{idx}:{label}",
+                kind=MEMORY_KIND_CORE,
+                title=label or "Claudeの記憶",
+                content=content,
+            )
+        )
+    return items
 
 def _load_memories(path: Path) -> ClaudeExportFile:
     entries = _read_json_entries(path, _MEMORIES_JSON_RE)
@@ -585,16 +743,10 @@ def _load_memories(path: Path) -> ClaudeExportFile:
 
 def _memory_items(data: dict[str, Any]) -> list[ClaudeMemoryItem]:
     items: list[ClaudeMemoryItem] = []
+    # 全体記憶は Claude が常に参照していた記憶なので、見出しごとにコア記憶にする
     conv_memory = str(data.get("conversations_memory") or "").strip()
     if conv_memory:
-        items.append(
-            ClaudeMemoryItem(
-                item_id="conversations_memory",
-                kind="conversations_memory",
-                title="Claudeの記憶 (会話全体)",
-                content=conv_memory,
-            )
-        )
+        items.extend(_core_memory_items(conv_memory))
     project_memories = data.get("project_memories")
     if isinstance(project_memories, dict):
         for project_id, content in sorted(project_memories.items()):
@@ -604,7 +756,7 @@ def _memory_items(data: dict[str, Any]) -> list[ClaudeMemoryItem]:
             items.append(
                 ClaudeMemoryItem(
                     item_id=f"project_memory:{project_id}",
-                    kind="project_memory",
+                    kind=MEMORY_KIND_PROJECT,
                     title=f"Claudeプロジェクト記憶 ({str(project_id)[:8]})",
                     content=text,
                 )
@@ -612,22 +764,7 @@ def _memory_items(data: dict[str, Any]) -> list[ClaudeMemoryItem]:
     for entry in data.get("memory_files") or []:
         if not isinstance(entry, dict):
             continue
-        content = str(entry.get("content") or "").strip()
-        if not content:
-            continue
-        mem_path = str(entry.get("path") or "")
-        match = _FRONTMATTER_NAME_RE.search(content)
-        if match:
-            title = match.group(1).strip()
-        else:
-            title = Path(mem_path).stem or mem_path or "memory"
-        items.append(
-            ClaudeMemoryItem(
-                item_id=f"memory_file:{mem_path or len(items)}",
-                kind="memory_file",
-                title=title,
-                content=content,
-                updated_at=_parse_iso(entry.get("updated_at")),
-            )
-        )
+        item = _memory_file_item(entry, len(items))
+        if item is not None:
+            items.append(item)
     return items

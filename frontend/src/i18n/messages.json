@@ -12668,8 +12668,8 @@
     "en": "Memories"
   },
   "components.memory.ClaudeImportPanel.text017": {
-    "ja": "Claude が蓄積した記憶を Memopedia に転記します。転記する項目を選べます。",
-    "en": "Transcribes the memories Claude accumulated into Memopedia. You can choose which items to transcribe."
+    "ja": "Claude が蓄積した記憶を転記します。全体記憶は見出しごとにコア記憶へ、それ以外は Memopedia へ入ります。転記する項目を選べます。",
+    "en": "Transcribes the memories Claude accumulated. The overall memory goes into core memory one heading at a time, and everything else goes into Memopedia. You can choose which items to transcribe."
   },
   "components.memory.ClaudeImportPanel.text018": {
     "ja": "frames（取り込み対象外）",
@@ -12704,8 +12704,8 @@
     "en": "No importable content was found in the file."
   },
   "components.memory.ClaudeImportPanel.text030": {
-    "ja": "全体記憶",
-    "en": "Overall memory"
+    "ja": "コア記憶",
+    "en": "Core memory"
   },
   "components.memory.ClaudeImportPanel.text031": {
     "ja": "プロジェクト記憶",
@@ -12720,12 +12720,12 @@
     "en": "Transcribed {p2} item(s) into Memopedia under \"{p1}\" ({p3} skipped as already present)."
   },
   "components.memory.ClaudeImportPanel.text034": {
-    "ja": "Memopedia へ転記する記憶を選択",
-    "en": "Select memories to transcribe into Memopedia"
+    "ja": "転記する記憶を選択",
+    "en": "Select memories to transcribe"
   },
   "components.memory.ClaudeImportPanel.text035": {
-    "ja": "選んだ項目は Memopedia の「Claude引っ越し」の下にページとして転記されます。",
-    "en": "Selected items are transcribed as pages under the \"Claude引っ越し\" trunk in Memopedia."
+    "ja": "種類が「コア記憶」の項目（Claude が常に参照していた全体記憶の各見出し）はペルソナのコア記憶に追加され、追加したことはペルソナにも通知されます。それ以外は Memopedia の「Claude引っ越し」の下にページとして転記されます。",
+    "en": "Items of kind \"Core memory\" (each heading of the overall memory Claude always referred to) are added to the persona's core memory, and the persona is notified of the addition. Everything else is transcribed as pages under the \"Claude引っ越し\" trunk in Memopedia."
   },
   "components.memory.ClaudeImportPanel.text036": {
     "ja": "種類",
@@ -12834,5 +12834,13 @@
   "components.memory.ClaudeImportPanel.text070": {
     "ja": "{p1} 件をインポート",
     "en": "Import {p1} item(s)"
+  },
+  "components.memory.ClaudeImportPanel.text039": {
+    "ja": "コア記憶に {p1} 件を追加しました（既存のためスキップ: {p2} 件）。",
+    "en": "Added {p1} item(s) to core memory ({p2} skipped as already present)."
+  },
+  "components.memory.ClaudeImportPanel.text053": {
+    "ja": "コア記憶の合計が容量の目安を超えています（{p1} / {p2} 文字）。切り詰めはせず、整理はペルソナ自身に任されます。",
+    "en": "Core memory now exceeds its size guideline ({p1} / {p2} characters). Nothing is cut; tidying it up is left to the persona."
   }
 }

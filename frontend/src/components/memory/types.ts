@@ -66,7 +66,8 @@ export type ClaudeCategory = 'conversations' | 'claude_code' | 'projects' | 'mem
 export interface ClaudeMemoryItemSummary {
   idx: number;
   id: string;
-  kind: 'conversations_memory' | 'project_memory' | 'memory_file' | string;
+  /** core_memory はコア記憶へ、それ以外は Memopedia へ転記される */
+  kind: 'core_memory' | 'project_memory' | 'memory_file' | string;
   title: string;
   preview: string | null;
   char_count: number;
@@ -99,6 +100,14 @@ export interface ClaudeMemoryImportResult {
   created: number;
   skipped: number;
   trunk_title: string;
+  /** 全体記憶の見出しから追加したコア記憶の件数 */
+  core_created: number;
+  core_skipped: number;
+  /** 追加後のコア記憶の合計文字数と容量の目安 (目安超過は知らせるだけで切り詰めない) */
+  core_total_chars: number;
+  core_budget: number;
+  memopedia_requested: number;
+  core_requested: number;
   message: string;
 }
 

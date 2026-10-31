@@ -296,7 +296,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
 | POST | `/api/people/{persona_id}/import/claude` | プレビュー済み Claude エクスポートから選択した会話を背景で取り込む。 |
-| POST | `/api/people/{persona_id}/import/claude/memories` | memories カテゴリの選択アイテムを Memopedia に転記する (同期)。 |
+| POST | `/api/people/{persona_id}/import/claude/memories` | memories カテゴリの選択アイテムを転記する (同期)。 |
 | POST | `/api/people/{persona_id}/import/claude/preview` | Claude 公式エクスポートの ZIP/JSON を解析し、取り込み候補の一覧を返す。 |
 | GET | `/api/people/{persona_id}/import/claude/status` | Claude 取り込みタスクの状態 (背景埋め込みの進捗を含む)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |

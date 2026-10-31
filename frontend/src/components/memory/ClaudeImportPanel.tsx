@@ -3,7 +3,7 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import {
   AlertCircle, BookOpen, Bot, CheckCircle, CheckSquare, FolderOpen,
-  Loader2, MessageSquare, MessagesSquare, Square, Upload,
+  Download, Loader2, MessageSquare, MessagesSquare, Square,
 } from 'lucide-react';
 import React, { useCallback, useRef, useState } from 'react';
 
@@ -18,7 +18,7 @@ import {
 
 import styles from './MemoryImport.module.css';
 import { MemoryImportProgress } from './MemoryImportProgress';
-import { formatImportDate, formatProgress, formatThreadDateRange } from './formatters';
+import { formatImportDate, formatProgress, formatThreadDateRange, sortThreadsByLastActivity } from './formatters';
 import {
   ClaudeCategory, ClaudePreviewData, ClaudePreviewErrorDetail,
   MemoryImportProgress as ImportProgressData, MemoryImportUiResult, ThreadSummary,
@@ -91,7 +91,7 @@ function categoryDesc(category: string): string {
 
 function kindLabel(kind: string): string {
   switch (kind) {
-    case 'conversations_memory': return uiText('components.memory.ClaudeImportPanel.text030');
+    case 'core_memory': return uiText('components.memory.ClaudeImportPanel.text030');
     case 'project_memory': return uiText('components.memory.ClaudeImportPanel.text031');
     case 'memory_file': return uiText('components.memory.ClaudeImportPanel.text032');
     default: return kind;
@@ -177,7 +177,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
   };
 
   const handleImportSuccess = async (message: string) => {
-    const threadList = await fetchThreads(personaId);
+    const threadList = sortThreadsByLastActivity(await fetchThreads(personaId));
     if (threadList.length <= 0) {
       setPhase('home');
       setResult({ type: 'success', message });
@@ -251,12 +251,23 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
       return;
     }
     setPhase('home'); setPreview(null); setSelectedIds(new Set());
-    setResult({
-      type: 'success',
-      message: uiText('components.memory.ClaudeImportPanel.text033', {
+    const lines: string[] = [];
+    if ((data.memopedia_requested ?? 0) > 0) {
+      lines.push(uiText('components.memory.ClaudeImportPanel.text033', {
         p1: data.trunk_title ?? '', p2: data.created ?? 0, p3: data.skipped ?? 0,
-      }),
-    });
+      }));
+    }
+    if ((data.core_requested ?? 0) > 0) {
+      lines.push(uiText('components.memory.ClaudeImportPanel.text039', {
+        p1: data.core_created ?? 0, p2: data.core_skipped ?? 0,
+      }));
+      const total = data.core_total_chars ?? 0;
+      const budget = data.core_budget ?? 0;
+      if (budget > 0 && total > budget) {
+        lines.push(uiText('components.memory.ClaudeImportPanel.text053', { p1: total, p2: budget }));
+      }
+    }
+    setResult({ type: 'success', message: lines.join(' ') });
     onImportComplete?.();
   };
 
@@ -463,7 +474,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete }: {
               </div>
               <div data-i18n={descKey} className={styles.claudeCategoryDesc}>{categoryDesc(category)}</div>
             </div>
-            {isLoading ? <Loader2 size={20} className={styles.loader} /> : <Upload size={20} className={styles.claudeCategoryUpload} />}
+            {isLoading ? <Loader2 size={20} className={styles.loader} /> : <Download size={20} className={styles.claudeCategoryUpload} />}
             <input
               type="file"
               ref={(el) => { fileInputRefs.current[category] = el; }}

@@ -15,7 +15,7 @@ import {
   startReembed,
 } from '@/lib/memory/importClient';
 
-import { formatProgress } from './formatters';
+import { formatProgress, sortThreadsByLastActivity } from './formatters';
 import { ImportSubTab, MemoryImportProgress, MemoryImportStep, MemoryImportUiResult, NativePreviewData, PreviewData, ThreadSummary } from './types';
 
 export function useMemoryImport(personaId: string, onImportComplete?: () => void) {
@@ -43,7 +43,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
   };
 
   const handleImportSuccess = async (message: string) => {
-    const threadList = await fetchThreads(personaId);
+    const threadList = sortThreadsByLastActivity(await fetchThreads(personaId));
     if (threadList.length <= 0) {
       setStep('upload');
       setResult({ type: 'success', message });
