@@ -92,6 +92,7 @@ saiverse/
 │                           #   対応する型は provider 設定の reflex_judgment 欄で宣言する（reflex_judgment.md）。
 │                           #   最初の利用者は自動想起の選別（auto_recall_jev_rerank.md）
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
+├── gemini_timing.py        # Gemini の DEBUG 計測（準備・HTTP 本文送信・応答待ち、本文を記録しない）
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
 ├── persona_model_selection.py # ペルソナが話す標準モデルの決め方（一時上書き → 個別 → グローバル → 組み込み）の唯一の置き場 /
