@@ -773,6 +773,14 @@ def _compare_gone() -> HTTPException:
     )
 
 
+def _remove_empty_persona_root(folder: Path) -> None:
+    """消した見比べのフォルダの親が空なら消す。"""
+    try:
+        folder.parent.rmdir()  # 空のときだけ消える
+    except OSError:
+        pass
+
+
 def _sweep_old_compares(manager: Any) -> None:
     """24 時間を過ぎた見比べのフォルダを消す (見比べを始めるたびに呼ぶ)。
 
@@ -891,6 +899,7 @@ def discard_compare(persona_id: str, token: str, manager=Depends(get_manager)):
             except OSError as exc:
                 LOGGER.warning("Could not delete the persona pack comparison %s", folder, exc_info=True)
                 raise HTTPException(status_code=500, detail=f"The comparison could not be deleted: {exc}")
+            _remove_empty_persona_root(folder)
     return {"discarded": True}
 
 
@@ -958,6 +967,7 @@ async def apply_persona_pack(
         except Exception as exc:
             raise _import_error(exc)
         shutil.rmtree(folder, ignore_errors=True)
+        _remove_empty_persona_root(folder)
         return payload
 
 

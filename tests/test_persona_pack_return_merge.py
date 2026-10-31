@@ -77,16 +77,23 @@ def _lite_pack(
     fragments: Optional[List[Dict[str, Any]]] = None,
     profile: Optional[Dict[str, Any]] = None,
     active: Optional[Dict[str, Any]] = None,
+    thread_titles: Optional[Dict[str, str]] = None,
     in_contents: bool = True,
 ) -> Path:
     """本体のパック src を、Lite が書き出した形に書き換えて dst へ書く。"""
     with zipfile.ZipFile(src) as zf:
         doc = {
             name: json.loads(zf.read(name))
-            for name in ("manifest.json", "chatlog/messages.json", "knowledge/pages.json", "profile/profile.json")
+            for name in (
+                "manifest.json", "chatlog/threads.json", "chatlog/messages.json",
+                "knowledge/pages.json", "profile/profile.json",
+            )
         }
     if in_contents:
         doc["manifest.json"]["contents"].append("extensions/lite")
+    for row in doc["chatlog/threads.json"]:
+        if row["id"] in (thread_titles or {}):
+            row["title"] = thread_titles[row["id"]]
     rows = [r for r in doc["chatlog/messages.json"] if r["id"] not in (drop_messages or [])]
     for row in rows:
         if row["id"] in (messages or {}):
@@ -300,9 +307,25 @@ def test_compare_writes_nothing_and_lists_only_real_differences(pack: Dict[str, 
     deleted = by_key["message:m4"]
     assert deleted["change"] == "deleted"
     assert deleted["lite"]["exists"] is False
-    assert by_key[KIND_ACTIVE_THREAD]["body"]["title"] == "room_a"
-    assert by_key[KIND_ACTIVE_THREAD]["lite"]["title"] == "room_b"
+    # 題の無いスレッド (room_b) の ID は画面に出さない
+    assert by_key[KIND_ACTIVE_THREAD]["body"]["title"] == "部屋 A の会話"
+    assert by_key[KIND_ACTIVE_THREAD]["lite"]["title"] is None
     assert by_key[KIND_ACTIVE_THREAD]["lite"]["content"] == "B の返事"
+
+
+def test_active_thread_item_shows_the_thread_titles(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    conn = _mem(env)
+    conn.execute("UPDATE threads SET title = '本体の題' WHERE id = ?", (f"{PID}:room_a",))
+    conn.commit()
+    conn.close()
+    zip_path = _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", _empty_changes(),
+        active={"active_thread_id": "room_b"}, thread_titles={f"{PID}:room_b": "Lite の題"},
+    )
+    items, _ = _compare(env, zip_path)
+    payload = items[0].payload
+    assert (payload["body"]["title"], payload["lite"]["title"]) == ("本体の題", "Lite の題")
 
 
 def test_chronicle_and_root_pages_are_not_listed(pack: Dict[str, Any]) -> None:
@@ -517,6 +540,24 @@ def test_deleted_page_and_core_memory(pack: Dict[str, Any]) -> None:
     ).fetchall()
     conn.close()
     assert edit_types == [("delete",)]
+
+
+def test_core_memory_has_its_own_row_in_the_result(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    conn = _mem(env)
+    core_page = conn.execute(
+        "SELECT id FROM memopedia_pages WHERE category = 'core' AND is_trunk = 0 LIMIT 1"
+    ).fetchone()[0]
+    conn.close()
+    changes = _empty_changes()
+    changes["pages"]["edited"] = [core_page]
+    zip_path = _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", changes, pages={core_page: {"content": "Lite のコア記憶"}},
+    )
+    items, _ = _compare(env, zip_path)
+    result = _apply(env, zip_path, _select(items, "lite"))
+    assert result.counts["core_pages"].updated == 1
+    assert result.counts["pages"].updated == 0
 
 
 def test_core_memory_deleted_in_body_loses_deleted_at_when_revived(pack: Dict[str, Any]) -> None:
@@ -1303,7 +1344,7 @@ def test_api_compare_lists_pages_and_apply_takes_the_choices(api: Dict[str, Any]
     assert payload["return_merge"]["choices"]["message"] == {"lite": 1, "body": 1}
     assert _api_message(api, "m1") == "Lite 1"
     assert _api_message(api, "m2") == "again"
-    assert _compare_folders(api) == []
+    assert list((api["home"] / "tmp" / "persona_pack_compare").iterdir()) == []
 
     again = _post_apply(api, token=data["token"], bulk="lite")
     assert again.status_code == 410
@@ -1396,7 +1437,7 @@ def test_api_discard_removes_the_comparison(api: Dict[str, Any]) -> None:
     token = _post_compare(api, api["lite"]).json()["token"]
     url = f"/api/people/{PID}/persona-pack/compare/{token}"
     assert api["client"].delete(url).status_code == 200
-    assert _compare_folders(api) == []
+    assert list((api["home"] / "tmp" / "persona_pack_compare").iterdir()) == []
     assert _post_apply(api, token=token, bulk="lite").status_code == 410
     assert api["client"].delete(url).status_code == 200
 

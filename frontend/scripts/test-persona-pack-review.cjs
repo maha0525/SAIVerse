@@ -290,7 +290,7 @@ function panelHarness(respond) {
         if (name === '@/i18n/core') return { t: key => key };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/i18n/api') return { apiFetch: async (url, init) => {
-            requests.push({ url, method: init?.method ?? 'GET' });
+            requests.push({ url, method: init?.method ?? 'GET', body: init?.body });
             return respond(url, init);
         } };
         if (name === './PersonaPackResult') return { __esModule: true, default: () => null };
@@ -306,31 +306,63 @@ function panelHarness(respond) {
     return { render, requests, review: nodes => nodes.find(n => n.type === Review) };
 }
 
+/** Choosing the ZIP is what starts the comparison. */
 async function openReview(h) {
-    let nodes = h.render();
+    const nodes = h.render();
     nodes.find(n => n.type === 'input' && n.props.type === 'file').props.onChange({ target: { files: [{ name: 'pack.zip' }], value: '' } });
-    nodes = h.render();
-    await byI18n(nodes, 'mergeAction').props.onClick();
+    await new Promise(setImmediate);
     await new Promise(setImmediate);
     return h.render();
 }
 
+const overwriteBox = nodes => nodes.find(n => n.type === 'input' && n.props.type === 'checkbox');
+
 async function panelTests() {
-    const compared = { ok: true, json: async () => ({ token: 'tok', has_changes: true, total: 2, counts: {}, message_deletions: 0, warnings: [], resume: false }) };
+    const answer = fields => ({ ok: true, json: async () => ({ token: 'tok', has_changes: true, total: 2, counts: {}, message_deletions: 0, warnings: [], resume: false, ...fields }) });
+    const compared = answer({});
+
+    // The list of a pack from Lite has no profile overwrite: each profile item has its own choice.
+    {
+        const nodes = await openReview(panelHarness(() => compared));
+        assert.equal(overwriteBox(nodes), undefined);
+    }
+
+    // A pack from the body offers the overwrite, and applying it sends what was chosen.
+    {
+        const h = panelHarness((url) => (url.endsWith('/apply') ? { ok: true, json: async () => ({ counts: {} }) } : answer({ has_changes: false, total: 0 })));
+        let nodes = await openReview(h);
+        assert.equal(h.review(nodes), undefined);
+        assert.ok(byI18n(nodes, 'mergeHint'));
+        overwriteBox(nodes).props.onChange({ target: { checked: true } });
+        nodes = h.render();
+        await byI18n(nodes, 'mergeAction').props.onClick();
+        await new Promise(setImmediate);
+        assert.equal(JSON.parse(h.requests.at(-1).body).overwrite_profile, true);
+    }
+
+    // A pack from Lite with nothing to choose says so and waits for the button.
+    for (const [fields, hint] of [[{ total: 0 }, 'mergeReturnHint'], [{ total: 0, resume: true }, 'mergeResumeHint']]) {
+        const h = panelHarness(() => answer(fields));
+        const nodes = await openReview(h);
+        assert.equal(overwriteBox(nodes), undefined);
+        assert.ok(byI18n(nodes, hint));
+        assert.equal(h.requests.length, 1, 'nothing is applied before the button');
+    }
 
     // Cancelling the list deletes the comparison on the server, and a refused delete still closes the list.
-    for (const answer of [{ ok: true }, { ok: false, status: 500, statusText: 'Server Error', json: async () => ({ detail: 'in use' }) }]) {
+    for (const deleted of [{ ok: true }, { ok: false, status: 500, statusText: 'Server Error', json: async () => ({ detail: 'in use' }) }]) {
         const warnings = [];
         const warn = console.warn;
         console.warn = (...args) => warnings.push(args);
-        const h = panelHarness((url, init) => (init?.method === 'DELETE' ? answer : compared));
+        const h = panelHarness((url, init) => (init?.method === 'DELETE' ? deleted : compared));
         const nodes = await openReview(h);
         h.review(nodes).props.onCancel();
         await new Promise(setImmediate);
         console.warn = warn;
-        assert.deepEqual(h.requests.at(-1), { url: '/api/people/p1/persona-pack/compare/tok', method: 'DELETE' });
+        assert.equal(h.requests.at(-1).url, '/api/people/p1/persona-pack/compare/tok');
+        assert.equal(h.requests.at(-1).method, 'DELETE');
         assert.equal(h.review(h.render()), undefined);
-        assert.equal(warnings.length, answer.ok ? 0 : 1, 'a failed delete leaves a line in the console');
+        assert.equal(warnings.length, deleted.ok ? 0 : 1, 'a failed delete leaves a line in the console');
     }
 
     // A failure after the memories were saved closes the list and asks for a new comparison.
@@ -345,9 +377,16 @@ async function panelTests() {
         const after = h.render();
         assert.equal(h.review(after), undefined);
         assert.ok(after.some(n => n.props?.children === `${P}comparePartial`));
+
+        // The way back is a new comparison of the same ZIP.
+        await byI18n(after, 'compareAgain').props.onClick();
+        await new Promise(setImmediate);
+        await new Promise(setImmediate);
+        assert.ok(h.requests.at(-1).url.endsWith('/persona-pack/compare'));
+        assert.ok(h.review(h.render()));
     }
 
-    console.log('Pack panel: cancel deletes the comparison, and a failure after the memories were saved asks for a new comparison passed.');
+    console.log('Pack panel: choosing a ZIP compares it, the profile overwrite shows only for a body pack, cancel deletes the comparison, and a failure after the memories were saved asks for a new comparison passed.');
 }
 
 function flat2(node, out = []) {

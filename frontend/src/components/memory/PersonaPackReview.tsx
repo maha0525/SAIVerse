@@ -121,7 +121,8 @@ interface SideViewProps {
 
 function SideView({ item, side, value, selected, onSelect, expanded, onToggle, loadingFull }: SideViewProps) {
     const missing = !value.exists || value.deleted;
-    const heading = value.title ?? (item.kind === 'page' ? item.title : null);
+    // コア記憶の題は番号 (c:N) なので出さない。種類の見出しがコア記憶と示している
+    const heading = item.category === 'core' ? null : value.title ?? (item.kind === 'page' ? item.title : null);
     const content = value.content ?? '';
     const foldable = value.truncated || content.length > FOLD_CHARS;
     const time = formatTime(value.updated_at);

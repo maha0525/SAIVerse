@@ -106,10 +106,7 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         e.target.value = '';
         if (!file) return;
         setSelectedFile(file);
-        setOverwriteProfile(false);
-        setCompare(null);
-        setImportError(null);
-        setResult(null);
+        void startCompare(file);
     };
 
     /** 見比べの ZIP と一覧を消す。消せなくても画面は閉じる (サーバーが 24 時間後に消す) */
@@ -132,7 +129,7 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         setResult(null);
     };
 
-    /** 見比べた ZIP を適用する。一覧が空のパックは見比べの直後にここへ来る */
+    /** 見比べた ZIP を適用する */
     const applyCompared = async (
         token: string,
         bulk: PersonaPackChoice | null,
@@ -164,15 +161,19 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         }
     };
 
-    const handleMerge = async () => {
-        if (!selectedFile) return;
+    /**
+     * ZIP を選んだら先に見比べる (取り込み先には書かない)。Lite から帰るパックか本体のパックかで
+     * 確かめる内容が違い、それはサーバーが中身を読むまで分からない。
+     */
+    async function startCompare(file: File) {
         setIsComparing(true);
+        setOverwriteProfile(false);
         setImportError(null);
         setResult(null);
         setCompare(null);
         try {
             const form = new FormData();
-            form.append('file', selectedFile);
+            form.append('file', file);
             const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/persona-pack/compare`, {
                 method: 'POST',
                 body: form,
@@ -181,19 +182,14 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                 setImportError(uiText('components.memory.PersonaPack.importFailed', { p1: await errorDetail(res) }));
                 return;
             }
-            const data = (await res.json()) as PersonaPackCompare;
-            if (data.total === 0) {
-                await applyCompared(data.token, null, {});
-                return;
-            }
-            setCompare(data);
+            setCompare((await res.json()) as PersonaPackCompare);
         } catch (error) {
             console.error('Persona pack compare failed', error);
             setImportError(uiText('components.memory.PersonaPack.importFailed', { p1: String(error) }));
         } finally {
             setIsComparing(false);
         }
-    };
+    }
 
     const isBusy = isComparing || isImporting;
 
@@ -212,7 +208,7 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                     onChange={handleFileChange}
                 />
                 <div className={styles.actions}>
-                    <button data-i18n="components.memory.PersonaPack.chooseFile" className={styles.secondaryButton} onClick={() => fileInputRef.current?.click()} disabled={isBusy || compare !== null}>
+                    <button data-i18n="components.memory.PersonaPack.chooseFile" className={styles.secondaryButton} onClick={() => fileInputRef.current?.click()} disabled={isBusy || (compare !== null && compare.total > 0)}>
                         <PackageOpen size={16} />
                         {uiText('components.memory.PersonaPack.chooseFile')}
                     </button>
@@ -221,18 +217,50 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                 {selectedFile && compare === null && (
                     <div className={styles.confirmBox}>
                         <div className={styles.fileName}>{selectedFile.name}</div>
-                        <label className={styles.checkboxRow}>
-                            <input
-                                type="checkbox"
-                                checked={overwriteProfile}
-                                onChange={(e) => setOverwriteProfile(e.target.checked)}
-                                disabled={isBusy}
-                            />
-                            <span data-i18n="components.memory.PersonaPack.overwriteProfile">{uiText('components.memory.PersonaPack.overwriteProfile')}</span>
-                        </label>
-                        <p data-i18n="components.memory.PersonaPack.mergeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeHint')}</p>
                         <div className={styles.actions}>
-                            <button data-i18n="components.memory.PersonaPack.mergeAction" className={styles.primaryButton} onClick={() => void handleMerge()} disabled={isBusy}>
+                            {isComparing ? (
+                                <span data-i18n="components.memory.PersonaPack.comparing" className={styles.busy}>
+                                    <Loader2 size={16} className={styles.spin} />
+                                    {uiText('components.memory.PersonaPack.comparing')}
+                                </span>
+                            ) : (
+                                <button data-i18n="components.memory.PersonaPack.compareAgain" className={styles.primaryButton} onClick={() => void startCompare(selectedFile)}>
+                                    <PackageOpen size={16} />
+                                    {uiText('components.memory.PersonaPack.compareAgain')}
+                                </button>
+                            )}
+                            <button data-i18n="components.memory.PersonaPack.cancel" className={styles.secondaryButton} onClick={handleCancel} disabled={isBusy}>
+                                <X size={16} />
+                                {uiText('components.memory.PersonaPack.cancel')}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* 食い違いの無いパック。プロフィールの上書きを選べるのは本体のパックだけで、Lite から帰るパックは項目ごとに見比べる */}
+                {selectedFile && compare !== null && compare.total === 0 && (
+                    <div className={styles.confirmBox}>
+                        <div className={styles.fileName}>{selectedFile.name}</div>
+                        {compare.has_changes ? (
+                            compare.resume
+                                ? <p data-i18n="components.memory.PersonaPack.mergeResumeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeResumeHint')}</p>
+                                : <p data-i18n="components.memory.PersonaPack.mergeReturnHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeReturnHint')}</p>
+                        ) : (
+                            <>
+                                <label className={styles.checkboxRow}>
+                                    <input
+                                        type="checkbox"
+                                        checked={overwriteProfile}
+                                        onChange={(e) => setOverwriteProfile(e.target.checked)}
+                                        disabled={isBusy}
+                                    />
+                                    <span data-i18n="components.memory.PersonaPack.overwriteProfile">{uiText('components.memory.PersonaPack.overwriteProfile')}</span>
+                                </label>
+                                <p data-i18n="components.memory.PersonaPack.mergeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeHint')}</p>
+                            </>
+                        )}
+                        <div className={styles.actions}>
+                            <button data-i18n="components.memory.PersonaPack.mergeAction" className={styles.primaryButton} onClick={() => void applyCompared(compare.token, null, {})} disabled={isBusy}>
                                 {isBusy ? <Loader2 size={16} className={styles.spin} /> : <PackageOpen size={16} />}
                                 {uiText('components.memory.PersonaPack.mergeAction')}
                             </button>
@@ -240,16 +268,14 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                                 <X size={16} />
                                 {uiText('components.memory.PersonaPack.cancel')}
                             </button>
-                            {isImporting ? (
+                            {isImporting && (
                                 <span data-i18n="components.memory.PersonaPack.importing" className={styles.busy}>{uiText('components.memory.PersonaPack.importing')}</span>
-                            ) : isComparing ? (
-                                <span data-i18n="components.memory.PersonaPack.comparing" className={styles.busy}>{uiText('components.memory.PersonaPack.comparing')}</span>
-                            ) : null}
+                            )}
                         </div>
                     </div>
                 )}
 
-                {selectedFile && compare !== null && (
+                {selectedFile && compare !== null && compare.total > 0 && (
                     <PersonaPackReview
                         personaId={personaId}
                         compare={compare}

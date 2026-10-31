@@ -424,7 +424,7 @@ class PersonaPackImportResult:
     """取り込みの結果 (intent §5「結果の内訳」)。
 
     ``counts`` のキー: ``threads`` ``stelis_threads`` ``messages`` ``attachments``
-    ``pages`` ``chronicle_pages`` ``activities`` ``memos`` ``clips``
+    ``pages`` ``core_pages`` ``chronicle_pages`` ``activities`` ``memos`` ``clips``
     ``purpose_tags`` ``task_book`` ``day_reports`` ``profile`` ``items`` と、
     ``extensions/memory_db/<table>`` ``extensions/saiverse_db/<table>``
     ``extensions/persona_dir``。ZIP に無いカテゴリは載らない。
@@ -612,11 +612,20 @@ def _json_bytes_to_text(value: Any) -> Optional[str]:
         return None
 
 
+def _page_count_key(page: Mapping[str, Any]) -> str:
+    """memopedia_pages の行の件数を載せる内訳のキー。根のページは ``pages`` に数える。"""
+    if not page.get("is_trunk"):
+        if page.get("category") == _CATEGORY_CHRONICLE:
+            return "chronicle_pages"
+        if page.get("category") == _CATEGORY_CORE:
+            return "core_pages"
+    return "pages"
+
+
 def _row_count_key(table: str, row: Dict[str, Any]) -> str:
     """JSON_TEXT_COLUMNS の表の行を除いたときに件数を載せる内訳のキー。"""
     if table == "memopedia_pages":
-        is_chronicle = row.get("category") == _CATEGORY_CHRONICLE and not row.get("is_trunk")
-        return "chronicle_pages" if is_chronicle else "pages"
+        return _page_count_key(row)
     return table
 
 
@@ -1641,23 +1650,33 @@ def _build_return_review(
     def zip_page(page_id: str) -> Optional[Dict[str, Any]]:
         return next(pack.pages.rows_where("WHERE id = ? ORDER BY ord", (page_id,)), None)
 
+    def body_thread_title(thread_id: str) -> Optional[str]:
+        if "title" not in {row[1] for row in memory.execute("PRAGMA table_info(threads)")}:
+            return None  # title の列を足す前の memory.db (読むだけなので足さない)
+        row = memory.execute("SELECT title FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        return row[0] if row else None
+
     def thread_tail(body_suffix: str, lite_suffix: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        # 画面に出すのはスレッドの題だけ。題の無いスレッドの ID は出さない
+        body_id = f"{target}:{body_suffix}"
+        lite_id = f"{pack.source_id}:{lite_suffix}"
         body_row = memory.execute(
             "SELECT content, created_at FROM messages WHERE thread_id = ? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (f"{target}:{body_suffix}",),
+            (body_id,),
         ).fetchone()
         lite_row = next(pack.messages.rows_where(
             "WHERE thread_id = ? ORDER BY created_at_key DESC, ord DESC LIMIT 1",
-            (f"{pack.source_id}:{lite_suffix}",),
+            (lite_id,),
         ), None)
+        lite_thread = next((row for row in pack.threads if row.get("id") == lite_id), None)
         body = return_merge.review_side(
-            title=body_suffix,
+            title=body_thread_title(body_id),
             content=body_row[0] if body_row else None,
             updated_at=body_row[1] if body_row else None,
         )
         lite = return_merge.review_side(
-            title=lite_suffix,
+            title=decode_value(lite_thread.get("title")) if lite_thread else None,
             content=decode_value(lite_row.get("content")) if lite_row else None,
             updated_at=iso_to_epoch(lite_row.get("created_at")) if lite_row else None,
         )
@@ -3357,7 +3376,7 @@ class _ImportJob:
         for ord_, text, first in pages.paged("r.row, " + _first_occurrence("id")):
             page = json.loads(text)
             is_chronicle = page.get("category") == _CATEGORY_CHRONICLE and not page.get("is_trunk")
-            counts = self.result.count("chronicle_pages" if is_chronicle else "pages")
+            counts = self.result.count(_page_count_key(page))
             if not first:
                 counts.skipped += 1
                 continue
@@ -3461,7 +3480,7 @@ class _ImportJob:
             is_chronicle = d.get("category") == _CATEGORY_CHRONICLE and not d.get("is_trunk")
             if is_chronicle:
                 self.imported_chronicle_ids.add(d["id"])
-            self.result.count("chronicle_pages" if is_chronicle else "pages").added += 1
+            self.result.count(_page_count_key(d)).added += 1
 
     def plan_page_numbers(self, conn: sqlite3.Connection, pages: _StagedRows) -> List[_PageNumberPlan]:
         """stage_knowledge が挿入する行 (accepted = 1) の短縮番号を計画する (モジュール docstring)。

@@ -62,6 +62,8 @@ export interface PersonaPackImportResult {
     persona_name?: string;
 }
 
+const FRAGMENTS_KEY = 'extensions/memory_db/memopedia_fragments';
+
 /** 表に出す順番。ここに無いキーは extensions/ (まとめて 1 行) かキー名のまま出す */
 const CATEGORY_ORDER = [
     'profile',
@@ -70,7 +72,9 @@ const CATEGORY_ORDER = [
     'messages',
     'attachments',
     'pages',
+    'core_pages',
     'chronicle_pages',
+    FRAGMENTS_KEY,
     'activities',
     'memos',
     'clips',
@@ -90,7 +94,9 @@ function categoryLabel(key: string): string {
         case 'messages': return uiText('components.memory.PersonaPack.categoryMessages');
         case 'attachments': return uiText('components.memory.PersonaPack.categoryAttachments');
         case 'pages': return uiText('components.memory.PersonaPack.categoryPages');
+        case 'core_pages': return uiText('components.memory.PersonaPack.categoryCorePages');
         case 'chronicle_pages': return uiText('components.memory.PersonaPack.categoryChronicle');
+        case FRAGMENTS_KEY: return uiText('components.memory.PersonaPack.categoryFragments');
         case 'activities': return uiText('components.memory.PersonaPack.categoryActivities');
         case 'memos': return uiText('components.memory.PersonaPack.categoryMemos');
         case 'clips': return uiText('components.memory.PersonaPack.categoryClips');
@@ -106,7 +112,7 @@ function categoryLabel(key: string): string {
 function choiceLabel(kind: string): string {
     switch (kind) {
         case 'message': return uiText('components.memory.PersonaPack.reviewKindMessage');
-        case 'page': return uiText('components.memory.PersonaPack.reviewKindPage');
+        case 'page': return uiText('components.memory.PersonaPack.resultChoicePages');
         case 'profile': return uiText('components.memory.PersonaPack.categoryProfile');
         case 'active_thread': return uiText('components.memory.PersonaPack.reviewKindThread');
         default: return kind;
