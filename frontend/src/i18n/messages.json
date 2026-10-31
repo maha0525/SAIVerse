@@ -12272,8 +12272,8 @@
     "en": "Import a persona pack"
   },
   "components.memory.PersonaPack.importDescription": {
-    "ja": "選んだパックの記録を、このペルソナに合流させます。まだ無い記録だけが追加され、今ある記録は消えません。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",
-    "en": "Merges the records in the chosen pack into this persona. Only records that are not here yet are added, and nothing already here is removed. To welcome the pack as a new persona, import it from the persona creation screen."
+    "ja": "選んだパックの記録を、このペルソナに合流させます。本体で書き出したパックは、まだ無い記録を足します。Lite から帰るパックは、食い違う記録を一件ずつ見比べて、どちらを残すかを選べます。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",
+    "en": "Merges the records in the chosen pack into this persona. A pack exported from this app adds the records that are not here yet. A pack coming back from Lite lets you compare each conflicting record and choose which one to keep. To welcome the pack as a new persona, import it from the persona creation screen."
   },
   "components.memory.PersonaPack.chooseFile": {
     "ja": "ZIP ファイルを選ぶ",
@@ -12286,6 +12286,18 @@
   "components.memory.PersonaPack.mergeHint": {
     "ja": "Memopedia のページは、内容が違うときは更新日時が新しい方が残ります (上書きされた方は編集履歴から戻せます)。Chronicle の記事は、取り込み先のどの記事もまだまとめていない会話のぶんだけが入ります。所持品と私室・その他の記録は合流では取り込まず、スキップとして数えます。",
     "en": "When a Memopedia page differs, the more recently updated version is kept (the overwritten text can be restored from the edit history). Chronicle articles are imported only for conversations that no article in this persona covers yet. Items, the private room, and other records are not merged; they are counted as skipped."
+  },
+  "components.memory.PersonaPack.mergeReturnHint": {
+    "ja": "Lite で増えた記録を足します。本体と食い違う記録はありません。",
+    "en": "Adds the records created in Lite. Nothing conflicts with this persona."
+  },
+  "components.memory.PersonaPack.mergeResumeHint": {
+    "ja": "途中で止まった取り込みの続きを行います。",
+    "en": "Continues the import that stopped partway."
+  },
+  "components.memory.PersonaPack.compareAgain": {
+    "ja": "もう一度確かめる",
+    "en": "Check the pack again"
   },
   "components.memory.PersonaPack.mergeAction": {
     "ja": "このペルソナに合流させる",
@@ -12346,6 +12358,18 @@
   "components.memory.PersonaPack.categoryPages": {
     "ja": "Memopedia のページ",
     "en": "Memopedia pages"
+  },
+  "components.memory.PersonaPack.categoryCorePages": {
+    "ja": "コア記憶",
+    "en": "Core memories"
+  },
+  "components.memory.PersonaPack.categoryFragments": {
+    "ja": "Fragment",
+    "en": "Fragments"
+  },
+  "components.memory.PersonaPack.resultChoicePages": {
+    "ja": "Memopedia のページとコア記憶",
+    "en": "Memopedia pages and core memories"
   },
   "components.memory.PersonaPack.categoryChronicle": {
     "ja": "Chronicle",
@@ -12418,6 +12442,190 @@
   "components.memory.PersonaPack.chronicleRepairHint": {
     "ja": "合流の後は、あらすじ (Chronicle) の画面に出る案内から、あらすじの補修を一度実行してください。取り込んだあらすじを、このペルソナのあらすじの流れにつなぎます。実行の前に、内容と費用の確認があります。",
     "en": "After merging, run the Chronicle repair once from the notice on the Chronicle screen. It connects the imported summaries to this persona's chronicle. You can review the content and cost before it runs."
+  },
+  "components.memory.PersonaPack.comparing": {
+    "ja": "見比べています…",
+    "en": "Comparing…"
+  },
+  "components.memory.PersonaPack.compareStale": {
+    "ja": "見比べたあとで本体の内容が変わったので、適用しませんでした。「もう一度確かめる」を押して見比べ直してください。",
+    "en": "The persona changed after the comparison, so nothing was applied. Press \"Check the pack again\" to compare once more."
+  },
+  "components.memory.PersonaPack.compareExpired": {
+    "ja": "見比べた内容が残っていません。「もう一度確かめる」を押して見比べ直してください。",
+    "en": "The comparison is gone. Press \"Check the pack again\" to compare once more."
+  },
+  "components.memory.PersonaPack.comparePartial": {
+    "ja": "発言とページは合流しましたが、プロフィールを保存できませんでした。「もう一度確かめる」を押して見比べ直すと、残りの項目だけが出ます。",
+    "en": "Messages and pages were merged, but the profile could not be saved. Press \"Check the pack again\" to compare once more; only what is left will be listed."
+  },
+  "components.memory.PersonaPack.reviewTitle": {
+    "ja": "どちらを残すかを選びます",
+    "en": "Choose what to keep"
+  },
+  "components.memory.PersonaPack.reviewLead": {
+    "ja": "Lite で変えた記憶のうち、本体と食い違っているものです。一件ずつ、どちらを残すかを選んでください。",
+    "en": "These are the records changed in Lite that differ from this persona. Choose which one to keep for each."
+  },
+  "components.memory.PersonaPack.reviewAllLite": {
+    "ja": "全部 Lite を残す",
+    "en": "Keep Lite for all"
+  },
+  "components.memory.PersonaPack.reviewAllBody": {
+    "ja": "全部 本体を残す",
+    "en": "Keep this persona for all"
+  },
+  "components.memory.PersonaPack.reviewUndecided": {
+    "ja": "未選択 {p1} 件",
+    "en": "{p1} not chosen yet"
+  },
+  "components.memory.PersonaPack.reviewAllDecided": {
+    "ja": "全件選びました",
+    "en": "All chosen"
+  },
+  "components.memory.PersonaPack.reviewDeleteNote": {
+    "ja": "発言を消しても、あらすじに内容が残ることがあります。",
+    "en": "Deleting a message can leave its content in the Chronicle."
+  },
+  "components.memory.PersonaPack.reviewBody": {
+    "ja": "本体",
+    "en": "This persona"
+  },
+  "components.memory.PersonaPack.reviewLite": {
+    "ja": "Lite",
+    "en": "Lite"
+  },
+  "components.memory.PersonaPack.reviewKindMessage": {
+    "ja": "発言",
+    "en": "Message"
+  },
+  "components.memory.PersonaPack.reviewKindPage": {
+    "ja": "Memopedia のページ",
+    "en": "Memopedia page"
+  },
+  "components.memory.PersonaPack.reviewKindCore": {
+    "ja": "コア記憶",
+    "en": "Core memory"
+  },
+  "components.memory.PersonaPack.reviewKindName": {
+    "ja": "名前",
+    "en": "Name"
+  },
+  "components.memory.PersonaPack.reviewKindSystemPrompt": {
+    "ja": "システムプロンプト",
+    "en": "System prompt"
+  },
+  "components.memory.PersonaPack.reviewKindDescription": {
+    "ja": "説明文",
+    "en": "Description"
+  },
+  "components.memory.PersonaPack.reviewKindThread": {
+    "ja": "いま続いているスレッド",
+    "en": "Current thread"
+  },
+  "components.memory.PersonaPack.reviewKeepBody": {
+    "ja": "本体の内容を残す",
+    "en": "Keep this persona's version"
+  },
+  "components.memory.PersonaPack.reviewKeepLite": {
+    "ja": "Lite の内容を残す",
+    "en": "Keep the Lite version"
+  },
+  "components.memory.PersonaPack.reviewContinueBody": {
+    "ja": "本体のスレッドを続ける",
+    "en": "Continue this persona's thread"
+  },
+  "components.memory.PersonaPack.reviewContinueLite": {
+    "ja": "Lite のスレッドを続ける",
+    "en": "Continue the Lite thread"
+  },
+  "components.memory.PersonaPack.reviewDelete": {
+    "ja": "消す",
+    "en": "Delete"
+  },
+  "components.memory.PersonaPack.reviewKeep": {
+    "ja": "残す",
+    "en": "Keep"
+  },
+  "components.memory.PersonaPack.reviewRestore": {
+    "ja": "戻す",
+    "en": "Bring back"
+  },
+  "components.memory.PersonaPack.reviewStayDeleted": {
+    "ja": "消したままにする",
+    "en": "Leave deleted"
+  },
+  "components.memory.PersonaPack.reviewDeletedInLite": {
+    "ja": "Lite で消しました",
+    "en": "Deleted in Lite"
+  },
+  "components.memory.PersonaPack.reviewDeletedInBody": {
+    "ja": "本体では消えています",
+    "en": "Deleted in this persona"
+  },
+  "components.memory.PersonaPack.reviewUpdatedAt": {
+    "ja": "更新: {p1}",
+    "en": "Updated: {p1}"
+  },
+  "components.memory.PersonaPack.reviewEmpty": {
+    "ja": "（空）",
+    "en": "(empty)"
+  },
+  "components.memory.PersonaPack.reviewShowAll": {
+    "ja": "全文を見る",
+    "en": "Show all"
+  },
+  "components.memory.PersonaPack.reviewCollapse": {
+    "ja": "たたむ",
+    "en": "Collapse"
+  },
+  "components.memory.PersonaPack.reviewPrev": {
+    "ja": "前へ",
+    "en": "Previous"
+  },
+  "components.memory.PersonaPack.reviewNext": {
+    "ja": "次へ",
+    "en": "Next"
+  },
+  "components.memory.PersonaPack.reviewRange": {
+    "ja": "{p1}〜{p2} 件目 / 全 {p3} 件",
+    "en": "{p1}-{p2} of {p3}"
+  },
+  "components.memory.PersonaPack.reviewLoading": {
+    "ja": "読み込んでいます…",
+    "en": "Loading…"
+  },
+  "components.memory.PersonaPack.reviewLoadFailed": {
+    "ja": "一覧を読めませんでした: {p1}",
+    "en": "The list could not be loaded: {p1}"
+  },
+  "components.memory.PersonaPack.reviewApply": {
+    "ja": "選んだ内容で合流させる",
+    "en": "Merge with these choices"
+  },
+  "components.memory.PersonaPack.resultChoicesTitle": {
+    "ja": "選んだ内容",
+    "en": "Your choices"
+  },
+  "components.memory.PersonaPack.resultKeptLite": {
+    "ja": "Lite を残した",
+    "en": "Kept Lite"
+  },
+  "components.memory.PersonaPack.resultKeptBody": {
+    "ja": "本体を残した",
+    "en": "Kept this persona"
+  },
+  "components.memory.PersonaPack.resultDeleted": {
+    "ja": "発言を {p1} 件、ページを {p2} 件消しました。",
+    "en": "Deleted {p1} messages and {p2} pages."
+  },
+  "components.memory.PersonaPack.resultFragmentsWithoutPage": {
+    "ja": "指しているページが無いので、Fragment を {p1} 件足しませんでした。",
+    "en": "{p1} Fragments were not added because their page is missing."
+  },
+  "components.memory.PersonaPack.resultBackup": {
+    "ja": "合流の前の記憶の複製: {p1}",
+    "en": "Copy of the memory from before the merge: {p1}"
   },
   "components.memory.PersonaPack.chronicleMarksPending": {
     "ja": "取り込んだあらすじが会話と二重に表示されるのを防ぐ印を、まだ書き込めていない会話があります。あらすじの補修を実行すると書き込まれます。",

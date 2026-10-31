@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 385（tag グループ: 26）
+**エンドポイント数**: 389（tag グループ: 26）
 
 ## addon
 
@@ -337,6 +337,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | GET | `/api/people/{persona_id}/persona-pack` | ペルソナ一体をペルソナまるごとパック (ZIP) にしてダウンロードさせる。読み取り専用。 |
+| POST | `/api/people/{persona_id}/persona-pack/apply` | 見比べた ZIP を選択どおりに合流させる (intent §5)。結果の内訳を返す。 |
+| POST | `/api/people/{persona_id}/persona-pack/compare` | パックと取り込み先を見比べる (取り込み先には書かない)。トークンと件数を返す。 |
+| DELETE | `/api/people/{persona_id}/persona-pack/compare/{token}` | 見比べの ZIP と一覧を消す (画面のキャンセル)。既に無ければ何もしない。 |
+| GET | `/api/people/{persona_id}/persona-pack/compare/{token}/items` | 見比べの一覧の offset 件目から limit 件を返す。full でなければ長い本文は切って返す。 |
 | POST | `/api/people/{persona_id}/persona-pack/import` | パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |

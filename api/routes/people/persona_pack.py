@@ -5,7 +5,18 @@
 
 - ``GET  /{persona_id}/persona-pack``                — 書き出し (読み取り専用)。ZIP を返す。
 - ``POST /{persona_id}/persona-pack/import``         — 既存のペルソナへ合流 (mode="merge")。
+  ``extensions/lite/changes.json`` を持つパックは見比べを経るので、ここでは断る。
+- ``POST /{persona_id}/persona-pack/compare``        — 見比べる。ZIP を受け、取り込み先に何も書かず、
+  トークンと件数を返す。ZIP と一覧は ``<SAIVERSE_HOME>/tmp/persona_pack_compare/`` に残す。
+- ``GET  /{persona_id}/persona-pack/compare/{token}/items`` — 一覧を 1 ページずつ読む。
+- ``DELETE /{persona_id}/persona-pack/compare/{token}`` — 見比べを破棄する (画面のキャンセル)。
+- ``POST /{persona_id}/persona-pack/apply``          — 見比べた ZIP を選択どおりに合流させる。
+  経路は上の合流と同じ _run_import で、changes.json が無いパックも選択なしでここを通れる。
 - ``POST /persona-pack/import-new``                  — 新しいペルソナを作って取り込む (mode="new")。
+
+見比べも適用も ``/api/`` の下なので、Next.js の中継の無活動の上限は
+frontend/next.config.ts の ``experimental.proxyTimeout`` (1 時間) に従う。取り込みの口と同じく、
+返事の最初のバイトまで黙っていても 30 秒では切られない。
 
 取り込みは同期で行い、結果の内訳 (PersonaPackImportResult) を JSON で返す。
 合流と新規作成は、ペルソナを問わずプロセス内で一度に一つだけ走らせる (_claim_import)。
@@ -29,11 +40,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 import zipfile
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -41,19 +55,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from api.deps import get_manager
 from api.file_safety import write_upload_bounded
+from .models import PersonaPackApplyRequest
 from .utils import ensure_persona_exists
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 PERSONA_PACK_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+# 見比べの ZIP と一覧の置き場 (<SAIVERSE_HOME>/tmp の下)。1 回の見比べが 1 フォルダ
+_COMPARE_DIR = "persona_pack_compare"
+_COMPARE_PACK = "pack.zip"
+_COMPARE_REVIEW = "review.sqlite"
+_COMPARE_KEEP_SECONDS = 24 * 60 * 60
+_COMPARE_ITEMS_MAX = 200
+_COMPARE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 # 取り込み中の key (_claim_import)。_ANY_IMPORT_KEY は種類を問わず取り込みが一つ
 # 走っている間だけ入る
@@ -573,7 +596,13 @@ def _after_commit(result: Any, step: str, func: Any, *args: Any) -> Any:
 
 
 def _run_import(
-    manager: Any, zip_path: Path, *, mode: str, persona_id: str, overwrite_profile: bool,
+    manager: Any,
+    zip_path: Path,
+    *,
+    mode: str,
+    persona_id: str,
+    overwrite_profile: bool,
+    return_selection: Any = None,
 ) -> Dict[str, Any]:
     """import_persona_pack を呼び、後処理 (プロフィールの反映・埋め込みの再生成) をする。
 
@@ -596,6 +625,7 @@ def _run_import(
             saiverse_db_path=saiverse_db_path,
             saiverse_home=saiverse_home,
             overwrite_profile=overwrite_profile,
+            return_selection=return_selection,
         )
 
     chronicle_after_merge: Optional[Dict[str, Any]] = None
@@ -657,8 +687,16 @@ def _run_import(
 
 
 def _import_error(exc: Exception) -> HTTPException:
+    from saiverse_memory.persona_pack.return_merge import ReturnMergeStale, ReturnMergeWorldFailed
+
     if isinstance(exc, HTTPException):
         return exc
+    # 画面は code で見比べ直しの案内を出す
+    if isinstance(exc, ReturnMergeStale):
+        return HTTPException(status_code=409, detail={"code": "compare_stale", "message": str(exc)})
+    if isinstance(exc, ReturnMergeWorldFailed):
+        LOGGER.exception("Persona pack apply stopped after memory.db was committed")
+        return HTTPException(status_code=500, detail={"code": "compare_partial", "message": str(exc)})
     if isinstance(exc, zipfile.BadZipFile):
         return HTTPException(status_code=400, detail="The file is not a ZIP archive.")
     if isinstance(exc, ValueError):
@@ -709,6 +747,228 @@ async def import_persona_pack_merge(
             raise _import_error(exc)
         finally:
             _remove(zip_path)
+
+
+# ---------------------------------------------------------------------------
+# 見比べてから合流する (Lite から帰るときの合流。intent §5)
+# ---------------------------------------------------------------------------
+
+def _compare_persona_root(manager: Any, persona_id: str) -> Path:
+    """このペルソナの見比べのフォルダの親。名前はペルソナ ID の指紋 (パスの文字を気にしない)。"""
+    digest = hashlib.sha256(persona_id.encode("utf-8")).hexdigest()[:32]
+    return _temp_root(manager) / _COMPARE_DIR / digest
+
+
+def _compare_folder(manager: Any, persona_id: str, token: str) -> Path:
+    """トークンの見比べのフォルダ。形の違うトークンは ZIP が無いのと同じに扱う。"""
+    if not _COMPARE_TOKEN_RE.match(token):
+        raise _compare_gone()
+    return _compare_persona_root(manager, persona_id) / token
+
+
+def _compare_gone() -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail={"code": "compare_expired", "message": "This comparison is gone. Compare the pack again."},
+    )
+
+
+def _remove_empty_persona_root(folder: Path) -> None:
+    """消した見比べのフォルダの親が空なら消す。"""
+    try:
+        folder.parent.rmdir()  # 空のときだけ消える
+    except OSError:
+        pass
+
+
+def _sweep_old_compares(manager: Any) -> None:
+    """24 時間を過ぎた見比べのフォルダを消す (見比べを始めるたびに呼ぶ)。
+
+    呼ぶのは _claim_import の内側なので、走っている適用のフォルダを消すことは無い。
+    """
+    root = _temp_root(manager) / _COMPARE_DIR
+    if not root.is_dir():
+        return
+    limit = time.time() - _COMPARE_KEEP_SECONDS
+    for persona_root in root.iterdir():
+        if not persona_root.is_dir():
+            continue
+        for folder in persona_root.iterdir():
+            try:
+                expired = folder.stat().st_mtime < limit
+            except OSError:
+                continue
+            if expired:
+                shutil.rmtree(folder, ignore_errors=True)
+        try:
+            persona_root.rmdir()  # 空のときだけ消える
+        except OSError:
+            pass
+
+
+def _start_compare(manager: Any, persona_id: str, zip_path: Path) -> Dict[str, Any]:
+    """ZIP を見比べのフォルダへ移し、一覧を作り、同じペルソナの前の見比べを消す。"""
+    from saiverse_memory.persona_pack import compare_persona_pack
+    from saiverse_memory.persona_pack.return_merge import read_review_summary, write_review
+
+    saiverse_db_path, saiverse_home = _world_paths(manager)
+    _sweep_old_compares(manager)
+    token = secrets.token_urlsafe(24)
+    persona_root = _compare_persona_root(manager, persona_id)
+    folder = persona_root / token
+    folder.mkdir(parents=True)
+    try:
+        pack_path = folder / _COMPARE_PACK
+        os.replace(zip_path, pack_path)
+        compared = compare_persona_pack(
+            pack_path,
+            target_persona_id=persona_id,
+            saiverse_db_path=saiverse_db_path,
+            saiverse_home=saiverse_home,
+        )
+        summary: Dict[str, Any] = {
+            "total": 0, "counts": {}, "message_deletions": 0, "warnings": [], "resume": False,
+        }
+        if compared is not None:
+            write_review(folder / _COMPARE_REVIEW, compared)
+            summary = read_review_summary(folder / _COMPARE_REVIEW)
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    for other in persona_root.iterdir():
+        if other != folder:
+            shutil.rmtree(other, ignore_errors=True)
+    return {"token": token, "has_changes": compared is not None, **summary}
+
+
+@router.post("/{persona_id}/persona-pack/compare")
+async def compare_persona_pack_endpoint(
+    persona_id: str,
+    file: UploadFile = File(...),
+    manager=Depends(get_manager),
+):
+    """パックと取り込み先を見比べる (取り込み先には書かない)。トークンと件数を返す。
+
+    changes.json が無いパックは has_changes=false で返り、トークンをそのまま適用に使える。
+    未完了の新規取り込みの再開になるパックは resume=true で一覧が空。
+    """
+    ensure_persona_exists(persona_id, manager)
+    with _claim_import(persona_id):
+        zip_path = await _save_upload(file, manager)
+        try:
+            _read_manifest(zip_path)
+            return await run_in_threadpool(_start_compare, manager, persona_id, zip_path)
+        except Exception as exc:
+            raise _import_error(exc)
+        finally:
+            _remove(zip_path)
+
+
+@router.get("/{persona_id}/persona-pack/compare/{token}/items")
+def list_compare_items(
+    persona_id: str,
+    token: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=_COMPARE_ITEMS_MAX),
+    full: bool = Query(False),
+    manager=Depends(get_manager),
+):
+    """見比べの一覧の offset 件目から limit 件を返す。full でなければ長い本文は切って返す。"""
+    from saiverse_memory.persona_pack.return_merge import read_review_items
+
+    ensure_persona_exists(persona_id, manager)
+    review = _compare_folder(manager, persona_id, token) / _COMPARE_REVIEW
+    if not review.is_file():
+        raise _compare_gone()
+    return {"items": read_review_items(review, offset, limit, full=full)}
+
+
+@router.delete("/{persona_id}/persona-pack/compare/{token}")
+def discard_compare(persona_id: str, token: str, manager=Depends(get_manager)):
+    """見比べの ZIP と一覧を消す (画面のキャンセル)。既に無ければ何もしない。
+
+    適用が走っている間は _claim_import が 409 で断る。消せなければログに残して 500 を返す。
+    残ったフォルダは _sweep_old_compares が消す。
+    """
+    ensure_persona_exists(persona_id, manager)
+    folder = _compare_folder(manager, persona_id, token)
+    with _claim_import(persona_id):
+        if folder.is_dir():
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                LOGGER.warning("Could not delete the persona pack comparison %s", folder, exc_info=True)
+                raise HTTPException(status_code=500, detail=f"The comparison could not be deleted: {exc}")
+            _remove_empty_persona_root(folder)
+    return {"discarded": True}
+
+
+def _apply_compared(
+    manager: Any, persona_id: str, folder: Path, request: PersonaPackApplyRequest,
+) -> Dict[str, Any]:
+    """見比べのフォルダの ZIP を、選択どおりに合流させる。"""
+    from saiverse_memory.persona_pack.return_merge import (
+        ReturnSelection,
+        read_review_fingerprints,
+        read_review_summary,
+        resolve_choices,
+    )
+
+    selection: Optional[ReturnSelection] = None
+    compare_warnings: list[str] = []
+    review = folder / _COMPARE_REVIEW
+    if review.is_file():
+        expected = read_review_fingerprints(review)
+        selection = ReturnSelection(
+            expected=expected,
+            decisions=resolve_choices(expected, request.bulk, request.choices),
+        )
+        compare_warnings = read_review_summary(review)["warnings"]
+    payload = _run_import(
+        manager, folder / _COMPARE_PACK,
+        mode="merge", persona_id=persona_id, overwrite_profile=request.overwrite_profile,
+        return_selection=selection,
+    )
+    # 一覧に出さなかった項目の知らせは、結果の画面の注意に載せる
+    payload["warnings"] = [*compare_warnings, *payload["warnings"]]
+    return payload
+
+
+@router.post("/{persona_id}/persona-pack/apply")
+async def apply_persona_pack(
+    persona_id: str,
+    request: PersonaPackApplyRequest,
+    manager=Depends(get_manager),
+):
+    """見比べた ZIP を選択どおりに合流させる (intent §5)。結果の内訳を返す。
+
+    あらすじのジョブ・取り込みの直列化・Beat ロックは /import の合流と同じ。見比べた
+    時点から一覧が変わっていたら 409 (code=compare_stale)、見比べが残っていなければ
+    410 (code=compare_expired)、memory.db の確定の後に saiverse.db の確定が失敗したら
+    500 (code=compare_partial) で、どれも見比べ直しを求める。成功したら ZIP を消す。
+    """
+    from .arasuji import has_active_generation_job
+
+    ensure_persona_exists(persona_id, manager)
+    if has_active_generation_job(persona_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A Chronicle generation or repair job is running for this persona. "
+                "Wait for it to finish, then import again."
+            ),
+        )
+    with _claim_import(persona_id):
+        folder = _compare_folder(manager, persona_id, request.token)
+        if not (folder / _COMPARE_PACK).is_file():
+            raise _compare_gone()
+        try:
+            payload = await run_in_threadpool(_apply_compared, manager, persona_id, folder, request)
+        except Exception as exc:
+            raise _import_error(exc)
+        shutil.rmtree(folder, ignore_errors=True)
+        _remove_empty_persona_root(folder)
+        return payload
 
 
 # ---------------------------------------------------------------------------
