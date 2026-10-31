@@ -12431,6 +12431,10 @@
     "ja": "見比べた内容が残っていません。もう一度「このペルソナに合流させる」を押して見比べ直してください。",
     "en": "The comparison is gone. Press \"Merge into this persona\" again to compare once more."
   },
+  "components.memory.PersonaPack.comparePartial": {
+    "ja": "発言とページは合流しましたが、プロフィールを保存できませんでした。もう一度「このペルソナに合流させる」を押して見比べ直すと、残りの項目だけが出ます。",
+    "en": "Messages and pages were merged, but the profile could not be saved. Press \"Merge into this persona\" again to compare once more; only what is left will be listed."
+  },
   "components.memory.PersonaPack.reviewTitle": {
     "ja": "どちらを残すかを選びます",
     "en": "Choose what to keep"

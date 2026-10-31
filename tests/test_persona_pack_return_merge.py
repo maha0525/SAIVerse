@@ -29,6 +29,8 @@ from saiverse_memory.persona_pack.return_merge import (
     ReturnMergeBackupError,
     ReturnMergeRequired,
     ReturnMergeStale,
+    ReturnMergeWorldFailed,
+    ReturnReview,
     ReturnSelection,
     read_review_fingerprints,
     read_review_items,
@@ -114,13 +116,18 @@ def _lite_pack(
     return dst
 
 
-def _compare(env: Dict[str, Any], zip_path: Path):
+def _review(env: Dict[str, Any], zip_path: Path) -> Optional[ReturnReview]:
     return compare_persona_pack(
         zip_path,
         target_persona_id=env["persona_id"],
         saiverse_db_path=env["world_db"],
         saiverse_home=env["home"],
     )
+
+
+def _compare(env: Dict[str, Any], zip_path: Path):
+    review = _review(env, zip_path)
+    return None if review is None else (review.items, review.warnings)
 
 
 def _select(items: List[Any], bulk: Optional[str] = None, **choices: str) -> ReturnSelection:
@@ -316,7 +323,8 @@ def test_review_store_returns_pages_and_shortens_long_text(pack: Dict[str, Any])
     )
     items, warnings = _compare(pack["env"], zip_path)
     path = pack["dir"] / "review.sqlite"
-    write_review(path, items, warnings)
+    write_review(path, ReturnReview(items, warnings))
+    assert read_review_summary(path)["resume"] is False
     assert read_review_summary(path)["total"] == 2
     assert read_review_summary(path)["counts"]["message"] == 2
     assert read_review_fingerprints(path) == {i.key: i.fingerprint for i in items}
@@ -430,6 +438,44 @@ def test_edited_page_takes_lite_and_keeps_the_old_text_in_history(pack: Dict[str
     conn.close()
     assert history == ("update", "persona_pack_import", "りんご", "赤い果物")
     assert embedded == (0,)
+
+
+def test_edited_page_writes_only_the_compared_columns(pack: Dict[str, Any]) -> None:
+    env, apple, banana = pack["env"], pack["ids"]["apple"], pack["ids"]["banana"]
+    conn = _mem(env)
+    conn.execute(
+        "UPDATE memopedia_pages SET metadata = ?, keywords = ?, vividness = 'vivid', is_important = 1 "
+        "WHERE id = ?",
+        (json.dumps({"body_only": 1, "shared": "body"}), json.dumps(["本体"]), apple),
+    )
+    conn.commit()
+    parent = conn.execute("SELECT parent_id FROM memopedia_pages WHERE id = ?", (apple,)).fetchone()[0]
+    conn.close()
+    changes = _empty_changes()
+    changes["pages"]["edited"] = [apple]
+    zip_path = _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", changes,
+        pages={apple: {
+            "title": "林檎", "summary": "Lite の概要", "content": "Lite のりんご",
+            "updated_at": "2030-01-01T00:00:00+00:00", "parent_id": banana, "keywords": ["Lite"],
+            "metadata": {"shared": "lite", "lite_only": 1}, "vividness": "rough", "is_important": 0,
+        }},
+    )
+    items, _ = _compare(env, zip_path)
+    _apply(env, zip_path, _select(items, "lite"))
+    conn = _mem(env)
+    row = conn.execute(
+        "SELECT title, summary, content, updated_at, parent_id, keywords, metadata, vividness, is_important "
+        "FROM memopedia_pages WHERE id = ?",
+        (apple,),
+    ).fetchone()
+    conn.close()
+    assert row[:3] == ("林檎", "Lite の概要", "Lite のりんご")
+    assert row[3] == 1893456000
+    assert row[4] == parent
+    assert json.loads(row[5]) == ["本体"]
+    assert json.loads(row[6]) == {"body_only": 1, "shared": "body"}
+    assert row[7:] == ("vivid", 1)
 
 
 def test_page_deleted_in_body_comes_back_when_lite_is_chosen(pack: Dict[str, Any]) -> None:
@@ -753,6 +799,320 @@ def test_change_of_a_listed_item_stops_the_apply(pack: Dict[str, Any]) -> None:
     assert not (env["home"] / "backups" / "persona_pack_merge").exists()
 
 
+@pytest.mark.parametrize("statement", [
+    "UPDATE messages SET role = 'user' WHERE id = 'm2'",
+    f"UPDATE messages SET thread_id = '{PID}:room_a' WHERE id = 'm2'",
+    "UPDATE messages SET created_at = created_at + 1 WHERE id = 'm2'",
+])
+def test_every_value_shown_for_a_message_is_checked(pack: Dict[str, Any], statement: str) -> None:
+    env = pack["env"]
+    zip_path = _edited_message_pack(pack)
+    items, _ = _compare(env, zip_path)
+    conn = _mem(env)
+    conn.execute(statement)
+    conn.commit()
+    conn.close()
+    with pytest.raises(ReturnMergeStale) as caught:
+        _apply(env, zip_path, _select(items, "lite"))
+    assert caught.value.keys == ["message:m2"]
+
+
+@pytest.mark.parametrize("assignment", [
+    "title = 'x'", "summary = 'x'", "content = 'x'", "is_deleted = 1", "updated_at = updated_at + 1",
+])
+def test_every_value_shown_for_a_page_is_checked(pack: Dict[str, Any], assignment: str) -> None:
+    env, apple = pack["env"], pack["ids"]["apple"]
+    changes = _empty_changes()
+    changes["pages"]["edited"] = [apple]
+    zip_path = _lite_pack(pack["zip"], pack["dir"] / "lite.zip", changes, pages={apple: {"content": "Lite"}})
+    items, _ = _compare(env, zip_path)
+    conn = _mem(env)
+    conn.execute(f"UPDATE memopedia_pages SET {assignment} WHERE id = ?", (apple,))
+    conn.commit()
+    conn.close()
+    with pytest.raises(ReturnMergeStale) as caught:
+        _apply(env, zip_path, _select(items, "lite"))
+    assert caught.value.keys == [f"page:{apple}"]
+
+
+def test_a_value_not_shown_does_not_stop_the_apply(pack: Dict[str, Any]) -> None:
+    env, apple = pack["env"], pack["ids"]["apple"]
+    changes = _empty_changes()
+    changes["pages"]["edited"] = [apple]
+    zip_path = _lite_pack(pack["zip"], pack["dir"] / "lite.zip", changes, pages={apple: {"content": "Lite"}})
+    items, _ = _compare(env, zip_path)
+    conn = _mem(env)
+    conn.execute("UPDATE memopedia_pages SET vividness = 'vivid' WHERE id = ?", (apple,))
+    conn.commit()
+    conn.close()
+    _apply(env, zip_path, _select(items, "lite"))
+    assert _page(env, apple)[2] == "Lite"
+
+
+def _two_item_pack(pack: Dict[str, Any]) -> Path:
+    changes = _empty_changes()
+    changes["messages"]["edited"] = ["m2", "m3"]
+    return _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", changes, messages={"m2": "Lite 2", "m3": "Lite 3"},
+    )
+
+
+def test_selection_is_checked_by_the_import_itself(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    zip_path = _two_item_pack(pack)
+    items, _ = _compare(env, zip_path)
+    full = {i.key: i.fingerprint for i in items}
+    before = _hash(env["memory_db"])
+    empty = ReturnSelection(expected={}, decisions={})
+    missing = ReturnSelection(expected={"message:m2": full["message:m2"]}, decisions={"message:m2": "lite"})
+    extra = ReturnSelection(
+        expected={**full, "message:m1": "x"}, decisions={k: "lite" for k in [*full, "message:m1"]},
+    )
+    wrong = ReturnSelection(expected={**full, "message:m2": "x"}, decisions={k: "lite" for k in full})
+    for selection in (empty, missing, extra, wrong):
+        with pytest.raises(ReturnMergeStale):
+            _apply(env, zip_path, selection)
+    with pytest.raises(ValueError, match="no matching choice"):
+        _apply(env, zip_path, ReturnSelection(expected=full, decisions={"message:m2": "lite"}))
+    with pytest.raises(ValueError, match="must be one of"):
+        _apply(env, zip_path, ReturnSelection(expected=full, decisions={k: "both" for k in full}))
+    assert _hash(env["memory_db"]) == before
+    assert not (env["home"] / "backups" / "persona_pack_merge").exists()
+
+
+def test_row_that_joins_the_list_after_the_comparison_stops_the_apply(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    changes = _empty_changes()
+    changes["messages"]["edited"] = ["m2", "m3"]
+    # m3 は本文が本体と同じなので、見比べの一覧に出ない
+    zip_path = _lite_pack(pack["zip"], pack["dir"] / "lite.zip", changes, messages={"m2": "Lite 2"})
+    items, _ = _compare(env, zip_path)
+    assert [i.key for i in items] == ["message:m2"]
+    conn = _mem(env)
+    conn.execute("UPDATE messages SET content = '本体で変わった' WHERE id = 'm3'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ReturnMergeStale) as caught:
+        _apply(env, zip_path, _select(items, "lite"))
+    assert caught.value.keys == ["message:m3"]
+
+
+def _without_a_table(env: Dict[str, Any]) -> None:
+    """_open_memory_db が作り直す表を消す。走れば memory.db のバイトが変わる。"""
+    conn = _mem(env)
+    conn.execute("DROP TABLE clips")
+    conn.commit()
+    conn.close()
+
+
+def _has_table(env: Dict[str, Any], name: str) -> bool:
+    conn = _mem(env)
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def test_stale_comparison_writes_nothing_at_all(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    zip_path = _edited_message_pack(pack)
+    items, _ = _compare(env, zip_path)
+    conn = _mem(env)
+    conn.execute("UPDATE messages SET content = '変わった' WHERE id = 'm2'")
+    conn.commit()
+    conn.close()
+    _without_a_table(env)
+    before = _hash(env["memory_db"])
+    with pytest.raises(ReturnMergeStale):
+        _apply(env, zip_path, _select(items, "lite"))
+    assert _hash(env["memory_db"]) == before
+    assert not _has_table(env, "clips")
+
+
+def test_failed_backup_writes_nothing_at_all(pack: Dict[str, Any]) -> None:
+    env = pack["env"]
+    zip_path = _edited_message_pack(pack)
+    items, _ = _compare(env, zip_path)
+    _without_a_table(env)
+    (env["home"] / "backups").write_text("not a folder", encoding="utf-8")
+    before = _hash(env["memory_db"])
+    with pytest.raises(ReturnMergeBackupError):
+        _apply(env, zip_path, _select(items, "lite"))
+    assert _hash(env["memory_db"]) == before
+    assert not _has_table(env, "clips")
+
+
+def test_change_after_the_backup_is_caught_inside_the_transaction(
+    pack: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saiverse_memory.persona_pack import return_merge
+
+    env = pack["env"]
+    zip_path = _edited_message_pack(pack)
+    items, _ = _compare(env, zip_path)
+    backup = return_merge.backup_memory_db
+
+    def backup_then_change(*args: Any) -> Path:
+        path = backup(*args)
+        conn = _mem(env)
+        conn.execute("UPDATE messages SET content = '複製の後で変わった' WHERE id = 'm2'")
+        conn.commit()
+        conn.close()
+        return path
+
+    monkeypatch.setattr(return_merge, "backup_memory_db", backup_then_change)
+    with pytest.raises(ReturnMergeStale):
+        _apply(env, zip_path, _select(items, "lite"))
+    assert _message(env, "m2")[0] == "複製の後で変わった"
+
+
+def _profile_pack(pack: Dict[str, Any]) -> Path:
+    changes = _empty_changes()
+    changes["messages"]["edited"] = ["m2"]
+    changes["profile"]["edited"] = ["name"]
+    return _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", changes,
+        messages={"m2": "Lite の本文"}, profile={"AINAME": "Lite 名"},
+    )
+
+
+@pytest.mark.parametrize("column, value", [("AINAME", "別の名"), ("DESCRIPTION", "本体で変えた")])
+def test_profile_is_checked_again_under_the_world_lock(
+    pack: Dict[str, Any], monkeypatch: pytest.MonkeyPatch, column: str, value: str,
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    env = pack["env"]
+    changes = _empty_changes()
+    changes["messages"]["edited"] = ["m2"]
+    changes["profile"]["edited"] = ["name", "description"]
+    description = _world_ai(env, "DESCRIPTION")
+    # DESCRIPTION は本体と同じなので見比べの一覧に出ず、変わると一覧に入る
+    zip_path = _lite_pack(
+        pack["zip"], pack["dir"] / "lite.zip", changes,
+        messages={"m2": "Lite の本文"}, profile={"AINAME": "Lite 名", "DESCRIPTION": description},
+    )
+    items, _ = _compare(env, zip_path)
+    assert {i.key for i in items} == {"message:m2", "profile:AINAME"}
+    stage = importer._ImportJob.stage_merge_recall_edges
+
+    def stage_then_change(self: Any, conn: sqlite3.Connection) -> None:
+        stage(self, conn)
+        world = sqlite3.connect(env["world_db"])
+        world.execute(f"UPDATE ai SET {column} = ?", (value,))
+        world.commit()
+        world.close()
+
+    monkeypatch.setattr(importer._ImportJob, "stage_merge_recall_edges", stage_then_change)
+    with pytest.raises(ReturnMergeStale) as caught:
+        _apply(env, zip_path, _select(items, "lite"))
+    assert caught.value.keys == [f"profile:{column}"]
+    assert _message(env, "m2")[0] == "B の返事"
+    assert _world_ai(env, column) == value
+
+
+def test_world_failure_leaves_the_rest_to_a_new_comparison(
+    pack: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    env = pack["env"]
+    zip_path = _profile_pack(pack)
+    items, _ = _compare(env, zip_path)
+    original = importer._ImportJob.commit_world
+
+    def fail(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail)
+    with pytest.raises(ReturnMergeWorldFailed, match="compare the pack again") as caught:
+        _apply(env, zip_path, _select(items, "lite"))
+    monkeypatch.setattr(importer._ImportJob, "commit_world", original)
+    assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+    assert _message(env, "m2")[0] == "Lite の本文"
+    assert _world_ai(env, "AINAME") != "Lite 名"
+
+    # 元の選択のままでは通らず、見比べ直すと残りだけが出る
+    with pytest.raises(ReturnMergeStale):
+        _apply(env, zip_path, _select(items, "lite"))
+    items, _ = _compare(env, zip_path)
+    assert [i.key for i in items] == ["profile:AINAME"]
+    _apply(env, zip_path, _select(items, "lite"))
+    assert _world_ai(env, "AINAME") == "Lite 名"
+    assert _compare(env, zip_path) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# 未完了の新規取り込みの再開
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def unfinished(pack: Dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
+    """Lite のパックの新規取り込みが saiverse.db の確定で止まった、別のペルソナ。"""
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(pack["dir"] / "dst", "newcomer_city_a", name="新入り")
+    zip_path = _edited_message_pack(pack)
+
+    def fail(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(importer._ImportJob, "commit_world", fail)
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            _import(target, zip_path, "new", overwrite_profile=True)
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    assert marker.is_file()
+    return {"env": target, "zip": zip_path, "marker": marker}
+
+
+def test_comparison_of_an_unfinished_import_has_no_items(unfinished: Dict[str, Any]) -> None:
+    env = unfinished["env"]
+    conn = _mem(env)
+    conn.execute("UPDATE messages SET content = '本体の値' WHERE id = 'm2'")
+    conn.commit()
+    conn.close()
+    review = _review(env, unfinished["zip"])
+    assert review == ReturnReview([], [], resume=True)
+
+
+def test_apply_resumes_after_the_backup(unfinished: Dict[str, Any]) -> None:
+    env = unfinished["env"]
+    result = _apply(env, unfinished["zip"], ReturnSelection(expected={}, decisions={}))
+    assert not unfinished["marker"].exists()
+    backup = Path(result.return_merge["backup_path"])
+    assert backup.parent == env["home"] / "backups" / "persona_pack_merge" / env["persona_id"]
+    assert backup.is_file()
+    assert any("it was resumed" in w for w in result.warnings)
+
+
+def test_choices_are_refused_when_the_import_would_resume(unfinished: Dict[str, Any]) -> None:
+    env = unfinished["env"]
+    selection = ReturnSelection(expected={"message:m2": "x"}, decisions={"message:m2": "lite"})
+    with pytest.raises(ReturnMergeStale):
+        _apply(env, unfinished["zip"], selection)
+    assert unfinished["marker"].is_file()
+    assert not (env["home"] / "backups" / "persona_pack_merge").exists()
+
+
+def test_marker_of_another_file_does_not_empty_the_list(unfinished: Dict[str, Any], tmp_path: Path) -> None:
+    env = unfinished["env"]
+    other = tmp_path / "other.zip"
+    with zipfile.ZipFile(unfinished["zip"]) as src, zipfile.ZipFile(other, "w") as dst:
+        for name in src.namelist():
+            dst.writestr(name, src.read(name))
+        dst.writestr("extra.txt", b"another file")
+    conn = _mem(env)
+    conn.execute("UPDATE messages SET content = '本体の値' WHERE id = 'm2'")
+    conn.commit()
+    conn.close()
+    review = _review(env, other)
+    assert review.resume is False
+    assert [i.key for i in review.items] == ["message:m2"]
+
+
 @pytest.mark.parametrize("change", ["page", "profile", "thread", "gone"])
 def test_each_kind_of_listed_item_is_checked(pack: Dict[str, Any], change: str) -> None:
     env, apple = pack["env"], pack["ids"]["apple"]
@@ -991,6 +1351,87 @@ def test_api_stale_comparison_answers_409(api: Dict[str, Any]) -> None:
     assert res.json()["detail"]["code"] == "compare_stale"
     assert _api_message(api, "m1") == "別の内容"
     assert _api_message(api, "m2") == "again"
+
+
+def test_api_failure_after_the_memory_commit_asks_for_a_new_comparison(
+    api: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    token = _post_compare(api, api["lite"]).json()["token"]
+
+    def fail(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail)
+    res = _post_apply(api, token=token, bulk="lite")
+    assert res.status_code == 500
+    assert res.json()["detail"]["code"] == "compare_partial"
+    assert "compare the pack again" in res.json()["detail"]["message"]
+
+
+def test_api_compare_reports_a_resume(api: Dict[str, Any], tmp_path: Path) -> None:
+    home = api["home"]
+    marker = home / "personas" / PID / "persona_pack_world_pending.json"
+    with zipfile.ZipFile(api["lite"]) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    from saiverse_memory.persona_pack.importer import _import_id, _sha256_file
+
+    digest = _sha256_file(api["lite"])
+    marker.write_text(json.dumps({
+        "persona_id": manifest["persona_id"], "format": "persona-pack", "zip_sha256": digest,
+        "import_id": _import_id(digest, PID), "item_short_ids": {},
+    }), encoding="utf-8")
+    data = _post_compare(api, api["lite"]).json()
+    assert data["has_changes"] is True
+    assert data["resume"] is True
+    assert data["total"] == 0
+    res = _post_apply(api, token=data["token"])
+    assert res.status_code == 200, res.text
+    assert res.json()["return_merge"]["backup_path"]
+    assert not marker.exists()
+
+
+def test_api_discard_removes_the_comparison(api: Dict[str, Any]) -> None:
+    token = _post_compare(api, api["lite"]).json()["token"]
+    url = f"/api/people/{PID}/persona-pack/compare/{token}"
+    assert api["client"].delete(url).status_code == 200
+    assert _compare_folders(api) == []
+    assert _post_apply(api, token=token, bulk="lite").status_code == 410
+    assert api["client"].delete(url).status_code == 200
+
+
+def test_api_discard_refuses_a_broken_token(api: Dict[str, Any]) -> None:
+    res = api["client"].delete(f"/api/people/{PID}/persona-pack/compare/not-a-token")
+    assert res.status_code == 410
+
+
+def test_api_discard_waits_for_a_running_import(
+    api: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routes.people import persona_pack as route
+
+    token = _post_compare(api, api["lite"]).json()["token"]
+    monkeypatch.setattr(route, "_importing", {PID, route._ANY_IMPORT_KEY})
+    res = api["client"].delete(f"/api/people/{PID}/persona-pack/compare/{token}")
+    assert res.status_code == 409
+    assert len(_compare_folders(api)) == 1
+
+
+def test_api_discard_failure_is_logged(
+    api: Dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from api.routes.people import persona_pack as route
+
+    token = _post_compare(api, api["lite"]).json()["token"]
+
+    def refuse(path: Path) -> None:
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(route.shutil, "rmtree", refuse)
+    res = api["client"].delete(f"/api/people/{PID}/persona-pack/compare/{token}")
+    assert res.status_code == 500
+    assert "Could not delete the persona pack comparison" in caplog.text
 
 
 def test_api_new_comparison_replaces_the_old_zip(api: Dict[str, Any]) -> None:

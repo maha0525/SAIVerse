@@ -16,6 +16,8 @@ export interface PersonaPackCompare {
     counts: Record<string, number>;
     message_deletions: number;
     warnings: string[];
+    /** 未完了の新規取り込みの再開になるので一覧が空 */
+    resume: boolean;
 }
 
 /** 片側の値 (saiverse_memory/persona_pack/return_merge.py の review_side) */
@@ -166,13 +168,15 @@ function SideView({ item, side, value, selected, onSelect, expanded, onToggle, l
  * 見比べの一覧 (docs/intent/persona_pack.md §5「Lite から帰るときの合流」)。
  * 一覧は 1 ページずつ読み、長い本文は開いたときに全文を読む。選択は一括 (bulk) と
  * 一件ごと (choices) で持ち、一件ごとの選択が一括に勝つ。全件が決まるまで適用できない。
+ * ページを読めなかった間 (pageError) は、一覧が見えないので選択も適用もできない。
  */
 export default function PersonaPackReview({ personaId, compare, applying, onApply, onCancel }: Props) {
     useLocale();
     const [offset, setOffset] = useState(0);
     const [items, setItems] = useState<ReviewItem[]>([]);
     const [loading, setLoading] = useState(true);
-    const [loadError, setLoadError] = useState<string | null>(null);
+    const [pageError, setPageError] = useState<string | null>(null);
+    const [fullError, setFullError] = useState<string | null>(null);
     const [bulk, setBulk] = useState<PersonaPackChoice | null>(null);
     const [choices, setChoices] = useState<Record<string, PersonaPackChoice>>({});
     const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -185,19 +189,20 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
         let cancelled = false;
         const load = async () => {
             setLoading(true);
-            setLoadError(null);
+            setItems([]);
+            setPageError(null);
             try {
                 const res = await apiFetch(`${itemsUrl}?offset=${offset}&limit=${PAGE_SIZE}`);
                 if (!res.ok) {
                     const detail = await failureText(res);
-                    if (!cancelled) setLoadError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: detail }));
+                    if (!cancelled) setPageError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: detail }));
                     return;
                 }
                 const data = (await res.json()) as { items: ReviewItem[] };
                 if (!cancelled) setItems(data.items);
             } catch (error) {
                 console.error('Persona pack review load failed', error);
-                if (!cancelled) setLoadError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: String(error) }));
+                if (!cancelled) setPageError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: String(error) }));
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -220,18 +225,24 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
         }
         if ((item.body.truncated || item.lite.truncated) && !fullItems[item.key]) {
             setLoadingFull(item.key);
-            setLoadError(null);
+            setFullError(null);
             try {
                 const res = await apiFetch(`${itemsUrl}?offset=${offset + index}&limit=1&full=true`);
                 if (!res.ok) {
-                    setLoadError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: await failureText(res) }));
+                    setFullError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: await failureText(res) }));
                     return;
                 }
                 const data = (await res.json()) as { items: ReviewItem[] };
-                if (data.items[0]) setFullItems((prev) => ({ ...prev, [item.key]: data.items[0] }));
+                const full = data.items[0];
+                if (full?.key !== item.key) {
+                    console.error('Persona pack review returned another item', item.key, full?.key);
+                    setFullError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: item.key }));
+                    return;
+                }
+                setFullItems((prev) => ({ ...prev, [item.key]: full }));
             } catch (error) {
                 console.error('Persona pack review item load failed', error);
-                setLoadError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: String(error) }));
+                setFullError(uiText('components.memory.PersonaPack.reviewLoadFailed', { p1: String(error) }));
                 return;
             } finally {
                 setLoadingFull(null);
@@ -256,7 +267,7 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
                     data-i18n="components.memory.PersonaPack.reviewAllLite"
                     className={`${styles.secondaryButton} ${bulk === 'lite' ? styles.reviewBulkActive : ''}`}
                     onClick={() => chooseAll('lite')}
-                    disabled={applying}
+                    disabled={applying || pageError !== null}
                 >
                     {uiText('components.memory.PersonaPack.reviewAllLite')}
                 </button>
@@ -264,7 +275,7 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
                     data-i18n="components.memory.PersonaPack.reviewAllBody"
                     className={`${styles.secondaryButton} ${bulk === 'body' ? styles.reviewBulkActive : ''}`}
                     onClick={() => chooseAll('body')}
-                    disabled={applying}
+                    disabled={applying || pageError !== null}
                 >
                     {uiText('components.memory.PersonaPack.reviewAllBody')}
                 </button>
@@ -273,9 +284,9 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
                     : <span data-i18n="components.memory.PersonaPack.reviewAllDecided" className={styles.busy}>{uiText('components.memory.PersonaPack.reviewAllDecided')}</span>}
             </div>
 
-            {loadError && (
-                <div className={styles.error}><AlertCircle size={16} /><span>{loadError}</span></div>
-            )}
+            {[pageError, fullError].filter(Boolean).map((error) => (
+                <div key={error} className={styles.error}><AlertCircle size={16} /><span>{error}</span></div>
+            ))}
             {loading ? (
                 <p data-i18n="components.memory.PersonaPack.reviewLoading" className={styles.busy}>
                     <Loader2 size={16} className={styles.spin} />
@@ -335,7 +346,7 @@ export default function PersonaPackReview({ personaId, compare, applying, onAppl
                     data-i18n="components.memory.PersonaPack.reviewApply"
                     className={styles.primaryButton}
                     onClick={() => onApply(bulk, choices)}
-                    disabled={applying || undecided > 0}
+                    disabled={applying || undecided > 0 || pageError !== null}
                 >
                     {applying ? <Loader2 size={16} className={styles.spin} /> : <PackageOpen size={16} />}
                     {uiText('components.memory.PersonaPack.reviewApply')}

@@ -9,7 +9,7 @@ docs/reference/persona-pack-format.md。
 - 一覧の計算 (build_review)。取り込み先の DB は読むだけ。
 - 一覧の保存と読み出し (write_review / read_review_*)。件数が多くても一度に全部を
   画面へ返さないよう、一覧は見比べのフォルダの SQLite に置き、画面は 1 ページずつ読む。
-- 選択の検査 (resolve_choices) と、見比べた時点の値との照合 (find_stale)。
+- 選択の検査 (resolve_choices) と、計算し直した一覧との照合 (check_selection / check_profile)。
 - memory.db の複製 (backup_memory_db) と active_state.json の書き換え (write_active_thread)。
 
 書き込みの本体は importer.py の ``_ImportJob`` にあり、§5 の合流と同じ経路を通る。
@@ -39,6 +39,8 @@ CHANGES_VERSION = 1
 ACTIVE_STATE_FILENAME = "active_state.json"  # saiverse_memory/adapter.py の _ACTIVE_STATE_FILENAME
 ACTIVE_STATE_ENTRY = "extensions/saiverse/persona_dir/" + ACTIVE_STATE_FILENAME
 FRAGMENTS_TABLE = "memopedia_fragments"
+# 選ばれたページの上書きで書く memopedia_pages の列。それ以外の列は本体の値を残す
+PAGE_COLUMNS: Tuple[str, ...] = ("title", "summary", "content", "updated_at")
 # saiverse_memory/adapter.py の _PERSONA_THREAD_SUFFIX (active_state.json が無いときの続き先)
 DEFAULT_THREAD_SUFFIX = "__persona__"
 
@@ -87,6 +89,10 @@ class ReturnMergeStale(Exception):
 
 class ReturnMergeBackupError(RuntimeError):
     """適用の前の memory.db の複製ができなかった。"""
+
+
+class ReturnMergeWorldFailed(RuntimeError):
+    """memory.db の確定の後に saiverse.db の確定が失敗した (見比べ直せば残りを適用できる)。"""
 
 
 # ---------------------------------------------------------------------------
@@ -361,43 +367,17 @@ def _body_page(conn: sqlite3.Connection, page_id: str) -> Optional[Tuple[Any, ..
 
 
 def _message_fingerprint(row: Optional[Tuple[Any, ...]]) -> str:
-    return _ABSENT if row is None else _digest(row[0])
+    """_body_message の行全部 (本文・作成日時・role・thread_id)。"""
+    return _ABSENT if row is None else _digest(*row)
 
 
 def _page_fingerprint(row: Optional[Tuple[Any, ...]]) -> str:
-    return _ABSENT if row is None else _digest(row[0], row[1], row[2], bool(row[4]))
+    """題名・概要・本文・更新日時・削除状態。画面に出す本体側の値。"""
+    return _ABSENT if row is None else _digest(row[0], row[1], row[2], row[3], bool(row[4]))
 
 
 def _value_fingerprint(value: Any) -> str:
     return _digest(value)
-
-
-def find_stale(
-    expected: Mapping[str, str],
-    memory: sqlite3.Connection,
-    profile: Mapping[str, Any],
-    active: str,
-) -> List[str]:
-    """見比べた時点の指紋 ``expected`` と今の本体の値が違う項目のキーを返す。
-
-    調べるのは一覧に出した項目だけ。一覧に無い行が変わっても止めない (intent)。
-    """
-    stale: List[str] = []
-    for key, fingerprint in expected.items():
-        kind, _, ident = key.partition(":")
-        if kind == KIND_MESSAGE:
-            current = _message_fingerprint(_body_message(memory, ident))
-        elif kind == KIND_PAGE:
-            current = _page_fingerprint(_body_page(memory, ident))
-        elif kind == KIND_PROFILE:
-            current = _value_fingerprint(profile.get(ident))
-        elif kind == KIND_ACTIVE_THREAD:
-            current = _value_fingerprint(active)
-        else:
-            raise ValueError(f"unknown item key {key!r}")
-        if current != fingerprint:
-            stale.append(key)
-    return stale
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +393,19 @@ class ReviewItem:
     change: str
     fingerprint: str
     payload: Dict[str, Any]
+
+
+@dataclass
+class ReturnReview:
+    """見比べの結果。
+
+    ``warnings`` は一覧に出さなかった項目の知らせ。``resume`` は、未完了の新規取り込みの
+    再開になるので一覧が空であること (importer._ImportJob.resuming)。
+    """
+
+    items: List[ReviewItem]
+    warnings: List[str]
+    resume: bool = False
 
 
 def review_side(
@@ -518,29 +511,13 @@ def _review_page(
     )
 
 
-def build_review(
+def review_profile(
     changes: ReturnChanges,
-    *,
-    memory: sqlite3.Connection,
-    zip_message: Callable[[str], Optional[Dict[str, Any]]],
-    zip_page: Callable[[str], Optional[Dict[str, Any]]],
     zip_profile: Optional[Mapping[str, Any]],
     body_profile: Mapping[str, Any],
-    zip_active: Optional[str],
-    body_active: str,
-    thread_tail: Callable[[str, str], Tuple[Dict[str, Any], Dict[str, Any]]],
-) -> Tuple[List[ReviewItem], List[str]]:
-    """一覧を計算する。本体の値は読むだけで、どこにも書かない。
-
-    ``zip_message`` / ``zip_page`` は id からパックの行を返す。``thread_tail`` は
-    (本体の値, Lite の値) のスレッドの最後の発言と時刻を片側の値にして返す。
-
-    Returns: (一覧, 一覧に出さなかった項目の警告)。並びはプロフィール・スレッド・
-    ページ・発言の順で、発言は時刻の順。
-    """
-    warnings: List[str] = []
+) -> List[ReviewItem]:
+    """一覧のプロフィールの項目。"""
     items: List[ReviewItem] = []
-
     for column, changed_at in changes.profile_edited.items():
         lite_value = decode_value((zip_profile or {}).get(column))
         body_value = body_profile.get(column)
@@ -556,6 +533,30 @@ def build_review(
                 "lite": review_side(content=lite_value, updated_at=changed_at),
             },
         ))
+    return items
+
+
+def build_review(
+    changes: ReturnChanges,
+    *,
+    memory: sqlite3.Connection,
+    zip_message: Callable[[str], Optional[Dict[str, Any]]],
+    zip_page: Callable[[str], Optional[Dict[str, Any]]],
+    zip_profile: Optional[Mapping[str, Any]],
+    body_profile: Mapping[str, Any],
+    zip_active: Optional[str],
+    body_active: str,
+    thread_tail: Callable[[str, str], Tuple[Dict[str, Any], Dict[str, Any]]],
+) -> ReturnReview:
+    """一覧を計算する。本体の値は読むだけで、どこにも書かない。
+
+    ``zip_message`` / ``zip_page`` は id からパックの行を返す。``thread_tail`` は
+    (本体の値, Lite の値) のスレッドの最後の発言と時刻を片側の値にして返す。
+
+    並びはプロフィール・スレッド・ページ・発言の順で、発言は時刻の順。
+    """
+    warnings: List[str] = []
+    items = review_profile(changes, zip_profile, body_profile)
 
     if zip_active is not None and zip_active != body_active:
         body_side, lite_side = thread_tail(body_active, zip_active)
@@ -594,7 +595,7 @@ def build_review(
             if item is not None:
                 messages.append(item)
     items.extend(sorted(messages, key=lambda i: _sort_time(i.payload.get("created_at"))))
-    return items, warnings
+    return ReturnReview(items, warnings)
 
 
 def _sort_time(value: Any) -> float:
@@ -605,7 +606,7 @@ def _sort_time(value: Any) -> float:
 # 一覧の保存と読み出し
 # ---------------------------------------------------------------------------
 
-def write_review(path: Path, items: Sequence[ReviewItem], warnings: Sequence[str]) -> None:
+def write_review(path: Path, review: ReturnReview) -> None:
     """一覧を見比べのフォルダの SQLite へ書く。"""
     conn = sqlite3.connect(str(path))
     try:
@@ -617,12 +618,15 @@ def write_review(path: Path, items: Sequence[ReviewItem], warnings: Sequence[str
                 (
                     (i, item.key, item.kind, item.change, item.fingerprint,
                      json.dumps(item.payload, ensure_ascii=False))
-                    for i, item in enumerate(items)
+                    for i, item in enumerate(review.items)
                 ),
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(name, value) VALUES ('warnings', ?)",
-                (json.dumps(list(warnings), ensure_ascii=False),),
+            conn.executemany(
+                "INSERT OR REPLACE INTO meta(name, value) VALUES (?, ?)",
+                (
+                    ("warnings", json.dumps(review.warnings, ensure_ascii=False)),
+                    ("resume", json.dumps(review.resume)),
+                ),
             )
     finally:
         conn.close()
@@ -640,12 +644,13 @@ def read_review_summary(path: Path) -> Dict[str, Any]:
             counts[kind] = counts.get(kind, 0) + n
             if kind == KIND_MESSAGE and change == CHANGE_DELETED:
                 message_deletions += n
-        row = conn.execute("SELECT value FROM meta WHERE name = 'warnings'").fetchone()
+        meta = dict(conn.execute("SELECT name, value FROM meta").fetchall())
         return {
             "total": sum(counts.values()),
             "counts": counts,
             "message_deletions": message_deletions,
-            "warnings": json.loads(row[0]) if row else [],
+            "warnings": json.loads(meta.get("warnings", "[]")),
+            "resume": json.loads(meta.get("resume", "false")),
         }
     finally:
         conn.close()
@@ -729,6 +734,49 @@ def resolve_choices(
     return decided
 
 
+def _stale_keys(current: Mapping[str, str], expected: Mapping[str, str]) -> List[str]:
+    """片方にしか無いキーと、指紋の違うキー。"""
+    return sorted(
+        key for key in current.keys() | expected.keys() if current.get(key) != expected.get(key)
+    )
+
+
+def check_selection(items: Sequence[ReviewItem], selection: ReturnSelection) -> None:
+    """計算し直した一覧 ``items`` と、渡された選択を照らす。
+
+    一覧の全キーに選択があり、余分なキーが無く、指紋が一致するときだけ戻る。空の選択が
+    通るのは ``items`` が空のときだけ。``items`` に無い行の変化では止まらない (intent)。
+
+    Raises:
+        ValueError: decisions のキーが expected と違う、または選べない値がある。
+        ReturnMergeStale: expected が今の一覧と違う。
+    """
+    unmatched = selection.expected.keys() ^ selection.decisions.keys()
+    if unmatched:
+        raise ValueError(f"persona pack: {len(unmatched)} compared item(s) have no matching choice")
+    for key, choice in selection.decisions.items():
+        if choice not in CHOICES:
+            raise ValueError(f"persona pack: {key!r}: the choice must be one of {CHOICES}, got {choice!r}")
+    stale = _stale_keys({item.key: item.fingerprint for item in items}, selection.expected)
+    if stale:
+        raise ReturnMergeStale(stale)
+
+
+def check_profile(items: Sequence[ReviewItem], selection: ReturnSelection) -> None:
+    """check_selection のプロフィールの項目だけ。``items`` は review_profile の結果。
+
+    memory.db へ書いた後で呼ぶ。そこから先は発言とページの一覧を計算し直せない。
+
+    Raises:
+        ReturnMergeStale: プロフィールの項目が expected と違う。
+    """
+    prefix = f"{KIND_PROFILE}:"
+    expected = {key: value for key, value in selection.expected.items() if key.startswith(prefix)}
+    stale = _stale_keys({item.key: item.fingerprint for item in items}, expected)
+    if stale:
+        raise ReturnMergeStale(stale)
+
+
 class ReturnPlan:
     """changes.json と選択から、_ImportJob が行ごとに引く判定。"""
 
@@ -802,10 +850,15 @@ class ReturnPlan:
 # memory.db の複製
 # ---------------------------------------------------------------------------
 
+def open_read_only(path: Path) -> sqlite3.Connection:
+    """DB を読み取り専用で開く。"""
+    return sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+
+
 def backup_memory_db(memory_db_path: Path, home: Path, persona_id: str) -> Path:
     """memory.db を ``<home>/backups/persona_pack_merge/<persona_id>/`` へ複製する。
 
-    sqlite の backup を、書き込みの取引の外の別の接続で行う。適用の取引は書き込みの前に
+    sqlite の backup を読み取り専用の接続で行う。適用は memory.db を書き込みで開く前に
     呼ぶので、複製は適用前の値になる。一時ファイルに書き切ってから置くので、途中で
     失敗した複製は名前を持たない。ペルソナごとに新しい BACKUP_KEEP 個を残す。
 
@@ -818,7 +871,7 @@ def backup_memory_db(memory_db_path: Path, home: Path, persona_id: str) -> Path:
     tmp = dest.with_name(dest.name + ".tmp")
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        source = sqlite3.connect(str(memory_db_path), timeout=30)
+        source = open_read_only(memory_db_path)
         try:
             target = sqlite3.connect(str(tmp))
             try:

@@ -56,4 +56,4 @@ Lite で変えた記録の一覧。このファイルがあるパックの合流
 
 **いま続いているスレッド**は `changes.json` に書かない。`extensions/saiverse/persona_dir/active_state.json` の `active_thread_id` に、スレッド id の `:` より後ろを書く。
 
-合流で足すのは、`created` の行と、利用者が戻すと選んだ行だけ。`journal/` の行は足さない。ZIP の `chatlog/` と `knowledge/` に一覧に無い行があっても、本体の値を変えない。
+合流で足すのは、`created` の行と、利用者が戻すと選んだ行だけ。`journal/` の行は足さない。ZIP の `chatlog/` と `knowledge/` に一覧に無い行があっても、本体の値を変えない。`pages.edited` の行で Lite を残すと選ばれたときに本体へ書くのは `title`・`summary`・`content`・`updated_at` だけ。

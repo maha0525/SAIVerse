@@ -129,8 +129,14 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
   発言の content だけを差し替える (metadata は本体の値)。
 - journal/ の行は足さない (changes.json に手帳の欄が無い)。Chronicle は上の規則のまま。
 - memopedia_fragments は fragments.created の行だけを足す (:meth:`_ImportJob.stage_return_fragments`)。
-- memory.db の取引を始めた直後、書き込みの前に、一覧の項目の今の値を見比べた時点の値と
-  照らし (違えば ReturnMergeStale)、memory.db を複製する (失敗なら ReturnMergeBackupError)。
+- 読み取り専用の接続で一覧を計算し直して選択と照らし (違えば ReturnMergeStale)、memory.db を
+  複製してから (失敗なら ReturnMergeBackupError) _open_memory_db を呼ぶ。どちらの失敗でも
+  取り込み先には何も書かれない。書き込みのトランザクションの中でもう一度計算し直して照らし、
+  saiverse.db の書き込みロックを取った後でプロフィールの項目を確かめ直す。
+- 新規取り込みの印による再開になるときは、一覧は空で、選択が空でなければ断る。複製を取って
+  から §5 の再開の経路を通す (:meth:`_ImportJob.prepare_merge`)。
+- memory.db の確定の後で saiverse.db の確定が失敗したら ReturnMergeWorldFailed。見比べ直せば、
+  適用済みの項目は一覧から消え、残りが出る。
 
 短縮番号 (memopedia_pages.short_id / clips.short_id / コア記憶の metadata.core_id /
 Chronicle の metadata.short_id) は DB ごとの連番 (docs/intent/reference_addressing.md
@@ -1607,11 +1613,6 @@ def _pack_active_suffix(reader: _PackReader, pack: _PackData, target: str) -> Op
     return return_merge.active_suffix(state, (pack.source_id, target))
 
 
-def _read_only(path: Path) -> sqlite3.Connection:
-    """DB を読み取り専用で開く (見比べは取り込み先へ書かない)。"""
-    return sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=30)
-
-
 def _body_profile(world: sqlite3.Connection, target: str) -> Dict[str, Any]:
     """取り込み先の ai 行のうち、Lite で変えられる列 (return_merge.PROFILE_COLUMNS)。"""
     columns = return_merge.PROFILE_COLUMNS
@@ -1623,17 +1624,92 @@ def _body_profile(world: sqlite3.Connection, target: str) -> Dict[str, Any]:
     return dict(zip(columns, row))
 
 
+def _build_return_review(
+    reader: _PackReader,
+    pack: _PackData,
+    *,
+    target: str,
+    persona_dir: Path,
+    memory: sqlite3.Connection,
+    world: sqlite3.Connection,
+) -> return_merge.ReturnReview:
+    """パックと取り込み先の今の値から一覧を計算する。``memory`` と ``world`` は読むだけ。"""
+
+    def zip_message(message_id: str) -> Optional[Dict[str, Any]]:
+        return next(pack.messages.rows_where("WHERE id = ? ORDER BY ord", (message_id,)), None)
+
+    def zip_page(page_id: str) -> Optional[Dict[str, Any]]:
+        return next(pack.pages.rows_where("WHERE id = ? ORDER BY ord", (page_id,)), None)
+
+    def thread_tail(body_suffix: str, lite_suffix: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        body_row = memory.execute(
+            "SELECT content, created_at FROM messages WHERE thread_id = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (f"{target}:{body_suffix}",),
+        ).fetchone()
+        lite_row = next(pack.messages.rows_where(
+            "WHERE thread_id = ? ORDER BY created_at_key DESC, ord DESC LIMIT 1",
+            (f"{pack.source_id}:{lite_suffix}",),
+        ), None)
+        body = return_merge.review_side(
+            title=body_suffix,
+            content=body_row[0] if body_row else None,
+            updated_at=body_row[1] if body_row else None,
+        )
+        lite = return_merge.review_side(
+            title=lite_suffix,
+            content=decode_value(lite_row.get("content")) if lite_row else None,
+            updated_at=iso_to_epoch(lite_row.get("created_at")) if lite_row else None,
+        )
+        return body, lite
+
+    return return_merge.build_review(
+        pack.return_changes,
+        memory=memory,
+        zip_message=zip_message,
+        zip_page=zip_page,
+        zip_profile=(pack.profile or {}).get("ai"),
+        body_profile=_body_profile(world, target),
+        zip_active=_pack_active_suffix(reader, pack, target),
+        body_active=return_merge.read_body_active(persona_dir, target),
+        thread_tail=thread_tail,
+    )
+
+
+def _resumes_new_import(
+    reader: _PackReader,
+    pack: _PackData,
+    *,
+    zip_path: Path,
+    target: str,
+    home: Path,
+    persona_dir: Path,
+    memory: sqlite3.Connection,
+    world: sqlite3.Connection,
+) -> bool:
+    """このパックの合流が、未完了の新規取り込みの再開になるか (_ImportJob.resuming)。"""
+    if not (persona_dir / WORLD_PENDING_MARKER).is_file():
+        return False
+    job = _ImportJob(
+        reader=reader, pack=pack, mode="merge", target=target, home=home, persona_dir=persona_dir,
+        result=PersonaPackImportResult(mode="merge", source_persona_id=pack.source_id, target_persona_id=target),
+        overwrite_profile=False, zip_sha256=_sha256_file(zip_path),
+    )
+    job.check_pending_marker(world, memory)
+    return job.resuming
+
+
 def compare_persona_pack(
     zip_path: Path,
     *,
     target_persona_id: str,
     saiverse_db_path: Path,
     saiverse_home: Path,
-) -> Optional[Tuple[List[return_merge.ReviewItem], List[str]]]:
+) -> Optional[return_merge.ReturnReview]:
     """Lite から帰るパックと取り込み先を見比べ、一覧を返す。取り込み先には何も書かない。
 
     Returns: changes.json が無いパックは None (形の検査もしない — 適用のときに行う)。
-    あれば (一覧, 一覧に出さなかった項目の警告)。
+    あれば一覧。未完了の新規取り込みの再開になるパックは、一覧が空で resume が True。
 
     Raises:
         zipfile.BadZipFile / ValueError: パックが不正 (validate_pack と同じ検査をする)。
@@ -1662,51 +1738,18 @@ def compare_persona_pack(
         world: Optional[sqlite3.Connection] = None
         try:
             pack = _load_pack(reader, staging)
-            changes = pack.return_changes
-            if changes is None:  # read_changes は上の判定で None にならない
+            if pack.return_changes is None:  # read_changes は上の判定で None にならない
                 return None
-            memory = _read_only(memory_db_path)
-            world = _read_only(saiverse_db_path)
-            target = target_persona_id
-
-            def zip_message(message_id: str) -> Optional[Dict[str, Any]]:
-                return next(pack.messages.rows_where("WHERE id = ? ORDER BY ord", (message_id,)), None)
-
-            def zip_page(page_id: str) -> Optional[Dict[str, Any]]:
-                return next(pack.pages.rows_where("WHERE id = ? ORDER BY ord", (page_id,)), None)
-
-            def thread_tail(body_suffix: str, lite_suffix: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-                body_row = memory.execute(
-                    "SELECT content, created_at FROM messages WHERE thread_id = ? "
-                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                    (f"{target}:{body_suffix}",),
-                ).fetchone()
-                lite_row = next(pack.messages.rows_where(
-                    "WHERE thread_id = ? ORDER BY created_at_key DESC, ord DESC LIMIT 1",
-                    (f"{pack.source_id}:{lite_suffix}",),
-                ), None)
-                body = return_merge.review_side(
-                    title=body_suffix,
-                    content=body_row[0] if body_row else None,
-                    updated_at=body_row[1] if body_row else None,
-                )
-                lite = return_merge.review_side(
-                    title=lite_suffix,
-                    content=decode_value(lite_row.get("content")) if lite_row else None,
-                    updated_at=iso_to_epoch(lite_row.get("created_at")) if lite_row else None,
-                )
-                return body, lite
-
-            return return_merge.build_review(
-                changes,
-                memory=memory,
-                zip_message=zip_message,
-                zip_page=zip_page,
-                zip_profile=(pack.profile or {}).get("ai"),
-                body_profile=_body_profile(world, target),
-                zip_active=_pack_active_suffix(reader, pack, target),
-                body_active=return_merge.read_body_active(persona_dir, target),
-                thread_tail=thread_tail,
+            memory = return_merge.open_read_only(memory_db_path)
+            world = return_merge.open_read_only(saiverse_db_path)
+            if _resumes_new_import(
+                reader, pack, zip_path=zip_path, target=target_persona_id, home=home,
+                persona_dir=persona_dir, memory=memory, world=world,
+            ):
+                return return_merge.ReturnReview([], [], resume=True)
+            return _build_return_review(
+                reader, pack, target=target_persona_id, persona_dir=persona_dir,
+                memory=memory, world=world,
             )
         finally:
             for conn in (memory, world):
@@ -1738,7 +1781,8 @@ def import_persona_pack(
             上書きする (PROFILE_PROTECTED_COLUMNS を除く)。changes.json を持つパックの
             合流では使わない (プロフィールは選ばれた項目だけ書く)。
         return_selection: changes.json を持つパックの合流で必須の選択。一覧が空でも
-            空の選択を渡す。それ以外のパックには渡さない。
+            空の選択を渡す。それ以外のパックには渡さない。この関数は一覧を計算し直して
+            選択と照らす (return_merge.check_selection)。
 
     Raises:
         FileNotFoundError: saiverse.db / memory.db が無い。
@@ -1746,10 +1790,12 @@ def import_persona_pack(
             (check_uncompressed_size) を超える・配列の JSON の 1 要素が
             MAX_JSON_ELEMENT_CHARS を超える・ai 行が無い・mode="new" で
             取り込み先に messages がある・changes.json を持つパックの合流に選択が無い
-            (return_merge.ReturnMergeRequired)。いずれも書き込み前に投げる。
-        return_merge.ReturnMergeStale: 一覧の項目が見比べた時点から変わった。
-        return_merge.ReturnMergeBackupError: memory.db を複製できなかった。
-            どちらも書き込み前に投げる。
+            (return_merge.ReturnMergeRequired)・選択のキーが expected と合わない・選べない値が
+            ある。いずれも書き込み前に投げる。
+        return_merge.ReturnMergeStale: 一覧が見比べた時点から変わった。取り込み先には何も
+            確定しない。
+        return_merge.ReturnMergeBackupError: memory.db を複製できなかった。書き込み前に投げる。
+        return_merge.ReturnMergeWorldFailed: memory.db の確定の後に saiverse.db の確定が失敗した。
 
     ZIP の配列の JSON は、ZIP と同じフォルダの作業用 SQLite (_staging_path) に積んでから
     取り込む。作業用 SQLite は成功・失敗を問わず、この関数が戻る前に消す。
@@ -1926,6 +1972,11 @@ class _ImportJob:
         Chronicle の全件取り込み・知覚台帳の添付) の mode="new" の工程を行うか。"""
         return self.mode == "new" or self.resume_memory
 
+    @property
+    def resuming(self) -> bool:
+        """印による未完了の mode="new" の工程の再開か (check_pending_marker の後に読む)。"""
+        return self.resume_memory or self.resume_world
+
     # --- 共通 ---------------------------------------------------------------
 
     def warn(self, message: str) -> None:
@@ -2067,6 +2118,8 @@ class _ImportJob:
         try:
             if world.execute("SELECT 1 FROM ai WHERE AIID = ?", (self.target,)).fetchone() is None:
                 raise ValueError(f"persona not found in saiverse.db: {self.target}")
+            if self.mode == "merge":
+                self.prepare_merge(memory_db_path, world)
             memory = _open_memory_db(memory_db_path)
             if self.mode == "new":
                 (n_messages,) = memory.execute("SELECT COUNT(*) FROM messages").fetchone()
@@ -2075,9 +2128,6 @@ class _ImportJob:
                         f"mode='new' requires a persona without messages; "
                         f"{self.target} has {n_messages}. Use mode='merge'."
                     )
-            else:
-                self.check_pending_marker(world, memory)
-                self.prepare_return_merge()
             self.report_refused_json_text()
             # 所持品の SHORT_ID は saiverse.db 側 (stage_items) で登録するが、item:N の参照を
             # 持つ purpose_tags / clips は memory.db 側で先に入るので、採番だけを先に決める
@@ -2086,8 +2136,7 @@ class _ImportJob:
             try:
                 memory.execute("BEGIN IMMEDIATE")
                 if self.return_plan is not None:
-                    self.check_return_stale(memory, world)
-                    self.backup_before_return_merge(memory_db_path)
+                    self.check_return_selection(memory, world)
                 self.stage_chatlog(memory)
                 self.stage_knowledge(memory)
                 self.check_page_tree(memory)
@@ -2106,6 +2155,8 @@ class _ImportJob:
                 world.execute("BEGIN IMMEDIATE")
                 if self.return_plan is None:
                     self.stage_task_book(world)
+                else:
+                    self.check_return_profile(world)
                 self.stage_profile(world)
                 if self.world_new:
                     self.stage_ext_saiverse(world)
@@ -2129,7 +2180,7 @@ class _ImportJob:
                 memory.execute("COMMIT")
                 memory_committed = True
                 self.commit_world(world)
-            except BaseException:
+            except BaseException as exc:
                 for conn in (world, memory) if not memory_committed else (world,):
                     try:
                         if conn.in_transaction:
@@ -2138,6 +2189,16 @@ class _ImportJob:
                         LOGGER.warning("[persona_pack] rollback failed", exc_info=True)
                 if not memory_committed:
                     self.remove_created_files()
+                elif self.return_plan is not None:
+                    LOGGER.error(
+                        "[persona_pack] memory.db was committed but saiverse.db was not (persona=%s); "
+                        "comparing the pack again lists what is left", self.target,
+                    )
+                    if isinstance(exc, Exception):
+                        raise return_merge.ReturnMergeWorldFailed(
+                            f"the memories were applied, but saiverse.db could not be saved ({exc}); "
+                            "compare the pack again to apply the rest"
+                        ) from exc
                 else:
                     LOGGER.error(
                         "[persona_pack] memory.db was committed but saiverse.db was not "
@@ -2161,43 +2222,53 @@ class _ImportJob:
 
     # --- Lite から帰るときの合流 -------------------------------------------------
 
-    def prepare_return_merge(self) -> None:
-        """再開の合流では選択を使わず、スレッドの続き先をパックから読む。
+    def prepare_merge(self, memory_db_path: Path, world: sqlite3.Connection) -> None:
+        """合流の、_open_memory_db より前の工程。memory.db は読み取り専用の接続でしか開かない。
 
-        印の再開 (resume_memory / resume_world) は mode="new" の工程をやり直す途中で、
-        パックの行を全部入れる必要がある。選択で行を絞ると、新規作成が欠けたまま印が消える。
+        印を読み、Lite から帰るパックなら選択を照らして memory.db を複製する。どちらかが
+        失敗すると、取り込み先には何も書かれない。複製は発言の削除が取り消せないから取る
+        (失敗なら適用しない)。
+
+        印の再開 (:attr:`resuming`) は mode="new" の工程をやり直す途中で、パックの行を全部
+        入れる必要がある。選択で行を絞ると、新規作成が欠けたまま印が消える。そこで一覧を空に
+        して空の選択だけを通し、複製の後は return_plan を外して再開の経路へ渡す。
         """
+        reading = return_merge.open_read_only(memory_db_path)
+        try:
+            self.check_pending_marker(world, reading)
+            if self.return_plan is not None:
+                self.check_return_selection(reading, world)
+        finally:
+            reading.close()
         plan = self.return_plan
         if plan is None:
             return
-        if self.resume_memory or self.resume_world:
-            self.warn(
-                "an earlier new-persona import of this pack is unfinished; it was resumed "
-                "and the choices were not used"
-            )
+        path = return_merge.backup_memory_db(memory_db_path, self.home, self.target)
+        plan.backup_path = str(path)
+        if self.resuming:
+            self.warn("an earlier new-persona import of this pack is unfinished; it was resumed")
+            self.result.return_merge = plan.summary()
             self.return_plan = None
-            return
-        if plan.takes_lite_thread:
+        elif plan.takes_lite_thread:
             plan.active_suffix = _pack_active_suffix(self.reader, self.pack, self.target)
 
-    def check_return_stale(self, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
-        """一覧の項目の今の値を見比べた時点の値と照らす (書き込みの前)。"""
-        stale = return_merge.find_stale(
-            self.return_plan.selection.expected,
-            memory,
-            _body_profile(world, self.target),
-            return_merge.read_body_active(self.persona_dir, self.target),
+    def check_return_selection(self, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
+        """一覧を今の値で計算し直して、渡された選択と照らす (書き込みの前)。"""
+        items: List[return_merge.ReviewItem] = []
+        if not self.resuming:
+            items = _build_return_review(
+                self.reader, self.pack, target=self.target, persona_dir=self.persona_dir,
+                memory=memory, world=world,
+            ).items
+        return_merge.check_selection(items, self.return_plan.selection)
+
+    def check_return_profile(self, world: sqlite3.Connection) -> None:
+        """saiverse.db の書き込みロックの下で、プロフィールの項目を確かめ直す。"""
+        plan = self.return_plan
+        items = return_merge.review_profile(
+            plan.changes, (self.pack.profile or {}).get("ai"), _body_profile(world, self.target),
         )
-        if stale:
-            raise return_merge.ReturnMergeStale(stale)
-
-    def backup_before_return_merge(self, memory_db_path: Path) -> None:
-        """memory.db を複製する。発言の削除は取り消せないので、失敗したら適用しない。
-
-        この取引はまだ何も書いていないので、別の接続の複製は適用前の値になる。
-        """
-        path = return_merge.backup_memory_db(memory_db_path, self.home, self.target)
-        self.return_plan.backup_path = str(path)
+        return_merge.check_profile(items, plan.selection)
 
     def stage_return_threads(self, messages: _StagedRows) -> Set[str]:
         """足してよいスレッドの ID: 足す発言があるものと、続きに選ばれたもの。
@@ -2272,11 +2343,23 @@ class _ImportJob:
     def overwrite_page(
         self, conn: sqlite3.Connection, page: Dict[str, Any], existing: Tuple[Any, ...],
     ) -> None:
-        """ZIP の行でページを上書きする。消える側の本文を編集履歴に残し、埋め込みの行を消す。"""
+        """ZIP の行でページを上書きする。消える側の本文を編集履歴に残し、埋め込みの行を消す。
+
+        Lite から帰るパックが書くのは return_merge.PAGE_COLUMNS だけで、それ以外の列は
+        本体の値を残す。
+        """
         from sai_memory.memopedia.storage import generate_diff, record_page_edit
 
         decoded = _decode_row(page, "memopedia_pages")
-        self.update_page(conn, page, decoded, existing)
+        if self.return_plan is None:
+            self.update_page(conn, page, decoded, existing)
+        else:
+            columns = [c for c in return_merge.PAGE_COLUMNS if c in decoded]
+            conn.execute(
+                f"UPDATE memopedia_pages SET {', '.join(f'{_quote(c)} = ?' for c in columns)} "
+                "WHERE id = ?",
+                [decoded[c] for c in columns] + [page["id"]],
+            )
         record_page_edit(
             conn,
             page_id=page["id"],

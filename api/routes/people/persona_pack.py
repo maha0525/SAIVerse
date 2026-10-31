@@ -9,6 +9,7 @@
 - ``POST /{persona_id}/persona-pack/compare``        — 見比べる。ZIP を受け、取り込み先に何も書かず、
   トークンと件数を返す。ZIP と一覧は ``<SAIVERSE_HOME>/tmp/persona_pack_compare/`` に残す。
 - ``GET  /{persona_id}/persona-pack/compare/{token}/items`` — 一覧を 1 ページずつ読む。
+- ``DELETE /{persona_id}/persona-pack/compare/{token}`` — 見比べを破棄する (画面のキャンセル)。
 - ``POST /{persona_id}/persona-pack/apply``          — 見比べた ZIP を選択どおりに合流させる。
   経路は上の合流と同じ _run_import で、changes.json が無いパックも選択なしでここを通れる。
 - ``POST /persona-pack/import-new``                  — 新しいペルソナを作って取り込む (mode="new")。
@@ -686,13 +687,16 @@ def _run_import(
 
 
 def _import_error(exc: Exception) -> HTTPException:
-    from saiverse_memory.persona_pack.return_merge import ReturnMergeStale
+    from saiverse_memory.persona_pack.return_merge import ReturnMergeStale, ReturnMergeWorldFailed
 
     if isinstance(exc, HTTPException):
         return exc
+    # 画面は code で見比べ直しの案内を出す
     if isinstance(exc, ReturnMergeStale):
-        # 画面は code で見比べ直しの案内を出す
         return HTTPException(status_code=409, detail={"code": "compare_stale", "message": str(exc)})
+    if isinstance(exc, ReturnMergeWorldFailed):
+        LOGGER.exception("Persona pack apply stopped after memory.db was committed")
+        return HTTPException(status_code=500, detail={"code": "compare_partial", "message": str(exc)})
     if isinstance(exc, zipfile.BadZipFile):
         return HTTPException(status_code=400, detail="The file is not a ZIP archive.")
     if isinstance(exc, ValueError):
@@ -815,10 +819,10 @@ def _start_compare(manager: Any, persona_id: str, zip_path: Path) -> Dict[str, A
             saiverse_home=saiverse_home,
         )
         summary: Dict[str, Any] = {
-            "total": 0, "counts": {}, "message_deletions": 0, "warnings": [],
+            "total": 0, "counts": {}, "message_deletions": 0, "warnings": [], "resume": False,
         }
         if compared is not None:
-            write_review(folder / _COMPARE_REVIEW, *compared)
+            write_review(folder / _COMPARE_REVIEW, compared)
             summary = read_review_summary(folder / _COMPARE_REVIEW)
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
@@ -838,6 +842,7 @@ async def compare_persona_pack_endpoint(
     """パックと取り込み先を見比べる (取り込み先には書かない)。トークンと件数を返す。
 
     changes.json が無いパックは has_changes=false で返り、トークンをそのまま適用に使える。
+    未完了の新規取り込みの再開になるパックは resume=true で一覧が空。
     """
     ensure_persona_exists(persona_id, manager)
     with _claim_import(persona_id):
@@ -868,6 +873,25 @@ def list_compare_items(
     if not review.is_file():
         raise _compare_gone()
     return {"items": read_review_items(review, offset, limit, full=full)}
+
+
+@router.delete("/{persona_id}/persona-pack/compare/{token}")
+def discard_compare(persona_id: str, token: str, manager=Depends(get_manager)):
+    """見比べの ZIP と一覧を消す (画面のキャンセル)。既に無ければ何もしない。
+
+    適用が走っている間は _claim_import が 409 で断る。消せなければログに残して 500 を返す。
+    残ったフォルダは _sweep_old_compares が消す。
+    """
+    ensure_persona_exists(persona_id, manager)
+    folder = _compare_folder(manager, persona_id, token)
+    with _claim_import(persona_id):
+        if folder.is_dir():
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                LOGGER.warning("Could not delete the persona pack comparison %s", folder, exc_info=True)
+                raise HTTPException(status_code=500, detail=f"The comparison could not be deleted: {exc}")
+    return {"discarded": True}
 
 
 def _apply_compared(
@@ -910,8 +934,9 @@ async def apply_persona_pack(
     """見比べた ZIP を選択どおりに合流させる (intent §5)。結果の内訳を返す。
 
     あらすじのジョブ・取り込みの直列化・Beat ロックは /import の合流と同じ。見比べた
-    時点から一覧の項目が変わっていたら 409 (code=compare_stale)、見比べが残っていなければ
-    410 (code=compare_expired) で、どちらも見比べ直しを求める。成功したら ZIP を消す。
+    時点から一覧が変わっていたら 409 (code=compare_stale)、見比べが残っていなければ
+    410 (code=compare_expired)、memory.db の確定の後に saiverse.db の確定が失敗したら
+    500 (code=compare_partial) で、どれも見比べ直しを求める。成功したら ZIP を消す。
     """
     from .arasuji import has_active_generation_job
 

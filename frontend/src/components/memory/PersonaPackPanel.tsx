@@ -47,6 +47,9 @@ async function applyFailure(res: Response): Promise<{ message: string; compareAg
     if (code === 'compare_expired') {
         return { message: uiText('components.memory.PersonaPack.compareExpired'), compareAgain: true };
     }
+    if (code === 'compare_partial') {
+        return { message: uiText('components.memory.PersonaPack.comparePartial'), compareAgain: true };
+    }
     const detail = data && typeof data.detail === 'string' ? data.detail : `${res.status} ${res.statusText}`;
     return { message: uiText('components.memory.PersonaPack.importFailed', { p1: detail }), compareAgain: false };
 }
@@ -109,7 +112,19 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         setResult(null);
     };
 
+    /** 見比べの ZIP と一覧を消す。消せなくても画面は閉じる (サーバーが 24 時間後に消す) */
+    const discardCompare = async (token: string) => {
+        const url = `/api/people/${encodeURIComponent(personaId)}/persona-pack/compare/${encodeURIComponent(token)}`;
+        try {
+            const res = await apiFetch(url, { method: 'DELETE' });
+            if (!res.ok) console.warn('Persona pack comparison could not be discarded', await errorDetail(res));
+        } catch (error) {
+            console.warn('Persona pack comparison could not be discarded', error);
+        }
+    };
+
     const handleCancel = () => {
+        if (compare) void discardCompare(compare.token);
         setSelectedFile(null);
         setOverwriteProfile(false);
         setCompare(null);
