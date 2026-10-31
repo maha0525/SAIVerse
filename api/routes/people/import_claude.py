@@ -108,6 +108,17 @@ def _add_core_memories(conn, items) -> tuple[list[tuple[int, str]], int]:
     return added, skipped
 
 
+def _notify_core_memory_import(adapter, added: list[tuple[int, str]]) -> None:
+    """コア記憶を追加した事実を知覚バッファ経由でペルソナへ知らせる。
+
+    reduce_key は付けない: 各通知はその回に追加した内容しか持たないので、
+    同じキーで畳むと、消費前に重なった先の回の追加がペルソナに届かない。
+    """
+    from .core_memory import _notify_persona_correction
+
+    _notify_persona_correction(adapter, _core_memory_import_notice(added))
+
+
 def _core_memory_import_notice(added: list[tuple[int, str]]) -> str:
     """ペルソナへの知覚通知の本文。ユーザーの訂正通知と同じく内容まで見せる。"""
     lines = [
@@ -472,7 +483,7 @@ def import_claude_memories(
 
     from sai_memory.memopedia import Memopedia
     from sai_memory.core_memory import total_core_memory_chars
-    from .core_memory import _notify_persona_correction, _resolve_budget
+    from .core_memory import _resolve_budget
 
     created = skipped = 0
     core_added: list[tuple[int, str]] = []
@@ -493,11 +504,7 @@ def import_claude_memories(
             LOGGER.exception("Claude memories import failed for %s", persona_id)
             raise HTTPException(status_code=500, detail=f"Memory import error: {e}")
         if core_added:
-            _notify_persona_correction(
-                adapter,
-                _core_memory_import_notice(core_added),
-                reduce_key="claude_import:core",
-            )
+            _notify_core_memory_import(adapter, core_added)
 
     core_budget = _resolve_budget(manager, persona_id)
     parts = []

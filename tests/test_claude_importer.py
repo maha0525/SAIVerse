@@ -449,3 +449,40 @@ def test_core_memories_are_added_once_and_notice_lists_them(tmp_path: Path) -> N
         assert len(list_core_memories(conn)) == 2
     finally:
         conn.close()
+
+
+def test_separate_core_memory_import_notices_are_not_folded(tmp_path: Path) -> None:
+    """取り込みごとの通知は、ペルソナが消費する前に重なっても両方残る。
+
+    各通知はその回に追加した内容しか持たないので、同じ reduce_key で集約すると
+    先の回の追加がペルソナに知らされないまま消える。
+    """
+    from api.routes.people.import_claude import _notify_core_memory_import
+    from sai_memory.perception_buffer import (
+        init_perception_buffer_table,
+        list_pending,
+        push_perception,
+        reduce_perceptions,
+    )
+
+    conn = sqlite3.connect(tmp_path / "memory.db")
+    try:
+        init_perception_buffer_table(conn)
+
+        class _Adapter:
+            def is_ready(self) -> bool:
+                return True
+
+            def push_perception(self, kind, content, **kwargs):
+                push_perception(conn, kind, content, **kwargs)
+
+        adapter = _Adapter()
+        _notify_core_memory_import(adapter, [(1, "Work context: 一回目")])
+        _notify_core_memory_import(adapter, [(2, "Top of mind: 二回目")])
+
+        shown = reduce_perceptions(list_pending(conn))
+        contents = "\n".join(item.content for item in shown)
+        assert "core:1: Work context: 一回目" in contents
+        assert "core:2: Top of mind: 二回目" in contents
+    finally:
+        conn.close()
