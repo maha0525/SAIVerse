@@ -175,6 +175,19 @@ Chronicle は一覧に出さず、§5 の規則どおりに扱う。Lite の画�
 
 **受け入れること**: 本体の記事を束ねた Lite の上位のあらすじは §5 の規則で捨てられ、元の一次あらすじから作り直す。費用はかかるが記憶は失われない。
 
+**実装で決めたこと（2026-11-01）**: `changes.json` の形の詳細は [persona-pack-format.md](../reference/persona-pack-format.md) に置いた。コードは `saiverse_memory/persona_pack/return_merge.py`（検査・一覧・選択）と `importer.py`（`return_plan` の分岐）、`api/routes/people/persona_pack.py`（口）。
+
+- **口は三つ**: `POST /{persona_id}/persona-pack/compare` が見比べ、`GET .../compare/{token}/items` が一覧を 1 ページずつ返し、`POST /{persona_id}/persona-pack/apply` が適用する。適用は `POST .../import` と同じ `_run_import` を通る。画面の合流は `changes.json` の有無によらずこの流れで、`changes.json` が無いパックは見比べを素通りして適用へ進む。`POST .../import` は `changes.json` を持つパックを断る。選択なしで通すと、Lite で消した記録が黙って残るため。
+- **一覧の置き場**: 見比べごとに `<SAIVERSE_HOME>/tmp/persona_pack_compare/<ペルソナ ID の指紋>/<トークン>/` を作り、ZIP と一覧の SQLite を置く。適用に成功したら消す。一覧の 1 ページは本文を `PREVIEW_CHARS` で切って返し、開いたときに全文を読む。
+- **選択**: 一括（`bulk`）と一件ごと（`choices`）の二つで受け、一件ごとが勝つ。どちらも無い項目があれば断る。
+- **足さないもの**: `changes.json` に欄の無い `journal/` の行は足さない。スレッドの行は、足す発言があるものと続きに選ばれたものだけを足す。どちらも「Lite で触っていない行で本体から消えたものは戻さない」を守るため。
+- **ページの一覧の範囲**: 本体で `is_deleted` のページも、Lite で編集していれば一覧に出し、Lite を残すと選ばれたら削除の状態を解く。Chronicle と根のページは一覧に出さず、結果の注意に載せる。
+- **Fragment**: 本体で `is_deleted` のページを指す行も「ページが無い」行として足さない。
+- **複製の置き場**: `<SAIVERSE_HOME>/backups/persona_pack_merge/<ペルソナ ID>/`。見比べた時点の値との照合のあと、書き込みの前に作る。
+- **プロフィールの上書きのチェック**: `changes.json` を持つパックでは使わず、結果の注意で知らせる。プロフィールは選ばれた項目だけを書く。
+- **新規作成の再開との重なり**: 印による再開の合流では選択を使わない。再開はパックの行を全部入れる工程で、選択で絞ると新規作成が欠けるため。結果の注意で知らせる。
+- **中継の無活動**: 見比べと適用は `/api/` の下の POST で、`next.config.ts` の `proxyTimeout`（1 時間）の内側にある。返事まで黙っていても 30 秒では切られない。
+
 ## 6. 互換と移行
 
 - 旧スレッド単位エクスポート（`saiverse_saimemory_v1` 形式）の**書き出しは、UI のボタンと API を本機能で置き換えて廃止**。コマンドラインの `scripts/export_saimemory_native.py` も新形式が入り次第、廃止する。既に書き出された旧ファイルの**取り込み機能は当面残す**。

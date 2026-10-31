@@ -117,6 +117,21 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
   (:meth:`_ImportJob.stage_merge_recall_edges`)。memopedia_fragments は合流しない。
   新規取り込みでは全部入れる。
 
+``extensions/lite/changes.json`` を持つパックの合流 (intent §5「Lite から帰るときの合流」) は、
+利用者の選択 (return_merge.ReturnSelection) を受けて同じ経路で動く。changes.json の検査・一覧・
+選択の検査は return_merge.py にあり、ここは次の差だけを持つ
+(:attr:`_ImportJob.return_plan` が None でないとき):
+
+- 本体に無い発言とページは created にあるものと、戻すと選ばれたものだけを足す。Lite で
+  触っていない行で本体から消えたものは戻さない。スレッドは足す発言があるものと、続きに
+  選ばれたものだけ。
+- 上の updated_at の比較は行わない。選ばれたページだけを update_page で上書きし、選ばれた
+  発言の content だけを差し替える (metadata は本体の値)。
+- journal/ の行は足さない (changes.json に手帳の欄が無い)。Chronicle は上の規則のまま。
+- memopedia_fragments は fragments.created の行だけを足す (:meth:`_ImportJob.stage_return_fragments`)。
+- memory.db の取引を始めた直後、書き込みの前に、一覧の項目の今の値を見比べた時点の値と
+  照らし (違えば ReturnMergeStale)、memory.db を複製する (失敗なら ReturnMergeBackupError)。
+
 短縮番号 (memopedia_pages.short_id / clips.short_id / コア記憶の metadata.core_id /
 Chronicle の metadata.short_id) は DB ごとの連番 (docs/intent/reference_addressing.md
 §2.1)。挿入する行の元の番号が取り込み先の取り込み開始時の MAX より大きければ
@@ -211,6 +226,7 @@ from sai_memory.presented_reduction import DROPPED_MEDIA_FIELD
 from sai_memory.room_state import snapshot_digest
 from saiverse import references
 
+from . import return_merge
 from .export import (
     API_MEDIA_IMAGES_PREFIX,
     _ATTACHMENT_KEYS,
@@ -420,6 +436,8 @@ class PersonaPackImportResult:
     # profile の上書きで書き換えた ai の列
     profile_columns_overwritten: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # Lite から帰るときの合流の選択の内訳 (return_merge.ReturnPlan.summary)。それ以外は None
+    return_merge: Optional[Dict[str, Any]] = None
 
     def count(self, key: str) -> ImportCounts:
         return self.counts.setdefault(key, ImportCounts())
@@ -1231,6 +1249,8 @@ class _PackData:
     # 包みが列の形の JSON に戻らなかったため None にしたものの警告文。
     # _unwrap_bytes_perception_columns が記録し、stage_ext_memory が警告に載せる
     ext_memory_nulled: List[str] = field(default_factory=list)
+    # extensions/lite/changes.json の中身 (無いパックは None)
+    return_changes: Optional[return_merge.ReturnChanges] = None
 
 
 _EXT = "extensions/saiverse/"
@@ -1368,6 +1388,22 @@ def _load_pack(reader: _PackReader, staging: Optional[_StagingDB]) -> _PackData:
                 if target is pack.ext_memory_tables:
                     rows = _unwrap_bytes_perception_columns(table[:-5], rows, pack)
                 target[table[:-5]] = stage(name, rows)
+    pack.return_changes = return_merge.read_changes(reader, pack.contents)
+    if pack.return_changes is not None:
+        # 配列の JSON をもう一度流し読みする (覚えるのは changes.json の id だけ)
+        # contents に無いフォルダの行は取り込まないので、ZIP にあっても無いものとして照らす
+        def rows_of(folder: str, name: str) -> Iterable[Dict[str, Any]]:
+            return reader.iter_rows(name) if has(folder) else ()
+
+        return_merge.check_against_pack(
+            pack.return_changes,
+            message_rows=rows_of("chatlog", "chatlog/messages.json"),
+            page_rows=rows_of("knowledge", "knowledge/pages.json"),
+            fragment_rows=rows_of(
+                "extensions/saiverse", f"{_EXT_MEMORY}{return_merge.FRAGMENTS_TABLE}.json",
+            ),
+            profile_ai=(pack.profile or {}).get("ai"),
+        )
     return pack
 
 
@@ -1558,6 +1594,127 @@ def validate_pack(zip_path: Path) -> None:
         _load_pack(_PackReader(zf), None)
 
 
+def _pack_active_suffix(reader: _PackReader, pack: _PackData, target: str) -> Optional[str]:
+    """パックの active_state.json が指すスレッドの後半 (無い・読めないときは None)。"""
+    name = return_merge.ACTIVE_STATE_ENTRY
+    if "extensions/saiverse" not in pack.contents or name not in reader.names:
+        return None
+    try:
+        state = reader.load_json(name)
+    except ValueError:
+        LOGGER.warning("[persona_pack] %s could not be read; the active thread is not compared", name)
+        return None
+    return return_merge.active_suffix(state, (pack.source_id, target))
+
+
+def _read_only(path: Path) -> sqlite3.Connection:
+    """DB を読み取り専用で開く (見比べは取り込み先へ書かない)。"""
+    return sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+
+
+def _body_profile(world: sqlite3.Connection, target: str) -> Dict[str, Any]:
+    """取り込み先の ai 行のうち、Lite で変えられる列 (return_merge.PROFILE_COLUMNS)。"""
+    columns = return_merge.PROFILE_COLUMNS
+    row = world.execute(
+        f"SELECT {', '.join(_quote(c) for c in columns)} FROM ai WHERE AIID = ?", (target,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"persona not found in saiverse.db: {target}")
+    return dict(zip(columns, row))
+
+
+def compare_persona_pack(
+    zip_path: Path,
+    *,
+    target_persona_id: str,
+    saiverse_db_path: Path,
+    saiverse_home: Path,
+) -> Optional[Tuple[List[return_merge.ReviewItem], List[str]]]:
+    """Lite から帰るパックと取り込み先を見比べ、一覧を返す。取り込み先には何も書かない。
+
+    Returns: changes.json が無いパックは None (形の検査もしない — 適用のときに行う)。
+    あれば (一覧, 一覧に出さなかった項目の警告)。
+
+    Raises:
+        zipfile.BadZipFile / ValueError: パックが不正 (validate_pack と同じ検査をする)。
+        FileNotFoundError: saiverse.db / memory.db が無い。
+    """
+    zip_path = Path(zip_path)
+    saiverse_db_path = Path(saiverse_db_path)
+    home = Path(saiverse_home)
+    persona_dir = home / "personas" / target_persona_id
+    memory_db_path = persona_dir / "memory.db"
+    if not saiverse_db_path.is_file():
+        raise FileNotFoundError(f"saiverse.db not found: {saiverse_db_path}")
+    if not memory_db_path.is_file():
+        raise FileNotFoundError(f"memory.db not found for persona {target_persona_id}: {memory_db_path}")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        check_uncompressed_size(zf)
+        reader = _PackReader(zf)
+        manifest = reader.load_json(MANIFEST_NAME) if MANIFEST_NAME in reader.names else None
+        contents = manifest.get("contents") if isinstance(manifest, dict) else None
+        listed = isinstance(contents, list) and return_merge.CHANGES_FOLDER in contents
+        if not listed and not return_merge.has_changes_file(reader.names):
+            return None
+        staging = _StagingDB(_staging_path(zip_path, uuid.uuid4().hex))
+        memory: Optional[sqlite3.Connection] = None
+        world: Optional[sqlite3.Connection] = None
+        try:
+            pack = _load_pack(reader, staging)
+            changes = pack.return_changes
+            if changes is None:  # read_changes は上の判定で None にならない
+                return None
+            memory = _read_only(memory_db_path)
+            world = _read_only(saiverse_db_path)
+            target = target_persona_id
+
+            def zip_message(message_id: str) -> Optional[Dict[str, Any]]:
+                return next(pack.messages.rows_where("WHERE id = ? ORDER BY ord", (message_id,)), None)
+
+            def zip_page(page_id: str) -> Optional[Dict[str, Any]]:
+                return next(pack.pages.rows_where("WHERE id = ? ORDER BY ord", (page_id,)), None)
+
+            def thread_tail(body_suffix: str, lite_suffix: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                body_row = memory.execute(
+                    "SELECT content, created_at FROM messages WHERE thread_id = ? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (f"{target}:{body_suffix}",),
+                ).fetchone()
+                lite_row = next(pack.messages.rows_where(
+                    "WHERE thread_id = ? ORDER BY created_at_key DESC, ord DESC LIMIT 1",
+                    (f"{pack.source_id}:{lite_suffix}",),
+                ), None)
+                body = return_merge.review_side(
+                    title=body_suffix,
+                    content=body_row[0] if body_row else None,
+                    updated_at=body_row[1] if body_row else None,
+                )
+                lite = return_merge.review_side(
+                    title=lite_suffix,
+                    content=decode_value(lite_row.get("content")) if lite_row else None,
+                    updated_at=iso_to_epoch(lite_row.get("created_at")) if lite_row else None,
+                )
+                return body, lite
+
+            return return_merge.build_review(
+                changes,
+                memory=memory,
+                zip_message=zip_message,
+                zip_page=zip_page,
+                zip_profile=(pack.profile or {}).get("ai"),
+                body_profile=_body_profile(world, target),
+                zip_active=_pack_active_suffix(reader, pack, target),
+                body_active=return_merge.read_body_active(persona_dir, target),
+                thread_tail=thread_tail,
+            )
+        finally:
+            for conn in (memory, world):
+                if conn is not None:
+                    conn.close()
+            staging.discard()
+
+
 def import_persona_pack(
     zip_path: Path,
     *,
@@ -1566,6 +1723,7 @@ def import_persona_pack(
     saiverse_db_path: Path,
     saiverse_home: Path,
     overwrite_profile: bool = False,
+    return_selection: Optional[return_merge.ReturnSelection] = None,
 ) -> PersonaPackImportResult:
     """ペルソナまるごとパックを既存のペルソナへ取り込む。
 
@@ -1577,14 +1735,21 @@ def import_persona_pack(
         saiverse_db_path: 取り込み先の本体 DB (saiverse.db)。
         saiverse_home: 取り込み先の SAIVERSE_HOME 相当のルート。
         overwrite_profile: True のときだけ ai 行を profile/profile.json の値で
-            上書きする (PROFILE_PROTECTED_COLUMNS を除く)。
+            上書きする (PROFILE_PROTECTED_COLUMNS を除く)。changes.json を持つパックの
+            合流では使わない (プロフィールは選ばれた項目だけ書く)。
+        return_selection: changes.json を持つパックの合流で必須の選択。一覧が空でも
+            空の選択を渡す。それ以外のパックには渡さない。
 
     Raises:
         FileNotFoundError: saiverse.db / memory.db が無い。
         ValueError: mode が不正・ZIP の形が不正・展開後のサイズが上限
             (check_uncompressed_size) を超える・配列の JSON の 1 要素が
             MAX_JSON_ELEMENT_CHARS を超える・ai 行が無い・mode="new" で
-            取り込み先に messages がある。いずれも書き込み前に投げる。
+            取り込み先に messages がある・changes.json を持つパックの合流に選択が無い
+            (return_merge.ReturnMergeRequired)。いずれも書き込み前に投げる。
+        return_merge.ReturnMergeStale: 一覧の項目が見比べた時点から変わった。
+        return_merge.ReturnMergeBackupError: memory.db を複製できなかった。
+            どちらも書き込み前に投げる。
 
     ZIP の配列の JSON は、ZIP と同じフォルダの作業用 SQLite (_staging_path) に積んでから
     取り込む。作業用 SQLite は成功・失敗を問わず、この関数が戻る前に消す。
@@ -1611,10 +1776,27 @@ def import_persona_pack(
             result = PersonaPackImportResult(
                 mode=mode, source_persona_id=pack.source_id, target_persona_id=target_persona_id,
             )
+            return_plan: Optional[return_merge.ReturnPlan] = None
+            if mode == "merge" and pack.return_changes is not None:
+                if return_selection is None:
+                    raise return_merge.ReturnMergeRequired(
+                        "persona pack: this pack came back from SAIVerse Lite; compare it first "
+                        "and apply the choices"
+                    )
+                return_plan = return_merge.ReturnPlan(pack.return_changes, return_selection)
+                if overwrite_profile:
+                    result.warnings.append(
+                        "profile overwrite is not used for a pack that came back from SAIVerse "
+                        "Lite; only the chosen profile items were written"
+                    )
+                    overwrite_profile = False
+            elif return_selection is not None:
+                raise ValueError("persona pack: choices apply only to merging a pack with changes.json")
             job = _ImportJob(
                 reader=reader, pack=pack, result=result, mode=mode,
                 target=target_persona_id, home=home, persona_dir=persona_dir,
                 overwrite_profile=overwrite_profile, zip_sha256=zip_sha256,
+                return_plan=return_plan,
             )
             job.run(memory_db_path, saiverse_db_path)
         finally:
@@ -1671,7 +1853,10 @@ class _ImportJob:
         persona_dir: Path,
         overwrite_profile: bool,
         zip_sha256: str,
+        return_plan: Optional[return_merge.ReturnPlan] = None,
     ) -> None:
+        # Lite から帰るときの合流の判定 (モジュール docstring)。それ以外は None
+        self.return_plan = return_plan
         self.reader = reader
         self.pack = pack
         self.result = result
@@ -1892,6 +2077,7 @@ class _ImportJob:
                     )
             else:
                 self.check_pending_marker(world, memory)
+                self.prepare_return_merge()
             self.report_refused_json_text()
             # 所持品の SHORT_ID は saiverse.db 側 (stage_items) で登録するが、item:N の参照を
             # 持つ purpose_tags / clips は memory.db 側で先に入るので、採番だけを先に決める
@@ -1899,23 +2085,34 @@ class _ImportJob:
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
+                if self.return_plan is not None:
+                    self.check_return_stale(memory, world)
+                    self.backup_before_return_merge(memory_db_path)
                 self.stage_chatlog(memory)
                 self.stage_knowledge(memory)
                 self.check_page_tree(memory)
-                self.stage_journal_memory(memory)
+                if self.return_plan is None:
+                    self.stage_journal_memory(memory)
+                else:
+                    self.stage_return_messages(memory)
+                    self.stage_return_page_deletions(memory)
+                    self.stage_return_fragments(memory)
+                    self.count_return_journal_skips()
                 if self.memory_new:
                     self.stage_ext_memory(memory)
                     self.record_memory_applied(memory)
                 else:
                     self.stage_merge_recall_edges(memory)
                 world.execute("BEGIN IMMEDIATE")
-                self.stage_task_book(world)
+                if self.return_plan is None:
+                    self.stage_task_book(world)
                 self.stage_profile(world)
                 if self.world_new:
                     self.stage_ext_saiverse(world)
                     self.stage_items(world)
                     self.record_world_applied(world)
-                self.stage_day_reports()
+                if self.return_plan is None:
+                    self.stage_day_reports()
                 if self.memory_new:
                     self.stage_persona_dir_files()
                 if self.mode == "merge":
@@ -1955,10 +2152,272 @@ class _ImportJob:
                 self.repair_resumed_item_refs(memory, world)
             if self.clear_marker:
                 self.remove_pending_marker()
+            if self.return_plan is not None:
+                self.finish_return_merge()
         finally:
             world.close()
             if memory is not None:
                 memory.close()
+
+    # --- Lite から帰るときの合流 -------------------------------------------------
+
+    def prepare_return_merge(self) -> None:
+        """再開の合流では選択を使わず、スレッドの続き先をパックから読む。
+
+        印の再開 (resume_memory / resume_world) は mode="new" の工程をやり直す途中で、
+        パックの行を全部入れる必要がある。選択で行を絞ると、新規作成が欠けたまま印が消える。
+        """
+        plan = self.return_plan
+        if plan is None:
+            return
+        if self.resume_memory or self.resume_world:
+            self.warn(
+                "an earlier new-persona import of this pack is unfinished; it was resumed "
+                "and the choices were not used"
+            )
+            self.return_plan = None
+            return
+        if plan.takes_lite_thread:
+            plan.active_suffix = _pack_active_suffix(self.reader, self.pack, self.target)
+
+    def check_return_stale(self, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
+        """一覧の項目の今の値を見比べた時点の値と照らす (書き込みの前)。"""
+        stale = return_merge.find_stale(
+            self.return_plan.selection.expected,
+            memory,
+            _body_profile(world, self.target),
+            return_merge.read_body_active(self.persona_dir, self.target),
+        )
+        if stale:
+            raise return_merge.ReturnMergeStale(stale)
+
+    def backup_before_return_merge(self, memory_db_path: Path) -> None:
+        """memory.db を複製する。発言の削除は取り消せないので、失敗したら適用しない。
+
+        この取引はまだ何も書いていないので、別の接続の複製は適用前の値になる。
+        """
+        path = return_merge.backup_memory_db(memory_db_path, self.home, self.target)
+        self.return_plan.backup_path = str(path)
+
+    def stage_return_threads(self, messages: _StagedRows) -> Set[str]:
+        """足してよいスレッドの ID: 足す発言があるものと、続きに選ばれたもの。
+
+        Lite で触っていない行で本体から消えたものを戻さないので、スレッドの行も
+        ZIP にあるだけでは足さない。messages の accepted が付いた後に呼ぶ。
+        """
+        wanted: Set[str] = set()
+        if messages:
+            wanted = {
+                self.remap_thread_id(thread_id)
+                for (thread_id,) in messages.query("SELECT DISTINCT thread_id FROM {t} WHERE accepted = 1")
+            }
+        if self.return_plan.active_suffix:
+            wanted.add(f"{self.target}:{self.return_plan.active_suffix}")
+        return wanted
+
+    def stage_return_messages(self, conn: sqlite3.Connection) -> None:
+        """選ばれた発言の本文の差し替えと削除 (metadata は本体の値を残す)。
+
+        埋め込みの行は消す。差し替えは空のベクトル行を置いて再生成へ回す
+        (stage_chatlog の新しい行と同じ形)。削除の範囲は SAIMemoryAdapter.delete_message
+        と同じ。あらすじの本文と pulse_logs などの写しは書き換えない (intent)。
+        """
+        from sai_memory.memory.storage import write_deferred_message_embedding
+
+        plan = self.return_plan
+        counts = self.result.count("messages")
+        for message_id in plan.edited_messages():
+            if self.pack.messages.contains("id", message_id, "accepted = 1"):
+                continue  # 本体で消えていて、stage_chatlog が ZIP の行のまま戻した
+            row = next(self.pack.messages.rows_where("WHERE id = ? ORDER BY ord", (message_id,)), None)
+            if row is None:
+                raise ValueError(f"persona pack: message {message_id!r} is not in chatlog/messages.json")
+            content = decode_value(row.get("content"))
+            conn.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
+            conn.execute("DELETE FROM message_embeddings WHERE message_id = ?", (message_id,))
+            if isinstance(content, str) and content.strip():
+                write_deferred_message_embedding(conn, message_id, commit=False)
+                self.result.embeddings_deferred += 1
+            counts.updated += 1
+        for message_id in plan.deleted_messages():
+            conn.execute("DELETE FROM message_embeddings WHERE message_id = ?", (message_id,))
+            conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+            plan.messages_deleted += 1
+
+    def stage_return_page(
+        self,
+        conn: sqlite3.Connection,
+        page: Dict[str, Any],
+        existing: Optional[Tuple[Any, ...]],
+        counts: ImportCounts,
+    ) -> bool:
+        """Chronicle 以外のページの 1 行を選択どおりに扱う。行を挿入するなら True を返す。"""
+        plan = self.return_plan
+        page_id = page["id"]
+        if existing is None:
+            if plan.accepts_new_page(page_id) and not decode_value(page.get("is_deleted")):
+                return True
+            counts.skipped += 1
+            self.note_page_numbers(page, None)
+            return False
+        self.note_page_numbers(page, existing)
+        if not plan.page_takes_lite(page_id):
+            counts.skipped += 1
+            return False
+        self.overwrite_page(conn, page, existing)
+        self.revive_page(conn, page_id)
+        counts.updated += 1
+        return False
+
+    def overwrite_page(
+        self, conn: sqlite3.Connection, page: Dict[str, Any], existing: Tuple[Any, ...],
+    ) -> None:
+        """ZIP の行でページを上書きする。消える側の本文を編集履歴に残し、埋め込みの行を消す。"""
+        from sai_memory.memopedia.storage import generate_diff, record_page_edit
+
+        decoded = _decode_row(page, "memopedia_pages")
+        self.update_page(conn, page, decoded, existing)
+        record_page_edit(
+            conn,
+            page_id=page["id"],
+            diff_text=generate_diff(existing[3] or "", decoded.get("content") or ""),
+            edit_type="update",
+            edit_source=_EDIT_SOURCE,
+            before_title=existing[1],
+            before_summary=existing[2],
+            before_content=existing[3],
+            commit=False,
+        )
+        conn.execute("DELETE FROM memopedia_embeddings WHERE page_id = ?", (page["id"],))
+
+    def revive_page(self, conn: sqlite3.Connection, page_id: str) -> None:
+        """本体で削除済みのページに Lite の内容を残すと選ばれたとき、削除の状態を解く。
+
+        update_page は削除の状態を本体の値のまま保つ (§5) ので、ここで is_deleted と
+        コア記憶の metadata の deleted_at を消す。
+        """
+        row = conn.execute(
+            "SELECT is_deleted, metadata FROM memopedia_pages WHERE id = ?", (page_id,)
+        ).fetchone()
+        if row is None or not row[0]:
+            return
+        try:
+            meta = json.loads(row[1]) if row[1] else None
+        except (TypeError, ValueError):
+            meta = None
+        metadata = row[1]
+        if isinstance(meta, dict) and "deleted_at" in meta:
+            meta.pop("deleted_at")
+            metadata = json.dumps(meta, ensure_ascii=False)
+        conn.execute(
+            "UPDATE memopedia_pages SET is_deleted = 0, metadata = ? WHERE id = ?", (metadata, page_id)
+        )
+
+    def stage_return_page_deletions(self, conn: sqlite3.Connection) -> None:
+        """選ばれたページの削除。編集履歴の残し方は MemopediaManager.delete_page と同じで、
+        コア記憶は remove_core_memory と同じく metadata の deleted_at も刻む。"""
+        from sai_memory.memopedia.storage import generate_diff, record_page_edit
+
+        plan = self.return_plan
+        now = int(time.time())
+        for page_id in plan.deleted_pages():
+            row = self.target_page_row(conn, page_id)
+            if row is None:
+                continue
+            title, summary, content = row[1], row[2], row[3]
+            record_page_edit(
+                conn,
+                page_id=page_id,
+                diff_text=generate_diff(f"title: {title}\nsummary: {summary}\ncontent:\n{content}", ""),
+                edit_type="delete",
+                edit_source=_EDIT_SOURCE,
+                before_title=title,
+                before_summary=summary,
+                before_content=content,
+                commit=False,
+            )
+            metadata = row[5]
+            if row[6] == _CATEGORY_CORE:
+                try:
+                    meta = json.loads(metadata) if metadata else {}
+                except (TypeError, ValueError):
+                    meta = None
+                if isinstance(meta, dict):
+                    meta["deleted_at"] = now
+                    metadata = json.dumps(meta, ensure_ascii=False)
+            conn.execute(
+                "UPDATE memopedia_pages SET is_deleted = 1, updated_at = ?, metadata = ? WHERE id = ?",
+                (now, metadata, page_id),
+            )
+            plan.pages_deleted += 1
+
+    def stage_return_fragments(self, conn: sqlite3.Connection) -> None:
+        """fragments.created の行だけを足す (intent「合流で新しく受け取るもの」)。
+
+        取り込み先に無い Chronicle を指す chronicle_entry_id は空にし、取り込み先に無い
+        (削除済みを含む) ページを指す行は足さずに件数を結果に出す。合流の Chronicle の
+        取り込みより後に呼ぶので、取り込んだ記事を指す行はそのまま入る。
+        """
+        plan = self.return_plan
+        table = return_merge.FRAGMENTS_TABLE
+        rows = self.pack.ext_memory_tables.get(table)
+        if not rows:
+            return
+        self._merged_ext_tables.add(table)
+        counts = self.result.count(f"extensions/memory_db/{table}")
+        created = plan.changes.fragments_created
+        for row in rows:
+            decoded = {k: decode_value(v) for k, v in row.items()}
+            if decoded.get("id") not in created:
+                counts.skipped += 1
+                continue
+            entity = conn.execute(
+                "SELECT is_deleted FROM memopedia_pages WHERE id = ?", (decoded.get("entity_id"),)
+            ).fetchone()
+            if entity is None or entity[0]:
+                counts.skipped += 1
+                plan.fragments_without_page += 1
+                continue
+            chronicle_id = decoded.get("chronicle_entry_id")
+            if chronicle_id is not None and conn.execute(
+                "SELECT 1 FROM memopedia_pages WHERE id = ?", (chronicle_id,)
+            ).fetchone() is None:
+                decoded["chronicle_entry_id"] = None
+            if self.insert(conn, table, decoded, or_ignore=True).rowcount:
+                counts.added += 1
+                plan.fragments_added += 1
+            else:
+                counts.skipped += 1
+        if plan.fragments_without_page:
+            self.warn(
+                f"{table}: {plan.fragments_without_page} fragment(s) point to a page that is not "
+                "in this persona; they were not added"
+            )
+
+    def count_return_journal_skips(self) -> None:
+        """Lite から帰るパックの journal/ は足さないので、件数だけ内訳に載せる。"""
+        pack = self.pack
+        for key, rows in (
+            ("activities", pack.activities), ("memos", pack.memos), ("clips", pack.clips),
+            ("purpose_tags", pack.purpose_tags), ("task_book", pack.task_book),
+        ):
+            if rows:
+                self.result.count(key).skipped += len(rows)
+        if pack.day_reports:
+            self.result.count("day_reports").skipped += len(pack.day_reports)
+
+    def finish_return_merge(self) -> None:
+        """commit の後の仕上げ: いま続いているスレッドの書き換えと、結果の内訳。
+
+        active_state.json は DB の取引の外なので、書けなくても取り込みは成功のまま警告する。
+        """
+        plan = self.return_plan
+        if plan.takes_lite_thread and plan.active_suffix:
+            try:
+                return_merge.write_active_thread(self.persona_dir, plan.active_suffix)
+            except OSError as exc:
+                self.warn(f"{return_merge.ACTIVE_STATE_FILENAME} could not be written: {exc}")
+        self.result.return_merge = plan.summary()
 
     def report_refused_json_text(self) -> None:
         """_PackData.refused_json_text の行を警告してスキップ件数に載せる。"""
@@ -2323,12 +2782,21 @@ class _ImportJob:
         ):
             self.remap_thread_id(thread_id)
 
+        # Lite から帰るパックは、足す発言が決まってから足すスレッドを決める
+        accepted: Optional[int] = None
+        wanted_threads: Optional[Set[str]] = None
+        if self.return_plan is not None:
+            if messages:
+                messages.add_mark("accepted")
+                accepted = self.mark_new_messages(conn, messages)
+            wanted_threads = self.stage_return_threads(messages)
+
         # threads
         counts = self.result.count("threads") if pack.threads else None
         existing = self.existing_keys(conn, "threads", "id", self.thread_map.values())
         for row in pack.threads:
             new_id = self.remap_thread_id(row["id"])
-            if new_id in existing:
+            if new_id in existing or (wanted_threads is not None and new_id not in wanted_threads):
                 counts.skipped += 1
                 continue
             decoded = _decode_row(row, "threads")
@@ -2347,7 +2815,7 @@ class _ImportJob:
             )
             for row in pack.stelis_threads:
                 new_id = self.remap_thread_id(row["thread_id"])
-                if new_id in present:
+                if new_id in present or (wanted_threads is not None and new_id not in wanted_threads):
                     counts.skipped += 1
                     continue
                 decoded = _decode_row(row, "stelis_threads")
@@ -2366,8 +2834,9 @@ class _ImportJob:
 
         # messages: id で照合し、無いものだけ入れる (挿入する行に accepted = 1)
         counts = self.result.count("messages")
-        messages.add_mark("accepted")
-        accepted = self.mark_new_messages(conn, messages)
+        if accepted is None:
+            messages.add_mark("accepted")
+            accepted = self.mark_new_messages(conn, messages)
         counts.skipped += len(messages) - accepted
 
         self.plan_attachments(conn, messages.rows_where("WHERE accepted = 1 ORDER BY ord"))
@@ -2413,8 +2882,10 @@ class _ImportJob:
 
         挿入するのは、id ごとに ZIP で最初の行 (ZIP 内の重複は先勝ち) のうち、取り込み先に
         同じ id が無いもの。取り込み先の照合は _CHUNK 件ずつの IN で問い合わせ、返った値と
-        Python の == で比べる (existing_keys と同じ)。
+        Python の == で比べる (existing_keys と同じ)。Lite から帰るパックは、そのうち
+        return_plan.accepts_new_message が認める行だけ。
         """
+        plan = self.return_plan
         accepted = 0
         pending: List[Tuple[int, Any]] = []
 
@@ -2425,7 +2896,7 @@ class _ImportJob:
                 f"SELECT id FROM messages WHERE id IN ({', '.join('?' for _ in ids)})", ids,
             )}
             for ord_, mid in pending:
-                if mid not in found:
+                if mid not in found and (plan is None or plan.accepts_new_message(mid)):
                     messages.execute("UPDATE {t} SET accepted = 1 WHERE ord = ?", (ord_,))
                     accepted += 1
             pending.clear()
@@ -2785,7 +3256,6 @@ class _ImportJob:
         pages = self.pack.pages
         if not pages:
             return
-        from sai_memory.memopedia.storage import generate_diff, record_page_edit
 
         chronicle_plan: Optional[_ChroniclePlan] = None
         if not self.memory_new:
@@ -2820,6 +3290,11 @@ class _ImportJob:
                     # 同じ id の行が取り込み先にあればその番号、無ければ取り込み先に入らない
                     self.note_page_numbers(page, existing)
                 continue
+            if self.return_plan is not None:
+                # 選択どおりに扱う。下の updated_at の比較は通らない
+                if self.stage_return_page(conn, page, existing, counts):
+                    accept(ord_)
+                continue
             zip_deleted = bool(decode_value(page.get("is_deleted")))
             if existing is None:
                 if zip_deleted and not self.memory_new:
@@ -2848,19 +3323,7 @@ class _ImportJob:
             ):
                 counts.skipped += 1
                 continue
-            self.update_page(conn, page, decoded, existing)
-            record_page_edit(
-                conn,
-                page_id=page["id"],
-                diff_text=generate_diff(existing[3] or "", decoded.get("content") or ""),
-                edit_type="update",
-                edit_source=_EDIT_SOURCE,
-                before_title=existing[1],
-                before_summary=existing[2],
-                before_content=existing[3],
-                commit=False,
-            )
-            conn.execute("DELETE FROM memopedia_embeddings WHERE page_id = ?", (page["id"],))
+            self.overwrite_page(conn, page, existing)
             counts.updated += 1
 
         if deleted_not_added:
@@ -3694,7 +4157,11 @@ class _ImportJob:
         if profile is None:
             return
         counts = self.result.count("profile")
-        if not self.overwrite_profile:
+        # Lite から帰るパックは選ばれた項目の列だけ。名前の重複の規則は同じものを通る
+        chosen: Optional[Set[str]] = None
+        if self.return_plan is not None and not self.overwrite_profile:
+            chosen = self.return_plan.profile_columns
+        if not (self.overwrite_profile if chosen is None else chosen):
             counts.skipped += 1
             return
         ai = _decode_row(profile["ai"])
@@ -3704,9 +4171,11 @@ class _ImportJob:
         for col in cols:
             if col in PROFILE_PROTECTED_COLUMNS or col in _PROFILE_FILE_COLUMNS or col not in ai:
                 continue
+            if chosen is not None and col not in chosen:
+                continue
             updates[col] = ai[col]
         for col in _PROFILE_FILE_COLUMNS:
-            if col not in cols or col not in ai:
+            if col not in cols or col not in ai or chosen is not None:
                 continue
             if not ai[col]:
                 updates[col] = None

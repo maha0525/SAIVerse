@@ -95,7 +95,7 @@ City / Building、自律 Pulse、ペルソナ間交流、Playbook / SEA、Spell 
 
 - **ペルソナ定義形式**と**会話ログ+記憶のエクスポート形式**は、本体の
   インポータが読めること。
-- 形式仕様は実装時に `docs/reference/` に文書化する。
+- 形式仕様は実装時に `docs/reference/` に文書化する（[persona-pack-format.md](../reference/persona-pack-format.md)）。
 - どちらかが形式を変えるときは、**同じ変更の中で**両側（Lite / 本体）を更新する。
 - 推奨: 本体リポジトリに Lite エクスポートのサンプルフィクスチャを置き、
   「本体インポータが Lite エクスポートを読める」ことを CI の契約テストとして

@@ -29,10 +29,21 @@ export interface PersonaPackChronicleAfterMerge {
     stale_entries: number | null;
 }
 
+/** Lite から帰るときの合流の選択の内訳 (return_merge.py の ReturnPlan.summary) */
+export interface PersonaPackReturnMerge {
+    choices: Record<string, { lite: number; body: number }>;
+    messages_deleted: number;
+    pages_deleted: number;
+    fragments_added: number;
+    fragments_without_page: number;
+    backup_path: string | null;
+}
+
 /**
  * 取り込みの結果 (importer.py の PersonaPackImportResult + API の後処理)。
  * persona_id / room_id / persona_name は新規取り込み (import-new) のときだけ入る。
  * chronicle_after_merge は Chronicle ページを取り込んだ合流のときだけ入る。
+ * return_merge は changes.json を持つパックの合流のときだけ入る。
  * API の応答には mode ('new' | 'merge') も入るが、画面はそれで分岐しないので宣言しない。
  */
 export interface PersonaPackImportResult {
@@ -45,6 +56,7 @@ export interface PersonaPackImportResult {
     warnings: string[];
     embedding_started: boolean;
     chronicle_after_merge?: PersonaPackChronicleAfterMerge | null;
+    return_merge?: PersonaPackReturnMerge | null;
     persona_id?: string;
     room_id?: string;
     persona_name?: string;
@@ -91,6 +103,16 @@ function categoryLabel(key: string): string {
     }
 }
 
+function choiceLabel(kind: string): string {
+    switch (kind) {
+        case 'message': return uiText('components.memory.PersonaPack.reviewKindMessage');
+        case 'page': return uiText('components.memory.PersonaPack.reviewKindPage');
+        case 'profile': return uiText('components.memory.PersonaPack.categoryProfile');
+        case 'active_thread': return uiText('components.memory.PersonaPack.reviewKindThread');
+        default: return kind;
+    }
+}
+
 function buildRows(counts: Record<string, PersonaPackCount>): [string, PersonaPackCount][] {
     const rows: [string, PersonaPackCount][] = [];
     for (const key of CATEGORY_ORDER) {
@@ -126,6 +148,8 @@ export default function PersonaPackResult({ result }: Props) {
     const renumbered = Object.values(result.renumbered || {}).reduce((sum, n) => sum + n, 0);
     const warnings = result.warnings || [];
     const chronicle = result.chronicle_after_merge ?? null;
+    const returned = result.return_merge ?? null;
+    const choiceRows = returned ? Object.entries(returned.choices) : [];
     // 失敗の数が 0 と確定したときだけ案内を出さない (null = 分からない も案内する)
     const chronicleMarksPending = chronicle !== null && (
         chronicle.cold_window_marks_skipped || chronicle.cold_window_mark_failures !== 0
@@ -157,6 +181,41 @@ export default function PersonaPackResult({ result }: Props) {
                     ))}
                 </tbody>
             </table>
+            {choiceRows.length > 0 && (
+                <table className={styles.table}>
+                    <thead>
+                        <tr>
+                            <th data-i18n="components.memory.PersonaPack.resultChoicesTitle">{uiText('components.memory.PersonaPack.resultChoicesTitle')}</th>
+                            <th data-i18n="components.memory.PersonaPack.resultKeptLite">{uiText('components.memory.PersonaPack.resultKeptLite')}</th>
+                            <th data-i18n="components.memory.PersonaPack.resultKeptBody">{uiText('components.memory.PersonaPack.resultKeptBody')}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {choiceRows.map(([kind, value]) => (
+                            <tr key={kind}>
+                                <td>{choiceLabel(kind)}</td>
+                                <td>{value.lite}</td>
+                                <td>{value.body}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            )}
+            {returned && (returned.messages_deleted > 0 || returned.pages_deleted > 0) && (
+                <p data-i18n="components.memory.PersonaPack.resultDeleted" className={styles.note}>
+                    {uiText('components.memory.PersonaPack.resultDeleted', { p1: returned.messages_deleted, p2: returned.pages_deleted })}
+                </p>
+            )}
+            {returned && returned.fragments_without_page > 0 && (
+                <p data-i18n="components.memory.PersonaPack.resultFragmentsWithoutPage" className={styles.note}>
+                    {uiText('components.memory.PersonaPack.resultFragmentsWithoutPage', { p1: returned.fragments_without_page })}
+                </p>
+            )}
+            {returned?.backup_path && (
+                <p data-i18n="components.memory.PersonaPack.resultBackup" className={styles.note}>
+                    {uiText('components.memory.PersonaPack.resultBackup', { p1: returned.backup_path })}
+                </p>
+            )}
             {chronicle && (
                 <>
                     <table className={styles.table}>

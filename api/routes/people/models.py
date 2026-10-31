@@ -684,3 +684,16 @@ class StorageLayersResponse(BaseModel):
 # NOTE: Tracks Viewer のモデル (TrackItem / TracksStatusCount / TracksResponse) は
 # 2026-08-21 に API ルートごと退役した (track_retirement.md §2 住人 9)。フロントの
 # 消費はゼロで、残っていた読み手は debug スクリプトだけだった。
+
+
+class PersonaPackApplyRequest(BaseModel):
+    """見比べたパックの適用 (api/routes/people/persona_pack.py の apply_persona_pack)。
+
+    choices は {項目のキー: "lite" か "body"}。bulk は choices に無い項目の選択で、
+    一件ごとの選択が bulk に勝つ。どちらも無い項目があれば断る。
+    """
+
+    token: str
+    bulk: Optional[str] = None
+    choices: Dict[str, str] = {}
+    overwrite_profile: bool = False
