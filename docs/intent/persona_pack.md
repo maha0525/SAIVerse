@@ -173,7 +173,11 @@ Chronicle は一覧に出さず、§5 の規則どおりに扱う。Lite の画�
 
 **合流で新しく受け取るもの**: `fragments.created` の Fragment を足す。§5 が Fragment を入れない理由は、ペルソナが編集・削除する既存の行を混ぜられないことで、Lite で新しく生まれた行だけならこの問題は起きない。合流で取り込まなかった Chronicle を指す `chronicle_entry_id` は空にする。指しているページが取り込み先に無い Fragment は足さず、件数を結果に出す。いま続いているスレッドは、選択されたら `active_state.json` の `active_thread_id` だけを書き換える。
 
-**受け入れること**: 本体の記事を束ねた Lite の上位のあらすじは §5 の規則で捨てられ、元の一次あらすじから作り直す。費用はかかるが記憶は失われない。
+**受け入れること**:
+
+- 本体の記事を束ねた Lite の上位のあらすじは §5 の規則で捨てられ、元の一次あらすじから作り直す。費用はかかるが記憶は失われない。
+- memory.db を確定した後で saiverse.db の確定に失敗すると、発言とページだけが先に変わる。見比べ直せば、適用済みの項目は一覧から消えて残りだけが出るので、そこからやり直せる。適用前の複製も残っている。
+- 見比べの一覧は全件をメモリに持つ。件数は人が Lite で編集・削除した数で決まるので、§3 原則 6 の「ペルソナの寿命とともに育つ記録」には当たらない。
 
 **実装で決めたこと（2026-11-01）**: `changes.json` の形の詳細は [persona-pack-format.md](../reference/persona-pack-format.md) に置いた。コードは `saiverse_memory/persona_pack/return_merge.py`（検査・一覧・選択）と `importer.py`（`return_plan` の分岐）、`api/routes/people/persona_pack.py`（口）。
 
