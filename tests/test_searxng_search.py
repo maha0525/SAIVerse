@@ -170,6 +170,53 @@ class TestSearxngSearchIntegration(unittest.TestCase):
         mock_get.assert_not_called()
 
     @patch("requests.get")
+    def test_results_trimmed_to_requested_count(self, mock_get):
+        """The server ignores the "limit" param; the tool must trim client-side."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"title": f"t{i}", "url": f"http://example.com/{i}", "content": "c"}
+                for i in range(30)
+            ]
+        }
+        mock_get.return_value = mock_resp
+
+        limiter = self.mod._RateLimiter(10, 60.0)
+        with patch.object(self.mod, "_rate_limiter", limiter):
+            msg, result = self.mod.searxng_search("test query", max_results=5)
+
+        self.assertIn("上位5件", msg)
+        self.assertEqual(msg.count("http://example.com/"), 5)
+        # The FIRST five results must survive, not an arbitrary five
+        self.assertIn("http://example.com/0", msg)
+        self.assertNotIn("http://example.com/29", msg)
+        self.assertIsNotNone(result.history_snippet)
+        self.assertNotIn("http://example.com/29", result.history_snippet)
+
+    @patch("requests.get")
+    def test_results_trimmed_to_default_count(self, mock_get):
+        """Without max_results, the DEFAULT_LIMIT (5 unless overridden) applies."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"title": f"t{i}", "url": f"http://example.com/{i}", "content": "c"}
+                for i in range(30)
+            ]
+        }
+        mock_get.return_value = mock_resp
+
+        limiter = self.mod._RateLimiter(10, 60.0)
+        with patch.object(self.mod, "_rate_limiter", limiter), \
+             patch.object(self.mod, "DEFAULT_LIMIT", 5):
+            msg, result = self.mod.searxng_search("test query")
+
+        self.assertEqual(msg.count("http://example.com/"), 5)
+
+    @patch("requests.get")
     def test_connection_error_returns_message(self, mock_get):
         """When SearXNG is down, return clear error message."""
         mock_get.side_effect = requests.exceptions.ConnectionError("refused")

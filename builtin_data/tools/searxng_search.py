@@ -234,6 +234,10 @@ def searxng_search(
     if not results:
         return "SearXNGから結果が見つかりませんでした。クエリやエンジンを調整して再試行してください。", ToolResult(history_snippet=None)
 
+    # SearXNG (and compatible servers) ignore the "limit" query parameter and
+    # return a full result page, so the requested count must be enforced here.
+    results = results[: int(params["limit"])]
+
     lines: List[str] = []
     snippet_lines: List[str] = []
     for entry in results:
