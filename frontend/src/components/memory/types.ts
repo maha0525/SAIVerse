@@ -1,4 +1,4 @@
-export type ImportSubTab = 'official' | 'claude' | 'extension' | 'native';
+export type ImportSubTab = 'official' | 'claude' | 'muse' | 'extension' | 'native';
 
 export type MemoryImportStep = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
 
@@ -93,6 +93,20 @@ export interface ClaudeImportRequest {
   conversation_ids: string[];
   skip_embedding: boolean;
   append_instructions_to_system_prompt?: boolean;
+}
+
+export interface MusePreviewData {
+  conversations: ConversationSummary[];
+  cache_key: string;
+  total_count: number;
+  workspace_file_count: number;
+  exported_at: string | null;
+}
+
+export interface MuseImportRequest {
+  cache_key: string;
+  conversation_ids: string[];
+  skip_embedding: boolean;
 }
 
 export interface ClaudeMemoryImportResult {

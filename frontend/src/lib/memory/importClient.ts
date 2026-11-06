@@ -7,6 +7,8 @@ import {
   ClaudePreviewErrorDetail,
   MemoryImportProgress,
   MemoryImportRequest,
+  MuseImportRequest,
+  MusePreviewData,
   NativePreviewData,
   PreviewData,
   ThreadSummary,
@@ -85,6 +87,25 @@ export async function importClaude(personaId: string, request: ClaudeImportReque
   return { ok: res.ok, data: await parseJson(res) };
 }
 
+export async function previewMuseImport(
+  personaId: string,
+  file: File,
+): Promise<{ ok: boolean; data: MusePreviewData | { detail?: string } }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await apiFetch(`/api/people/${personaId}/import/muse/preview`, { method: 'POST', body: formData });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function importMuse(personaId: string, request: MuseImportRequest): Promise<{ ok: boolean; data: { detail?: string } }> {
+  const res = await apiFetch(`/api/people/${personaId}/import/muse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
 export async function importClaudeMemories(
   personaId: string,
   cacheKey: string,
@@ -98,7 +119,7 @@ export async function importClaudeMemories(
   return { ok: res.ok, data: await parseJson(res) };
 }
 
-export async function getImportStatus(personaId: string, type: 'extension' | 'official' | 'native' | 'claude'): Promise<MemoryImportProgress> {
+export async function getImportStatus(personaId: string, type: 'extension' | 'official' | 'native' | 'claude' | 'muse'): Promise<MemoryImportProgress> {
   const res = await apiFetch(`/api/people/${personaId}/import/${type}/status`);
   return parseJson<MemoryImportProgress>(res);
 }

@@ -304,6 +304,19 @@ class ClaudeImportRequest(BaseModel):
     # システムプロンプト末尾に追記する
     append_instructions_to_system_prompt: bool = False
 
+class MusePreviewResponse(BaseModel):
+    """Muse 公式エクスポートのプレビュー。会話は通常 1 件。"""
+    conversations: List[ConversationSummary] = []
+    cache_key: str
+    total_count: int
+    workspace_file_count: int = 0
+    exported_at: Optional[str] = None
+
+class MuseImportRequest(BaseModel):
+    cache_key: str
+    conversation_ids: List[str]  # conversation_id or idx as string
+    skip_embedding: bool = False
+
 class ClaudeMemoryImportRequest(BaseModel):
     cache_key: str
     item_ids: List[str]  # item id or idx as string

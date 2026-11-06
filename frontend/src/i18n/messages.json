@@ -12823,6 +12823,10 @@
     "ja": "Claude 公式エクスポート",
     "en": "Official Claude export"
   },
+  "components.memory.MemoryImportForm.label004": {
+    "ja": "Muse 公式エクスポート",
+    "en": "Official Muse export"
+  },
   "components.memory.ClaudeImportPanel.text001": {
     "ja": "Claude からのエクスポート手順",
     "en": "How to export from Claude"
@@ -13050,5 +13054,149 @@
   "components.memory.ClaudeImportPanel.text053": {
     "ja": "コア記憶の合計が容量の目安を超えています（{p1} / {p2} 文字）。切り詰めはせず、整理はペルソナ自身に任されます。",
     "en": "Core memory now exceeds its size guideline ({p1} / {p2} characters). Nothing is cut; tidying it up is left to the persona."
+  },
+  "components.memory.MuseImportPanel.text001": {
+    "ja": "Muse からのエクスポート手順",
+    "en": "How to export from Muse"
+  },
+  "components.memory.MuseImportPanel.text002": {
+    "ja": "Muse の「Settings > Data Controls」を開く",
+    "en": "In Muse, open Settings > Data Controls"
+  },
+  "components.memory.MuseImportPanel.text003": {
+    "ja": "「Download your agent data」を実行する（受付後、ダウンロード用のリンクが届く）",
+    "en": "Run \"Download your agent data\" (a download link arrives after the request is accepted)"
+  },
+  "components.memory.MuseImportPanel.text004": {
+    "ja": "届いた EYI_Package の ZIP をダウンロードする（リンクは失効することがあるため、届いたらすぐ保存する）",
+    "en": "Download the EYI_Package ZIP from the link (links can expire, so save it as soon as it arrives)"
+  },
+  "components.memory.MuseImportPanel.text005": {
+    "ja": "SOUL・長期記憶（MEMORY.md）・アイコンは Muse のエクスポートに含まれないため、この取り込みでは移りません。",
+    "en": "SOUL, long-term memory (MEMORY.md), and icons are not included in Muse exports, so they are not transferred by this import."
+  },
+  "components.memory.MuseImportPanel.text006": {
+    "ja": "ワークスペースファイルは zip 内にあっても一覧のメタデータのみを取り込み、ファイル自体は復元されません。",
+    "en": "Workspace files are imported only as listing metadata even when they are in the ZIP; the files themselves are not restored."
+  },
+  "components.memory.MuseImportPanel.text007": {
+    "ja": "Muse のエクスポート ZIP をドラッグ＆ドロップ（またはクリックして選択）してください。",
+    "en": "Drag and drop the Muse export ZIP here (or click to choose a file)."
+  },
+  "components.memory.MuseImportPanel.text008": {
+    "ja": "EYI_Package_*.zip",
+    "en": "EYI_Package_*.zip"
+  },
+  "components.memory.MuseImportPanel.text009": {
+    "ja": "Muse のエクスポートとして認識できませんでした。ZIP 内の manifest.json を確認してください。",
+    "en": "The file was not recognized as a Muse export. Check the manifest.json inside the ZIP."
+  },
+  "components.memory.MuseImportPanel.text010": {
+    "ja": "ファイルに取り込める会話が見つかりませんでした。",
+    "en": "No importable conversations were found in the file."
+  },
+  "components.memory.MuseImportPanel.text013": {
+    "ja": "インポートする会話を選択",
+    "en": "Select conversations to import"
+  },
+  "components.memory.MuseImportPanel.text014": {
+    "ja": "{p1} 件中 {p2} 件選択",
+    "en": "{p2} of {p1} selected"
+  },
+  "components.memory.MuseImportPanel.text015": {
+    "ja": "タイトル",
+    "en": "Title"
+  },
+  "components.memory.MuseImportPanel.text016": {
+    "ja": "メッセージ数",
+    "en": "Message count"
+  },
+  "components.memory.MuseImportPanel.text017": {
+    "ja": "作成日",
+    "en": "Created"
+  },
+  "components.memory.MuseImportPanel.text018": {
+    "ja": "プレビュー",
+    "en": "Preview"
+  },
+  "components.memory.MuseImportPanel.text019": {
+    "ja": "(無題)",
+    "en": "(untitled)"
+  },
+  "components.memory.MuseImportPanel.text020": {
+    "ja": "ワークスペースファイル: {p1} 件（メタデータのみ。ファイル自体は復元されません）",
+    "en": "Workspace files: {p1} (metadata only; the files themselves are not restored)"
+  },
+  "components.memory.MuseImportPanel.text021": {
+    "ja": "エクスポート日時: {p1}",
+    "en": "Exported: {p1}"
+  },
+  "components.memory.MuseImportPanel.text022": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.memory.MuseImportPanel.text023": {
+    "ja": "{p1} 件をインポート",
+    "en": "Import {p1} item(s)"
+  },
+  "components.memory.MuseImportPanel.text025": {
+    "ja": "インポートを開始しています...",
+    "en": "Starting import..."
+  },
+  "components.memory.MuseImportPanel.text026": {
+    "ja": "{p1}/{p2} 会話を処理中...",
+    "en": "Processing {p1}/{p2} conversations..."
+  },
+  "components.memory.MuseImportPanel.text027": {
+    "ja": "インポートが完了しました（{p1} 会話 / {p2} メッセージ）。",
+    "en": "Import complete ({p1} conversations / {p2} messages)."
+  },
+  "components.memory.MuseImportPanel.text028": {
+    "ja": "{p1} スレッドを自動設定しました。",
+    "en": "Automatically selected thread. {p1}"
+  },
+  "components.memory.MuseImportPanel.text029": {
+    "ja": "インポートに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.MuseImportPanel.text030": {
+    "ja": "記憶想起用のエンベディングを作成しますか？",
+    "en": "Generate embeddings for memory recall?"
+  },
+  "components.memory.MuseImportPanel.text031": {
+    "ja": "スキップ",
+    "en": "Skip"
+  },
+  "components.memory.MuseImportPanel.text032": {
+    "ja": "作成する",
+    "en": "Generate"
+  },
+  "components.memory.MuseImportPanel.text033": {
+    "ja": "どのスレッドから会話を続けますか？",
+    "en": "Which thread should the conversation continue from?"
+  },
+  "components.memory.MuseImportPanel.text034": {
+    "ja": "{p1} 件",
+    "en": "{p1} items"
+  },
+  "components.memory.MuseImportPanel.text035": {
+    "ja": "(プレビューなし)",
+    "en": "(no preview)"
+  },
+  "components.memory.MuseImportPanel.text036": {
+    "ja": "スキップ",
+    "en": "Skip"
+  },
+  "components.memory.MuseImportPanel.text037": {
+    "ja": "このスレッドを使用",
+    "en": "Use this thread"
+  },
+  "components.memory.MuseImportPanel.text038": {
+    "ja": "インポート完了！アクティブスレッドを設定しました。",
+    "en": "Import complete! Active thread has been set."
+  },
+  "components.memory.MuseImportPanel.text039": {
+    "ja": "バックグラウンドのエンベディング生成に失敗しました。",
+    "en": "Background embedding generation failed."
   }
 }

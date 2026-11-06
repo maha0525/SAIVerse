@@ -1,6 +1,6 @@
 # Muse エクスポート取り込み — Meta のパーソナル AI の会話をペルソナ記憶へ
 
-**ステータス**: 検証待ち（パーサー・CLI・テストを追加済み。workspace ファイルの復元は今回の範囲外）
+**ステータス**: 検証待ち（UI 追加済み・実機確認待ち。パーサー・CLI・API・フロントの Muse 枠を追加済み。SOUL / MEMORY / アイコンの取り込みと workspace ファイルの復元は今回の範囲外）
 
 ## 利用者が得るものと経路
 
@@ -69,6 +69,40 @@ Muse のエクスポート ZIP
   ChatGPT 版と同じく、取り込み後に埋め込みのバックフィルを試みる（失敗しても
   取り込み自体は完了している）。
 
+## UI（引っ越しタブ / ペルソナ作成ウィザード）
+
+引っ越しタブとペルソナ作成ウィザードが共有する取り込みコンポーネント
+(`frontend/src/components/memory/`) に Muse 枠を追加した。どちらの入口からでも
+`MemoryImportForm` のサブタブ「Muse 公式エクスポート」→ `MuseImportPanel` の
+同じ導線になる。
+
+エンドポイント:
+
+- `POST /api/people/{persona_id}/import/muse/preview`: アップロードされた ZIP を
+  一時ファイルへ保存し、`MuseExport` で manifest.json を解析する。会話一覧、
+  `workspace_file_count`、`exported_at` と、後続の import で使う `cache_key` を返す。
+- `POST /api/people/{persona_id}/import/muse`: preview の `cache_key` と選択した
+  会話 ID（フロントは idx を文字列で送る）を受け取り、背景タスクを開始する。
+  identifier で見つからない selector は `.conversations` の数値インデックスとして
+  解決する。
+- `GET /api/people/{persona_id}/import/muse/status`: 背景取り込みと、後追いの
+  埋め込み生成の進捗を返す。
+
+パネルのフェーズは `home | select | embedding | importing | thread-select`。
+home では Muse の Settings > Data Controls > 「Download your agent data」から
+`EYI_Package_*.zip` を取得する手順とドロップ枠を出す。select では Claude 版と
+同じ会話テーブルに加えて workspace ファイル件数とエクスポート日時を表示し、
+embedding では「後で生成 / 今すぐ生成」を選ぶ。importing は status を 1 秒間隔で
+ポーリングし、完了後は取り込みで増えたスレッドを有効化する（複数なら
+thread-select で選ぶ）。
+
+対象範囲は会話のみ:
+
+- SOUL・長期記憶（MEMORY.md）・アイコンは Muse のエクスポート自体に含まれない
+  ため、この取り込みでは移らない。UI の home にこの注意を常時表示する。
+- workspace ファイルは ZIP 内に実体があっても、一覧のメタデータだけを扱い、
+  ファイル自体は復元しない。UI の home と select にこの注意を表示する。
+
 ## workspace_files の扱い（今回の範囲）
 
 ZIP 内の `workspace/...` の実体は取り込まない。理由は、SAIVerse 側に
@@ -124,5 +158,11 @@ ZIP 内の `workspace/...` の実体は取り込まない。理由は、SAIVerse
   「14 ターン + 見出し 1 行 = 15」になり、role と timestamp が元データの
   秒に一致することを確認する。
 - ZIP と展開済みディレクトリの両方から同じレコードが得られることを確認する。
-- 未検証の境界: 実際の Muse エクスポートの揺れ（resources の実スキーマ、
-  複数トランスクリプト、workspace の実パス）。将来の実データで確認する。
+- API テスト (`tests/test_muse_import_api.py`) で、架空フィクスチャ ZIP の preview が
+  200 を返して会話 1 件・workspace ファイル 3 件を返すこと、Muse 形式でない
+  テキスト／壊れた ZIP が 400 になることを確認する。背景取り込みは偽アダプタで
+  直接 `_run_muse_import_task` を呼び、14 ペイロードの保存、埋め込みの deferred
+  指定、タイトル設定、adapter の引き渡しを確認する。
+- 未検証の境界: フロントエンドの実ビルド（この環境には node_modules が無い）と、
+  実際の Muse エクスポート ZIP を使った実機確認。パーサー側の揺れ（resources の
+  実スキーマ、複数トランスクリプト、workspace の実パス）も実データで確認する。
