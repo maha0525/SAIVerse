@@ -5,6 +5,7 @@ import { AlertCircle, CheckSquare, Download, Loader2, MessageSquare, Square } fr
 import React, { useState, useRef, useCallback } from 'react';
 
 import ClaudeImportPanel from './ClaudeImportPanel';
+import MuseImportPanel from './MuseImportPanel';
 import styles from './MemoryImport.module.css';
 import { formatImportDate, formatThreadDateRange } from './formatters';
 import { ImportSubTab, MemoryImportStep, NativePreviewData, PreviewData, ThreadSummary } from './types';
@@ -68,6 +69,10 @@ export function MemoryImportForm(props: Props) {
     if (props.activeSubTab === 'claude') {
       return <ClaudeImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} />;
     }
+    // Muse 公式エクスポートは会話の取り込みだけを持つ独立パネル。
+    if (props.activeSubTab === 'muse') {
+      return <MuseImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} />;
+    }
     if (props.step === 'thread-select') {
       return <div className={styles.threadSelectContainer}>
         <div className={styles.threadSelectHeader}><MessageSquare size={24} /><h3 data-i18n="components.memory.MemoryImportForm.text001">{uiText("components.memory.MemoryImportForm.text001")}</h3></div>
@@ -114,6 +119,7 @@ export function MemoryImportForm(props: Props) {
       <div className={styles.subTabs}>
         <button data-i18n="components.memory.MemoryImportForm.text036" className={`${styles.subTab} ${props.activeSubTab === 'official' ? styles.active : ''}`} onClick={() => props.onTabChange('official')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.text036")}</button>
         <button data-i18n="components.memory.MemoryImportForm.label003" className={`${styles.subTab} ${props.activeSubTab === 'claude' ? styles.active : ''}`} onClick={() => props.onTabChange('claude')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.label003")}</button>
+        <button data-i18n="components.memory.MemoryImportForm.label004" className={`${styles.subTab} ${props.activeSubTab === 'muse' ? styles.active : ''}`} onClick={() => props.onTabChange('muse')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.label004")}</button>
         <button data-i18n="components.memory.MemoryImportForm.text037" className={`${styles.subTab} ${props.activeSubTab === 'extension' ? styles.active : ''}`} onClick={() => props.onTabChange('extension')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.text037")}</button>
         <button className={`${styles.subTab} ${props.activeSubTab === 'native' ? styles.active : ''}`} onClick={() => props.onTabChange('native')} disabled={props.step === 'importing'}>{uiText("components.memory.MemoryImportForm.label002")}</button>
       </div>

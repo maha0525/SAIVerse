@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 389（tag グループ: 26）
+**エンドポイント数**: 392（tag グループ: 26）
 
 ## addon
 
@@ -301,6 +301,9 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/import/claude/status` | Claude 取り込みタスクの状態 (背景埋め込みの進捗を含む)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |
 | GET | `/api/people/{persona_id}/import/extension/status` | Get the status of extension import task. |
+| POST | `/api/people/{persona_id}/import/muse` | プレビュー済み Muse エクスポートから選択した会話を背景で取り込む。 |
+| POST | `/api/people/{persona_id}/import/muse/preview` | Muse 公式エクスポートの ZIP を解析し、取り込み候補の一覧を返す。 |
+| GET | `/api/people/{persona_id}/import/muse/status` | Muse 取り込みタスクの状態 (背景埋め込みの進捗を含む)。 |
 | POST | `/api/people/{persona_id}/import/native` | Import native SAIVerse JSON. |
 | POST | `/api/people/{persona_id}/import/native/preview` | Preview a native JSON file before importing. |
 | GET | `/api/people/{persona_id}/import/native/status` | Poll native import progress. |
