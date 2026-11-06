@@ -6,8 +6,10 @@ Supported models:
 - nano_banana_pro: Gemini 3 Pro Image (highest quality, aspect ratio + resolution control)
 - gpt_image_1_5: OpenAI GPT Image 1.5 (legacy)
 - gpt_image_2: OpenAI GPT Image 2 (previous generation)
-- gpt_image_2_5_flare: OpenAI GPT Image 2.5 Flare (state of the art, fastest high-quality generation)
-- gpt_image_2_5_sunburst: OpenAI GPT Image 2.5 Sunburst (state of the art, best editing precision with reference images)
+- gpt_image_2_5_flare: OpenAI GPT Image 2.5 Flare (previous generation, fastest high-quality generation)
+- gpt_image_2_5_sunburst: OpenAI GPT Image 2.5 Sunburst (previous generation, best editing precision with reference images)
+- gpt_image_2_6_flare: OpenAI GPT Image 2.6 Flare (state of the art, fastest high-quality generation)
+- gpt_image_2_6_sunburst: OpenAI GPT Image 2.6 Sunburst (state of the art, best editing precision with reference images)
 - grok_imagine: xAI Grok Imagine Image 2.0 (can also create slightly NSFW images)
 
 Input image URI formats:
@@ -43,6 +45,8 @@ ModelType = Literal[
     "gpt_image_2",
     "gpt_image_2_5_flare",
     "gpt_image_2_5_sunburst",
+    "gpt_image_2_6_flare",
+    "gpt_image_2_6_sunburst",
     "grok_imagine",
 ]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
@@ -61,6 +65,7 @@ SizeType = Literal[
 
 # OpenAI API model IDs that support the 'xhigh' / 'max' quality levels.
 _GPT_IMAGE_25_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst")
+_GPT_IMAGE_26_MODELS = ("gpt-image-2.6-flare", "gpt-image-2.6-sunburst")
 
 # Tool-level model names routed to the OpenAI images API (these honour `size`).
 _OPENAI_TOOL_MODELS = (
@@ -68,6 +73,8 @@ _OPENAI_TOOL_MODELS = (
     "gpt_image_2",
     "gpt_image_2_5_flare",
     "gpt_image_2_5_sunburst",
+    "gpt_image_2_6_flare",
+    "gpt_image_2_6_sunburst",
 )
 
 
@@ -302,10 +309,14 @@ def _generate_with_gpt_image(
         effective_size = _aspect_ratio_to_openai_size(aspect_ratio)
     effective_quality = quality if quality != "auto" else "high"
 
-    # 'xhigh' / 'max' were introduced with GPT Image 2.5; older models top out at 'high'.
-    if openai_model not in _GPT_IMAGE_25_MODELS and effective_quality in ("xhigh", "max"):
+    # 'xhigh' / 'max' were introduced with GPT Image 2.5 and are also supported by
+    # GPT Image 2.6; older models top out at 'high'.
+    if (
+        openai_model not in _GPT_IMAGE_25_MODELS + _GPT_IMAGE_26_MODELS
+        and effective_quality in ("xhigh", "max")
+    ):
         logger.warning(
-            "[gpt_image] quality=%s is only supported by GPT Image 2.5 models, "
+            "[gpt_image] quality=%s is only supported by GPT Image 2.5 / 2.6 models, "
             "clamping to 'high' for model=%s",
             effective_quality, openai_model,
         )
@@ -403,6 +414,28 @@ def _generate_with_gpt_image_2_5_sunburst(
 ) -> Tuple[bytes, str]:
     """Generate image using OpenAI GPT Image 2.5 Sunburst."""
     return _generate_with_gpt_image("gpt-image-2.5-sunburst", prompt, aspect_ratio, quality, input_image_paths, size)
+
+
+def _generate_with_gpt_image_2_6_flare(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2.6 Flare."""
+    return _generate_with_gpt_image("gpt-image-2.6-flare", prompt, aspect_ratio, quality, input_image_paths, size)
+
+
+def _generate_with_gpt_image_2_6_sunburst(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+    size: str = "auto",
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2.6 Sunburst."""
+    return _generate_with_gpt_image("gpt-image-2.6-sunburst", prompt, aspect_ratio, quality, input_image_paths, size)
 
 
 _XAI_IMAGINE_MODEL = "grok-imagine-image-2.0"
@@ -545,6 +578,8 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
         "gpt_image_2": "OPENAI_API_KEY",
         "gpt_image_2_5_flare": "OPENAI_API_KEY",
         "gpt_image_2_5_sunburst": "OPENAI_API_KEY",
+        "gpt_image_2_6_flare": "OPENAI_API_KEY",
+        "gpt_image_2_6_sunburst": "OPENAI_API_KEY",
         "grok_imagine": "XAI_API_KEY",
     }
     return mapping.get(model)
@@ -564,6 +599,8 @@ def get_available_image_models() -> List[str]:
         "nano_banana_2",
         "nano_banana_2_1",
         "nano_banana_pro",
+        "gpt_image_2_6_flare",
+        "gpt_image_2_6_sunburst",
         "gpt_image_2_5_flare",
         "gpt_image_2_5_sunburst",
         "gpt_image_1_5",
@@ -577,6 +614,8 @@ def get_available_image_models() -> List[str]:
 _FALLBACK_ORDER = [
     "nano_banana_2_1",
     "nano_banana_pro",
+    "gpt_image_2_6_flare",
+    "gpt_image_2_6_sunburst",
     "gpt_image_2_5_flare",
     "gpt_image_2_5_sunburst",
     "gpt_image_1_5",
@@ -604,16 +643,21 @@ def generate_image(
             - nano_banana_pro: Highest quality with aspect ratio + resolution control (Gemini 3 Pro)
             - gpt_image_1_5: Legacy quality (OpenAI GPT Image 1.5)
             - gpt_image_2: Previous generation (OpenAI GPT Image 2)
-            - gpt_image_2_5_flare: State of the art, fastest high-quality generation
+            - gpt_image_2_5_flare: Previous generation, fastest high-quality generation
               (OpenAI GPT Image 2.5 Flare)
-            - gpt_image_2_5_sunburst: State of the art, best editing precision with
+            - gpt_image_2_5_sunburst: Previous generation, best editing precision with
               reference images (OpenAI GPT Image 2.5 Sunburst)
+            - gpt_image_2_6_flare: State of the art, fastest high-quality generation
+              (OpenAI GPT Image 2.6 Flare)
+            - gpt_image_2_6_sunburst: State of the art, best editing precision with
+              reference images (OpenAI GPT Image 2.6 Sunburst)
             - grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "xhigh", "max", "auto").
             "auto" uses the global default quality setting.
-            "xhigh" / "max" are only honored by the gpt_image_2_5_* models; other
-            models round them down to "high" (Gemini: 4K).
+            "xhigh" / "max" are only honored by the gpt_image_2_5_* and
+            gpt_image_2_6_* models; other models round them down to "high"
+            (Gemini: 4K).
         size: Output image size in pixels (gpt_image_* only). "auto" uses
             aspect_ratio + quality to pick a size. Specific values like
             "2048x2048" override aspect_ratio. Ignored for non-OpenAI models.
@@ -724,6 +768,14 @@ def generate_image(
             elif attempt_model == "nano_banana_pro":
                 image_data, mime = _generate_with_nano_banana_pro(
                     prompt, aspect_ratio, quality, input_image_paths
+                )
+            elif attempt_model == "gpt_image_2_6_flare":
+                image_data, mime = _generate_with_gpt_image_2_6_flare(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
+                )
+            elif attempt_model == "gpt_image_2_6_sunburst":
+                image_data, mime = _generate_with_gpt_image_2_6_sunburst(
+                    prompt, aspect_ratio, quality, input_image_paths, size=size
                 )
             elif attempt_model == "gpt_image_2_5_flare":
                 image_data, mime = _generate_with_gpt_image_2_5_flare(
@@ -837,8 +889,10 @@ def schema() -> ToolSchema:
             "- nano_banana_2_1: Improved quality with aspect ratio + resolution control (Gemini Nano Banana 2.1)\n"
             "- nano_banana_2: Fast, high quality generation with aspect ratio + resolution control (Gemini 3.1 Flash)\n"
             "- nano_banana_pro: Highest quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
-            "- gpt_image_2_5_flare: State of the art, fastest high-quality generation (OpenAI GPT Image 2.5 Flare)\n"
-            "- gpt_image_2_5_sunburst: State of the art, best editing precision with reference images (OpenAI GPT Image 2.5 Sunburst)\n"
+            "- gpt_image_2_6_flare: State of the art, fastest high-quality generation (OpenAI GPT Image 2.6 Flare)\n"
+            "- gpt_image_2_6_sunburst: State of the art, best editing precision with reference images (OpenAI GPT Image 2.6 Sunburst)\n"
+            "- gpt_image_2_5_flare: Previous generation, fastest high-quality generation (OpenAI GPT Image 2.5 Flare)\n"
+            "- gpt_image_2_5_sunburst: Previous generation, best editing precision with reference images (OpenAI GPT Image 2.5 Sunburst)\n"
             "- gpt_image_1_5: Legacy photorealistic quality (OpenAI)\n"
             "- gpt_image_2: Previous generation photorealistic quality (OpenAI)\n"
             "- grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)\n\n"
@@ -868,6 +922,8 @@ def schema() -> ToolSchema:
                         "nano_banana_pro",
                         "gpt_image_1_5",
                         "gpt_image_2",
+                        "gpt_image_2_6_flare",
+                        "gpt_image_2_6_sunburst",
                         "gpt_image_2_5_flare",
                         "gpt_image_2_5_sunburst",
                         "grok_imagine",
@@ -877,8 +933,10 @@ def schema() -> ToolSchema:
                         "nano_banana_2_1 (improved quality, Gemini Nano Banana 2.1), "
                         "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
                         "nano_banana_pro (a bit higher quality, Gemini 3 Pro), "
-                        "gpt_image_2_5_flare (state of the art, fastest high-quality generation, OpenAI GPT Image 2.5 Flare), "
-                        "gpt_image_2_5_sunburst (state of the art, best editing precision with reference images, OpenAI GPT Image 2.5 Sunburst), "
+                        "gpt_image_2_6_flare (state of the art, fastest high-quality generation, OpenAI GPT Image 2.6 Flare), "
+                        "gpt_image_2_6_sunburst (state of the art, best editing precision with reference images, OpenAI GPT Image 2.6 Sunburst), "
+                        "gpt_image_2_5_flare (previous generation, fastest high-quality generation, OpenAI GPT Image 2.5 Flare), "
+                        "gpt_image_2_5_sunburst (previous generation, best editing precision with reference images, OpenAI GPT Image 2.5 Sunburst), "
                         "gpt_image_1_5 (legacy model), gpt_image_2 (previous generation), "
                         "grok_imagine (this can also create slightly NSFW images)"
                     ),
@@ -895,8 +953,9 @@ def schema() -> ToolSchema:
                     "enum": ["low", "medium", "high", "xhigh", "max", "auto"],
                     "description": (
                         "Image quality level. 'auto' uses the global default quality setting. "
-                        "'xhigh' and 'max' are only honored by gpt_image_2_5_* models; "
-                        "other models treat them as 'high' (Gemini: 4K)."
+                        "'xhigh' and 'max' are only honored by gpt_image_2_5_* and "
+                        "gpt_image_2_6_* models; other models treat them as 'high' "
+                        "(Gemini: 4K)."
                     ),
                     "default": "auto"
                 },
