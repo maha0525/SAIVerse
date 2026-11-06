@@ -11,7 +11,7 @@ import unittest
 import uuid
 import zipfile
 import zlib
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -374,6 +374,99 @@ class MuseImporterCliTest(unittest.TestCase):
         for _suffix, payload in written[1:]:
             self.assertNotEqual(payload["role"], "system")
             self.assertNotIn(SYSTEM_NOTICE_KEY, payload.get("metadata") or {})
+
+
+class _FakeAdapterBase:
+    """append_persona_message の成否を role で制御できるフェイク。
+
+    本物のアダプタは保存に失敗すると例外を飲んで None を返すので、
+    フェイクも同じ契約 (成功時は id、失敗時は None) に合わせる。
+    """
+
+    fail_roles: set = set()
+    backfill_error: Exception | None = None
+
+    def __init__(self, persona_id: str) -> None:
+        self.persona_id = persona_id
+
+    def is_ready(self) -> bool:
+        return True
+
+    def append_persona_message(self, payload, *, thread_suffix=None):
+        if payload.get("role") in self.fail_roles:
+            return None
+        return "id"
+
+    def backfill_missing_message_embeddings(self):
+        if self.backfill_error is not None:
+            raise self.backfill_error
+        return {"embedded": 0, "total_missing": 0}
+
+    def reembed_stale_messages(self):
+        return {"embedded": 0, "total": 0}
+
+    def close(self) -> None:
+        pass
+
+
+def _run_import(adapter_cls):
+    import argparse
+
+    import scripts.import_muse_conversations as importer
+
+    args = argparse.Namespace(
+        select=None, select_all=True, preview=40, roles="user,assistant",
+        thread_suffix=None, no_header=False, dry_run=False, persona="p1",
+        output="json",
+    )
+    out, err = io.StringIO(), io.StringIO()
+    with patch.object(importer, "SAIMemoryAdapter", adapter_cls):
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = importer.handle_import(MuseExport(FIXTURE_ZIP), args)
+    return rc, out.getvalue(), err.getvalue()
+
+
+class MuseImporterFailureTest(unittest.TestCase):
+    def test_all_saves_failing_is_reported_as_failed(self) -> None:
+        class _AllFail(_FakeAdapterBase):
+            fail_roles = {"system", "user", "assistant"}
+
+        rc, out, _err = _run_import(_AllFail)
+        self.assertEqual(rc, 1)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertEqual(results[0]["messages_imported"], 0)
+        self.assertEqual(results[0]["messages_failed"], 15)
+
+    def test_partial_failure_is_reported_as_partial(self) -> None:
+        class _UserFail(_FakeAdapterBase):
+            fail_roles = {"user"}
+
+        rc, out, _err = _run_import(_UserFail)
+        self.assertEqual(rc, 1)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "partial")
+        self.assertEqual(results[0]["messages_imported"], 8)
+        self.assertEqual(results[0]["messages_failed"], 7)
+
+    def test_json_output_keeps_stdout_pure(self) -> None:
+        rc, out, err = _run_import(_FakeAdapterBase)
+        self.assertEqual(rc, 0)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "imported")
+        self.assertEqual(results[0]["messages_imported"], 15)
+        self.assertNotIn("インポート完了", out)
+        self.assertIn("インポート完了", err)
+
+    def test_backfill_failure_still_returns_pure_json(self) -> None:
+        class _BackfillFail(_FakeAdapterBase):
+            backfill_error = RuntimeError("boom")
+
+        rc, out, err = _run_import(_BackfillFail)
+        self.assertEqual(rc, 0)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "imported")
+        self.assertIn("バックフィルに失敗", err)
 
 
 class MuseImporterEndToEndTest(unittest.TestCase):
