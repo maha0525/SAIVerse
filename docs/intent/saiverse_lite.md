@@ -1,7 +1,7 @@
 # SAIVerse Lite (仮称) — スマホ単体で始めるSAIVerse
 
 **version**: v0.3（2026-10-31 記憶の設計を本体の縮小版へ改訂）
-**status**: 検証待ち（本体は develop に入った。Lite の実装はブランチ feature/body-memory-core にあり未配信。本物のペルソナの往復はスマホ実機でも通り、残るのは大きいパックの確認と、端末内モデルの大きいファイルの置き場）
+**status**: 検証待ち（2026-11-06 に app.saiverse.net へ配信した。本物のペルソナの往復と大きいパックの取り込み・書き出しはスマホ実機で通った。残るのは前の版のデータを持つ端末での移行の確認。端末内モデルは wasm の置き場が決まるまで設定画面で選べないようにしてある）
 **関連**:
 - `tools/utilities/chatgpt_importer.py` / `api/routes/people/import_chatlog.py` — 本体の会話インポート基盤（Lite の「引っ越し」の受け口）
 - `docs/intent/persona_pack.md` — ペルソナまるごとパック。本体と Lite の行き来に使う形式
