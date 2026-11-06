@@ -20,9 +20,10 @@ ChatGPT や Claude など他のサービスでの過去のやり取りを、SAIV
 
 - **ChatGPT からの引っ越し**: ChatGPT の公式データエクスポート（`conversations.json` を含む ZIP）を用意し、`scripts/import_chatgpt_conversations.py` で取り込む。メモリーウィンドウの「引っ越し」タブからも同じ ZIP を取り込める。
 - **Claude からの引っ越し**: 下の「[Claude からの引っ越し](#claude-からの引っ越し)」を参照。メモリーウィンドウの「引っ越し」タブ →「Claude 公式エクスポート」から取り込む。
+- **Muse（Meta のパーソナル AI）からの引っ越し**: Muse の「Download your agent data」で取得した ZIP（または展開したフォルダ）を用意し、`scripts/import_muse_conversations.py` で取り込む。会話（manifest の turns）のみを取り込み、ワークスペースファイルは復元しない。
 - **SAIVerse 内の古い形式のログ**（旧バージョンの `log.json` 等）を再取り込みしたい場合: `scripts/import_persona_logs_to_saimemory.py` を使う。
 
-どちらも、取り込みの際に呼ばれるのは「文章をデータベースに保存する」処理と「あとで検索できるように索引を作る」処理だけで、費用のかかる AI 呼び出しは一切行われない。
+どの方法でも、取り込みの際に呼ばれるのは「文章をデータベースに保存する」処理と「あとで検索できるように索引を作る」処理だけで、費用のかかる AI 呼び出しは一切行われない。
 
 取り込みが終わると、完了報告が表示される。
 

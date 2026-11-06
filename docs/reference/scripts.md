@@ -61,6 +61,7 @@ python scripts/tag_conversation_messages.py air --auto
 | スクリプト | 用途 |
 |---|---|
 | `import_chatgpt_conversations.py` | ChatGPT 公式エクスポートを取り込み |
+| `import_muse_conversations.py` | Muse（Meta のパーソナル AI）のエクスポート ZIP / 展開ディレクトリを取り込み（会話のみ。workspace ファイルは復元しない） |
 | `import_chatlog_json.py` | 汎用チャットログ JSON を取り込み |
 | `import_persona_logs_to_saimemory.py` | SAIVerse 内の旧形式ログ（`log.json` 等）を取り込み。完了時に埋め込みバックフィル＋サマリを表示 |
 
