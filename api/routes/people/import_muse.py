@@ -24,6 +24,10 @@ from .import_chatlog import (
     _with_embedding_status,
 )
 from .utils import ensure_persona_exists
+# 出典見出しの生成は CLI と共通にする (不変条件 6)。モジュール先頭で読むのは、
+# タスク内での遅延 import だと、テストが差し替えた SAIMemoryAdapter を CLI 側の
+# 名前束縛が取り込んでしまうため。
+from scripts.import_muse_conversations import build_header_payload
 import tempfile
 import threading
 import logging
@@ -110,7 +114,11 @@ def _run_muse_import_task(
             imported_ids: List[str] = []
 
             for record in selected_records:
-                payloads = list(record.iter_memory_payloads())
+                # CLI と同じく、会話の先頭に出典見出し (システム通知) を置く
+                # (docs/intent/muse_export_import.md の不変条件 6)。経路によって
+                # 記憶の内容が変わらないよう、見出しも埋め込み保留の対象にする。
+                payloads = [build_header_payload(record)]
+                payloads.extend(record.iter_memory_payloads())
                 thread_suffix = record.conversation_id or record.identifier
 
                 for payload in payloads:
@@ -275,6 +283,18 @@ def import_muse_export(
     selected_records = _resolve_records(export_file, request.conversation_ids)
     if not selected_records:
         raise HTTPException(status_code=400, detail="No valid conversations found for the given selection.")
+
+    # 背景タスクが状態を立てる前に同ペルソナの要求が重なると、冒頭のチェックを
+    # 両方とも通過して同じ会話を二重に取り込んでしまう。検証が済んだこの時点で、
+    # ロック内で実行中チェックと状態の予約を一体で行ってからタスクを登録する。
+    with _muse_import_lock:
+        status = _muse_import_status.get(persona_id, {})
+        if status.get("running"):
+            raise HTTPException(status_code=409, detail="Import already in progress.")
+        _muse_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": len(selected_records),
+            "message": "Starting import...",
+        }
 
     background_tasks.add_task(
         _run_muse_import_task,

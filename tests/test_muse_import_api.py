@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from api.deps import get_manager
 from api.routes.people import import_muse
+from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 from saiverse_memory.adapter import EMBEDDING_DEFERRED
 from tests.test_muse_importer import FIXTURE_ZIP
 from tools.utilities.muse_importer import MuseExport
@@ -139,17 +140,40 @@ def test_run_muse_import_task_saves_payloads_and_hands_off_embedding(client, mon
     status = import_muse._muse_import_status[PERSONA_ID]
     assert status["success"] is True
     assert status["conversations"] == 1
-    assert status["messages"] == 14
+    assert status["messages"] == 15
     assert status["embedding"] is True
 
     adapter = created[0]
-    assert len(adapter.payloads) == 14
+    assert len(adapter.payloads) == 15
     assert all(payload["embedding_chunks"] == EMBEDDING_DEFERRED for payload, _ in adapter.payloads)
+    # 先頭は CLI と同じ出典見出し (システム通知、系統名 muse_import)。
+    header, _header_suffix = adapter.payloads[0]
+    assert header["role"] == "system"
+    assert header["metadata"][SYSTEM_NOTICE_KEY] == "muse_import"
+    assert header["content"].startswith("[Imported Muse conversation ")
     assert adapter.titles == [(
         "EYI Package_01-15-2027_0000000001",
         "Conversation with Muse AI_01-15-2027_0000000001",
     )]
-    assert handed_off == [(PERSONA_ID, adapter, 14)]
+    assert handed_off == [(PERSONA_ID, adapter, 15)]
     # handed_off のときは背景スレッドが adapter を引き取るため、ここでは閉じない。
     assert adapter.closed is False
     assert cache_key not in import_muse._muse_export_cache
+
+
+def test_import_reserves_running_state_before_task_starts(client, monkeypatch):
+    """受理した時点で実行中を予約し、タスク開始前の二重要求を 409 で弾く。"""
+    preview = _post_preview(client).json()
+    cache_key = preview["cache_key"]
+
+    # 背景タスクを無力化し、「タスクがまだ状態を立てていない」状況を作る。
+    monkeypatch.setattr(import_muse, "_run_muse_import_task", lambda *a, **k: None)
+
+    body = {"cache_key": cache_key, "conversation_ids": ["0"], "skip_embedding": True}
+    res = client.post(f"/api/people/{PERSONA_ID}/import/muse", json=body)
+    assert res.status_code == 200
+    # タスクは何もしていないのに、予約によって実行中になっている。
+    assert import_muse._muse_import_status[PERSONA_ID]["running"] is True
+
+    res = client.post(f"/api/people/{PERSONA_ID}/import/muse", json=body)
+    assert res.status_code == 409
