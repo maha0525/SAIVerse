@@ -152,11 +152,19 @@ def _truncate(value: str, width: int) -> str:
     return textwrap.shorten(value, width=width, placeholder="…")
 
 
-def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
+def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> int:
+    def _notify(message: str = "") -> None:
+        # --output json では標準出力を JSON 専用にするため、人間向けの案内は
+        # 標準エラー出力へ送る (完了メッセージやバックフィルの失敗も同様)。
+        if args.output == "json":
+            print(message, file=sys.stderr)
+        else:
+            print(message)
+
     records = export.conversations
     if not records:
-        print("No conversations found in export.")
-        return
+        _notify("No conversations found in export.")
+        return 0
 
     if args.select_all:
         selected = list(records)
@@ -166,8 +174,8 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
             selected = prompt_for_selection(records, preview=args.preview)
 
     if not selected:
-        print("No conversations selected; aborting.")
-        return
+        _notify("No conversations selected; aborting.")
+        return 0
 
     allowed_roles = parse_roles(args.roles)
     include_roles: Optional[Sequence[str]] = list(allowed_roles) if allowed_roles else None
@@ -180,8 +188,8 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
     if not args.dry_run:
         adapter = SAIMemoryAdapter(args.persona)
         if not adapter.is_ready():
-            print(f"SAIMemory adapter is not ready for persona {args.persona}.")
-            return
+            _notify(f"SAIMemory adapter is not ready for persona {args.persona}.")
+            return 1
 
     try:
         for record in selected:
@@ -194,12 +202,16 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
                 "id": record.identifier,
                 "title": record.title,
                 "thread_suffix": thread_suffix,
-                "messages_imported": len(payloads),
             }
 
             if args.dry_run:
+                import_result["messages_imported"] = len(payloads)
                 import_result["status"] = "skipped (dry-run)"
             else:
+                # _append_message は保存に失敗すると例外を捕捉して None を返す。
+                # 戻り値を確認し、実際に保存できた件数だけを集計する。
+                saved = 0
+                failed = 0
                 for payload in payloads:
                     metadata = payload.get("metadata")
                     if not isinstance(metadata, dict):
@@ -215,8 +227,17 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
                     if "conversation" not in tag_list:
                         tag_list.append("conversation")
                     metadata["tags"] = tag_list
-                    adapter.append_persona_message(payload, thread_suffix=thread_suffix)  # type: ignore[arg-type]
-                import_result["status"] = "imported"
+                    message_id = adapter.append_persona_message(payload, thread_suffix=thread_suffix)  # type: ignore[arg-type]
+                    if message_id is None:
+                        failed += 1
+                    else:
+                        saved += 1
+                import_result["messages_imported"] = saved
+                if failed:
+                    import_result["messages_failed"] = failed
+                    import_result["status"] = "partial" if saved else "failed"
+                else:
+                    import_result["status"] = "imported"
 
             results.append(import_result)
 
@@ -238,26 +259,33 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
                 ) + (stale_stats.get("total", 0) - stale_stats.get("embedded", 0))
                 total_imported = sum(
                     int(item.get("messages_imported", 0)) for item in results
-                    if item.get("status") == "imported"
                 )
-                print()
-                print(f"インポート完了: {total_imported} 件のメッセージを取り込みました。")
+                total_failed = sum(
+                    int(item.get("messages_failed", 0)) for item in results
+                )
+                _notify()
+                _notify(f"インポート完了: {total_imported} 件のメッセージを取り込みました。")
+                if total_failed:
+                    _notify(
+                        f"注意: {total_failed} 件のメッセージを保存できませんでした"
+                        " (DB のロックやディスク容量不足の可能性があります)。"
+                    )
                 if still_missing:
-                    print(
+                    _notify(
                         f"注意: {still_missing} 件の埋め込みが未生成です (embedder 未初期化の可能性)。"
                         f"`python scripts/embed_recall_sources.py {args.persona}` で後から生成できます。"
                     )
                 else:
                     if backfilled:
-                        print(f"埋め込みバックフィル: {backfilled} 件を追加生成しました。")
-                    print("自動想起はこの時点から機能します。")
-                print(
+                        _notify(f"埋め込みバックフィル: {backfilled} 件を追加生成しました。")
+                    _notify("自動想起はこの時点から機能します。")
+                _notify(
                     "Chronicle（あらすじ）の生成は任意です。後から "
                     "`python scripts/arasuji/build_arasuji_core.py --estimate` で費用を確認して実行するか、"
                     "ふだんの会話（Metabolism）で少しずつ進みます。"
                 )
             except Exception as exc:
-                print(f"埋め込みバックフィルに失敗しました (インポート自体は完了): {exc}")
+                _notify(f"埋め込みバックフィルに失敗しました (インポート自体は完了): {exc}")
 
     finally:
         if adapter is not None:
@@ -272,6 +300,9 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
             suffix = item.get("thread_suffix", "")
             suffix_note = f" thread={suffix}" if suffix else ""
             print(f"[{status}] {item['title']} ({item['messages_imported']} messages){suffix_note}")
+
+    # 保存に失敗したメッセージがあれば、終了コードでも失敗を伝える。
+    return 1 if any(int(item.get("messages_failed", 0)) for item in results) else 0
 
 
 def build_summary_rows(records: Sequence[ConversationRecord], preview: int) -> tuple[list[str], list[list[str]]]:
@@ -403,11 +434,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "import":
         try:
-            handle_import(export, args)
+            return handle_import(export, args)
         except ValueError as exc:
             print(f"Import aborted: {exc}")
             return 1
-        return 0
 
     parser.print_help()
     return 1
