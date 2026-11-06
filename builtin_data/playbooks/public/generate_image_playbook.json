@@ -40,11 +40,11 @@
             "type": "string",
             "enum": [
               "nano_banana_2_1",
-              "gpt_image_2_5_flare",
-              "gpt_image_2_5_sunburst",
+              "gpt_image_2_6_flare",
+              "gpt_image_2_6_sunburst",
               "grok_imagine"
             ],
-            "description": "使用するモデル。nano_banana_2_1(画質改善版, Gemini Nano Banana 2.1), gpt_image_2_5_flare(最高品質かつ高速, OpenAI GPT Image 2.5 Flare), gpt_image_2_5_sunburst(参照画像を使う編集の精度が最高, OpenAI GPT Image 2.5 Sunburst), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Image 2.0)。デフォルトはnano_banana_2_1"
+            "description": "使用するモデル。nano_banana_2_1(画質改善版, Gemini Nano Banana 2.1), gpt_image_2_6_flare(最高品質かつ高速, OpenAI GPT Image 2.6 Flare), gpt_image_2_6_sunburst(参照画像を使う編集の精度が最高, OpenAI GPT Image 2.6 Sunburst), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Image 2.0)。デフォルトはnano_banana_2_1"
           },
           "quality": {
             "type": "string",
