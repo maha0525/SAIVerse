@@ -539,3 +539,87 @@ def test_files_import_retry_with_changed_selection_appends_new_kind(
     assert body["core_created"] == 4
     assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
     assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1
+
+
+SOUL_TEXT_WITH_NOTE = """> **About this file.** This is a fictional persona note.
+> It explains how the file works. This note is not part of the file.
+
+# SOUL.md
+
+ルナは星見市の図書館に住む架空のアシスタント。"""
+
+IDENTITY_TEXT_WITH_NOTE = """> **About this file.** Fictional identity note.
+> This note is not part of the file.
+
+名前: ルナ
+出身: 星見市の架空の図書館"""
+
+MEMORY_TEXT_WITH_NOTE = """> **About this file.** This is a fictional long-term memory note.
+> This note is not part of the file.
+
+# MEMORY.md
+<!-- Fictional curated memory: how this file is organized. -->
+
+## 好きなもの
+- 星空と、静かな夜の読書
+
+## 苦手なもの
+- 急かされること"""
+
+AGENTS_TEXT_WITH_COMMENT = """# ルナの作業ルール（架空）
+
+<!-- Fictional comment about the file format. -->
+- 作業を始める前に、今日の予定を短く確認する。"""
+
+
+def test_files_import_strips_muse_format_notes(file_client, file_manager):
+    """Muse のファイル形式の説明文は取り込まず、本文だけを取り込む。"""
+    files = [
+        ("files", ("SOUL.md", SOUL_TEXT_WITH_NOTE.encode("utf-8"), "text/markdown")),
+        ("files", ("IDENTITY.md", IDENTITY_TEXT_WITH_NOTE.encode("utf-8"), "text/markdown")),
+        ("files", ("MEMORY.md", MEMORY_TEXT_WITH_NOTE.encode("utf-8"), "text/markdown")),
+        ("files", ("AGENTS.md", AGENTS_TEXT_WITH_COMMENT.encode("utf-8"), "text/markdown")),
+    ]
+    preview = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files/preview",
+        files=files,
+    )
+    assert preview.status_code == 200
+    preview_body = preview.json()
+    memory_entry = next(f for f in preview_body["files"] if f["kind"] == "memory")
+    # 注記の前文と、見出しだけの H1 節は項目にならない。
+    assert memory_entry["item_count"] == 2
+
+    res = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": preview_body["cache_key"], "kinds": []},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    assert body["core_created"] == 2
+
+    prompt = file_manager._system_prompt
+    assert "ルナは星見市の図書館に住む架空のアシスタント" in prompt
+    assert "名前: ルナ" in prompt
+    assert "About this file" not in prompt
+    assert "This note is not part of the file" not in prompt
+
+    from sai_memory.core_memory import list_core_memories
+    from sai_memory.memopedia import Memopedia
+    from saiverse_memory import SAIMemoryAdapter
+
+    adapter = SAIMemoryAdapter(PERSONA_ID)
+    try:
+        items = list_core_memories(adapter.conn)
+        assert len(items) == 2
+        for item in items:
+            content = item["content"] if isinstance(item, dict) else str(item)
+            assert "About this file" not in content
+            assert "Fictional curated memory" not in content
+        page = Memopedia(adapter.conn).find_by_title(import_muse._AGENTS_PAGE_TITLE)
+        assert page is not None
+        assert "Fictional comment" not in page.content
+        assert "今日の予定を短く確認する" in page.content
+    finally:
+        adapter.close()
