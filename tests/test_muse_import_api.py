@@ -497,3 +497,45 @@ def test_files_import_retry_after_memory_failure_does_not_duplicate_prompt(
     assert body["core_created"] == 4
     assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
     assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1
+
+
+def test_files_import_retry_with_changed_selection_appends_new_kind(
+    file_client, file_manager, monkeypatch
+):
+    """失敗後の再試行で選択を変更しても、未適用の種別は取りこぼさない。"""
+    preview = _post_files_preview(file_client)
+    assert preview.status_code == 200
+    cache_key = preview.json()["cache_key"]
+
+    original = import_muse._add_core_memory_items
+    calls = {"n": 0}
+
+    def flaky_add(conn, contents):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated memory failure")
+        return original(conn, contents)
+
+    monkeypatch.setattr(import_muse, "_add_core_memory_items", flaky_add)
+
+    # 初回は SOUL + MEMORY だけを選び、記憶側で失敗させる。
+    first = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": ["soul", "memory"]},
+    )
+    assert first.status_code == 500
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert IDENTITY_TEXT.strip() not in file_manager._system_prompt
+
+    # 再試行では SOUL を外して IDENTITY を追加する。
+    second = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": ["identity", "memory"]},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["success"] is True
+    assert body["system_prompt_appended"] == ["identity"]
+    assert body["core_created"] == 4
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1

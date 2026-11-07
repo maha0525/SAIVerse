@@ -52,7 +52,7 @@ _muse_export_cache: dict = {}
 
 # 後段: SOUL / IDENTITY / MEMORY / AGENTS の個別ファイル取り込み。
 # cache_key -> {"persona_id": str, "files": {kind: {"filename", "text", "items"}},
-#               "applied_steps": [str]  # 再試行時の二重適用を防ぐ適用済み記録}
+#               "applied_prompt_kinds": [str]  # プロンプト追記済みの種別}
 _muse_file_cache: dict = {}
 
 _MEMOPEDIA_TRUNK_TITLE = "Muse引っ越し"
@@ -548,7 +548,7 @@ async def preview_muse_files(
     _muse_file_cache[cache_key] = {
         "persona_id": persona_id,
         "files": parsed,
-        "applied_steps": [],
+        "applied_prompt_kinds": [],
     }
     return MuseFilePreviewResponse(
         files=preview_files,
@@ -567,9 +567,10 @@ def import_muse_files(
 
     システムプロンプト追記を最初に行い、失敗したら記憶側は書かない。成功した
     場合だけ preview のキャッシュを破棄し、同じプレビューの二重実行を防ぐ。
-    記憶側の失敗でキャッシュが残った場合の再試行では、適用済みステップ
-    (applied_steps) をスキップし、プロンプトの二重追記を防ぐ。記憶側の
-    書き込み自体は冪等 (コア記憶は重複スキップ、Memopedia は作成/更新)。
+    記憶側の失敗でキャッシュが残った場合の再試行では、プロンプト追記の
+    適用済み種別 (applied_prompt_kinds) を種別ごとにスキップし、二重追記と
+    未適用種別の取りこぼしを防ぐ。記憶側の書き込み自体は冪等
+    (コア記憶は重複スキップ、Memopedia は作成/更新)。
     """
     ensure_persona_exists(persona_id, manager)
 
@@ -591,23 +592,30 @@ def import_muse_files(
     if not kinds:
         raise HTTPException(status_code=400, detail="No valid files selected for import.")
 
-    appended_kinds: List[str] = []
-    instructions: List[str] = []
+    prompt_pairs: List[tuple[str, str]] = []
     for kind in ("soul", "identity"):
         if kind in kinds:
             text = cached_files[kind]["text"]
             if text.strip():
-                instructions.append(text)
-                appended_kinds.append(kind)
-    if instructions:
+                prompt_pairs.append((kind, text))
+    appended_kinds = [kind for kind, _ in prompt_pairs]
+    if prompt_pairs:
         # 失敗 (HTTPException) はそのまま伝播させ、記憶側を始めない。
         # プロンプト追記は即時永続化されるため、記憶側の失敗後に同じ
-        # キャッシュで再試行された場合は二重追記にならないよう抑止する。
+        # キャッシュで再試行された場合は、種別ごとに適用済みを記録して
+        # 二重追記を防ぎつつ、選択変更で増えた未適用の種別は追記する。
         from .import_claude import _append_instructions_to_system_prompt
-        applied_steps = cached.setdefault("applied_steps", [])
-        if "prompt" not in applied_steps:
-            _append_instructions_to_system_prompt(manager, persona_id, instructions)
-            applied_steps.append("prompt")
+        applied_prompt_kinds = cached.setdefault("applied_prompt_kinds", [])
+        pending = [
+            (kind, text)
+            for kind, text in prompt_pairs
+            if kind not in applied_prompt_kinds
+        ]
+        if pending:
+            _append_instructions_to_system_prompt(
+                manager, persona_id, [text for _, text in pending]
+            )
+            applied_prompt_kinds.extend(kind for kind, _ in pending)
 
     core_added: list[tuple[int, str]] = []
     core_skipped = 0
