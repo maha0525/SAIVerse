@@ -379,6 +379,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             {createdPersonaId && (
                 <MemoryImport
                     personaId={createdPersonaId}
+                    suppressChronicleOffer={!!embedded}
                     onImportComplete={() => {
                         // Import completed with thread selection done
                     }}

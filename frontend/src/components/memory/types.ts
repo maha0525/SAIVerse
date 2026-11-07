@@ -5,6 +5,12 @@ export type MemoryImportStep = 'upload' | 'select' | 'embedding-dialog' | 'impor
 export interface MemoryImportProps {
   personaId: string;
   onImportComplete?: () => void;
+  /**
+   * true hides ChronicleOfferPanel after imports. Set by the tutorial's embedded
+   * PersonaWizard, whose StepChronicle already explains Chronicle
+   * (docs/intent/import_chronicle_offer.md invariant 2).
+   */
+  suppressChronicleOffer?: boolean;
 }
 
 export interface MemoryImportUiResult {

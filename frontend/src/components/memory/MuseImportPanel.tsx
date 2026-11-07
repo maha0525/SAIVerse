@@ -17,6 +17,7 @@ import {
 } from '@/lib/memory/importClient';
 
 import styles from './MemoryImport.module.css';
+import ChronicleOfferPanel from './ChronicleOfferPanel';
 import { MemoryImportProgress } from './MemoryImportProgress';
 import { formatImportDate, formatThreadDateRange, sortThreadsByLastActivity } from './formatters';
 import {
@@ -52,9 +53,11 @@ function memopediaActionLabel(action: string | null | undefined): string {
   }
 }
 
-export default function MuseImportPanel({ personaId, onImportComplete }: {
+export default function MuseImportPanel({ personaId, onImportComplete, suppressChronicleOffer }: {
   personaId: string;
   onImportComplete?: () => void;
+  /** true hides ChronicleOfferPanel (tutorial; docs/intent/import_chronicle_offer.md invariant 2) */
+  suppressChronicleOffer?: boolean;
 }) {
   useLocale();
   const [phase, setPhase] = useState<Phase>('home');
@@ -65,6 +68,9 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
   const [importProgress, setImportProgress] = useState<string | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  // true once a conversation import is stored and its thread step is done;
+  // the home phase then shows ChronicleOfferPanel once.
+  const [chronicleOfferPending, setChronicleOfferPending] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [filePreview, setFilePreview] = useState<MuseFilePreviewData | null>(null);
   const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
@@ -76,6 +82,7 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
   const reset = () => {
     setPhase('home'); setPreview(null); setSelectedIds(new Set());
     setResult(null); setImportProgress(null); setThreads([]); setSelectedThreadId(null);
+    setChronicleOfferPending(false);
   };
 
   const handleFile = useCallback(async (file: File) => {
@@ -179,9 +186,11 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
     if (threadList.length <= 0) {
       setPhase('home');
       setResult({ type: 'success', message });
+      setChronicleOfferPending(true);
     } else if (threadList.length === 1) {
       await activateThread(personaId, threadList[0].thread_id);
       setPhase('home');
+      setChronicleOfferPending(true);
       setResult({
         type: 'success',
         message: uiText('components.memory.MuseImportPanel.text028', { p1: message }),
@@ -253,6 +262,7 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
     setIsLoading(false);
     setPhase('home');
     setResult({ type: 'success', message: uiText('components.memory.MuseImportPanel.text038') });
+    setChronicleOfferPending(true);
     onImportComplete?.();
   };
 
@@ -333,7 +343,7 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
           );
         })}</div>
         <div className={styles.actions}>
-          <button data-i18n="components.memory.MuseImportPanel.text036" className={styles.cancelButton} onClick={() => { setPhase('home'); onImportComplete?.(); }}>{uiText('components.memory.MuseImportPanel.text036')}</button>
+          <button data-i18n="components.memory.MuseImportPanel.text036" className={styles.cancelButton} onClick={() => { setPhase('home'); setChronicleOfferPending(true); onImportComplete?.(); }}>{uiText('components.memory.MuseImportPanel.text036')}</button>
           <button data-i18n="components.memory.MuseImportPanel.text037" className={styles.importButton} onClick={() => void confirmThread()} disabled={!selectedThreadId || isLoading}>{uiText('components.memory.MuseImportPanel.text037')}</button>
         </div>
       </div>
@@ -392,6 +402,10 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
       </div>
 
       {resultBanner}
+
+      {chronicleOfferPending && !suppressChronicleOffer && (
+        <ChronicleOfferPanel personaId={personaId} onDone={() => setChronicleOfferPending(false)} />
+      )}
 
       <div
         className={`${styles.uploadArea} ${isDragOver ? styles.uploadAreaDragOver : ''}`}
