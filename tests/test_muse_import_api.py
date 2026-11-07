@@ -456,3 +456,44 @@ def test_files_import_requires_valid_cache(file_client):
         json={"cache_key": "no-such-cache", "kinds": []},
     )
     assert res.status_code == 400
+
+
+def test_files_import_retry_after_memory_failure_does_not_duplicate_prompt(
+    file_client, file_manager, monkeypatch
+):
+    """記憶側の失敗後に同じキャッシュで再試行してもプロンプトは二重追記されない。"""
+    preview = _post_files_preview(file_client)
+    assert preview.status_code == 200
+    cache_key = preview.json()["cache_key"]
+
+    original = import_muse._add_core_memory_items
+    calls = {"n": 0}
+
+    def flaky_add(conn, contents):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated memory failure")
+        return original(conn, contents)
+
+    monkeypatch.setattr(import_muse, "_add_core_memory_items", flaky_add)
+
+    first = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert first.status_code == 500
+    # プロンプト追記は永続化済みで、再試行のためにキャッシュは残っている。
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert cache_key in import_muse._muse_file_cache
+
+    second = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["success"] is True
+    assert body["system_prompt_appended"] == ["soul", "identity"]
+    assert body["core_created"] == 4
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1

@@ -98,6 +98,10 @@ export default function MuseImportPanel({ personaId, onImportComplete }: {
   const handleFilesSelected = useCallback(async (selectedFiles: FileList | File[]) => {
     const list = Array.from(selectedFiles);
     if (list.length === 0) return;
+    // 新しいプレビュー要求を始める時点で以前の候補と選択を無効化する。
+    // 失敗や対象0件のときに古いキャッシュが取り込まれる事故を防ぐため。
+    setFilePreview(null);
+    setSelectedKinds(new Set());
     setFileBusy(true);
     setResult(null);
     const { ok, data } = await previewMuseFiles(personaId, list);
