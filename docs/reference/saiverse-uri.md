@@ -65,7 +65,7 @@ saiverse://{global_scheme}/{path}?{params}               # グローバル (下�
 | `saiverse://self/chronicle/{entry_id}` | 指定エントリ（`entry_id` = UUID） |
 | `saiverse://self/chronicle?contain=TEXT` | TEXT を含むエントリ |
 | `saiverse://self/chronicle/range?from={ts}&to={ts}` | 時間範囲 |
-| `saiverse://self/chronicle/recent?depth=N` | **いま見えていない**細かいあらすじ（Lv1）を新しい方から N 件。head のあらすじ枠（memory weave の選定を現時点の記録で再現）と、提示ウィンドウで digest として見えている畳んだ範囲を「見えている」とみなして除外する。manager / ペルソナ文脈が無い経路では除外なしで新しい Lv1 を N 件 |
+| `saiverse://self/chronicle/recent?depth=N` | **いま見えていない**細かいあらすじ（Lv1）を新しい方から N 件。「見えている」はスペル実行時の送信中 messages の列から読む — 畳んだ範囲の digest メッセージ（metadata の `chronicle_entry_ids`）と、weave のメッセージが列に居るときの head の選定の再現（現時点の記録で）。スペル実行文脈が無い経路（API / CLI）では除外なしで新しい Lv1 を N 件 |
 
 ## 複数解決とトリム
 

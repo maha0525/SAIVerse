@@ -1037,42 +1037,56 @@ class UriResolver:
         return visible, pulse_id
 
     def _presented_chronicle_entry_ids(self, persona_id, adapter, conn) -> set:
-        """いまペルソナに見えているあらすじ entry の id 集合 (近似)。
+        """いまペルソナに見えているあらすじ entry の id 集合。
 
-        供給源は二つ:
+        読むのは、スペル実行時に tools.context へ置かれる「これから送る messages
+        の列」だけ — 実際にこのペルソナ・このモデルの提示に入っているものに限る。
+        全モデルの fold を DB から集約すると、別モデルの窓でしか見えていない
+        entry まで除外してしまう (PR #456 Codex P2)。供給源は二つ:
 
-        1. 提示ウィンドウの畳んだ範囲 (fold) — その範囲はあらすじ entry の本文が
-           digest としてそのまま窓に見えている (sea/session_window.py)。
-        2. head のあらすじ枠 (memory weave) — head が使うのと同じ選定
-           (sai_memory/arasuji/context.get_episode_context、ペルソナの文字数予算、
-           fold の除外名簿) をいまの記録で回して再現する。head の実物は
-           Metabolism 時点の凍結スナップショットなので厳密には一致しないことが
-           あるが、ズレるのは「凍結後に増えた最新 entry」で、その期間の中身は
-           窓の生ログとして見えている。
+        1. 畳んだ範囲の digest 置き換えメッセージ (sea/session_window._placeholder、
+           metadata の ``chronicle_entry_ids``) — その entry の本文が digest として
+           この列に見えている。
+        2. head のあらすじ枠 — 列に weave のメッセージ
+           (metadata ``__memory_weave_context__``) が居るときだけ、head と同じ選定
+           (get_episode_context、ペルソナの文字数予算、fold の除外名簿) をいまの
+           記録で回して再現する。head の実物は Metabolism 時点の凍結スナップ
+           ショットなので厳密には一致しないことがあるが、ズレるのは「凍結後に
+           増えた最新 entry」で、その期間の中身は窓の生ログとして見えている。
 
-        weave が無効なペルソナは 1 だけ。manager が無い経路 (CLI / 単体テスト)
-        では空集合 — 除外なしの素の一覧になる。
+        スペル実行文脈が無い経路 (API / CLI / 単体テスト) では列が無いので空集合
+        = 除外なし。manager の有無では判定しない — API も manager 付きで解決する
+        (PR #456 Codex P2)。
         """
         presented: set = set()
-        if not self.manager or not persona_id:
+        try:
+            from tools.context import get_active_llm_messages
+
+            messages = get_active_llm_messages()
+        except Exception:
+            return presented
+        if not isinstance(messages, list):
             return presented
 
+        from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
+
         folded: set = set()
-        try:
-            from sea.session_lifecycle import collect_folded_chronicle_entry_ids
+        weave_present = False
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            meta = m.get("metadata")
+            if not isinstance(meta, dict):
+                continue
+            if meta.get(SYSTEM_NOTICE_KEY) == "fold_digest":
+                ids = meta.get("chronicle_entry_ids")
+                if isinstance(ids, list):
+                    folded |= {str(x) for x in ids if x}
+            if meta.get("__memory_weave_context__"):
+                weave_present = True
+        presented |= folded
 
-            collected = collect_folded_chronicle_entry_ids(self.manager, persona_id)
-            # None = 照会失敗 (fold の有無が分からない)。ここは提示の近似なので
-            # 空として続行する (吸収と違い、ズレても読み物が少し重複するだけ)。
-            folded = {str(x) for x in (collected or ())}
-            presented |= folded
-        except Exception:
-            LOGGER.debug(
-                "Failed to collect folded chronicle entry ids for %s",
-                persona_id, exc_info=True,
-            )
-
-        if not self._memory_weave_enabled(persona_id):
+        if not weave_present:
             return presented
 
         try:
@@ -1100,31 +1114,6 @@ class UriResolver:
                 persona_id, exc_info=True,
             )
         return presented
-
-    def _memory_weave_enabled(self, persona_id) -> bool:
-        """head のあらすじ枠 (memory weave) がこのペルソナで有効か。
-
-        sea/head_pipeline/sections/memory_weave.py の _resolve_enabled と同じ
-        判定 (AI.MEMORY_WEAVE_CONTEXT)。読めなければ False (= 枠は見えていない
-        扱い — 除外が減る側に倒す)。
-        """
-        session_factory = getattr(self.manager, "SessionLocal", None)
-        if not session_factory:
-            return False
-        db = session_factory()
-        try:
-            from database.models import AI as AIModel
-
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            return bool(ai.MEMORY_WEAVE_CONTEXT) if ai else False
-        except Exception:
-            LOGGER.warning(
-                "Failed to resolve MEMORY_WEAVE_CONTEXT for %s", persona_id,
-                exc_info=True,
-            )
-            return False
-        finally:
-            db.close()
 
     def _get_active_thread_id(self, adapter) -> str:
         """adapterからアクティブスレッドIDを取得。"""

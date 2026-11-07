@@ -251,74 +251,74 @@ def test_chronicle_recent_says_everything_is_presented(chronicle_resolver):
     assert "あらすじ枠に載っています" in resolved.content
 
 
-# ---- chronicle/recent: 提示集合の本経路 (スタブ manager で実走) ----
+# ---- chronicle/recent: 提示集合の本経路 (送る列から読む) ----
 
-class _StubQuery:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def filter_by(self, **_kw):
-        return self
-
-    def first(self):
-        return self._rows[0] if self._rows else None
-
-    def all(self):
-        return list(self._rows)
+def _weave_message():
+    """head のあらすじ枠のメッセージ (sea/head_pipeline/integration.py と同じ形)。"""
+    return {
+        "role": "user",
+        "content": "以下は、あなたの長期記憶（Chronicle: これまでの出来事）です。…",
+        "metadata": {"__memory_weave_context__": True, "__memory_weave_type__": "chronicle"},
+    }
 
 
-class _StubDb:
-    def __init__(self, rows_by_model):
-        self._rows = rows_by_model
+def _fold_digest_message(entry_ids):
+    """畳んだ範囲の digest 置き換えメッセージ (sea/session_window._placeholder と同じ形)。"""
+    from sai_memory.memory.storage import SYSTEM_NOTICE_KEY
 
-    def query(self, model):
-        return _StubQuery(self._rows.get(model.__name__, []))
-
-    def close(self):
-        pass
-
-
-class _StubManager:
-    def __init__(self, rows_by_model):
-        self._rows = rows_by_model
-
-    def SessionLocal(self):
-        return _StubDb(self._rows)
+    return {
+        "id": "folded:x1",
+        "role": "system",
+        "content": "【この位置の記憶は圧縮されています】…",
+        "metadata": {
+            SYSTEM_NOTICE_KEY: "fold_digest",
+            "chronicle_entry_ids": list(entry_ids),
+        },
+    }
 
 
 def test_chronicle_presented_path_with_weave_marks_everything_presented(chronicle_resolver):
-    """weave 有効 + fold なし: head の選定の再現が全 Lv1 を提示済みにする。
+    """送る列に weave のメッセージが居る: head の選定の再現が全 Lv1 を提示済みにする。
 
     _presented_chronicle_entry_ids の本物を通す — get_episode_context の
     source_id と get_entries_by_level の id が同じ名前空間であることも
     これで固定される (ずれていたら除外が効かず entries > 0 になる)。
     """
-    resolver, _entries, _tmp = chronicle_resolver
-    ai_row = SimpleNamespace(MEMORY_WEAVE_CONTEXT=True, CHRONICLE_CHAR_BUDGET=None)
-    resolver.manager = _StubManager({"AI": [ai_row], "SessionAnchor": []})
-    resolved = resolver.resolve(
-        "saiverse://self/chronicle/recent?depth=3", persona_id="p",
-    )
+    resolver, _entries, tmp_path = chronicle_resolver
+    with persona_context("p", tmp_path, None, llm_messages=[_weave_message()]):
+        resolved = resolver.resolve(
+            "saiverse://self/chronicle/recent?depth=3", persona_id="p",
+        )
     assert resolved.metadata["entries"] == 0
     assert resolved.metadata["excluded_presented"] == 3
     assert "あらすじ枠に載っています" in resolved.content
 
 
-def test_chronicle_presented_path_reads_folds_when_weave_is_off(chronicle_resolver):
-    """weave 無効 + fold が最新 entry を digest 提示中: その entry だけ除外される。"""
-    import json
-
-    resolver, entries, _tmp = chronicle_resolver
+def test_chronicle_presented_path_reads_fold_digests_from_sent_messages(chronicle_resolver):
+    """weave なし + 列に最新 entry の digest が見えている: その entry だけ除外される。"""
+    resolver, entries, tmp_path = chronicle_resolver
     newest = entries[2]
-    ai_row = SimpleNamespace(MEMORY_WEAVE_CONTEXT=False, CHRONICLE_CHAR_BUDGET=None)
-    anchor_row = SimpleNamespace(FOLDED_RANGES_JSON=json.dumps([{
-        "message_ids": ["x1"],
-        "chronicle_entry_ids": [newest.id],
-    }]))
-    resolver.manager = _StubManager({"AI": [ai_row], "SessionAnchor": [anchor_row]})
-    resolved = resolver.resolve(
-        "saiverse://self/chronicle/recent?depth=2", persona_id="p",
-    )
+    with persona_context("p", tmp_path, None,
+                         llm_messages=[_fold_digest_message([newest.id])]):
+        resolved = resolver.resolve(
+            "saiverse://self/chronicle/recent?depth=2", persona_id="p",
+        )
     assert "あらすじ3" not in resolved.content
     assert "あらすじ1" in resolved.content and "あらすじ2" in resolved.content
     assert resolved.metadata["excluded_presented"] == 1
+
+
+def test_chronicle_recent_over_api_is_not_excluded_even_with_manager(chronicle_resolver):
+    """manager 付きでもスペル実行文脈が無ければ除外しない (API 経由の閲覧)。
+
+    PR #456 Codex P2-1 の再発防止 — api/routes/uri.py は manager 付きの
+    resolver で解決するが、閲覧者のプロンプトという概念が無いので、
+    「すべて載っています」と空を返してはいけない。
+    """
+    resolver, _entries, _tmp = chronicle_resolver
+    resolver.manager = object()  # manager が居ても判定に使わないことの証明
+    resolved = resolver.resolve(
+        "saiverse://self/chronicle/recent?depth=2", persona_id="p",
+    )
+    assert resolved.metadata["entries"] == 2
+    assert resolved.metadata["excluded_presented"] == 0
