@@ -10,8 +10,9 @@ import { MemoryImportResult } from './MemoryImportResult';
 import { MemoryImportProps } from './types';
 import { useMemoryImport } from './useMemoryImport';
 import PersonaPackPanel from './PersonaPackPanel';
+import ChronicleOfferPanel from './ChronicleOfferPanel';
 
-export default function MemoryImport({ personaId, onImportComplete }: MemoryImportProps) {
+export default function MemoryImport({ personaId, onImportComplete, suppressChronicleOffer }: MemoryImportProps) {
     useLocale();
   const memoryImport = useMemoryImport(personaId, onImportComplete);
 
@@ -40,6 +41,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         <MemoryImportForm
           personaId={personaId}
           onImportComplete={onImportComplete}
+          suppressChronicleOffer={suppressChronicleOffer}
           activeSubTab={memoryImport.activeSubTab}
           step={memoryImport.step}
           isLoading={memoryImport.isLoading}
@@ -67,12 +69,18 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
           }}
           onSelectThread={memoryImport.setSelectedThreadId}
           onConfirmThread={() => { void memoryImport.handleThreadSelectConfirm(); }}
-          onSkipThread={() => { memoryImport.setStep('upload'); onImportComplete?.(); }}
+          onSkipThread={memoryImport.handleThreadSelectSkip}
           onOpenNativeImport={() => memoryImport.setStep('embedding-dialog')}
         />
       )}
 
       <MemoryImportResult result={memoryImport.result} />
+
+      {/* official / extension / native: offer a Chronicle once after the import
+          finishes. Claude and Muse panels render their own offer. */}
+      {memoryImport.chronicleOfferPending && !suppressChronicleOffer && (
+        <ChronicleOfferPanel personaId={personaId} onDone={memoryImport.dismissChronicleOffer} />
+      )}
 
       {/* ペルソナまるごとパック (docs/intent/persona_pack.md) の取り込みとエクスポート */}
       <PersonaPackPanel personaId={personaId} />

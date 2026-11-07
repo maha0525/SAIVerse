@@ -33,24 +33,31 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
   const [pendingNativeFile, setPendingNativeFile] = useState<File | null>(null);
   const [isReembedding, setIsReembedding] = useState(false);
   const [reembedProgress, setReembedProgress] = useState<string | null>(null);
+  // true once an import has stored conversations and its thread step is done;
+  // MemoryImport then shows ChronicleOfferPanel once (docs/intent/import_chronicle_offer.md).
+  const [chronicleOfferPending, setChronicleOfferPending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const nativeFileInputRef = useRef<HTMLInputElement>(null);
 
   const resetState = () => {
     setStep('upload'); setPreviewData(null); setSelectedIds(new Set()); setResult(null);
     setPendingExtensionFile(null); setImportProgress(null); setThreads([]); setSelectedThreadId(null);
-    setNativePreview(null); setPendingNativeFile(null);
+    setNativePreview(null); setPendingNativeFile(null); setChronicleOfferPending(false);
   };
+
+  const dismissChronicleOffer = () => setChronicleOfferPending(false);
 
   const handleImportSuccess = async (message: string) => {
     const threadList = sortThreadsByLastActivity(await fetchThreads(personaId));
     if (threadList.length <= 0) {
       setStep('upload');
       setResult({ type: 'success', message });
+      setChronicleOfferPending(true);
     } else if (threadList.length === 1) {
       await activateThread(personaId, threadList[0].thread_id);
       setStep('upload');
       setResult({ type: 'success', message: uiText("components.memory.useMemoryImport.text001", { p1: message }) });
+      setChronicleOfferPending(true);
       onImportComplete?.();
     } else {
       setThreads(threadList);
@@ -71,7 +78,11 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
     setImportProgress(null); setIsLoading(false);
     if (data.success) {
       if (type === 'native') {
-        setStep('upload'); setResult({ type: 'success', message: data.message || 'Native import complete' }); onImportComplete?.();
+        setStep('upload'); setResult({ type: 'success', message: data.message || 'Native import complete' });
+        // Native packages may carry their Chronicle; the panel hides itself
+        // when the estimate reports no unprocessed messages.
+        setChronicleOfferPending(true);
+        onImportComplete?.();
       } else {
         await handleImportSuccess(data.message || 'Import successful');
       }
@@ -113,6 +124,10 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeExtensionImport = async (skipEmbedding: boolean) => {
     if (!pendingExtensionFile) return;
+    // 前の取り込みの案内が開いたままなら畳む。残すと、取り込み中も古い見積もりが
+    // 表示され続け、完了後も取り直されない (PR #458 Codex P2 — 実行時に
+    // 「見積もり時より件数が増えている」の検査で失敗する)。
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text003"));
     const { ok, data } = await importExtension(personaId, pendingExtensionFile, skipEmbedding);
     setPendingExtensionFile(null);
@@ -122,6 +137,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeOfficialImport = async (skipEmbedding: boolean) => {
     if (!previewData) return;
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text004"));
     const { ok, data } = await importOfficial(personaId, {
       cache_key: previewData.cache_key,
@@ -142,6 +158,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeNativeImport = async (skipEmbedding: boolean) => {
     if (!pendingNativeFile) return;
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text005"));
     const { ok, data } = await importNative(personaId, pendingNativeFile, skipEmbedding);
     setPendingNativeFile(null); setNativePreview(null);
@@ -157,6 +174,14 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
     setIsLoading(false);
     setStep('upload');
     setResult({ type: 'success', message: uiText("components.memory.useMemoryImport.text006") });
+    setChronicleOfferPending(true);
+    onImportComplete?.();
+  };
+
+  // Skipping thread activation still leaves the imported conversations stored.
+  const handleThreadSelectSkip = () => {
+    setStep('upload');
+    setChronicleOfferPending(true);
     onImportComplete?.();
   };
 
@@ -177,6 +202,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
     nativePreview, isReembedding, reembedProgress, fileInputRef, nativeFileInputRef,
     setActiveSubTab, setStep, setSelectedIds, setSelectedThreadId, resetState,
     handleFileSelect, handleNativeFileSelect, executeExtensionImport, executeOfficialImport, executeNativeImport,
-    handleThreadSelectConfirm, handleReembed, setResult,
+    handleThreadSelectConfirm, handleThreadSelectSkip, handleReembed, setResult,
+    chronicleOfferPending, dismissChronicleOffer,
   };
 }

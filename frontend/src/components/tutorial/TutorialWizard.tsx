@@ -361,7 +361,7 @@ export default function TutorialWizard({
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    chronicle_generation_active: state.chronicleEnabled
+                    chronicle_enabled: state.chronicleEnabled
                 })
             });
         } catch (e) {

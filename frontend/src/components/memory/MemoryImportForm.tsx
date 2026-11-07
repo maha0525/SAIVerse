@@ -13,6 +13,7 @@ import { ImportSubTab, MemoryImportStep, NativePreviewData, PreviewData, ThreadS
 interface Props {
   personaId: string;
   onImportComplete?: () => void;
+  suppressChronicleOffer?: boolean;
   activeSubTab: ImportSubTab;
   step: MemoryImportStep;
   isLoading: boolean;
@@ -67,11 +68,11 @@ export function MemoryImportForm(props: Props) {
     // Claude 公式エクスポートはカテゴリ別ドロップ枠と Memopedia 転記を持つため、
     // 進行状態ごと自前で管理する独立パネルに任せる。
     if (props.activeSubTab === 'claude') {
-      return <ClaudeImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} />;
+      return <ClaudeImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} suppressChronicleOffer={props.suppressChronicleOffer} />;
     }
     // Muse 公式エクスポートは会話の取り込みだけを持つ独立パネル。
     if (props.activeSubTab === 'muse') {
-      return <MuseImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} />;
+      return <MuseImportPanel personaId={props.personaId} onImportComplete={props.onImportComplete} suppressChronicleOffer={props.suppressChronicleOffer} />;
     }
     if (props.step === 'thread-select') {
       return <div className={styles.threadSelectContainer}>

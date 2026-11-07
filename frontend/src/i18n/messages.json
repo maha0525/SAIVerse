@@ -13266,5 +13266,93 @@
   "components.memory.MuseImportPanel.text056": {
     "ja": "なし",
     "en": "none"
+  },
+  "components.memory.ChronicleOfferPanel.text001": {
+    "ja": "取り込んだ会話のあらすじを作りますか？",
+    "en": "Create a Chronicle for the imported conversations?"
+  },
+  "components.memory.ChronicleOfferPanel.text002": {
+    "ja": "あらすじを作らない場合、ペルソナが自然に思い出せるのは直近の会話だけで、取り込んだ古い出来事は本人からは見えません (検索では見つけられます)。",
+    "en": "Without a Chronicle, the persona naturally recalls only recent conversations; older imported events stay out of its view (search can still find them)."
+  },
+  "components.memory.ChronicleOfferPanel.text003": {
+    "ja": "あらすじを作ると、古い出来事も本人の長期記憶として思い出せるようになります。",
+    "en": "With a Chronicle, the persona can recall older events as part of its long-term memory."
+  },
+  "components.memory.ChronicleOfferPanel.text004": {
+    "ja": "対象の会話",
+    "en": "Conversations to summarize"
+  },
+  "components.memory.ChronicleOfferPanel.text005": {
+    "ja": "{p1} 件",
+    "en": "{p1} messages"
+  },
+  "components.memory.ChronicleOfferPanel.text006": {
+    "ja": "AI の呼び出し",
+    "en": "AI calls"
+  },
+  "components.memory.ChronicleOfferPanel.text007": {
+    "ja": "約 {p1} 回 ({p2})",
+    "en": "About {p1} calls ({p2})"
+  },
+  "components.memory.ChronicleOfferPanel.text008": {
+    "ja": "概算費用",
+    "en": "Estimated cost"
+  },
+  "components.memory.ChronicleOfferPanel.text009": {
+    "ja": "無料 (このモデルには料金設定がありません)",
+    "en": "Free (no pricing configured for this model)"
+  },
+  "components.memory.ChronicleOfferPanel.text010": {
+    "ja": "約 {p1}",
+    "en": "About {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text011": {
+    "ja": "あらすじを作る (推奨)",
+    "en": "Create Chronicle (recommended)"
+  },
+  "components.memory.ChronicleOfferPanel.text012": {
+    "ja": "あとで",
+    "en": "Later"
+  },
+  "components.memory.ChronicleOfferPanel.text013": {
+    "ja": "記憶画面の Chronicle タブからいつでも作れます。",
+    "en": "You can create it any time from the Chronicle tab in the memory screen."
+  },
+  "components.memory.ChronicleOfferPanel.text014": {
+    "ja": "あらすじを作成しています ({p1} / {p2})",
+    "en": "Creating Chronicle ({p1} / {p2})"
+  },
+  "components.memory.ChronicleOfferPanel.text015": {
+    "ja": "あらすじを作成しています…",
+    "en": "Creating Chronicle..."
+  },
+  "components.memory.ChronicleOfferPanel.text016": {
+    "ja": "この案内を閉じても、作成は背景で続きます。進み具合は記憶画面の Chronicle タブで確かめられます。",
+    "en": "Closing this notice does not stop the job; it continues in the background. You can check its progress in the Chronicle tab of the memory screen."
+  },
+  "components.memory.ChronicleOfferPanel.text017": {
+    "ja": "あらすじを作成しました。",
+    "en": "The Chronicle has been created."
+  },
+  "components.memory.ChronicleOfferPanel.text018": {
+    "ja": "あらすじを作成できませんでした: {p1}",
+    "en": "Could not create the Chronicle: {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text019": {
+    "ja": "あらすじの作成は中止されました。",
+    "en": "Chronicle creation was cancelled."
+  },
+  "components.memory.ChronicleOfferPanel.text020": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.memory.ChronicleOfferPanel.text021": {
+    "ja": "あらすじの作成を開始できませんでした: {p1}",
+    "en": "Could not start Chronicle creation: {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text022": {
+    "ja": "進み具合を確認できなくなりました。作成が続いているかは、記憶画面の Chronicle タブで確かめてください。",
+    "en": "Lost track of the job's progress. Check the Chronicle tab in the memory screen to see whether it is still running."
   }
 }
