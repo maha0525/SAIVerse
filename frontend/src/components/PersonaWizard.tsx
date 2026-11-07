@@ -33,6 +33,9 @@ interface City {
 
 type Step = 1 | 2 | 3;
 
+/** manager/persona.py の PERSONA_FOLDER_ERROR_CODE (記憶フォルダが残る ID の断り) */
+const PERSONA_MEMORY_FOLDER_EXISTS = 'persona_memory_folder_exists';
+
 /**
  * manager/ids.py slugify_identifier のフロント写し。名前を ID 用の ASCII slug に
  * 落とす (小文字化・空白→'_'・契約外文字は除去)。日本語名のように何も残らない
@@ -110,15 +113,31 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         }
     };
 
+    // 記憶フォルダの残る ID の一覧。取れなくても空で続ける (確定はバックエンドが行う)
+    const loadPersonaFolderIds = async (): Promise<string[]> => {
+        try {
+            const res = await apiFetch('/api/world/ais/reserved-ids');
+            if (!res.ok) return [];
+            const data = await res.json();
+            return Array.isArray(data?.persona_folder_ids) ? data.persona_folder_ids : [];
+        } catch (e) {
+            console.error('Failed to load reserved persona ids', e);
+            return [];
+        }
+    };
+
     const loadTakenIds = async () => {
         try {
             // 使用済み ID の照合なので、1 ページ分では足りない (欠けた分は
             // 「空いている」と誤って判定される)。全件読み切る
-            const [ais, buildings] = await Promise.all([
+            const [ais, buildings, folderIds] = await Promise.all([
                 fetchAllTableRows<{ AIID: string }>('ai'),
                 fetchAllTableRows<{ BUILDINGID: string }>('building'),
+                loadPersonaFolderIds(),
             ]);
-            setTakenAiIds(new Set(ais.map(a => a.AIID)));
+            // 削除したペルソナの記憶フォルダが残る ID も避ける (バックエンドは
+            // その ID での作成を断る — 新しいペルソナが前の記憶を開かないため)
+            setTakenAiIds(new Set([...ais.map(a => a.AIID), ...folderIds]));
             setTakenBuildingIds(new Set(buildings.map(b => b.BUILDINGID)));
         } catch (e) {
             // 取れなくても致命ではない (初期値の提案が素朴になるだけで、
@@ -201,7 +220,13 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             const data = await res.json().catch(() => ({ detail: res.statusText }));
 
             if (!res.ok) {
-                setError(data.detail || uiText("components.PersonaWizard.text004"));
+                // 文言表に文がある断りは識別子 (error_code) とパラメータで届く
+                // (api/routes/world.py の create_ai)。無い・知らない識別子は英語の detail を出す
+                if (data.error_code === PERSONA_MEMORY_FOLDER_EXISTS && data.error_params?.folder) {
+                    setError(uiText("components.PersonaWizard.memoryFolderExists", { p1: data.error_params.folder }));
+                } else {
+                    setError(data.detail || uiText("components.PersonaWizard.text004"));
+                }
                 return;
             }
 

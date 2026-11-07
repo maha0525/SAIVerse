@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | 実装と隔離環境での削除→作り直しの通し確認 (紐づけが消える・連番が進む・断りが日本語で出る) まで済み、PR を develop 向けに出してある。次 = まはーが PR を確認し、実機で削除→作り直しを一度通す。 | まはー (PR 確認と実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | 取り込み後のあらすじ案内 (5 つの取り込み口 + チュートリアルの保存キー修正) | 実装と隔離環境での画面確認まで済み、PR を develop 向けに出してある。次 = まはーが PR を確認し、実機の取り込みで案内 (件数・費用・作る/あとで) と、「作る」であらすじが実際に増えることを見る。 | まはー (PR 確認と実機確認) | [intent](../intent/import_chronicle_offer.md) | 2026-11-07 |
 | 🟣 検証待ち | Muse 公式エクスポートの取り込み (引っ越し) | 後段のファイル取り込み（preview→同期 import とフロント UI）は実装・自己検証まで完了。次 = まはーが PR を確認し、実機で SOUL/IDENTITY の追記、MEMORY のコア記憶、AGENTS の Memopedia 作成・更新を見る。 | まはー (PR 確認と実機確認) | [intent](../intent/muse_export_import.md) | 2026-11-07 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | 実装はブランチ feature/gpt-image-2-6 の PR #451 にあり、まだ develop に入っていない。次 = まはーが PR を確認し、実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (PR 確認と実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-07 |

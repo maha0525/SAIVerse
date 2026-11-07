@@ -12643,6 +12643,10 @@
     "ja": "パックから迎えられませんでした: {p1}",
     "en": "Could not welcome the persona from the pack: {p1}"
   },
+  "components.PersonaWizard.memoryFolderExists": {
+    "ja": "この ID は使えません。前のペルソナの記憶フォルダ (~/.saiverse/personas/{p1}) が残っているためです。新しいペルソナには別の ID を選んでください。記憶ごと引き継ぎたいときはペルソナまるごとパックを使ってください。",
+    "en": "This ID cannot be used: a previous persona's memory folder still exists at ~/.saiverse/personas/{p1}. A new persona with this ID would open those memories. Choose a different ID; to inherit the memories intentionally, use a Persona Pack."
+  },
   "api.systemNoticeMigration.abortedTitle": {
     "ja": "システム通知の記録の移行に失敗しました",
     "en": "Migrating system notice records failed"
