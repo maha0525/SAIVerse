@@ -8,7 +8,9 @@ import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal, PackageOpen } from 'lucide-react';
 import styles from './PersonaWizard.module.css';
-import MemoryImport from './memory/MemoryImport';
+import ImportFlowModal from './memory/ImportFlowModal';
+import ImportSourcePicker from './memory/ImportSourcePicker';
+import { ImportSource } from './memory/types';
 import PersonaPackResult, { PersonaPackImportResult } from './memory/PersonaPackResult';
 import ModalOverlay from './common/ModalOverlay';
 import SettingsModal from './SettingsModal';
@@ -79,6 +81,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const packInputRef = useRef<HTMLInputElement>(null);
     const [packResult, setPackResult] = useState<PersonaPackImportResult | null>(null);
 
+    // ステップ 2 で選んだ取り込み元。null でないあいだ ImportFlowModal を開く
+    const [importSource, setImportSource] = useState<ImportSource | null>(null);
+
     // Reset on open
     useEffect(() => {
         if (isOpen) {
@@ -92,6 +97,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setCreatedRoomId(null);
             setShowSettings(false);
             setPackResult(null);
+            setImportSource(null);
             loadCities();
             loadTakenIds();
         }
@@ -372,18 +378,27 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         </>
     );
 
+    // ステップ 2 は過去ログ取り込みの①だけを置き、②〜⑥は ImportFlowModal が持つ
+    // (docs/intent/import_flow_redesign.md)。⑥まで終えたらステップ 3 へ進む。
     const renderStep2 = () => (
         <div className={styles.importStep}>
             <h3 data-i18n="components.PersonaWizard.text015">{uiText("components.PersonaWizard.text015")}</h3>
             <p data-i18n="components.PersonaWizard.text016">{uiText("components.PersonaWizard.text016")}</p>
             {createdPersonaId && (
-                <MemoryImport
-                    personaId={createdPersonaId}
-                    suppressChronicleOffer={!!embedded}
-                    onImportComplete={() => {
-                        // Import completed with thread selection done
-                    }}
-                />
+                <>
+                    <ImportSourcePicker onSelect={setImportSource} onSkip={() => setStep(3)} />
+                    {importSource && (
+                        <ImportFlowModal
+                            key={importSource}
+                            personaId={createdPersonaId}
+                            source={importSource}
+                            onClose={(finished) => {
+                                setImportSource(null);
+                                if (finished) setStep(3);
+                            }}
+                        />
+                    )}
+                </>
             )}
         </div>
     );
@@ -449,13 +464,6 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         >
                             {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}{uiText("components.PersonaWizard.text025")}<ArrowRight size={16} />
                         </button>
-                    )}
-                    {step === 2 && (
-                        <>
-                            <button data-i18n="components.PersonaWizard.text026" className={styles.skipButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text026")}</button>
-                            <button data-i18n="components.PersonaWizard.text027" className={styles.nextButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text027")}<ArrowRight size={16} />
-                            </button>
-                        </>
                     )}
                 </div>
             </div>

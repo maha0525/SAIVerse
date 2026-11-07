@@ -480,7 +480,6 @@ export default function TutorialWizard({
                     <StepChronicle
                         enabled={state.chronicleEnabled}
                         onChange={(v) => updateState({ chronicleEnabled: v })}
-                        personaId={state.createdPersonaId}
                     />
                 );
             case 8:

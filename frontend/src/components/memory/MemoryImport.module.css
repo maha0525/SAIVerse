@@ -11,35 +11,6 @@
     margin-bottom: 1.5rem;
 }
 
-.subTabs {
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 2rem;
-    border-bottom: 1px solid #333;
-    padding-bottom: 1rem;
-}
-
-.subTab {
-    background: none;
-    border: none;
-    color: #888;
-    font-size: 1rem;
-    cursor: pointer;
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
-    transition: all 0.2s;
-}
-
-.subTab:hover {
-    color: #ccc;
-    background-color: rgba(255, 255, 255, 0.05);
-}
-
-.subTab.active {
-    color: #4dabf7;
-    background-color: rgba(77, 171, 247, 0.1);
-}
-
 .uploadArea {
     border: 2px dashed #444;
     border-radius: 8px;
@@ -164,6 +135,18 @@
     width: 16px;
     height: 16px;
     accent-color: #4dabf7;
+}
+
+.selectedFile {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #ccc;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
 }
 
 /* Table */
@@ -430,12 +413,6 @@
     color: #4dabf7;
 }
 
-/* Tab disabled state */
-.subTab:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
 /* Thread Selection */
 .threadSelectContainer {
     background-color: #1a1b1e;
@@ -561,24 +538,6 @@
     color: #1f2937;
 }
 
-:global([data-theme="light"]) .subTabs {
-    border-bottom-color: #e2e8f0;
-}
-
-:global([data-theme="light"]) .subTab {
-    color: #64748b;
-}
-
-:global([data-theme="light"]) .subTab:hover {
-    color: #1f2937;
-    background-color: rgba(0, 0, 0, 0.03);
-}
-
-:global([data-theme="light"]) .subTab.active {
-    color: #2563eb;
-    background-color: rgba(37, 99, 235, 0.08);
-}
-
 :global([data-theme="light"]) .uploadArea {
     background-color: #f8fafc;
     border-color: #cbd5e1;
@@ -619,6 +578,11 @@
 }
 
 :global([data-theme="light"]) .checkbox {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .selectedFile {
+    border-color: #e2e8f0;
     color: #374151;
 }
 

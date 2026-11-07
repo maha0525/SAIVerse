@@ -10,15 +10,17 @@ import importStyles from './MemoryImport.module.css';
 import styles from './ChronicleOfferPanel.module.css';
 
 /**
- * Offer shown once after a chat-log import finishes: explains what happens with
- * and without a Chronicle, shows the cost estimate, and can start the existing
- * repair job (POST /arasuji/generate with mode='repair').
- * Design: docs/intent/import_chronicle_offer.md
+ * Step 5 of ImportFlowModal: explains what happens with and without a
+ * Chronicle, shows the cost estimate, and can start the existing repair job
+ * (POST /arasuji/generate with mode='repair'). onDone moves the flow to its
+ * last step.
+ * Design: docs/intent/import_chronicle_offer.md, docs/intent/import_flow_redesign.md
  *
- * - Renders nothing and calls onDone() when unprocessed_messages is 0 or the
- *   estimate request fails (invariant 1).
- * - "Later" writes nothing (invariant 3).
- * - Closing while the job runs leaves the job running on the backend (invariant 4).
+ * - Shows a loading line while the estimate is fetched, then calls onDone()
+ *   without showing the choice when unprocessed_messages or
+ *   estimated_llm_calls is 0, or the estimate request fails.
+ * - "Later" writes nothing.
+ * - Going on while the job runs leaves the job running on the backend.
  */
 
 // Same response shape as RepairEstimate in ArasujiViewer.tsx.
@@ -185,7 +187,16 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
     }
   };
 
-  if (!estimate) return null;
+  if (!estimate) {
+    return (
+      <div className={styles.panel}>
+        <div className={styles.progressLine}>
+          <Loader2 size={16} className={importStyles.loader} />
+          <span data-i18n="components.memory.ChronicleOfferPanel.estimating">{uiText('components.memory.ChronicleOfferPanel.estimating')}</span>
+        </div>
+      </div>
+    );
+  }
 
   const formatCount = (n: number) => n.toLocaleString(getFormatLocale());
 

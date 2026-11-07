@@ -66,15 +66,18 @@ Muse のエクスポート ZIP
 - **時刻**: 先頭ターンの `created_at` を会話の作成時刻、末尾ターンのものを
   更新時刻とする。ターンが無い場合は `exported_at` に落とす。
 - **書き込み**: `SAIMemoryAdapter.append_persona_message(payload, thread_suffix=...)`。
-  ChatGPT 版と同じく、取り込み後に埋め込みのバックフィルを試みる（失敗しても
-  取り込み自体は完了している）。
+  エンベディングは取り込みでは作らず（UI は常に `skip_embedding=true` で送る）、
+  専用ウィンドウの④で「作成する」を選ぶと `POST /reembed` が呼ばれ、まだ
+  エンベディングの無いメッセージの分だけが作られる（2026-11-08 の一本道化から —
+  [import_flow_redesign.md](import_flow_redesign.md)）。
 
 ## UI（引っ越しタブ / ペルソナ作成ウィザード）
 
 引っ越しタブとペルソナ作成ウィザードが共有する取り込みコンポーネント
 (`frontend/src/components/memory/`) に Muse 枠を追加した。どちらの入口からでも
-`MemoryImportForm` のサブタブ「Muse 公式エクスポート」→ `MuseImportPanel` の
-同じ導線になる。
+取り込み元の選択 (ImportSourcePicker) で「Muse 公式エクスポート」を選ぶと
+取り込みの専用ウィンドウ (ImportFlowModal) が開き、その②が `MuseImportPanel` になる
+([import_flow_redesign.md](import_flow_redesign.md))。
 
 エンドポイント:
 
@@ -88,13 +91,14 @@ Muse のエクスポート ZIP
 - `GET /api/people/{persona_id}/import/muse/status`: 背景取り込みと、後追いの
   埋め込み生成の進捗を返す。
 
-パネルのフェーズは `home | select | embedding | importing | thread-select`。
-home では Muse の Settings > Data Controls > 「Download your agent data」から
-`EYI_Package_*.zip` を取得する手順とドロップ枠を出す。select では Claude 版と
-同じ会話テーブルに加えて workspace ファイル件数とエクスポート日時を表示し、
-embedding では「後で生成 / 今すぐ生成」を選ぶ。importing は status を 1 秒間隔で
-ポーリングし、完了後は取り込みで増えたスレッドを有効化する（複数なら
-thread-select で選ぶ）。
+パネルのフェーズは `home | select` の二つ。home では Muse の Settings >
+Data Controls > 「Download your agent data」から `EYI_Package_*.zip` を取得する
+手順とドロップ枠を出す。select では Claude 版と同じ会話テーブルに加えて
+workspace ファイル件数とエクスポート日時を表示する。取り込みの実行・進捗の
+定期確認・スレッドの有効化と選択・エンベディングとあらすじの選択は、すべて
+ImportFlowModal（③以降）の側で行う。SOUL.md などの個別ファイルの取り込みは
+チャットログの取り込みとは別物なので、メモリー画面の独立した節
+（MuseFileMigrationPanel）に置き、ペルソナ作成ウィザードには出さない。
 
 対象範囲は会話のみ:
 

@@ -8,34 +8,30 @@ import {
 import React, { useCallback, useRef, useState } from 'react';
 
 import {
-  activateThread,
-  fetchThreads,
-  getImportStatus,
   importClaude,
   importClaudeMemories,
   previewClaudeImport,
 } from '@/lib/memory/importClient';
 
 import styles from './MemoryImport.module.css';
-import ChronicleOfferPanel from './ChronicleOfferPanel';
-import { MemoryImportProgress } from './MemoryImportProgress';
-import { formatImportDate, formatProgress, formatThreadDateRange, sortThreadsByLastActivity } from './formatters';
+import { formatImportDate } from './formatters';
 import {
   ClaudeCategory, ClaudePreviewData, ClaudePreviewErrorDetail,
-  MemoryImportProgress as ImportProgressData, MemoryImportUiResult, ThreadSummary,
+  ImportDirectResult, ImportStartRequest, MemoryImportUiResult,
 } from './types';
 
 /**
- * Claude (claude.ai) 公式エクスポートの取り込みタブ。
+ * Claude (claude.ai) 公式エクスポートの取り込み、ImportFlowModal の段階 2。
  *
  * 公式エクスポートは manifest JSON 経由で複数のカテゴリ別 ZIP に分かれて
  * ダウンロードされるため、カテゴリごとのドロップ枠と手順ガイドを置く。
- * conversations / claude_code / projects は会話選択 → スレッド取り込み、
- * memories は項目選択 → Memopedia 転記。frames は取り込み対象外。
- * 設計: docs/intent/claude_import.md
+ * conversations / claude_code / projects は会話選択のあと onStart で取り込みを
+ * ImportFlowModal に渡す。memories は項目選択 → Memopedia 転記をここで実行し、
+ * onDirectDone で完了の段階へ進む。frames は取り込み対象外。
+ * 設計: docs/intent/claude_import.md, docs/intent/import_flow_redesign.md
  */
 
-type Phase = 'home' | 'select' | 'memory-select' | 'embedding' | 'importing' | 'thread-select';
+type Phase = 'home' | 'select' | 'memory-select';
 
 interface CategoryRow {
   category: ClaudeCategory;
@@ -122,11 +118,12 @@ function previewErrorMessage(detail: string | ClaudePreviewErrorDetail | undefin
   }
 }
 
-export default function ClaudeImportPanel({ personaId, onImportComplete, suppressChronicleOffer }: {
+export default function ClaudeImportPanel({ personaId, onStart, onDirectDone }: {
   personaId: string;
-  onImportComplete?: () => void;
-  /** true hides ChronicleOfferPanel (tutorial; docs/intent/import_chronicle_offer.md invariant 2) */
-  suppressChronicleOffer?: boolean;
+  /** Runs a conversation import (steps 3-6 of ImportFlowModal). */
+  onStart: (request: ImportStartRequest) => void;
+  /** A memories import stores no conversations; the flow goes to its last step. */
+  onDirectDone: (result: ImportDirectResult) => void;
 }) {
   useLocale();
   const [phase, setPhase] = useState<Phase>('home');
@@ -135,20 +132,13 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [appendInstructions, setAppendInstructions] = useState(false);
   const [result, setResult] = useState<MemoryImportUiResult | null>(null);
-  const [importProgress, setImportProgress] = useState<string | null>(null);
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  // true once a conversation import is stored and its thread step is done;
-  // the home phase then shows ChronicleOfferPanel once.
-  const [chronicleOfferPending, setChronicleOfferPending] = useState(false);
   const [dragCategory, setDragCategory] = useState<string | null>(null);
   const dragCounters = useRef<Record<string, number>>({});
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const reset = () => {
     setPhase('home'); setPreview(null); setSelectedIds(new Set());
-    setAppendInstructions(false); setResult(null); setImportProgress(null);
-    setThreads([]); setSelectedThreadId(null); setChronicleOfferPending(false);
+    setAppendInstructions(false); setResult(null);
   };
 
   const handleFile = async (category: ClaudeCategory, file: File) => {
@@ -182,71 +172,24 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
     setSelectedIds((prev) => (prev.size === total ? new Set() : new Set(Array.from({ length: total }, (_, i) => i))));
   };
 
-  const handleImportSuccess = async (message: string) => {
-    const threadList = sortThreadsByLastActivity(await fetchThreads(personaId));
-    if (threadList.length <= 0) {
-      setPhase('home');
-      setResult({ type: 'success', message });
-      setChronicleOfferPending(true);
-    } else if (threadList.length === 1) {
-      await activateThread(personaId, threadList[0].thread_id);
-      setPhase('home');
-      setChronicleOfferPending(true);
-      setResult({ type: 'success', message: uiText('components.memory.ClaudeImportPanel.text040', { p1: message }) });
-      onImportComplete?.();
-    } else {
-      setThreads(threadList);
-      setSelectedThreadId(threadList[0].thread_id);
-      setPhase('thread-select');
-      setResult({ type: 'success', message });
-    }
-    setPreview(null); setSelectedIds(new Set());
-  };
-
-  // 取り込み完了後の背景埋め込みを、画面を止めずに見送る (useMemoryImport と同じ)
-  const watchEmbedding = (data: ImportProgressData) => {
-    if (data.embedding_running === true) {
-      setTimeout(() => { void getImportStatus(personaId, 'claude').then(watchEmbedding); }, 1000);
-      return;
-    }
-    if (data.embedding_error) setResult({ type: 'error', message: data.embedding_error });
-  };
-
-  const pollStatus = async () => {
-    const data = await getImportStatus(personaId, 'claude');
-    if (data.running) {
-      setImportProgress(formatProgress(data.message, data.progress, data.total));
-      setTimeout(() => void pollStatus(), 1000);
-      return;
-    }
-    setImportProgress(null); setIsLoading(false);
-    if (data.success) {
-      await handleImportSuccess(data.message || uiText('components.memory.ClaudeImportPanel.text041'));
-      watchEmbedding(data);
-      return;
-    }
-    setPhase('select');
-    setResult({ type: 'error', message: data.message || uiText('components.memory.ClaudeImportPanel.text042') });
-  };
-
-  const executeImport = async (skipEmbedding: boolean) => {
-    if (!preview) return;
-    // 前の取り込みの案内が開いたままなら畳む (useMemoryImport 側と同じ理由)。
-    setChronicleOfferPending(false);
-    setPhase('importing'); setIsLoading(true); setResult(null);
-    setImportProgress(uiText('components.memory.ClaudeImportPanel.text043'));
-    const { ok, data } = await importClaude(personaId, {
+  const startImport = () => {
+    if (!preview || selectedIds.size === 0) return;
+    const request = {
       cache_key: preview.cache_key,
       conversation_ids: Array.from(selectedIds).map(String),
-      skip_embedding: skipEmbedding,
+      skip_embedding: true,
       append_instructions_to_system_prompt: preview.category === 'projects' && appendInstructions,
+    };
+    onStart({
+      statusType: 'claude',
+      initialProgress: uiText('components.memory.ClaudeImportPanel.text043'),
+      selectThread: true,
+      failureMessage: (data) => data.message || uiText('components.memory.ClaudeImportPanel.text042'),
+      start: async () => {
+        const { ok, data } = await importClaude(personaId, request);
+        return { ok, error: data.detail || uiText('components.memory.ClaudeImportPanel.text042') };
+      },
     });
-    if (!ok) {
-      setPhase('select'); setIsLoading(false); setImportProgress(null);
-      setResult({ type: 'error', message: data.detail || uiText('components.memory.ClaudeImportPanel.text042') });
-      return;
-    }
-    setTimeout(() => void pollStatus(), 1000);
   };
 
   const executeMemoryImport = async () => {
@@ -277,19 +220,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
         lines.push(uiText('components.memory.ClaudeImportPanel.text053', { p1: total, p2: budget }));
       }
     }
-    setResult({ type: 'success', message: lines.join(' ') });
-    onImportComplete?.();
-  };
-
-  const confirmThread = async () => {
-    if (!selectedThreadId) return;
-    setIsLoading(true);
-    await activateThread(personaId, selectedThreadId);
-    setIsLoading(false);
-    setPhase('home');
-    setResult({ type: 'success', message: uiText('components.memory.ClaudeImportPanel.text044') });
-    setChronicleOfferPending(true);
-    onImportComplete?.();
+    onDirectDone({ message: lines.join(' ') });
   };
 
   const makeDropHandlers = useCallback((category: string, onFile: (file: File) => void) => ({
@@ -324,51 +255,6 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
       <span>{result.message}</span>
     </div>
   );
-
-  if (phase === 'importing') {
-    return <MemoryImportProgress message={importProgress} />;
-  }
-
-  if (phase === 'embedding') {
-    return (
-      <div className={styles.embeddingDialog}>
-        <h3 data-i18n="components.memory.ClaudeImportPanel.text050">{uiText('components.memory.ClaudeImportPanel.text050')}</h3>
-        <div className={styles.dialogActions}>
-          <button data-i18n="components.memory.ClaudeImportPanel.text051" className={styles.cancelButton} onClick={() => void executeImport(true)}>{uiText('components.memory.ClaudeImportPanel.text051')}</button>
-          <button data-i18n="components.memory.ClaudeImportPanel.text052" className={styles.importButton} onClick={() => void executeImport(false)}>{uiText('components.memory.ClaudeImportPanel.text052')}</button>
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === 'thread-select') {
-    return (
-      <div className={styles.threadSelectContainer}>
-        <div className={styles.threadSelectHeader}><MessageSquare size={24} /><h3 data-i18n="components.memory.ClaudeImportPanel.text045">{uiText('components.memory.ClaudeImportPanel.text045')}</h3></div>
-        {resultBanner}
-        <div className={styles.threadList}>{threads.map((thread) => {
-          const meta = [
-            uiText('components.memory.ClaudeImportPanel.text046', { p1: thread.message_count ?? 0 }),
-            formatThreadDateRange(thread.first_created_at, thread.last_created_at),
-            thread.title ? (thread.suffix || thread.thread_id) : '',
-          ].filter(Boolean).join(' · ');
-          return (
-            <div key={thread.thread_id} className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.selected : ''}`} onClick={() => setSelectedThreadId(thread.thread_id)}>
-              <div className={styles.threadContent}>
-                <div className={styles.threadName}>{thread.title || thread.suffix || thread.thread_id}</div>
-                <div className={styles.threadMetaLine}>{meta}</div>
-                <div data-i18n="components.memory.ClaudeImportPanel.text047" className={styles.threadPreview}>{thread.preview || uiText('components.memory.ClaudeImportPanel.text047')}</div>
-              </div>
-            </div>
-          );
-        })}</div>
-        <div className={styles.actions}>
-          <button data-i18n="components.memory.ClaudeImportPanel.text048" className={styles.cancelButton} onClick={() => { setPhase('home'); setChronicleOfferPending(true); onImportComplete?.(); }}>{uiText('components.memory.ClaudeImportPanel.text048')}</button>
-          <button data-i18n="components.memory.ClaudeImportPanel.text049" className={styles.importButton} onClick={() => void confirmThread()} disabled={!selectedThreadId || isLoading}>{uiText('components.memory.ClaudeImportPanel.text049')}</button>
-        </div>
-      </div>
-    );
-  }
 
   if (phase === 'select' && preview) {
     const allSelected = selectedIds.size === preview.conversations.length;
@@ -408,7 +294,7 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
         )}
         <div className={styles.actions}>
           <button data-i18n="components.memory.ClaudeImportPanel.text069" className={styles.cancelButton} onClick={reset}>{uiText('components.memory.ClaudeImportPanel.text069')}</button>
-          <button data-i18n="components.memory.ClaudeImportPanel.text070" className={styles.importButton} onClick={() => { if (selectedIds.size > 0) setPhase('embedding'); }} disabled={selectedIds.size === 0 || isLoading}>{uiText('components.memory.ClaudeImportPanel.text070', { p1: selectedIds.size })}</button>
+          <button data-i18n="components.memory.ClaudeImportPanel.text070" className={styles.importButton} onClick={startImport} disabled={selectedIds.size === 0 || isLoading}>{uiText('components.memory.ClaudeImportPanel.text070', { p1: selectedIds.size })}</button>
         </div>
       </div>
     );
@@ -468,10 +354,6 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
       </div>
 
       {resultBanner}
-
-      {chronicleOfferPending && !suppressChronicleOffer && (
-        <ChronicleOfferPanel personaId={personaId} onDone={() => setChronicleOfferPending(false)} />
-      )}
 
       <div className={styles.claudeCategoryList}>
         {CATEGORY_ROWS.map(({ category, fileHint, nameKey, descKey, Icon }) => (
