@@ -32,7 +32,7 @@ from database.models import (
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.items import item_db_filter
-from manager.persona import PersonaMixin
+from manager.persona import CreationErrorDetail, PersonaMixin, purge_persona_state_rows
 from manager.ids import (
     build_identifier,
     charset_error,
@@ -1645,7 +1645,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
     def create_ai(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    ) -> Tuple[bool, str, Optional[CreationErrorDetail], Optional[str], Optional[str]]:
+        """``(success, message, error, ai_id, room_id)`` を返す (``_create_persona`` と同じ形)。"""
         if home_city_id != self.state.city_id:
             return (
                 False,
@@ -1653,17 +1654,19 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "Use dispatch to move personas between cities.",
                 None,
                 None,
+                None,
             )
-        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id, language=language)
+        success, message, error, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id, language=language)
         if success:
             return (
                 True,
                 f"AI '{name}' and their room created successfully. "
                 "A restart is required for the AI to become active.",
+                None,
                 ai_id,
                 room_id,
             )
-        return False, message, None, None
+        return False, message, error, None, None
 
     def _deliver_spell_toggle(self, ai_id: str, persona: Any) -> None:
         """スペル不使用モードの切り替えを head へ届ける。
@@ -2051,9 +2054,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         """Deletes an AI after checking its state.
 
         既存の流儀 (同一 transaction 内で関連テーブル → ai 行の順に処理し、
-        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行も
-        ここで**削除**する (残置ではなく削除 — FK は宣言のみで DB は強制しない
-        アプリ層検査の方針のため、消さないと孤児行が残る)。
+        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行と、
+        現在の状態として読まれる行 (purge_persona_state_rows — user_ai_link・
+        予定・anchor など) もここで**削除**する (残置ではなく削除 — FK は宣言のみで
+        DB は強制しないアプリ層検査の方針のため、消さないと孤児行が残り、
+        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない。
+
+        注意: 本メソッドは PersonaMixin 側の同名定義 (manager/persona.py) と
+        行単位の複製関係にある — 片方を変えたらもう片方も揃えること。
         """
         if self._is_seeded_entity(ai_id):
             return "Error: Seeded AIs cannot be deleted."
@@ -2075,9 +2083,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ).update({"EXIT_TIMESTAMP": datetime.now()})
 
             task_book.purge_persona_entries(db, ai_id)
+            purged = purge_persona_state_rows(db, ai_id)
 
             db.delete(ai)
             db.commit()
+            logging.info("Deleted the state rows of AI '%s': %s", ai_id, purged)
 
             if ai_id in self.personas:
                 persona_name = self.personas[ai_id].persona_name

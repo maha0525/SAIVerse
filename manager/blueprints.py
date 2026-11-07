@@ -15,7 +15,7 @@ from database.models import (
     Tool as ToolModel,
 )
 from manager.ids import build_identifier
-from manager.persona import ai_stem_taken
+from manager.persona import ai_stem_taken, find_persona_folder, persona_folder_error
 from saiverse.building_retirement import BuildingIdAvailability
 from persona.core import PersonaCore
 from saiverse.buildings import Building
@@ -204,7 +204,9 @@ class BlueprintMixin:
             ai_stem = build_identifier(
                 entity_name,
                 stem="persona",
-                exists=lambda s: ai_stem_taken(db, s, city_slug, building_ids),
+                exists=lambda s: ai_stem_taken(
+                    db, s, city_slug, building_ids, self.saiverse_home,
+                ),
             )
             new_ai_id = f"{ai_stem}_{city_slug}"
 
@@ -219,6 +221,13 @@ class BlueprintMixin:
                     False,
                     f"An entity with the generated ID '{new_ai_id}' already exists.",
                 )
+
+            # 削除したペルソナの記憶フォルダが残る ID は使わない (理由は
+            # manager/persona.py の同じ検査と同じ)。名前から作った ID は
+            # ai_stem_taken を通らないので、ここで断る
+            leftover_folder = find_persona_folder(self.saiverse_home, new_ai_id)
+            if leftover_folder is not None:
+                return (False, persona_folder_error(new_ai_id, leftover_folder))
 
             # ensure_unique=True の理由は manager/persona.py の同じ箇所と同じ:
             # 私室と同じ ID の Building が既に存在しうる。使えない ID は断らずに

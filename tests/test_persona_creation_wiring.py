@@ -159,7 +159,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     # --- 私室 ID の文字種契約 (docs/issues/building_id_no_charset_constraint.md) ---
 
     def test_ascii_name_keeps_the_readable_room_id(self):
-        ok, _msg, ai_id, room_id = self._create("Sophie")
+        ok, _msg, _err, ai_id, room_id = self._create("Sophie")
         self.assertTrue(ok)
         self.assertEqual(room_id, "sophie_city_a_room")
         self.assertEqual(self._room_id_in_db(ai_id), "sophie_city_a_room")
@@ -167,13 +167,13 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     def test_japanese_name_gets_a_serial_ascii_ai_id_and_matching_room(self):
         # 日本語名は slug が残らないので AIID ごと persona_<連番> へ落ちる
         # (issue 論点 3)。AIID と私室 ID は同じ連番を共有する
-        ok, _msg, ai_id, room_id = self._create("エア")
+        ok, _msg, _err, ai_id, room_id = self._create("エア")
         self.assertTrue(ok)
         self.assertEqual(ai_id, "persona_1_city_a")
         self.assertEqual(room_id, "persona_1_city_a_room")
         self.assertEqual(self._room_id_in_db(ai_id), room_id)
 
-        ok2, _msg2, ai_id2, room_id2 = self._create("ミク")
+        ok2, _msg2, _err, ai_id2, room_id2 = self._create("ミク")
         self.assertTrue(ok2)
         self.assertEqual(ai_id2, "persona_2_city_a")
         self.assertEqual(room_id2, "persona_2_city_a_room")
@@ -197,7 +197,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         finally:
             db.close()
 
-        ok, _msg, ai_id, room_id = self._create("ミク")
+        ok, _msg, _err, ai_id, room_id = self._create("ミク")
         self.assertTrue(ok)
         self.assertEqual(ai_id, "persona_2_city_a")
         self.assertEqual(room_id, "persona_2_city_a_room")
@@ -208,7 +208,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         # 消した建物の元の ID は、残る会話などの付け替えが済むまで新しい建物に
         # 付けない。私室の ID は利用者が選んだものではないので、断らずに次の候補へ
         _reserve_retiring_id(self.svc.saiverse_home, "sophie_city_a_room")
-        ok, msg, ai_id, room_id = self._create("Sophie")
+        ok, msg, _err, ai_id, room_id = self._create("Sophie")
         self.assertTrue(ok, msg)
         self.assertEqual(ai_id, "sophie_city_a")
         self.assertNotEqual(room_id, "sophie_city_a_room")
@@ -218,7 +218,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         # 連番の AIID と私室は同じ番号を共有する。私室の番号が使えないなら、
         # AIID ごと次の番号へ進む (番号が食い違わない)
         _reserve_retiring_id(self.svc.saiverse_home, "persona_1_city_a_room")
-        ok, msg, ai_id, room_id = self._create("エア")
+        ok, msg, _err, ai_id, room_id = self._create("エア")
         self.assertTrue(ok, msg)
         self.assertEqual(ai_id, "persona_2_city_a")
         self.assertEqual(room_id, "persona_2_city_a_room")
@@ -226,7 +226,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     def test_private_room_never_gets_a_deleted_prefixed_id(self):
         # deleted_ で始まる ID は、消した建物の記録を移した先の形。名前が「Deleted X」
         # でも、私室にその形を付けない
-        ok, msg, ai_id, room_id = self._create("Deleted X")
+        ok, msg, _err, ai_id, room_id = self._create("Deleted X")
         self.assertTrue(ok, msg)
         self.assertEqual(ai_id, "deleted_x_city_a")
         self.assertFalse(room_id.lower().startswith("deleted_"), room_id)
@@ -236,12 +236,12 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         # slug 化は情報を落とす写像 — 「A店」と「A森」はどちらも a になる。
         # 連番で黙って避けると名前と違う ID が無言で生まれるので、Building と
         # 同じ裁定で「already exists」を音を立てて返す。世界状態は動かない
-        ok1, _m1, ai1, _room1 = self._create("A店")
+        ok1, _m1, _err, ai1, _room1 = self._create("A店")
         self.assertTrue(ok1)
         self.assertEqual(ai1, "a_city_a")
 
         cache_before = dict(self.svc.building_map)
-        ok2, msg2, _id2, _room2 = self._create("A森")
+        ok2, msg2, _err, _id2, _room2 = self._create("A森")
         self.assertFalse(ok2)
         self.assertIn("already exists", msg2)
         self.assertEqual(dict(self.svc.building_map), cache_before)
@@ -251,17 +251,17 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         # 区別しない。'alice' と 'Alice' を別ペルソナとして通すと DB 上は別行
         # なのに記憶 DB・ログの保存先が同じになるため、重複検査は大文字小文字を
         # 畳む
-        ok1, _m1, _ai1, _room1 = self._create("X", custom_ai_id="alice")
+        ok1, _m1, _err, _ai1, _room1 = self._create("X", custom_ai_id="alice")
         self.assertTrue(ok1)
 
         cache_before = dict(self.svc.building_map)
-        ok2, msg2, _ai2, _room2 = self._create("Y", custom_ai_id="Alice")
+        ok2, msg2, _err, _ai2, _room2 = self._create("Y", custom_ai_id="Alice")
         self.assertFalse(ok2)
         self.assertIn("already exists", msg2)
         self.assertEqual(dict(self.svc.building_map), cache_before)
 
         # 名前由来の自動生成でも同じ畳み込みが効く (名前 'ALICE' → slug 'alice')
-        ok3, msg3, _ai3, _room3 = self._create("ALICE")
+        ok3, msg3, _err, _ai3, _room3 = self._create("ALICE")
         self.assertFalse(ok3)
         self.assertIn("already exists", msg3)
 
@@ -280,7 +280,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         finally:
             db.close()
 
-        ok, _msg, ai_id, room_id = self._create("X", custom_ai_id="alice")
+        ok, _msg, _err, ai_id, room_id = self._create("X", custom_ai_id="alice")
         self.assertTrue(ok, f"作成が失敗した: {_msg}")
         # 既存 Building の ID を奪わず、連番の私室へ落ちる
         self.assertNotEqual(room_id, "alice_city_a_room")
@@ -293,13 +293,13 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         # 拒否。日本語もパス脱出文字もここで一緒に落ちる
         for bad in ("日本語ID", "識別子", "../../outside", "a/b", "a\\b",
                     "a:b", "a|b", "..", "_leading", "-leading"):
-            ok, msg, _ai, _room = self._create("X", custom_ai_id=bad)
+            ok, msg, _err, _ai, _room = self._create("X", custom_ai_id=bad)
             self.assertFalse(ok, f"{bad!r} が通ってしまった")
             self.assertIn("Error", msg)
             self.assertEqual(self.svc.building_map, {}, f"{bad!r} で世界状態が動いた")
 
     def test_custom_ai_id_with_hyphen_is_allowed(self):
-        ok, _msg, ai_id, room_id = self._create("X", custom_ai_id="neo-alice")
+        ok, _msg, _err, ai_id, room_id = self._create("X", custom_ai_id="neo-alice")
         self.assertTrue(ok)
         self.assertEqual(ai_id, "neo-alice_city_a")
         self.assertEqual(room_id, "neo-alice_city_a_room")
@@ -307,14 +307,14 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     def test_path_characters_in_names_are_dropped_by_the_slug(self):
         # 自動生成側は slug 化が契約外の文字 (区切り・'..' を含む) を捨てるので、
         # 名前にパス文字が混ざっても安全な ID に落ちる
-        ok, _msg, ai_id, _room = self._create("../escape")
+        ok, _msg, _err, ai_id, _room = self._create("../escape")
         self.assertTrue(ok)
         self.assertEqual(ai_id, "escape_city_a")
 
     # --- DB とキャッシュの整合 ---
 
     def test_cache_matches_db_after_success(self):
-        _ok, _msg, ai_id, room_id = self._create("Sophie")
+        _ok, _msg, _err, ai_id, room_id = self._create("Sophie")
         self.assertIn(room_id, self._building_ids())
         self.assertIn(room_id, self.svc.building_map)
         self.assertIn(ai_id, self.svc.personas)
@@ -327,7 +327,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         既存ペルソナの部屋と占有者を上書きしたままになる (DB は巻き戻るのに
         キャッシュは巻き戻らない)。
         """
-        _ok, _msg, first_ai, first_room = self._create("Sophie")
+        _ok, _msg, _err, first_ai, first_room = self._create("Sophie")
         before = (
             dict(self.svc.building_map),
             dict(self.svc.occupants),
@@ -346,7 +346,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
 
         self.svc.SessionLocal = failing_factory
         try:
-            ok, _msg2, _ai2, _room2 = self._create("Aria")
+            ok, _msg2, _err, _ai2, _room2 = self._create("Aria")
         finally:
             self.svc.SessionLocal = real_factory
 
@@ -361,7 +361,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     def test_duplicate_name_is_rejected_without_touching_the_cache(self):
         self._create("Sophie")
         buildings_before = list(self.svc.building_map)
-        ok, msg, _ai_id, _room_id = self._create("sophie")
+        ok, msg, _err, _ai_id, _room_id = self._create("sophie")
         self.assertFalse(ok)
         self.assertIn("already exists", msg)
         self.assertEqual(list(self.svc.building_map), buildings_before)
@@ -370,7 +370,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
 
     def test_the_override_model_is_not_saved_as_the_personas_default_model(self):
         """一時上書き中に作ると、上書きのモデルで話すが、個別の標準モデルとしては保存しない。"""
-        ok, _msg, ai_id, _room = self._create("Sophie")
+        ok, _msg, _err, ai_id, _room = self._create("Sophie")
         self.assertTrue(ok)
         db = self.SessionLocal()
         try:
@@ -385,7 +385,7 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
     def test_without_an_override_the_new_persona_uses_the_global_default(self):
         self.svc.model = None
         with patch.dict(os.environ, {"SAIVERSE_DEFAULT_MODEL": "test-model"}):
-            ok, _msg, ai_id, _room = self._create("Sophie")
+            ok, _msg, _err, ai_id, _room = self._create("Sophie")
         self.assertTrue(ok)
         persona = self.svc.personas[ai_id]
         self.assertEqual(persona.model, "test-model")

@@ -978,21 +978,29 @@ async def apply_persona_pack(
 def _pick_ai_stem(manager: Any, name: str) -> Optional[str]:
     """名前から AIID の名前部分を選ぶ。同じ ID が既にあれば番号を足す (intent §5)。
 
+    削除したペルソナの記憶フォルダ (``personas/<id>/``) が残る ID も使用済みとして
+    番号を足す — 作成経路 (manager/persona.py の _create_persona) はその ID を断るため
+    (docs/issues/persona_delete_leaves_orphans_and_reuses_ids.md)。
+
     英数字が残らない名前 (日本語名など) は None — 作成経路が persona_<連番> を選ぶ。
     """
     from sqlalchemy import func
 
     from database.models import AI
     from manager.ids import is_valid_identifier, slugify_identifier
+    from manager.persona import persona_folder_names
 
     slug = slugify_identifier(name)
     if not is_valid_identifier(slug):
         return None
     city = str(manager.city_name)
+    folders = {folder.lower() for folder in persona_folder_names(Path(manager.saiverse_home))}
     db = manager.SessionLocal()
     try:
         def taken(stem: str) -> bool:
             ai_id = f"{stem}_{city}".lower()
+            if ai_id in folders:
+                return True
             return db.query(AI.AIID).filter(func.lower(AI.AIID) == ai_id).first() is not None
 
         stem, n = slug, 2
@@ -1145,7 +1153,7 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
 
     validate_pack(zip_path)
     stem = _pick_ai_stem(manager, name)
-    success, message, ai_id, room_id = manager.create_ai(
+    success, message, _error, ai_id, room_id = manager.create_ai(
         name, system_prompt, manager.city_id, stem,
     )
     if not success or not ai_id:
