@@ -215,13 +215,18 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
           </>
         )}
         {job.status === 'completed' && (
-          <div className={`${importStyles.result} ${importStyles.success} ${styles.outcome}`}>
-            <CheckCircle size={16} />
-            <span data-i18n="components.memory.ChronicleOfferPanel.text017">
-              {uiText('components.memory.ChronicleOfferPanel.text017')}
-              {job.warning ? ` ${job.warning}` : ''}
-            </span>
-          </div>
+          <>
+            <div className={`${importStyles.result} ${importStyles.success} ${styles.outcome}`}>
+              <CheckCircle size={16} />
+              <span data-i18n="components.memory.ChronicleOfferPanel.text017">
+                {uiText('components.memory.ChronicleOfferPanel.text017')}
+                {job.warning ? ` ${job.warning}` : ''}
+              </span>
+            </div>
+            {/* 補修は一部を処理できないまま completed になることがあり、その説明は
+                message に入る (PR #458 Codex P2)。捨てずに併記する。 */}
+            {job.message && <p className={styles.serverMessage}>{job.message}</p>}
+          </>
         )}
         {job.status === 'failed' && (
           <div className={`${importStyles.result} ${importStyles.error} ${styles.outcome}`}>

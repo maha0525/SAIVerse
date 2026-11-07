@@ -240,6 +240,8 @@ export default function MuseImportPanel({ personaId, onImportComplete, suppressC
 
   const executeImport = async (skipEmbedding: boolean) => {
     if (!preview) return;
+    // 前の取り込みの案内が開いたままなら畳む (useMemoryImport 側と同じ理由)。
+    setChronicleOfferPending(false);
     setPhase('importing'); setIsLoading(true); setResult(null);
     setImportProgress(uiText('components.memory.MuseImportPanel.text025'));
     const { ok } = await importMuse(personaId, {

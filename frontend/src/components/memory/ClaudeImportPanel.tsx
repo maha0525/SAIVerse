@@ -231,6 +231,8 @@ export default function ClaudeImportPanel({ personaId, onImportComplete, suppres
 
   const executeImport = async (skipEmbedding: boolean) => {
     if (!preview) return;
+    // 前の取り込みの案内が開いたままなら畳む (useMemoryImport 側と同じ理由)。
+    setChronicleOfferPending(false);
     setPhase('importing'); setIsLoading(true); setResult(null);
     setImportProgress(uiText('components.memory.ClaudeImportPanel.text043'));
     const { ok, data } = await importClaude(personaId, {

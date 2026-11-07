@@ -124,6 +124,10 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeExtensionImport = async (skipEmbedding: boolean) => {
     if (!pendingExtensionFile) return;
+    // 前の取り込みの案内が開いたままなら畳む。残すと、取り込み中も古い見積もりが
+    // 表示され続け、完了後も取り直されない (PR #458 Codex P2 — 実行時に
+    // 「見積もり時より件数が増えている」の検査で失敗する)。
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text003"));
     const { ok, data } = await importExtension(personaId, pendingExtensionFile, skipEmbedding);
     setPendingExtensionFile(null);
@@ -133,6 +137,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeOfficialImport = async (skipEmbedding: boolean) => {
     if (!previewData) return;
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text004"));
     const { ok, data } = await importOfficial(personaId, {
       cache_key: previewData.cache_key,
@@ -153,6 +158,7 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
 
   const executeNativeImport = async (skipEmbedding: boolean) => {
     if (!pendingNativeFile) return;
+    setChronicleOfferPending(false);
     setStep('importing'); setIsLoading(true); setResult(null); setImportProgress(uiText("components.memory.useMemoryImport.text005"));
     const { ok, data } = await importNative(personaId, pendingNativeFile, skipEmbedding);
     setPendingNativeFile(null); setNativePreview(null);
