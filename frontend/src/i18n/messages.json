@@ -3420,8 +3420,8 @@
     "en": "Free (no pricing configured for this model)"
   },
   "components.memory.ArasujiViewer.text117": {
-    "ja": "約 ${p1} {p2}",
-    "en": "Approx. ${p1} {p2}"
+    "ja": "約 {p1}",
+    "en": "Approx. {p1}"
   },
   "components.memory.ArasujiViewer.text118": {
     "ja": "キャンセル",

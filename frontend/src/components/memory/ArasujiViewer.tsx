@@ -4,6 +4,7 @@ import { apiFetch } from '@/i18n/api';
 import { getFormatLocale } from '@/i18n/core';
 
 import { t as uiText } from '@/i18n/core';
+import { formatCost } from '@/lib/formatCost';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
@@ -1321,10 +1322,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     {repairEstimate.is_free_tier
                                         ? uiText("components.memory.ArasujiViewer.text116")
                                         : uiText("components.memory.ArasujiViewer.text117", {
-                                            p1: repairEstimate.estimated_cost_usd > 0 && repairEstimate.estimated_cost_usd < 0.01
-                                                ? repairEstimate.estimated_cost_usd.toFixed(4)
-                                                : repairEstimate.estimated_cost_usd.toFixed(2),
-                                            p2: repairEstimate.currency
+                                            p1: formatCost(repairEstimate.estimated_cost_usd, repairEstimate.currency),
                                         })}
                                 </span>
                             </div>
