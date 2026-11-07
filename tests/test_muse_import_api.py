@@ -32,6 +32,7 @@ def _clean_muse_state():
     """preview が残した一時ファイルとモジュール状態をテストごとに片付ける。"""
     import_muse._muse_export_cache.clear()
     import_muse._muse_import_status.clear()
+    import_muse._muse_file_cache.clear()
     yield
     for cached in list(import_muse._muse_export_cache.values()):
         tmp_path = cached.get("tmp_path")
@@ -39,6 +40,7 @@ def _clean_muse_state():
             Path(tmp_path).unlink()
     import_muse._muse_export_cache.clear()
     import_muse._muse_import_status.clear()
+    import_muse._muse_file_cache.clear()
 
 
 @pytest.fixture()
@@ -177,3 +179,363 @@ def test_import_reserves_running_state_before_task_starts(client, monkeypatch):
 
     res = client.post(f"/api/people/{PERSONA_ID}/import/muse", json=body)
     assert res.status_code == 409
+
+# ---------------------------------------------------------------------------
+# 後段: SOUL / IDENTITY / MEMORY / AGENTS の個別ファイル取り込み
+# ---------------------------------------------------------------------------
+
+# 架空の Muse ペルソナ「ルナ」のファイル。実在の人物・ペルソナとは無関係。
+SOUL_TEXT = """ルナは、星見市の小さな図書館に住む架空のアシスタント。
+わからないことは「わからない」と言い、相手の話を最後まで聞いてから答える。
+難しい話も、星空を見上げるような落ち着いた言葉で伝える。"""
+
+IDENTITY_TEXT = """名前: ルナ
+絵文字: 🌙
+一人称: わたし
+出身: 星見市の架空の図書館"""
+
+MEMORY_TEXT = """ルナは、星見市の図書館で働く利用者を支えるために生まれた架空の存在。
+
+# 好きなもの
+- 星空と、静かな夜の読書
+- 季節の変わり目に図書館の窓を開けること
+
+# 苦手なもの
+- 急かされること
+- 約束を黙って破ること
+
+# 大切にしていること
+- 相手の言葉をそのまま受け取る
+- わからないことをわからないと言う"""
+
+AGENTS_TEXT = """# ルナの作業ルール（架空）
+
+- 作業を始める前に、今日の予定を短く確認する。
+- 判断に迷ったら、利用者に一度だけ質問する。
+- 終わった作業は、図書館の記録ノートに残す。"""
+
+AGENTS_TEXT_UPDATED = """# ルナの作業ルール（架空・改訂）
+
+- 作業を始める前に、今日の予定と締め切りを確認する。
+- 判断に迷ったら、利用者に選択肢を二つ示して尋ねる。
+- 終わった作業と未完了の作業を、図書館の記録ノートに分けて残す。"""
+
+
+class DummyEmbedder:
+    """テストで実モデルのダウンロードを起こさないための差し替え。"""
+
+    def __init__(self, *args, **kwargs):
+        self.model_name = "dummy"
+
+    def embed(self, texts, *, is_query=False):
+        return [[0.0] * 3 for _ in texts]
+
+
+class FakeManager:
+    """Muse ファイル取り込みが触る manager の最小の偽物。"""
+
+    def __init__(self):
+        self.personas = {PERSONA_ID: object()}
+        self.updated = {}
+        self._system_prompt = "既存のプロンプト"
+
+    def get_ai_details(self, ai_id: str):
+        if ai_id != PERSONA_ID:
+            return None
+        return {
+            "SYSTEMPROMPT": self._system_prompt,
+            "AINAME": "ルナ",
+            "DESCRIPTION": "架空の図書館アシスタント",
+            "HOME_CITYID": 1,
+            "AUTONOMY_ENABLED": True,
+            "AVATAR_IMAGE": None,
+            "APPEARANCE_IMAGE_PATH": None,
+        }
+
+    def update_ai(self, **kwargs):
+        self.updated = kwargs
+        self._system_prompt = kwargs.get("system_prompt", self._system_prompt)
+        return "ok"
+
+
+@pytest.fixture()
+def isolated_home(monkeypatch, tmp_path):
+    """実 SAIMemoryAdapter を組み立てるテストの置き場と埋め込みを隔離する。"""
+    monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
+    monkeypatch.setenv("SAIMEMORY_MEMORY", "1")
+    monkeypatch.setenv("SAIMEMORY_BACKUP_ON_START", "0")
+    monkeypatch.setattr("saiverse_memory.adapter.Embedder", DummyEmbedder)
+
+
+@pytest.fixture()
+def file_manager():
+    return FakeManager()
+
+
+@pytest.fixture()
+def file_client(isolated_home, file_manager):
+    app = FastAPI()
+    app.include_router(import_muse.router, prefix="/api/people")
+    app.dependency_overrides[get_manager] = lambda: file_manager
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _post_files_preview(
+    client: TestClient,
+    *,
+    memory_text: str = MEMORY_TEXT,
+    agents_text: str = AGENTS_TEXT,
+):
+    files = [
+        ("files", ("SOUL.md", SOUL_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("MEMORY.md", memory_text.encode("utf-8"), "text/markdown")),
+        ("files", ("AGENTS.md", agents_text.encode("utf-8"), "text/markdown")),
+        ("files", ("IDENTITY.md", IDENTITY_TEXT.encode("utf-8"), "text/markdown")),
+    ]
+    return client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files/preview",
+        files=files,
+    )
+
+
+def test_split_memory_items_headings_and_preamble():
+    items = import_muse._split_memory_items(MEMORY_TEXT)
+
+    assert len(items) == 4
+    assert items[0]["title"] is None
+    assert "星見市の図書館で働く" in items[0]["content"]
+    assert [item["title"] for item in items[1:]] == ["好きなもの", "苦手なもの", "大切にしていること"]
+    assert items[1]["content"].startswith("# 好きなもの")
+    assert "- 星空と、静かな夜の読書" in items[1]["content"]
+
+
+def test_split_memory_items_fallbacks():
+    paragraphs = import_muse._split_memory_items("第一段落。\n\n第二段落。\n\n第三段落。")
+    assert len(paragraphs) == 3
+    assert all(item["title"] is None for item in paragraphs)
+
+    lines = import_muse._split_memory_items("一行目\n二行目\n三行目")
+    assert len(lines) == 3
+    assert all(item["title"] is None for item in lines)
+
+    assert import_muse._split_memory_items("") == []
+    assert import_muse._split_memory_items("   \n  \n") == []
+
+    one_heading = import_muse._split_memory_items("# 唯一の見出し\n\n本文だけ")
+    assert len(one_heading) == 2
+    assert all(item["title"] is None for item in one_heading)
+
+
+def test_files_preview_detects_kinds_and_counts(client):
+    files = [
+        ("files", ("SOUL.md", SOUL_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("MEMORY.md", MEMORY_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("AGENTS.md", AGENTS_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("IDENTITY.md", IDENTITY_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("notes.txt", b"not a Muse file", "text/plain")),
+    ]
+    res = client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files/preview",
+        files=files,
+    )
+    assert res.status_code == 200
+
+    body = res.json()
+    by_name = {entry["filename"]: entry for entry in body["files"]}
+    assert body["total_count"] == 4
+    assert by_name["SOUL.md"]["kind"] == "soul"
+    assert by_name["SOUL.md"]["destination"] == "system_prompt"
+    assert by_name["IDENTITY.md"]["kind"] == "identity"
+    assert by_name["IDENTITY.md"]["destination"] == "system_prompt"
+    assert by_name["MEMORY.md"]["kind"] == "memory"
+    assert by_name["MEMORY.md"]["destination"] == "core_memory"
+    assert by_name["MEMORY.md"]["item_count"] == 4
+    assert by_name["AGENTS.md"]["kind"] == "agents"
+    assert by_name["AGENTS.md"]["destination"] == "memopedia"
+    assert by_name["notes.txt"]["kind"] is None
+    assert by_name["notes.txt"]["destination"] is None
+    assert by_name["notes.txt"]["item_count"] == 0
+    assert body["cache_key"] in import_muse._muse_file_cache
+
+
+def test_files_preview_no_recognized_files(client):
+    res = client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files/preview",
+        files=[("files", ("notes.txt", b"not a Muse file", "text/plain"))],
+    )
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["cache_key"] == ""
+    assert body["total_count"] == 0
+    assert body["files"][0]["kind"] is None
+
+
+def test_files_import_end_to_end(file_client, file_manager):
+    preview = _post_files_preview(file_client)
+    assert preview.status_code == 200
+    cache_key = preview.json()["cache_key"]
+    assert cache_key in import_muse._muse_file_cache
+
+    res = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["success"] is True
+    assert body["core_created"] == 4
+    assert body["system_prompt_appended"] == ["soul", "identity"]
+    assert body["memopedia_action"] == "created"
+    assert body["trunk_title"] == import_muse._MEMOPEDIA_TRUNK_TITLE
+
+    expected_prompt = (
+        "既存のプロンプト\n\n" + SOUL_TEXT.strip() + "\n\n" + IDENTITY_TEXT.strip()
+    )
+    assert file_manager.updated["system_prompt"] == expected_prompt
+
+    from sai_memory.core_memory import list_core_memories
+    from sai_memory.memopedia import Memopedia
+    from saiverse_memory import SAIMemoryAdapter
+
+    adapter = SAIMemoryAdapter(PERSONA_ID)
+    try:
+        assert len(list_core_memories(adapter.conn)) == 4
+        page = Memopedia(adapter.conn).find_by_title(import_muse._AGENTS_PAGE_TITLE)
+        assert page is not None
+        assert page.content == AGENTS_TEXT.strip()
+    finally:
+        adapter.close()
+
+    res_again = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert res_again.status_code == 400
+
+
+def test_files_import_second_run_updates_agents_and_skips_core(file_client):
+    first_preview = _post_files_preview(file_client)
+    assert first_preview.status_code == 200
+    first_res = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": first_preview.json()["cache_key"], "kinds": []},
+    )
+    assert first_res.status_code == 200
+
+    second_preview = _post_files_preview(file_client, agents_text=AGENTS_TEXT_UPDATED)
+    assert second_preview.status_code == 200
+    second_res = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": second_preview.json()["cache_key"], "kinds": []},
+    )
+    assert second_res.status_code == 200
+
+    body = second_res.json()
+    assert body["memopedia_action"] == "updated"
+    assert body["core_created"] == 0
+    assert body["core_skipped"] == 4
+
+    from sai_memory.memopedia import Memopedia
+    from saiverse_memory import SAIMemoryAdapter
+
+    adapter = SAIMemoryAdapter(PERSONA_ID)
+    try:
+        page = Memopedia(adapter.conn).find_by_title(import_muse._AGENTS_PAGE_TITLE)
+        assert page is not None
+        assert page.content == AGENTS_TEXT_UPDATED.strip()
+    finally:
+        adapter.close()
+
+
+def test_files_import_requires_valid_cache(file_client):
+    res = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": "no-such-cache", "kinds": []},
+    )
+    assert res.status_code == 400
+
+
+def test_files_import_retry_after_memory_failure_does_not_duplicate_prompt(
+    file_client, file_manager, monkeypatch
+):
+    """記憶側の失敗後に同じキャッシュで再試行してもプロンプトは二重追記されない。"""
+    preview = _post_files_preview(file_client)
+    assert preview.status_code == 200
+    cache_key = preview.json()["cache_key"]
+
+    original = import_muse._add_core_memory_items
+    calls = {"n": 0}
+
+    def flaky_add(conn, contents):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated memory failure")
+        return original(conn, contents)
+
+    monkeypatch.setattr(import_muse, "_add_core_memory_items", flaky_add)
+
+    first = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert first.status_code == 500
+    # プロンプト追記は永続化済みで、再試行のためにキャッシュは残っている。
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert cache_key in import_muse._muse_file_cache
+
+    second = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": []},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["success"] is True
+    assert body["system_prompt_appended"] == ["soul", "identity"]
+    assert body["core_created"] == 4
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1
+
+
+def test_files_import_retry_with_changed_selection_appends_new_kind(
+    file_client, file_manager, monkeypatch
+):
+    """失敗後の再試行で選択を変更しても、未適用の種別は取りこぼさない。"""
+    preview = _post_files_preview(file_client)
+    assert preview.status_code == 200
+    cache_key = preview.json()["cache_key"]
+
+    original = import_muse._add_core_memory_items
+    calls = {"n": 0}
+
+    def flaky_add(conn, contents):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated memory failure")
+        return original(conn, contents)
+
+    monkeypatch.setattr(import_muse, "_add_core_memory_items", flaky_add)
+
+    # 初回は SOUL + MEMORY だけを選び、記憶側で失敗させる。
+    first = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": ["soul", "memory"]},
+    )
+    assert first.status_code == 500
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert IDENTITY_TEXT.strip() not in file_manager._system_prompt
+
+    # 再試行では SOUL を外して IDENTITY を追加する。
+    second = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": cache_key, "kinds": ["identity", "memory"]},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["success"] is True
+    assert body["system_prompt_appended"] == ["identity"]
+    assert body["core_created"] == 4
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+    assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1

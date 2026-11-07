@@ -13198,5 +13198,73 @@
   "components.memory.MuseImportPanel.text039": {
     "ja": "バックグラウンドのエンベディング生成に失敗しました。",
     "en": "Background embedding generation failed."
+  },
+  "components.memory.MuseImportPanel.text040": {
+    "ja": "ファイルからの引っ越し",
+    "en": "Moving in from files"
+  },
+  "components.memory.MuseImportPanel.text041": {
+    "ja": "SOUL.md・IDENTITY.md・MEMORY.md・AGENTS.md はエクスポート ZIP に含まれないため、個別にアップロードして取り込みます。",
+    "en": "SOUL.md, IDENTITY.md, MEMORY.md, and AGENTS.md are not included in the export ZIP, so upload them here individually."
+  },
+  "components.memory.MuseImportPanel.text042": {
+    "ja": "ファイルを選択（.md）",
+    "en": "Choose files (.md)"
+  },
+  "components.memory.MuseImportPanel.text043": {
+    "ja": "システムプロンプトへ追記",
+    "en": "Append to system prompt"
+  },
+  "components.memory.MuseImportPanel.text044": {
+    "ja": "コア記憶へ追加",
+    "en": "Add to core memory"
+  },
+  "components.memory.MuseImportPanel.text045": {
+    "ja": "Memopedia へ転記",
+    "en": "Transcribe to Memopedia"
+  },
+  "components.memory.MuseImportPanel.text046": {
+    "ja": "対象外",
+    "en": "Not supported"
+  },
+  "components.memory.MuseImportPanel.text047": {
+    "ja": "{p1} 件に分割",
+    "en": "Split into {p1} item(s)"
+  },
+  "components.memory.MuseImportPanel.text048": {
+    "ja": "選択したファイルを取り込む",
+    "en": "Import selected files"
+  },
+  "components.memory.MuseImportPanel.text049": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.memory.MuseImportPanel.text050": {
+    "ja": "ファイルのプレビューに失敗しました。.md ファイルを選び直してください。",
+    "en": "Could not preview the files. Please choose the .md files again."
+  },
+  "components.memory.MuseImportPanel.text051": {
+    "ja": "ファイルの取り込みに失敗しました。",
+    "en": "File import failed."
+  },
+  "components.memory.MuseImportPanel.text052": {
+    "ja": "ファイルの取り込みが完了しました。",
+    "en": "File import completed."
+  },
+  "components.memory.MuseImportPanel.text053": {
+    "ja": "システムプロンプト追記 {p1} 件 / コア記憶の追加 {p2} 件 / Memopedia {p3}",
+    "en": "System prompt: {p1} file(s) appended / Core memory: {p2} added / Memopedia: {p3}"
+  },
+  "components.memory.MuseImportPanel.text054": {
+    "ja": "作成",
+    "en": "created"
+  },
+  "components.memory.MuseImportPanel.text055": {
+    "ja": "更新",
+    "en": "updated"
+  },
+  "components.memory.MuseImportPanel.text056": {
+    "ja": "なし",
+    "en": "none"
   }
 }

@@ -109,6 +109,32 @@ export interface MuseImportRequest {
   skip_embedding: boolean;
 }
 
+export interface MuseFilePreviewEntry {
+  filename: string;
+  kind: string | null;
+  destination: string | null;
+  item_count: number;
+  char_count: number;
+}
+
+export interface MuseFilePreviewData {
+  files: MuseFilePreviewEntry[];
+  cache_key: string;
+  total_count: number;
+}
+
+export interface MuseFileImportResult {
+  success: boolean;
+  system_prompt_appended: string[];
+  core_created: number;
+  core_skipped: number;
+  core_total_chars: number;
+  core_budget: number;
+  memopedia_action: string | null;
+  trunk_title: string;
+  message: string;
+}
+
 export interface ClaudeMemoryImportResult {
   success: boolean;
   created: number;

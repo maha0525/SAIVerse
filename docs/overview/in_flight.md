@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | Muse 公式エクスポートの取り込み (引っ越し) | CLI に続いて取り込み UI (API と引っ越しタブ / ペルソナ作成の Muse 枠) の実装がブランチ feature/muse-import-ui の PR にある。次 = まはーが PR を確認し、実機で本物のエクスポート ZIP を UI から取り込んで会話が入ることを見る。 | まはー (PR 確認と実機確認) | [intent](../intent/muse_export_import.md) | 2026-11-07 |
+| 🟣 検証待ち | Muse 公式エクスポートの取り込み (引っ越し) | 後段のファイル取り込み（preview→同期 import とフロント UI）は実装・自己検証まで完了。次 = まはーが PR を確認し、実機で SOUL/IDENTITY の追記、MEMORY のコア記憶、AGENTS の Memopedia 作成・更新を見る。 | まはー (PR 確認と実機確認) | [intent](../intent/muse_export_import.md) | 2026-11-07 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | 実装はブランチ feature/gpt-image-2-6 の PR #451 にあり、まだ develop に入っていない。次 = まはーが PR を確認し、実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (PR 確認と実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-07 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | 実装は PR にあり、develop への取り込み待ち。次 = まはーが PR を確認し、取り込み・再起動後の通常利用でメティスが送信完了と応答待ちをログから分けて確認する。 | まはー (PR 確認と取り込み) → 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-10-31 |
 | 🟣 検証待ち | Claude 公式エクスポートの取り込み (引っ越しタブの Claude サブタブ) | 本体は develop に入り、実機確認で出た 4 点の追加対応はブランチ feature/claude-import-refinements の PR にある。次 = まはーが PR を確認し、実機で全体記憶がコア記憶に見出しごとに入ること、記憶ファイルのページ名・概要、スレッドの並び順を見る。 | まはー (PR 確認と実機確認) | [intent](../intent/claude_import.md) | 2026-10-30 |

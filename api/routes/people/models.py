@@ -317,6 +317,23 @@ class MuseImportRequest(BaseModel):
     conversation_ids: List[str]  # conversation_id or idx as string
     skip_embedding: bool = False
 
+class MuseFilePreviewEntry(BaseModel):
+    """Muse エクスポートに含まれない個別ファイル 1 件のプレビュー。"""
+    filename: str
+    kind: Optional[str] = None  # "soul" | "identity" | "memory" | "agents"
+    destination: Optional[str] = None  # "system_prompt" | "core_memory" | "memopedia"
+    item_count: int = 0
+    char_count: int = 0
+
+class MuseFilePreviewResponse(BaseModel):
+    files: List[MuseFilePreviewEntry] = []
+    cache_key: str
+    total_count: int  # 判定できたファイル数
+
+class MuseFileImportRequest(BaseModel):
+    cache_key: str
+    kinds: List[str] = []
+
 class ClaudeMemoryImportRequest(BaseModel):
     cache_key: str
     item_ids: List[str]  # item id or idx as string
