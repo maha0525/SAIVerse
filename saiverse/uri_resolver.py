@@ -316,22 +316,61 @@ class UriResolver:
 
         # saiverse://self/message/msg/recent?depth=N
         if len(path) >= 2 and path[0] == "msg" and path[1] == "recent":
-            from sai_memory.memory.storage import get_messages_last
+            from sai_memory.memory.storage import _row_to_message
 
-            depth = int(params.get("depth", 5))
+            # depth=0 や負値を通すと「行があるのに空」の答えになるのでクランプする
+            depth = max(1, min(int(params.get("depth", 5)), 100))
             thread_id = self._get_active_thread_id(adapter)
+            visible_ids, current_pulse = self._presentation_exclusions()
 
+            # 「直近」は、いまプロンプトに載っている行 (visible_ids) と、この
+            # スペルを唱えた Pulse 自身の行を除いた中での直近。見えている行を
+            # そのまま返しても想起にならない (2026-11-07 まはー指摘)。スペル
+            # 以外の経路 (API / CLI) では両方空なので、従来どおり素の直近になる。
+            sql = (
+                "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                "FROM messages WHERE thread_id = ? "
+                "AND (scope IS NULL OR scope != 'discardable') "
+            )
+            sql_params: List[Any] = [thread_id]
+            if current_pulse:
+                sql += "AND (pulse_id IS NULL OR pulse_id != ?) "
+                sql_params.append(current_pulse)
+            sql += "ORDER BY created_at DESC, rowid DESC"
+
+            msgs = []
             with adapter._db_lock:
-                msgs = get_messages_last(adapter.conn, thread_id, depth)
-            content = self._format_messages(msgs) if msgs else "(no recent messages)"
+                cursor = adapter.conn.execute(sql, sql_params)
+                while len(msgs) < depth:
+                    rows = cursor.fetchmany(64)
+                    if not rows:
+                        break
+                    for row in rows:
+                        if str(row[0]) in visible_ids:
+                            continue
+                        msgs.append(_row_to_message(row))
+                        if len(msgs) >= depth:
+                            break
+            msgs.reverse()  # oldest first (従来の並びと同じ)
+
+            if msgs:
+                content = self._format_messages(msgs)
+            elif visible_ids:
+                content = "(記録に残る直近のメッセージは、すべて現在のコンテキストに載っています)"
+            else:
+                content = "(no recent messages)"
             return ResolvedContent(
                 uri=parsed.raw,
                 content=content,
                 content_type="message_log",
-                metadata={"depth": depth, "count": len(msgs)},
+                metadata={
+                    "depth": depth,
+                    "count": len(msgs),
+                    "excluded_presented": len(visible_ids),
+                },
             )
 
-        # saiverse://self/message/msg?contain=TEXT&window=N
+        # saiverse://self/message/msg?contain=TEXT&window=N&limit=N&order=new|old
         if len(path) >= 1 and path[0] == "msg" and "contain" in params:
             from sai_memory.memory.storage import (
                 _row_to_message,
@@ -341,43 +380,76 @@ class UriResolver:
 
             query_text = params["contain"]
             window = int(params.get("window", 0))
+            limit = max(1, min(int(params.get("limit", 1)), 20))
+            order = params.get("order", "new")
+            if order not in ("new", "old"):
+                return self._error(parsed.raw, f"Invalid order (use 'new' or 'old'): {order}")
             thread_id = self._get_active_thread_id(adapter)
+            visible_ids, current_pulse = self._presentation_exclusions()
 
             # 本文での検索なので、書き手が決まっていない行は当たりにも周辺にも
             # 入れない (storage.author_settled_sql — 記憶の検索の経路で共有)。
+            # さらに、いまプロンプトに載っている行とこのスペルを唱えた Pulse
+            # 自身の行は当たりから外す — contain で検索すると、検索語を含む
+            # 自分の唱え文自身が最新の当たりになってしまうため。
+            direction = "ASC" if order == "old" else "DESC"
+            sql = (
+                "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                f"FROM messages WHERE thread_id = ? AND content LIKE ? AND {author_settled_sql()} "
+            )
+            sql_params = [thread_id, f"%{query_text}%"]
+            if current_pulse:
+                sql += "AND (pulse_id IS NULL OR pulse_id != ?) "
+                sql_params.append(current_pulse)
+            sql += f"ORDER BY created_at {direction}, rowid {direction}"
+
+            hits = []
             with adapter._db_lock:
-                cursor = adapter.conn.execute(
-                    "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-                    f"FROM messages WHERE thread_id = ? AND content LIKE ? AND {author_settled_sql()} "
-                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                    (thread_id, f"%{query_text}%"),
+                cursor = adapter.conn.execute(sql, sql_params)
+                while len(hits) < limit:
+                    rows = cursor.fetchmany(64)
+                    if not rows:
+                        break
+                    for row in rows:
+                        if str(row[0]) in visible_ids:
+                            continue
+                        hits.append(_row_to_message(row))
+                        if len(hits) >= limit:
+                            break
+
+            if not hits:
+                note = ""
+                if visible_ids or current_pulse:
+                    note = " (現在のコンテキストに見えているメッセージは検索の対象外です)"
+                return self._error(
+                    parsed.raw, f"Message not found containing: {query_text}{note}",
                 )
-                row = cursor.fetchone()
 
-            if not row:
-                return self._error(parsed.raw, f"Message not found containing: {query_text}")
-
-            msg = _row_to_message(row)
-
-            if window > 0:
-                # 当たりを前後で挟む (前と後を別々に取る正典順。周辺は書き手が
-                # 決まっていない行を外す)
-                with adapter._db_lock:
-                    surrounding = get_window_with_anchor(
-                        adapter.conn, msg, window, window, settled_only=True,
-                    )
-                content = self._format_messages(surrounding, highlight_id=msg.id)
-            else:
-                content = self._format_messages([msg])
+            blocks = []
+            for msg in hits:
+                if window > 0:
+                    # 当たりを前後で挟む (前と後を別々に取る正典順。周辺は書き手が
+                    # 決まっていない行を外す)
+                    with adapter._db_lock:
+                        surrounding = get_window_with_anchor(
+                            adapter.conn, msg, window, window, settled_only=True,
+                        )
+                    blocks.append(self._format_messages(surrounding, highlight_id=msg.id))
+                else:
+                    blocks.append(self._format_messages([msg]))
+            content = "\n---\n".join(blocks)
 
             return ResolvedContent(
                 uri=parsed.raw,
                 content=content,
-                content_type="message_log" if window > 0 else "message",
+                content_type="message_log" if (window > 0 or len(hits) > 1) else "message",
                 metadata={
-                    "message_id": msg.id,
-                    "created_at": msg.created_at,
+                    "message_id": hits[0].id,
+                    "message_ids": [m.id for m in hits],
+                    "created_at": hits[0].created_at,
                     "window": window,
+                    "order": order,
+                    "count": len(hits),
                 },
             )
 
@@ -637,22 +709,52 @@ class UriResolver:
 
         # saiverse://self/chronicle/recent?depth=N
         if len(path) >= 1 and path[0] == "recent":
-            from sai_memory.arasuji.context import get_episode_context, format_episode_context
+            from sai_memory.arasuji.storage import get_entries_by_level
 
-            depth = int(params.get("depth", 3))
+            depth = max(1, min(int(params.get("depth", 3)), 50))
             adapter = self._get_adapter(parsed.persona_id)
+
+            # 「直近のあらすじ」は、いま見えているあらすじ (head のあらすじ枠と、
+            # 提示ウィンドウで digest として見えている畳んだ範囲) に**出ていない**
+            # 一番細かいあらすじ (Lv1) を新しい順に返す。head の枠は全履歴を
+            # 予算内で覆っているので、見えているものをそのまま返しても想起に
+            # ならない (2026-11-07 まはー指摘)。粗く束ねられて中身が隠れている
+            # 範囲の、畳まれる前の細かいあらすじだけが「見えていない直近」。
+            presented = self._presented_chronicle_entry_ids(
+                parsed.persona_id, adapter, conn,
+            )
+
             if adapter:
                 with adapter._db_lock:
-                    ctx = get_episode_context(adapter.conn, max_entries=depth * 10)
+                    lv1 = get_entries_by_level(adapter.conn, 1, order_by_time=True)
             else:
-                ctx = get_episode_context(conn, max_entries=depth * 10)
+                lv1 = get_entries_by_level(conn, 1, order_by_time=True)
+            lv1 = [e for e in lv1 if e.origin_track_id is None]
+            lv1.sort(key=lambda e: e.end_time or 0, reverse=True)
+            unseen = [e for e in lv1 if e.id not in presented][:depth]
 
-            content = format_episode_context(ctx) if ctx else "(no chronicle data)"
+            if not unseen:
+                if presented:
+                    content = (
+                        "(直近のあらすじは、すべて現在のコンテキストの"
+                        "あらすじ枠に載っています)"
+                    )
+                else:
+                    content = "(no chronicle data)"
+            else:
+                unseen.reverse()  # oldest first で読みやすく
+                content = "\n---\n".join(
+                    self._format_chronicle_entry(e) for e in unseen
+                )
             return ResolvedContent(
                 uri=parsed.raw,
                 content=content,
                 content_type="chronicle_context",
-                metadata={"depth": depth, "entries": len(ctx)},
+                metadata={
+                    "depth": depth,
+                    "entries": len(unseen),
+                    "excluded_presented": len(presented),
+                },
             )
 
         return self._error(parsed.raw, f"Unknown chronicle path: {'/'.join(path)}")
@@ -906,6 +1008,123 @@ class UriResolver:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _presentation_exclusions(self) -> Tuple[set, Optional[str]]:
+        """「いま見えている行」の id 集合と、実行中 Pulse の id を返す。
+
+        ペルソナがスペルとして resolve_uri を唱えたときだけ値が入る — スペル
+        ループが実行時に tools.context へ「これから送る messages の列」と
+        PulseContext を置くので、列に載っている記録の行 id (= プロンプトに実際に
+        入っている行) と、唱えた Pulse の id をそこから読む。API / CLI 経由では
+        両方空で、除外は掛からない。
+        """
+        visible: set = set()
+        pulse_id: Optional[str] = None
+        try:
+            from tools.context import get_active_llm_messages, get_active_pulse_context
+
+            msgs = get_active_llm_messages()
+            if isinstance(msgs, list):
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("id"):
+                        visible.add(str(m["id"]))
+            pulse_ctx = get_active_pulse_context()
+            raw = getattr(pulse_ctx, "pulse_id", None)
+            if raw:
+                pulse_id = str(raw)
+        except Exception:
+            LOGGER.debug("Failed to read presentation context for exclusion", exc_info=True)
+        return visible, pulse_id
+
+    def _presented_chronicle_entry_ids(self, persona_id, adapter, conn) -> set:
+        """いまペルソナに見えているあらすじ entry の id 集合 (近似)。
+
+        供給源は二つ:
+
+        1. 提示ウィンドウの畳んだ範囲 (fold) — その範囲はあらすじ entry の本文が
+           digest としてそのまま窓に見えている (sea/session_window.py)。
+        2. head のあらすじ枠 (memory weave) — head が使うのと同じ選定
+           (sai_memory/arasuji/context.get_episode_context、ペルソナの文字数予算、
+           fold の除外名簿) をいまの記録で回して再現する。head の実物は
+           Metabolism 時点の凍結スナップショットなので厳密には一致しないことが
+           あるが、ズレるのは「凍結後に増えた最新 entry」で、その期間の中身は
+           窓の生ログとして見えている。
+
+        weave が無効なペルソナは 1 だけ。manager が無い経路 (CLI / 単体テスト)
+        では空集合 — 除外なしの素の一覧になる。
+        """
+        presented: set = set()
+        if not self.manager or not persona_id:
+            return presented
+
+        folded: set = set()
+        try:
+            from sea.session_lifecycle import collect_folded_chronicle_entry_ids
+
+            collected = collect_folded_chronicle_entry_ids(self.manager, persona_id)
+            # None = 照会失敗 (fold の有無が分からない)。ここは提示の近似なので
+            # 空として続行する (吸収と違い、ズレても読み物が少し重複するだけ)。
+            folded = {str(x) for x in (collected or ())}
+            presented |= folded
+        except Exception:
+            LOGGER.debug(
+                "Failed to collect folded chronicle entry ids for %s",
+                persona_id, exc_info=True,
+            )
+
+        if not self._memory_weave_enabled(persona_id):
+            return presented
+
+        try:
+            from builtin_data.tools.get_memory_weave_context import (
+                _resolve_persona_chronicle_budget,
+            )
+            from sai_memory.arasuji.context import USE_DEFAULT_BUDGET, get_episode_context
+
+            budget = _resolve_persona_chronicle_budget(persona_id, USE_DEFAULT_BUDGET)
+            if adapter:
+                with adapter._db_lock:
+                    ctx = get_episode_context(
+                        adapter.conn, max_entries=10_000, char_budget=budget,
+                        exclude_entry_ids=folded or None,
+                    )
+            else:
+                ctx = get_episode_context(
+                    conn, max_entries=10_000, char_budget=budget,
+                    exclude_entry_ids=folded or None,
+                )
+            presented |= {str(e.source_id) for e in ctx if e.level >= 1}
+        except Exception:
+            LOGGER.warning(
+                "Failed to reproduce presented chronicle selection for %s",
+                persona_id, exc_info=True,
+            )
+        return presented
+
+    def _memory_weave_enabled(self, persona_id) -> bool:
+        """head のあらすじ枠 (memory weave) がこのペルソナで有効か。
+
+        sea/head_pipeline/sections/memory_weave.py の _resolve_enabled と同じ
+        判定 (AI.MEMORY_WEAVE_CONTEXT)。読めなければ False (= 枠は見えていない
+        扱い — 除外が減る側に倒す)。
+        """
+        session_factory = getattr(self.manager, "SessionLocal", None)
+        if not session_factory:
+            return False
+        db = session_factory()
+        try:
+            from database.models import AI as AIModel
+
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return bool(ai.MEMORY_WEAVE_CONTEXT) if ai else False
+        except Exception:
+            LOGGER.warning(
+                "Failed to resolve MEMORY_WEAVE_CONTEXT for %s", persona_id,
+                exc_info=True,
+            )
+            return False
+        finally:
+            db.close()
 
     def _get_active_thread_id(self, adapter) -> str:
         """adapterからアクティブスレッドIDを取得。"""

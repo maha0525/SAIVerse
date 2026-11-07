@@ -48,12 +48,12 @@ URIは複数まとめて渡せます。
 
 ### 過去ログ
 あなたの発言・会話はすべて記録されています。
-- `saiverse://self/message/msg/recent?depth=5` — 直近N件のメッセージ
-- `saiverse://self/message/msg?contain=テキスト&window=2` — 内容で検索（該当メッセージの前後N件も含む）
+- `saiverse://self/message/msg/recent?depth=5` — いまのコンテキストに載っていないメッセージのうち、新しいものからN件。見えている会話のすぐ手前（過去側）を遡るのに使います
+- `saiverse://self/message/msg?contain=テキスト&window=2` — 内容で検索（該当メッセージの前後N件も含む）。`&limit=3` で当たりを複数（既定1・最大20）、`&order=old` で古い方から（初出を探すとき）。いま見えているメッセージと、この発言と同じパルスの記録は当たりに含まれません
 
 ### あらすじ（Chronicle）
 あなたが過ごした日々の出来事の要約が、時系列で残っています。
-- `saiverse://self/chronicle/recent?depth=3` — 最近のあらすじ
+- `saiverse://self/chronicle/recent?depth=3` — 長期記憶のあらすじ枠に出ていない（粗くまとめられて中身が隠れている）細かいあらすじを、新しいものからN件
 - `saiverse://self/chronicle?contain=テキスト` — 内容で検索
 
 ### 記憶の地図帳（Memory Atlas）
