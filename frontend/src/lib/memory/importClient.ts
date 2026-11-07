@@ -7,6 +7,8 @@ import {
   ClaudePreviewErrorDetail,
   MemoryImportProgress,
   MemoryImportRequest,
+  MuseFileImportResult,
+  MuseFilePreviewData,
   MuseImportRequest,
   MusePreviewData,
   NativePreviewData,
@@ -102,6 +104,29 @@ export async function importMuse(personaId: string, request: MuseImportRequest):
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+  });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function previewMuseFiles(
+  personaId: string,
+  files: File[],
+): Promise<{ ok: boolean; data: MuseFilePreviewData | { detail?: string } }> {
+  const formData = new FormData();
+  for (const file of files) formData.append('files', file);
+  const res = await apiFetch(`/api/people/${personaId}/import/muse/files/preview`, { method: 'POST', body: formData });
+  return { ok: res.ok, data: await parseJson(res) };
+}
+
+export async function importMuseFiles(
+  personaId: string,
+  cacheKey: string,
+  kinds: string[],
+): Promise<{ ok: boolean; data: Partial<MuseFileImportResult> & { detail?: string } }> {
+  const res = await apiFetch(`/api/people/${personaId}/import/muse/files`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cache_key: cacheKey, kinds }),
   });
   return { ok: res.ok, data: await parseJson(res) };
 }
