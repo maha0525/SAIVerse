@@ -47,6 +47,12 @@ interface JobState {
 
 const FINISHED_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const POLL_INTERVAL_MS = 1500;
+// ジョブの台帳はバックエンドのプロセス内メモリなので、サーバー再起動を跨ぐと
+// 参照が 404 になる。連続でこの回数失敗したら追跡を止めて案内に切り替える
+// (止めないと「作成しています…」のスピナーが永遠に残る)。
+const MAX_POLL_FAILURES = 8;
+// 追跡不能の印 (バックエンドの status には無い、この画面だけの値)。
+const UNTRACKED = 'untracked';
 
 export default function ChronicleOfferPanel({ personaId, onDone }: {
   personaId: string;
@@ -59,7 +65,14 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
   const [startError, setStartError] = useState<string | null>(null);
   const onDoneRef = useRef(onDone);
   useEffect(() => { onDoneRef.current = onDone; }, [onDone]);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopPolling = () => {
+    if (pollingRef.current) {
+      clearTimeout(pollingRef.current);
+      pollingRef.current = null;
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -85,37 +98,50 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
         onDoneRef.current();
       }
     })();
-    return () => { cancelled = true; };
+    // personaId が変わって見積もりを取り直すときは、前のジョブの追跡も止める
+    // (止めないと古い persona/job の進捗を映し続ける)。アンマウント時も同じ。
+    return () => { cancelled = true; stopPolling(); };
   }, [personaId]);
 
-  useEffect(() => () => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-  }, []);
-
+  // 前の応答を待ってから次の確認を予約する (setInterval だと応答が遅れた回に
+  // 到着順が入れ替わり、進捗が一時的に逆行して見える)。
   const startPolling = (jobId: string) => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    pollingRef.current = setInterval(async () => {
+    stopPolling();
+    let failures = 0;
+    const tick = async () => {
       try {
         const res = await apiFetch(`/api/people/${personaId}/arasuji/generate/${jobId}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        setJob({
-          jobId: data.job_id,
-          status: data.status,
-          progress: data.progress ?? null,
-          total: data.total ?? null,
-          message: data.message ?? null,
-          warning: data.warning || null,
-          error: data.error || null,
-        });
-        if (FINISHED_STATUSES.has(data.status) && pollingRef.current) {
-          clearInterval(pollingRef.current);
-          pollingRef.current = null;
+        if (res.ok) {
+          failures = 0;
+          const data = await res.json();
+          setJob({
+            jobId: data.job_id,
+            status: data.status,
+            progress: data.progress ?? null,
+            total: data.total ?? null,
+            message: data.message ?? null,
+            warning: data.warning || null,
+            error: data.error || null,
+          });
+          if (FINISHED_STATUSES.has(data.status)) {
+            pollingRef.current = null;
+            return;
+          }
+        } else {
+          failures += 1;
         }
       } catch (e) {
         console.error('Chronicle job polling error', e);
+        failures += 1;
       }
-    }, POLL_INTERVAL_MS);
+      if (failures >= MAX_POLL_FAILURES) {
+        setJob(prev => (prev ? { ...prev, status: UNTRACKED } : prev));
+        pollingRef.current = null;
+        return;
+      }
+      pollingRef.current = setTimeout(() => { void tick(); }, POLL_INTERVAL_MS);
+    };
+    pollingRef.current = setTimeout(() => { void tick(); }, POLL_INTERVAL_MS);
   };
 
   const startGeneration = async () => {
@@ -164,7 +190,7 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
   const formatCount = (n: number) => n.toLocaleString(getFormatLocale());
 
   if (job) {
-    const finished = FINISHED_STATUSES.has(job.status);
+    const finished = FINISHED_STATUSES.has(job.status) || job.status === UNTRACKED;
     const hasCounts = job.total !== null && job.total > 0 && job.progress !== null;
     return (
       <div className={styles.panel}>
@@ -209,6 +235,12 @@ export default function ChronicleOfferPanel({ personaId, onDone }: {
           <div className={`${importStyles.result} ${importStyles.error} ${styles.outcome}`}>
             <AlertCircle size={16} />
             <span data-i18n="components.memory.ChronicleOfferPanel.text019">{uiText('components.memory.ChronicleOfferPanel.text019')}</span>
+          </div>
+        )}
+        {job.status === UNTRACKED && (
+          <div className={`${importStyles.result} ${importStyles.error} ${styles.outcome}`}>
+            <AlertCircle size={16} />
+            <span data-i18n="components.memory.ChronicleOfferPanel.text022">{uiText('components.memory.ChronicleOfferPanel.text022')}</span>
           </div>
         )}
         <div className={importStyles.actions}>

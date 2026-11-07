@@ -13350,5 +13350,9 @@
   "components.memory.ChronicleOfferPanel.text021": {
     "ja": "あらすじの作成を開始できませんでした: {p1}",
     "en": "Could not start Chronicle creation: {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text022": {
+    "ja": "進み具合を確認できなくなりました。作成が続いているかは、記憶画面の Chronicle タブで確かめてください。",
+    "en": "Lost track of the job's progress. Check the Chronicle tab in the memory screen to see whether it is still running."
   }
 }
