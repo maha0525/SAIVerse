@@ -137,6 +137,10 @@ export interface MemoryImportProgress {
   message?: string;
   progress?: number;
   total?: number;
+  // Conversations/messages stored by a completed import (official-import routes
+  // report both counts in their success status payload).
+  conversations?: number;
+  messages?: number;
   // Background embedding of the messages this import stored (chat-log imports only).
   embedding_running?: boolean | null;
   embedding_progress?: number | null;
