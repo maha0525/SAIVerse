@@ -27,6 +27,22 @@ export interface ImportDirectResult {
   message: string;
 }
 
+/**
+ * What one pass of ImportFlowModal imported, handed to onClose when the flow
+ * closes from step 6. PersonaWizard lists these at its import hub
+ * (docs/intent/import_flow_redesign.md「複数の取り込み」).
+ */
+export interface ImportFlowSummary {
+  source: ImportSource;
+  /** Counts shown at step 6; absent when the import reported no counts. */
+  conversations?: number;
+  messages?: number;
+  /** Step 6 text used when there are no counts (e.g. Claude memories only). */
+  message: string;
+  /** True when the Muse file import (SOUL / IDENTITY / MEMORY / AGENTS) ran in this pass. */
+  museFilesImported: boolean;
+}
+
 export interface MemoryImportProps {
   personaId: string;
   onImportComplete?: () => void;

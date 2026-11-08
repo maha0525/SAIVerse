@@ -5823,6 +5823,30 @@
     "ja": "ほかの AI との会話のエクスポートを取り込むと、過去の会話を記憶として引き継げます。取り込まずに進んで、あとから行うこともできます。",
     "en": "Import an export of conversations with another AI to carry them over as memories. You can also go on without importing and do it later."
   },
+  "components.PersonaWizard.importedHeading": {
+    "ja": "ここまでに取り込んだもの",
+    "en": "Imported so far"
+  },
+  "components.PersonaWizard.importedCounts": {
+    "ja": "{p1} 件の会話・{p2} 件のメッセージ",
+    "en": "{p1} conversations, {p2} messages"
+  },
+  "components.PersonaWizard.importedSeparator": {
+    "ja": " — ",
+    "en": " — "
+  },
+  "components.PersonaWizard.importedMuseFilesNote": {
+    "ja": "（ファイルも取り込み済み）",
+    "en": " (files imported too)"
+  },
+  "components.PersonaWizard.finishImport": {
+    "ja": "取り込みを終える",
+    "en": "Finish importing"
+  },
+  "components.PersonaWizard.importMoreHint": {
+    "ja": "ほかの取り込み元からも続けて取り込めます。下から選んでください。",
+    "en": "You can keep importing from other sources. Choose one below."
+  },
   "components.PersonaWizard.text017": {
     "ja": "ペルソナを作成しました",
     "en": "Persona created"
@@ -12814,6 +12838,26 @@
   "components.memory.ImportFlowModal.stageFiles": {
     "ja": "ファイルと会話",
     "en": "Files and conversations"
+  },
+  "components.memory.ImportFlowModal.stageMuseFiles": {
+    "ja": "Muse のファイル",
+    "en": "Muse files"
+  },
+  "components.memory.ImportFlowModal.museFilesTitle": {
+    "ja": "Muse のファイルも取り込みますか？",
+    "en": "Import the Muse files too?"
+  },
+  "components.memory.ImportFlowModal.museFilesBody": {
+    "ja": "Muse のエクスポート ZIP には SOUL.md・IDENTITY.md・MEMORY.md・AGENTS.md が入っていません。これらは Muse 側から別に入手してください。取り込むと、SOUL.md と IDENTITY.md はシステムプロンプトの末尾に、MEMORY.md はコア記憶に、AGENTS.md は Memopedia のページに入ります。",
+    "en": "The Muse export ZIP does not include SOUL.md, IDENTITY.md, MEMORY.md, or AGENTS.md. Get these files from Muse separately. When imported, SOUL.md and IDENTITY.md are appended to the system prompt, MEMORY.md goes into core memory, and AGENTS.md becomes a Memopedia page."
+  },
+  "components.memory.ImportFlowModal.museFilesLaterNote": {
+    "ja": "「あとで」を選んでも、メモリー画面の「ファイルからの引っ越し」の節からいつでも取り込めます。",
+    "en": "If you choose \"Later\", you can import them any time from the \"Moving in from files\" section of the memory screen."
+  },
+  "components.memory.ImportFlowModal.museFilesImport": {
+    "ja": "ファイルを取り込む",
+    "en": "Import files"
   },
   "components.memory.ImportFlowModal.stageImport": {
     "ja": "取り込み",

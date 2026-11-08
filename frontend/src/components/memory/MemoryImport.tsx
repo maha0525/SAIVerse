@@ -71,6 +71,8 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
           key={flowSource}
           personaId={personaId}
           source={flowSource}
+          // メモリー画面では閉じたら①へ戻るだけで、取り込みの要約 (onClose の
+          // 第 2 引数) は使わない — 実績一覧はペルソナ作成ウィザードだけが持つ。
           onClose={() => setFlowSource(null)}
           onImportComplete={onImportComplete}
         />
