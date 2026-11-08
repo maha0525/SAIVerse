@@ -253,6 +253,10 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 setCreatedPersonaId(personaId);
                 setCreatedRoomId(roomId);
             }
+            // 「戻る」から作り直すと作成先のペルソナが変わるので、前のペルソナの
+            // 取り込み実績と開きかけの取り込み元をここで空にする
+            setImportedItems([]);
+            setImportSource(null);
             setStep(2);
         } catch (e) {
             console.error('Failed to create persona', e);
@@ -287,6 +291,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setName(result.persona_name || result.persona_id || '');
             setCreatedPersonaId(result.persona_id ?? null);
             setCreatedRoomId(result.room_id ?? null);
+            // こちらも作成先が変わるので、前のペルソナの取り込み実績を持ち越さない
+            setImportedItems([]);
+            setImportSource(null);
             setPackResult(result);
             setStep(3);
         } catch (err) {
