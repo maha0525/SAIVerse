@@ -1,16 +1,35 @@
-export type ImportSubTab = 'official' | 'claude' | 'muse' | 'extension' | 'native';
+/** Where a chat-log import comes from (step 1 of docs/intent/import_flow_redesign.md). */
+export type ImportSource = 'official' | 'claude' | 'muse' | 'extension' | 'native';
 
-export type MemoryImportStep = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
+/** Status endpoint of each import route (GET /import/{type}/status). */
+export type ImportStatusType = 'extension' | 'official' | 'native' | 'claude' | 'muse';
+
+/**
+ * What a source's step-2 screen hands to ImportFlowModal to run step 3.
+ * `start` posts the import with skip_embedding=true: the embedding choice is
+ * asked after the import (step 4) and runs through POST /reembed.
+ */
+export interface ImportStartRequest {
+  statusType: ImportStatusType;
+  start: () => Promise<{ ok: boolean; error?: string }>;
+  /** Progress text shown before the first status response. */
+  initialProgress: string;
+  /** Progress text for a running status; formatProgress is used when absent. */
+  formatRunning?: (data: MemoryImportProgress) => string;
+  /** Error text for a finished status without success. */
+  failureMessage: (data: MemoryImportProgress) => string;
+  /** false skips the thread step (native packages keep their own thread ids). */
+  selectThread: boolean;
+}
+
+/** Result of an import that stores no conversations (Claude memories). */
+export interface ImportDirectResult {
+  message: string;
+}
 
 export interface MemoryImportProps {
   personaId: string;
   onImportComplete?: () => void;
-  /**
-   * true hides ChronicleOfferPanel after imports. Set by the tutorial's embedded
-   * PersonaWizard, whose StepChronicle already explains Chronicle
-   * (docs/intent/import_chronicle_offer.md invariant 2).
-   */
-  suppressChronicleOffer?: boolean;
 }
 
 export interface MemoryImportUiResult {

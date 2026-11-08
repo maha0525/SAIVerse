@@ -4624,8 +4624,8 @@
     "en": "(no preview)"
   },
   "components.memory.MemoryImportForm.text004": {
-    "ja": "スキップ",
-    "en": "Skip"
+    "ja": "選ばずに進む",
+    "en": "Continue without choosing"
   },
   "components.memory.MemoryImportForm.text005": {
     "ja": "このスレッドを使用",
@@ -4636,8 +4636,8 @@
     "en": "Generate embeddings for memory recall?"
   },
   "components.memory.MemoryImportForm.text007": {
-    "ja": "スキップ",
-    "en": "Skip"
+    "ja": "あとで",
+    "en": "Later"
   },
   "components.memory.MemoryImportForm.text008": {
     "ja": "作成する",
@@ -4695,14 +4695,6 @@
     "ja": "インポート",
     "en": "Import"
   },
-  "components.memory.MemoryImportForm.text022": {
-    "ja": "ドロップしてアップロード",
-    "en": "Drop to upload"
-  },
-  "components.memory.MemoryImportForm.text023": {
-    "ja": "クリックまたはドラッグ&ドロップでアップロード",
-    "en": "Click or drag and drop to upload"
-  },
   "components.memory.MemoryImportForm.text024": {
     "ja": "インポートする会話を選択",
     "en": "Select conversations to import"
@@ -4750,14 +4742,6 @@
   "components.memory.MemoryImportForm.text035": {
     "ja": "クリックまたはドラッグ&ドロップでアップロード",
     "en": "Click or drag and drop to upload"
-  },
-  "components.memory.MemoryImportForm.text036": {
-    "ja": "ChatGPT 公式エクスポート",
-    "en": "Official ChatGPT export"
-  },
-  "components.memory.MemoryImportForm.text037": {
-    "ja": "拡張機能エクスポート",
-    "en": "Extension export"
   },
   "components.memory.MemoryImportProgress.text001": {
     "ja": "インポート中...",
@@ -5567,30 +5551,6 @@
     "ja": "pulse_id 付きの messages がまだありません。",
     "en": "No messages with a pulse_id yet."
   },
-  "components.memory.useMemoryImport.text001": {
-    "ja": "{p1} スレッドを自動設定しました。",
-    "en": "Automatically selected thread {p1}."
-  },
-  "components.memory.useMemoryImport.text002": {
-    "ja": "ファイルに会話が見つかりませんでした。",
-    "en": "No conversations found in the file."
-  },
-  "components.memory.useMemoryImport.text003": {
-    "ja": "インポート開始...",
-    "en": "Starting import..."
-  },
-  "components.memory.useMemoryImport.text004": {
-    "ja": "インポート開始...",
-    "en": "Starting import..."
-  },
-  "components.memory.useMemoryImport.text005": {
-    "ja": "Nativeインポート開始...",
-    "en": "Starting Native import..."
-  },
-  "components.memory.useMemoryImport.text006": {
-    "ja": "インポート完了！アクティブスレッドを設定しました。",
-    "en": "Import complete! Active thread has been set."
-  },
   "components.memory.WorkingMemoryViewer.text001": {
     "ja": "読み込み中...",
     "en": "Loading..."
@@ -5856,12 +5816,12 @@
     "en": "Leave blank to use the default prompt"
   },
   "components.PersonaWizard.text015": {
-    "ja": "ChatGPTからログをインポート",
-    "en": "Import logs from ChatGPT"
+    "ja": "過去の会話を取り込む",
+    "en": "Import past conversations"
   },
   "components.PersonaWizard.text016": {
-    "ja": "ChatGPTのエクスポートデータをインポートすると、過去の会話を記憶として引き継げます。 この手順はスキップして後から行うこともできます。",
-    "en": "Import ChatGPT export data to carry past conversations over as memories. You can skip this step and do it later."
+    "ja": "ほかの AI との会話のエクスポートを取り込むと、過去の会話を記憶として引き継げます。取り込まずに進んで、あとから行うこともできます。",
+    "en": "Import an export of conversations with another AI to carry them over as memories. You can also go on without importing and do it later."
   },
   "components.PersonaWizard.text017": {
     "ja": "ペルソナを作成しました",
@@ -5898,14 +5858,6 @@
   "components.PersonaWizard.text025": {
     "ja": "次へ ",
     "en": "Next "
-  },
-  "components.PersonaWizard.text026": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.PersonaWizard.text027": {
-    "ja": "完了 ",
-    "en": "Done "
   },
   "components.PersonaWizard.text028": {
     "ja": "ペルソナを作成",
@@ -8867,30 +8819,6 @@
     "ja": "）が伴います。 生成は会話が一定量を超えたときに少しずつ行われ、 過去ログを取り込んでも自動でまとめて生成されることはありません。",
     "en": "). Generation happens gradually when conversation exceeds a threshold. Imported past logs are not automatically summarized all at once."
   },
-  "components.tutorial.steps.StepChronicle.text006": {
-    "ja": "あらすじになっていない過去メッセージ: ",
-    "en": "Past messages not yet summarized: "
-  },
-  "components.tutorial.steps.StepChronicle.text007": {
-    "ja": "件",
-    "en": "items"
-  },
-  "components.tutorial.steps.StepChronicle.text008": {
-    "ja": "まとめてあらすじ化した場合の推定コスト: ",
-    "en": "Estimated cost to summarize all: "
-  },
-  "components.tutorial.steps.StepChronicle.text009": {
-    "ja": "推定LLM呼び出し: ",
-    "en": "Estimated LLM calls: "
-  },
-  "components.tutorial.steps.StepChronicle.text010": {
-    "ja": "回",
-    "en": "calls"
-  },
-  "components.tutorial.steps.StepChronicle.text011": {
-    "ja": "まとめてのあらすじ化は自動では行われません。メモリー画面の「Chronicle」タブから実行したときだけ発生します。",
-    "en": "Bulk summarization is never automatic. It runs only when you request it from the Chronicle tab in the memory screen."
-  },
   "components.tutorial.steps.StepChronicle.text012": {
     "ja": "Chronicle 自動生成を有効にする（推奨）",
     "en": "Enable automatic Chronicle generation (recommended)"
@@ -11543,10 +11471,6 @@
     "ja": "Stelis",
     "en": "Stelis"
   },
-  "components.memory.MemoryImportForm.label002": {
-    "ja": "Native (SAIVerse)",
-    "en": "Native (SAIVerse)"
-  },
   "components.memory.MemoryNotesViewer.label001": {
     "ja": "pulse: ",
     "en": "pulse: "
@@ -12823,13 +12747,185 @@
     "ja": "添付画像 {p1}",
     "en": "Attachment {p1}"
   },
-  "components.memory.MemoryImportForm.label003": {
+  "components.memory.ImportSourcePicker.heading": {
+    "ja": "どこから取り込みますか？",
+    "en": "Where do the logs come from?"
+  },
+  "components.memory.ImportSourcePicker.officialName": {
+    "ja": "ChatGPT 公式エクスポート",
+    "en": "Official ChatGPT export"
+  },
+  "components.memory.ImportSourcePicker.officialDesc": {
+    "ja": "ChatGPT のデータエクスポートで届く ZIP、またはその中の conversations.json",
+    "en": "The ZIP from ChatGPT's data export, or the conversations.json inside it"
+  },
+  "components.memory.ImportSourcePicker.claudeName": {
     "ja": "Claude 公式エクスポート",
     "en": "Official Claude export"
   },
-  "components.memory.MemoryImportForm.label004": {
+  "components.memory.ImportSourcePicker.claudeDesc": {
+    "ja": "claude.ai のエクスポートで届くカテゴリ別の ZIP (会話・Claude Code・プロジェクト・メモリー)",
+    "en": "The per-category ZIPs from the claude.ai export (conversations, Claude Code, projects, memories)"
+  },
+  "components.memory.ImportSourcePicker.museName": {
     "ja": "Muse 公式エクスポート",
     "en": "Official Muse export"
+  },
+  "components.memory.ImportSourcePicker.museDesc": {
+    "ja": "Muse の「Download your agent data」で届く EYI_Package の ZIP",
+    "en": "The EYI_Package ZIP from Muse's \"Download your agent data\""
+  },
+  "components.memory.ImportSourcePicker.extensionName": {
+    "ja": "拡張機能エクスポート",
+    "en": "Extension export"
+  },
+  "components.memory.ImportSourcePicker.extensionDesc": {
+    "ja": "ブラウザー拡張機能で保存した会話のファイル (.json / .md / .txt)",
+    "en": "A conversation file saved with a browser extension (.json / .md / .txt)"
+  },
+  "components.memory.ImportSourcePicker.nativeName": {
+    "ja": "Native (SAIVerse)",
+    "en": "Native (SAIVerse)"
+  },
+  "components.memory.ImportSourcePicker.nativeDesc": {
+    "ja": "SAIVerse から書き出したスレッドの JSON。同じ ID のスレッドは上書きされます",
+    "en": "Thread JSON exported from SAIVerse. Threads with the same IDs are overwritten"
+  },
+  "components.memory.ImportSourcePicker.skipName": {
+    "ja": "取り込まない",
+    "en": "Don't import"
+  },
+  "components.memory.ImportSourcePicker.skipDesc": {
+    "ja": "あとからメモリー画面の「引っ越し」タブで取り込めます。",
+    "en": "You can import later from the Moving tab of the memory screen."
+  },
+  "components.memory.ImportFlowModal.title": {
+    "ja": "取り込み: {p1}",
+    "en": "Import: {p1}"
+  },
+  "components.memory.ImportFlowModal.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.memory.ImportFlowModal.next": {
+    "ja": "次へ",
+    "en": "Next"
+  },
+  "components.memory.ImportFlowModal.stageFiles": {
+    "ja": "ファイルと会話",
+    "en": "Files and conversations"
+  },
+  "components.memory.ImportFlowModal.stageImport": {
+    "ja": "取り込み",
+    "en": "Import"
+  },
+  "components.memory.ImportFlowModal.stageEmbedding": {
+    "ja": "エンベディング",
+    "en": "Embeddings"
+  },
+  "components.memory.ImportFlowModal.stageChronicle": {
+    "ja": "あらすじ",
+    "en": "Chronicle"
+  },
+  "components.memory.ImportFlowModal.stageDone": {
+    "ja": "完了",
+    "en": "Done"
+  },
+  "components.memory.ImportFlowModal.importedCounts": {
+    "ja": "{p1} 件の会話・{p2} 件のメッセージを取り込みました。",
+    "en": "Imported {p1} conversations and {p2} messages."
+  },
+  "components.memory.ImportFlowModal.importDone": {
+    "ja": "取り込みが完了しました。",
+    "en": "The import is complete."
+  },
+  "components.memory.ImportFlowModal.threadAutoActivated": {
+    "ja": "会話を続けるスレッドを自動で設定しました。",
+    "en": "The thread to continue from was set automatically."
+  },
+  "components.memory.ImportFlowModal.threadActivated": {
+    "ja": "選んだスレッドから会話を続けるように設定しました。",
+    "en": "The conversation will continue from the selected thread."
+  },
+  "components.memory.ImportFlowModal.inputNote": {
+    "ja": "取り込みを始めると、エンベディングとあらすじを選び終えるまで、この画面は閉じられません。",
+    "en": "Once the import starts, this window cannot be closed until you have made the embedding and Chronicle choices."
+  },
+  "components.memory.ImportFlowModal.importingNote": {
+    "ja": "取り込み中はこの画面を閉じられません。",
+    "en": "This window cannot be closed while importing."
+  },
+  "components.memory.ImportFlowModal.importUntracked": {
+    "ja": "取り込みの進み具合を確認できなくなりました。取り込まれた会話は、メモリー画面で確かめてください。",
+    "en": "Lost track of the import's progress. Check the memory screen for the imported conversations."
+  },
+  "components.memory.ImportFlowModal.embeddingBody": {
+    "ja": "エンベディングは、記憶想起 (意味の近さによる検索) に使われる索引です。作らない場合、取り込んだ会話はこの検索の対象になりません。メモリー画面の「エンベディング管理」の「未処理を埋める」で、あとから作れます。",
+    "en": "Embeddings are the index used for memory recall (search by closeness of meaning). Without them, the imported conversations are not covered by that search. You can create them later with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingRunning": {
+    "ja": "エンベディングを作成しています: {p1}",
+    "en": "Creating embeddings: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingEnded": {
+    "ja": "エンベディングの作成処理が終わりました: {p1}",
+    "en": "The embedding job has ended: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingStartFailed": {
+    "ja": "エンベディングの作成を開始できませんでした: {p1}",
+    "en": "Could not start creating embeddings: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingUntracked": {
+    "ja": "エンベディングの作成の進み具合を確認できなくなりました。作られていない分は、メモリー画面の「エンベディング管理」の「未処理を埋める」で作れます。",
+    "en": "Lost track of the embedding job. Anything left can be created with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingSkipped": {
+    "ja": "エンベディングは作成していません。メモリー画面の「エンベディング管理」の「未処理を埋める」で、あとから作れます。",
+    "en": "No embeddings were created. You can create them later with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingBackground": {
+    "ja": "エンベディングの作成は裏で続きます。この画面を閉じても止まりません。",
+    "en": "The embedding job continues in the background; closing this window does not stop it."
+  },
+  "components.memory.ImportFlowModal.doneTitle": {
+    "ja": "取り込みが完了しました",
+    "en": "Import complete"
+  },
+  "components.memory.ImportFlowModal.importFailed": {
+    "ja": "取り込みに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.ImportFlowModal.reembedStartFallback": {
+    "ja": "エンベディングの作成を開始できませんでした。",
+    "en": "Could not start creating embeddings."
+  },
+  "components.memory.MemoryImportForm.previewFailed": {
+    "ja": "ファイルの読み取りに失敗しました。",
+    "en": "Could not read the file."
+  },
+  "components.memory.MemoryImport.reembedStarting": {
+    "ja": "開始しています...",
+    "en": "Starting..."
+  },
+  "components.memory.MemoryImportForm.noConversations": {
+    "ja": "ファイルに会話が見つかりませんでした。",
+    "en": "No conversations found in the file."
+  },
+  "components.memory.MemoryImportForm.starting": {
+    "ja": "インポート開始...",
+    "en": "Starting import..."
+  },
+  "components.memory.MemoryImportForm.nativeStarting": {
+    "ja": "Nativeインポート開始...",
+    "en": "Starting Native import..."
+  },
+  "components.memory.MemoryImportForm.extensionConfirm": {
+    "ja": "このファイルを取り込みます",
+    "en": "Import this file"
+  },
+  "components.memory.ChronicleOfferPanel.estimating": {
+    "ja": "あらすじを作る場合の費用を見積もっています…",
+    "en": "Estimating the cost of a Chronicle..."
   },
   "components.memory.ClaudeImportPanel.text001": {
     "ja": "Claude からのエクスポート手順",
@@ -12955,14 +13051,6 @@
     "ja": "{p1} 件を転記",
     "en": "Transcribe {p1} item(s)"
   },
-  "components.memory.ClaudeImportPanel.text040": {
-    "ja": "{p1} スレッドを自動設定しました。",
-    "en": "Automatically selected thread. {p1}"
-  },
-  "components.memory.ClaudeImportPanel.text041": {
-    "ja": "インポートが完了しました。",
-    "en": "Import complete."
-  },
   "components.memory.ClaudeImportPanel.text042": {
     "ja": "インポートに失敗しました。",
     "en": "Import failed."
@@ -12970,42 +13058,6 @@
   "components.memory.ClaudeImportPanel.text043": {
     "ja": "インポート開始...",
     "en": "Starting import..."
-  },
-  "components.memory.ClaudeImportPanel.text044": {
-    "ja": "インポート完了！アクティブスレッドを設定しました。",
-    "en": "Import complete! Active thread has been set."
-  },
-  "components.memory.ClaudeImportPanel.text045": {
-    "ja": "どのスレッドから会話を続けますか？",
-    "en": "Which thread should the conversation continue from?"
-  },
-  "components.memory.ClaudeImportPanel.text046": {
-    "ja": "{p1} 件",
-    "en": "{p1} items"
-  },
-  "components.memory.ClaudeImportPanel.text047": {
-    "ja": "(プレビューなし)",
-    "en": "(no preview)"
-  },
-  "components.memory.ClaudeImportPanel.text048": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.memory.ClaudeImportPanel.text049": {
-    "ja": "このスレッドを使用",
-    "en": "Use this thread"
-  },
-  "components.memory.ClaudeImportPanel.text050": {
-    "ja": "記憶想起用のエンベディングを作成しますか？",
-    "en": "Generate embeddings for memory recall?"
-  },
-  "components.memory.ClaudeImportPanel.text051": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.memory.ClaudeImportPanel.text052": {
-    "ja": "作成する",
-    "en": "Generate"
   },
   "components.memory.ClaudeImportPanel.text060": {
     "ja": "インポートする会話を選択",
@@ -13151,57 +13203,9 @@
     "ja": "{p1}/{p2} 会話を処理中...",
     "en": "Processing {p1}/{p2} conversations..."
   },
-  "components.memory.MuseImportPanel.text027": {
-    "ja": "インポートが完了しました（{p1} 会話 / {p2} メッセージ）。",
-    "en": "Import complete ({p1} conversations / {p2} messages)."
-  },
-  "components.memory.MuseImportPanel.text028": {
-    "ja": "{p1} スレッドを自動設定しました。",
-    "en": "Automatically selected thread. {p1}"
-  },
   "components.memory.MuseImportPanel.text029": {
     "ja": "インポートに失敗しました。",
     "en": "Import failed."
-  },
-  "components.memory.MuseImportPanel.text030": {
-    "ja": "記憶想起用のエンベディングを作成しますか？",
-    "en": "Generate embeddings for memory recall?"
-  },
-  "components.memory.MuseImportPanel.text031": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.memory.MuseImportPanel.text032": {
-    "ja": "作成する",
-    "en": "Generate"
-  },
-  "components.memory.MuseImportPanel.text033": {
-    "ja": "どのスレッドから会話を続けますか？",
-    "en": "Which thread should the conversation continue from?"
-  },
-  "components.memory.MuseImportPanel.text034": {
-    "ja": "{p1} 件",
-    "en": "{p1} items"
-  },
-  "components.memory.MuseImportPanel.text035": {
-    "ja": "(プレビューなし)",
-    "en": "(no preview)"
-  },
-  "components.memory.MuseImportPanel.text036": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.memory.MuseImportPanel.text037": {
-    "ja": "このスレッドを使用",
-    "en": "Use this thread"
-  },
-  "components.memory.MuseImportPanel.text038": {
-    "ja": "インポート完了！アクティブスレッドを設定しました。",
-    "en": "Import complete! Active thread has been set."
-  },
-  "components.memory.MuseImportPanel.text039": {
-    "ja": "バックグラウンドのエンベディング生成に失敗しました。",
-    "en": "Background embedding generation failed."
   },
   "components.memory.MuseImportPanel.text040": {
     "ja": "ファイルからの引っ越し",
@@ -13332,8 +13336,8 @@
     "en": "Creating Chronicle..."
   },
   "components.memory.ChronicleOfferPanel.text016": {
-    "ja": "この案内を閉じても、作成は背景で続きます。進み具合は記憶画面の Chronicle タブで確かめられます。",
-    "en": "Closing this notice does not stop the job; it continues in the background. You can check its progress in the Chronicle tab of the memory screen."
+    "ja": "次へ進んでも、作成は背景で続きます。進み具合は記憶画面の Chronicle タブで確かめられます。",
+    "en": "Going on does not stop the job; it continues in the background. You can check its progress in the Chronicle tab of the memory screen."
   },
   "components.memory.ChronicleOfferPanel.text017": {
     "ja": "あらすじを作成しました。",
@@ -13348,8 +13352,8 @@
     "en": "Chronicle creation was cancelled."
   },
   "components.memory.ChronicleOfferPanel.text020": {
-    "ja": "閉じる",
-    "en": "Close"
+    "ja": "次へ",
+    "en": "Next"
   },
   "components.memory.ChronicleOfferPanel.text021": {
     "ja": "あらすじの作成を開始できませんでした: {p1}",

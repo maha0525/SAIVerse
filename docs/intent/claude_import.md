@@ -40,7 +40,9 @@ UI にカテゴリ別のドロップ枠と手順ガイドを置き、どの枠�
   (chatgpt_importer の `ConversationRecord`/`ConversationMessage` を共用し、
   下流 (API・取り込みタスク) が取り込み元を区別しなくて済む形に正規化する)。
   API は `api/routes/people/import_claude.py`。UI は `ClaudeImportPanel.tsx`
-  (引っ越しタブの 4 番目のサブタブ)。
+  (取り込み元の選択で「Claude 公式エクスポート」を選ぶと開く、取り込みの
+  専用ウィンドウ ImportFlowModal の② —
+  [import_flow_redesign.md](import_flow_redesign.md))。
 
 ## カテゴリ別の扱い (まはー裁定 2026-10-30)
 
