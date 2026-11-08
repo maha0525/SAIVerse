@@ -3223,10 +3223,6 @@
     "ja": " 件あります",
     "en": " messages"
   },
-  "components.memory.ArasujiViewer.text068": {
-    "ja": "処理を実行中です。",
-    "en": "Processing is in progress."
-  },
   "components.memory.ArasujiViewer.text069": {
     "ja": "前回の処理が完了していません。再実行してください。",
     "en": "The previous operation did not finish. Please run it again."
