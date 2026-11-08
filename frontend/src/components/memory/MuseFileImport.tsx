@@ -58,22 +58,33 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
   const [selectedKinds, setSelectedKinds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [imported, setImported] = useState(false);
+  // これまでに選んだファイル。「ファイルを追加」は選び直しではなく合流で、
+  // 毎回この全体で preview を取り直す (SOUL.md だけ選んだ後に MEMORY.md を
+  // 足せるように)。cache_key は常に最新の preview のものを使う。
+  const [pickedFiles, setPickedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // 直前に成功した preview の cache_key。preview のたびにサーバーへ渡し、
+  // 部分失敗 (プロンプト追記済み・記憶側で失敗) の後に新しいキャッシュが
+  // 作られてもプロンプト追記済みの記録を引き継がせる。「やめる」では消さない
+  // (やめた後の選び直しでも二重追記を防ぐため)。取り込み成功時はサーバー側も
+  // キャッシュを破棄するので null に戻す。
+  const lastCacheKeyRef = useRef<string | null>(null);
 
   const handleFilesSelected = useCallback(async (selectedFiles: FileList | File[]) => {
-    const list = Array.from(selectedFiles);
-    if (list.length === 0) return;
-    // 新しいプレビュー要求を始める時点で以前の候補と選択を無効化する。
-    // 失敗や対象0件のときに古いキャッシュが取り込まれる事故を防ぐため。
-    setPreview(null);
-    setSelectedKinds(new Set());
+    const added = Array.from(selectedFiles);
+    if (added.length === 0) return;
+    // 後に選んだファイルを後ろに並べる: 同じ種別が重なったときは後のものが
+    // 採用される (preview 側の規則) ので、追加 = 差し替えとしても働く。
+    const combined = [...pickedFiles, ...added];
     setBusy(true);
     setResult(null);
     let response: Awaited<ReturnType<typeof previewMuseFiles>>;
     try {
-      response = await previewMuseFiles(personaId, list);
+      response = await previewMuseFiles(personaId, combined, lastCacheKeyRef.current ?? undefined);
     } catch (e) {
-      // 通信の失敗も結果の欄に出して、選び直せる状態に戻す (行き止まりにしない)。
+      // 失敗したら、前の preview と選択をそのまま残して選び直せるようにする
+      // (行き止まりにしない)。表示中の表は前の cache_key と一致したままなので、
+      // このまま取り込んでも表と違うものが入ることはない。
       console.error('Muse file preview failed', e);
       setBusy(false);
       setResult({ type: 'error', message: uiText('components.memory.MuseImportPanel.text050') });
@@ -81,20 +92,18 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
     }
     setBusy(false);
     const { ok, data } = response;
-    if (!ok || !('cache_key' in data)) {
+    if (!ok || !('cache_key' in data) || data.total_count === 0 || !data.cache_key) {
       setResult({ type: 'error', message: uiText('components.memory.MuseImportPanel.text050') });
       return;
     }
-    if (data.total_count === 0 || !data.cache_key) {
-      setResult({ type: 'error', message: uiText('components.memory.MuseImportPanel.text050') });
-      return;
-    }
+    lastCacheKeyRef.current = data.cache_key;
+    setPickedFiles(combined);
     setPreview(data);
     const kinds = data.files
       .map((file) => file.kind)
       .filter((kind): kind is string => kind !== null);
     setSelectedKinds(new Set(kinds));
-  }, [personaId]);
+  }, [personaId, pickedFiles]);
 
   const toggleKind = (kind: string) => {
     setSelectedKinds((prev) => {
@@ -107,6 +116,7 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
   const cancelPreview = () => {
     setPreview(null);
     setSelectedKinds(new Set());
+    setPickedFiles([]);
   };
 
   const execute = async () => {
@@ -142,6 +152,8 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
     });
     setPreview(null);
     setSelectedKinds(new Set());
+    setPickedFiles([]);
+    lastCacheKeyRef.current = null;
     setImported(true);
     onImportComplete?.();
   };
@@ -228,6 +240,14 @@ export function MuseFileImportView({ state }: { state: MuseFileImportState }) {
               disabled={busy}
             >
               {uiText('components.memory.MuseImportPanel.text049')}
+            </button>
+            <button
+              data-i18n="components.memory.MuseFileImport.addFiles"
+              className={styles.cancelButton}
+              onClick={state.openPicker}
+              disabled={busy}
+            >
+              {uiText('components.memory.MuseFileImport.addFiles')}
             </button>
             <button
               data-i18n="components.memory.MuseImportPanel.text048"

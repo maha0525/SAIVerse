@@ -11,7 +11,7 @@ AGENTS.md を個別に受け取り、システムプロンプト追記・コア�
 同期で取り込む (preview で判定結果を持ち、import で書く)。
 設計: docs/intent/muse_export_import.md
 """
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from api.deps import get_manager
 from api.file_safety import safe_upload_suffix, write_upload_bounded
 from .models import (
@@ -528,6 +528,7 @@ def get_muse_import_status(persona_id: str, manager = Depends(get_manager)):
 async def preview_muse_files(
     persona_id: str,
     files: List[UploadFile] = File(...),
+    prior_cache_key: Optional[str] = Form(None),
     manager = Depends(get_manager),
 ):
     """SOUL / IDENTITY / MEMORY / AGENTS の個別アップロードを判定する。
@@ -535,6 +536,9 @@ async def preview_muse_files(
     ファイル名 (ベース名、大小文字は不問) で種別を決め、MEMORY.md はその場で
     コア記憶の項目へ分割して件数を返す。判定できないファイルは対象外として
     一覧に残すだけ。同じ種別が複数来たら最後のファイルを採用する。
+    prior_cache_key (直前の preview の cache_key、任意) が同じペルソナの
+    キャッシュを指していれば、その applied_prompt_kinds を引き継ぐ。存在しない・
+    別ペルソナの鍵は無視する。
     """
     ensure_persona_exists(persona_id, manager)
 
@@ -596,11 +600,19 @@ async def preview_muse_files(
     if not parsed:
         return MuseFilePreviewResponse(files=preview_files, cache_key="", total_count=0)
 
+    # 部分失敗 (プロンプト追記済み・記憶側で失敗) の後の「ファイルを追加」や
+    # 選び直しが新しいキャッシュを作っても、プロンプト追記の二重適用を防ぐため、
+    # 直前のキャッシュの適用済み種別を引き継ぐ。
+    applied_prompt_kinds: List[str] = []
+    prior = _muse_file_cache.get(prior_cache_key) if prior_cache_key else None
+    if prior and prior.get("persona_id") == persona_id:
+        applied_prompt_kinds = list(prior.get("applied_prompt_kinds", []))
+
     cache_key = str(uuid.uuid4())
     _muse_file_cache[cache_key] = {
         "persona_id": persona_id,
         "files": parsed,
-        "applied_prompt_kinds": [],
+        "applied_prompt_kinds": applied_prompt_kinds,
     }
     return MuseFilePreviewResponse(
         files=preview_files,
