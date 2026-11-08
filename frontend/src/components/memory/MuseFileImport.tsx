@@ -63,6 +63,12 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
   // 足せるように)。cache_key は常に最新の preview のものを使う。
   const [pickedFiles, setPickedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // 直前に成功した preview の cache_key。preview のたびにサーバーへ渡し、
+  // 部分失敗 (プロンプト追記済み・記憶側で失敗) の後に新しいキャッシュが
+  // 作られてもプロンプト追記済みの記録を引き継がせる。「やめる」では消さない
+  // (やめた後の選び直しでも二重追記を防ぐため)。取り込み成功時はサーバー側も
+  // キャッシュを破棄するので null に戻す。
+  const lastCacheKeyRef = useRef<string | null>(null);
 
   const handleFilesSelected = useCallback(async (selectedFiles: FileList | File[]) => {
     const added = Array.from(selectedFiles);
@@ -74,7 +80,7 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
     setResult(null);
     let response: Awaited<ReturnType<typeof previewMuseFiles>>;
     try {
-      response = await previewMuseFiles(personaId, combined);
+      response = await previewMuseFiles(personaId, combined, lastCacheKeyRef.current ?? undefined);
     } catch (e) {
       // 失敗したら、前の preview と選択をそのまま残して選び直せるようにする
       // (行き止まりにしない)。表示中の表は前の cache_key と一致したままなので、
@@ -90,6 +96,7 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
       setResult({ type: 'error', message: uiText('components.memory.MuseImportPanel.text050') });
       return;
     }
+    lastCacheKeyRef.current = data.cache_key;
     setPickedFiles(combined);
     setPreview(data);
     const kinds = data.files
@@ -146,6 +153,7 @@ export function useMuseFileImport(personaId: string, onImportComplete?: () => vo
     setPreview(null);
     setSelectedKinds(new Set());
     setPickedFiles([]);
+    lastCacheKeyRef.current = null;
     setImported(true);
     onImportComplete?.();
   };

@@ -541,6 +541,75 @@ def test_files_import_retry_with_changed_selection_appends_new_kind(
     assert file_manager._system_prompt.count(IDENTITY_TEXT.strip()) == 1
 
 
+def _post_soul_memory_preview(client: TestClient, prior_cache_key: str | None = None):
+    files = [
+        ("files", ("SOUL.md", SOUL_TEXT.encode("utf-8"), "text/markdown")),
+        ("files", ("MEMORY.md", MEMORY_TEXT.encode("utf-8"), "text/markdown")),
+    ]
+    data = {"prior_cache_key": prior_cache_key} if prior_cache_key is not None else None
+    return client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files/preview",
+        files=files,
+        data=data,
+    )
+
+
+def test_files_preview_with_prior_cache_key_carries_applied_prompt_kinds(
+    file_client, file_manager, monkeypatch
+):
+    """部分失敗の後に preview を取り直しても (「ファイルを追加」)、プロンプトは二重追記されない。"""
+    first_preview = _post_soul_memory_preview(file_client)
+    assert first_preview.status_code == 200
+    first_key = first_preview.json()["cache_key"]
+
+    def failing_add(conn, contents):
+        raise RuntimeError("simulated memory failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(import_muse, "_add_core_memory_items", failing_add)
+        first = file_client.post(
+            f"/api/people/{PERSONA_ID}/import/muse/files",
+            json={"cache_key": first_key, "kinds": []},
+        )
+    assert first.status_code == 500
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+
+    # 同じファイル一式で、前の cache_key を付けて preview を取り直す。
+    second_preview = _post_soul_memory_preview(file_client, prior_cache_key=first_key)
+    assert second_preview.status_code == 200
+    second_key = second_preview.json()["cache_key"]
+    assert second_key != first_key
+    assert import_muse._muse_file_cache[second_key]["applied_prompt_kinds"] == ["soul"]
+
+    second = file_client.post(
+        f"/api/people/{PERSONA_ID}/import/muse/files",
+        json={"cache_key": second_key, "kinds": []},
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["success"] is True
+    assert body["core_created"] == 4
+    assert file_manager._system_prompt.count(SOUL_TEXT.strip()) == 1
+
+    from sai_memory.core_memory import list_core_memories
+    from saiverse_memory import SAIMemoryAdapter
+
+    adapter = SAIMemoryAdapter(PERSONA_ID)
+    try:
+        assert len(list_core_memories(adapter.conn)) == 4
+    finally:
+        adapter.close()
+
+
+def test_files_preview_ignores_unknown_prior_cache_key(file_client):
+    """存在しない prior_cache_key は無視され、preview は普通に成功する。"""
+    res = _post_soul_memory_preview(file_client, prior_cache_key="no-such-cache")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total_count"] == 2
+    assert import_muse._muse_file_cache[body["cache_key"]]["applied_prompt_kinds"] == []
+
+
 SOUL_TEXT_WITH_NOTE = """> **About this file.** This is a fictional persona note.
 > It explains how the file works. This note is not part of the file.
 

@@ -111,9 +111,11 @@ export async function importMuse(personaId: string, request: MuseImportRequest):
 export async function previewMuseFiles(
   personaId: string,
   files: File[],
+  priorCacheKey?: string,
 ): Promise<{ ok: boolean; data: MuseFilePreviewData | { detail?: string } }> {
   const formData = new FormData();
   for (const file of files) formData.append('files', file);
+  if (priorCacheKey) formData.append('prior_cache_key', priorCacheKey);
   const res = await apiFetch(`/api/people/${personaId}/import/muse/files/preview`, { method: 'POST', body: formData });
   return { ok: res.ok, data: await parseJson(res) };
 }
