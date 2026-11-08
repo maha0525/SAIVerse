@@ -123,6 +123,15 @@
     text-align: left;
 }
 
+/* Muse のファイル取り込みステップ: プレビューの表と結果は左揃えにする
+   (囲みの embeddingDialog は中央揃え)。 */
+.museFilesDetail {
+    text-align: left;
+    margin: 0 0 1.5rem 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .summaryLine {
     margin: 0.5rem 0 0 0;
     color: #ccc;

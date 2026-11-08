@@ -18,7 +18,9 @@ import { ImportStartRequest, MusePreviewData } from './types';
  * Muse の「Download your agent data」で取得した EYI_Package の ZIP から
  * 会話を選び、onStart で取り込みを ImportFlowModal に渡す。Muse のエクスポートには
  * SOUL・長期記憶・アイコンは含まれず、ワークスペースファイルはメタデータだけを扱う。
- * SOUL.md などの個別ファイルの取り込みは MuseFileMigrationPanel (メモリー画面) にある。
+ * SOUL.md などの個別ファイルの取り込みは、会話の取り込みの後に ImportFlowModal の
+ * 必須二択ステップ (muse-files) で出る。あとから取り込む口は MuseFileMigrationPanel
+ * (メモリー画面) にあり、どちらも MuseFileImport.tsx を共有する。
  * 設計: docs/intent/muse_export_import.md, docs/intent/import_flow_redesign.md
  */
 

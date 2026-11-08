@@ -9,8 +9,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal, PackageOpen } from 'lucide-react';
 import styles from './PersonaWizard.module.css';
 import ImportFlowModal from './memory/ImportFlowModal';
-import ImportSourcePicker from './memory/ImportSourcePicker';
-import { ImportSource } from './memory/types';
+import ImportSourcePicker, { importSourceName } from './memory/ImportSourcePicker';
+import { ImportFlowSummary, ImportSource } from './memory/types';
 import PersonaPackResult, { PersonaPackImportResult } from './memory/PersonaPackResult';
 import ModalOverlay from './common/ModalOverlay';
 import SettingsModal from './SettingsModal';
@@ -86,6 +86,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
 
     // ステップ 2 で選んだ取り込み元。null でないあいだ ImportFlowModal を開く
     const [importSource, setImportSource] = useState<ImportSource | null>(null);
+    // ステップ 2 で⑥まで終えた取り込みの実績。1 件以上あれば「取り込まない」の
+    // 代わりに「取り込みを終える」を出す (docs/intent/import_flow_redesign.md「複数の取り込み」)
+    const [importedItems, setImportedItems] = useState<ImportFlowSummary[]>([]);
 
     // Reset on open
     useEffect(() => {
@@ -101,6 +104,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setShowSettings(false);
             setPackResult(null);
             setImportSource(null);
+            setImportedItems([]);
             loadCities();
             loadTakenIds();
         }
@@ -249,6 +253,10 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 setCreatedPersonaId(personaId);
                 setCreatedRoomId(roomId);
             }
+            // 「戻る」から作り直すと作成先のペルソナが変わるので、前のペルソナの
+            // 取り込み実績と開きかけの取り込み元をここで空にする
+            setImportedItems([]);
+            setImportSource(null);
             setStep(2);
         } catch (e) {
             console.error('Failed to create persona', e);
@@ -283,6 +291,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setName(result.persona_name || result.persona_id || '');
             setCreatedPersonaId(result.persona_id ?? null);
             setCreatedRoomId(result.room_id ?? null);
+            // こちらも作成先が変わるので、前のペルソナの取り込み実績を持ち越さない
+            setImportedItems([]);
+            setImportSource(null);
             setPackResult(result);
             setStep(3);
         } catch (err) {
@@ -403,23 +414,61 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         </>
     );
 
-    // ステップ 2 は過去ログ取り込みの①だけを置き、②〜⑥は ImportFlowModal が持つ
-    // (docs/intent/import_flow_redesign.md)。⑥まで終えたらステップ 3 へ進む。
+    // 実績一覧の 1 行: 取り込み元の表示名 — 件数 (件数が無い取り込みは⑥の文)。
+    // Muse の流れでファイルも取り込んだ回には短い付記を足す。
+    const importedItemText = (item: ImportFlowSummary): string => {
+        const detail = typeof item.conversations === 'number' && typeof item.messages === 'number'
+            ? uiText("components.PersonaWizard.importedCounts", { p1: item.conversations, p2: item.messages })
+            : item.message;
+        const parts = [importSourceName(item.source)];
+        if (detail) parts.push(detail);
+        const line = parts.join(uiText("components.PersonaWizard.importedSeparator"));
+        return item.museFilesImported
+            ? `${line}${uiText("components.PersonaWizard.importedMuseFilesNote")}`
+            : line;
+    };
+
+    // ステップ 2 は過去ログ取り込みの①と実績一覧を置くハブで、②〜⑥は
+    // ImportFlowModal が持つ (docs/intent/import_flow_redesign.md)。⑥で閉じたら
+    // ①へ戻って実績を積み、何回でも取り込める。ステップ 3 へ進むのは、0 件のときの
+    // 「取り込まない」カードか、1 件以上のときの「取り込みを終える」ボタンだけ (不変条件 5)。
     const renderStep2 = () => (
         <div className={styles.importStep}>
             <h3 data-i18n="components.PersonaWizard.text015">{uiText("components.PersonaWizard.text015")}</h3>
             <p data-i18n="components.PersonaWizard.text016">{uiText("components.PersonaWizard.text016")}</p>
+            {importedItems.length > 0 && (
+                <div className={styles.importedList}>
+                    <div data-i18n="components.PersonaWizard.importedHeading" className={styles.importedHeading}>{uiText("components.PersonaWizard.importedHeading")}</div>
+                    <ul>
+                        {importedItems.map((item, idx) => (
+                            <li key={idx} className={styles.importedItem}>
+                                <CheckCircle size={16} className={styles.importedIcon} />
+                                <span>{importedItemText(item)}</span>
+                            </li>
+                        ))}
+                    </ul>
+                    <div className={styles.importedActions}>
+                        <button data-i18n="components.PersonaWizard.finishImport" className={styles.nextButton} onClick={() => setStep(3)}>
+                            {uiText("components.PersonaWizard.finishImport")}<ArrowRight size={16} />
+                        </button>
+                    </div>
+                    <p data-i18n="components.PersonaWizard.importMoreHint" className={styles.importedHint}>{uiText("components.PersonaWizard.importMoreHint")}</p>
+                </div>
+            )}
             {createdPersonaId && (
                 <>
-                    <ImportSourcePicker onSelect={setImportSource} onSkip={() => setStep(3)} />
+                    <ImportSourcePicker
+                        onSelect={setImportSource}
+                        onSkip={importedItems.length === 0 ? () => setStep(3) : undefined}
+                    />
                     {importSource && (
                         <ImportFlowModal
                             key={importSource}
                             personaId={createdPersonaId}
                             source={importSource}
-                            onClose={(finished) => {
+                            onClose={(finished, summary) => {
                                 setImportSource(null);
-                                if (finished) setStep(3);
+                                if (finished && summary) setImportedItems((prev) => [...prev, summary]);
                             }}
                         />
                     )}

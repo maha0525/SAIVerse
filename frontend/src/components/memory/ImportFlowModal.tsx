@@ -20,10 +20,12 @@ import importStyles from './MemoryImport.module.css';
 import { importSourceName } from './ImportSourcePicker';
 import { MemoryImportForm } from './MemoryImportForm';
 import { MemoryImportProgress } from './MemoryImportProgress';
+import { MuseFileImportView, useMuseFileImport } from './MuseFileImport';
 import MuseImportPanel from './MuseImportPanel';
 import { formatProgress, formatThreadDateRange, sortThreadsByLastActivity } from './formatters';
 import {
-  ImportDirectResult, ImportSource, ImportStartRequest, MemoryImportProgress as ImportProgressData, ThreadSummary,
+  ImportDirectResult, ImportFlowSummary, ImportSource, ImportStartRequest, MemoryImportProgress as ImportProgressData,
+  ThreadSummary,
 } from './types';
 
 /**
@@ -33,6 +35,8 @@ import {
  *   input        step 2: the source's own upload / selection screen
  *   importing    step 3: the import runs (status polling)
  *   thread-select     : which thread to continue from, when several exist
+ *   muse-files        : Muse only — import SOUL / IDENTITY / MEMORY / AGENTS
+ *                       or not (two buttons; 不変条件 6)
  *   embedding    step 4: create embeddings or not (two buttons, nothing else)
  *   chronicle    step 5: create a Chronicle or not (ChronicleOfferPanel)
  *   done         step 6: summary and the close button
@@ -44,7 +48,7 @@ import {
  * embeds the messages that have no vector.
  */
 
-type FlowStep = 'input' | 'importing' | 'thread-select' | 'embedding' | 'chronicle' | 'done';
+type FlowStep = 'input' | 'importing' | 'thread-select' | 'muse-files' | 'embedding' | 'chronicle' | 'done';
 
 type EmbeddingState =
   | { kind: 'none' }
@@ -58,13 +62,32 @@ const POLL_INTERVAL_MS = 1000;
 // 連続でこの回数、状態の問い合わせに失敗したら追跡を止める (ChronicleOfferPanel と同じ考え方)。
 const MAX_POLL_FAILURES = 8;
 
-const STAGES: FlowStep[][] = [['input'], ['importing', 'thread-select'], ['embedding'], ['chronicle'], ['done']];
+// 段階表示の段。Muse のときだけ取り込みと④の間に「ファイル」の段が入る
+// (docs/intent/import_flow_redesign.md「Muse のファイル取り込み」)。
+function stagesFor(source: ImportSource): { steps: FlowStep[]; label: string }[] {
+  const stages: { steps: FlowStep[]; label: string }[] = [
+    { steps: ['input'], label: uiText('components.memory.ImportFlowModal.stageFiles') },
+    { steps: ['importing', 'thread-select'], label: uiText('components.memory.ImportFlowModal.stageImport') },
+  ];
+  if (source === 'muse') {
+    stages.push({ steps: ['muse-files'], label: uiText('components.memory.ImportFlowModal.stageMuseFiles') });
+  }
+  stages.push(
+    { steps: ['embedding'], label: uiText('components.memory.ImportFlowModal.stageEmbedding') },
+    { steps: ['chronicle'], label: uiText('components.memory.ImportFlowModal.stageChronicle') },
+    { steps: ['done'], label: uiText('components.memory.ImportFlowModal.stageDone') },
+  );
+  return stages;
+}
 
 export default function ImportFlowModal({ personaId, source, onClose, onImportComplete }: {
   personaId: string;
   source: ImportSource;
-  /** finished is true when the flow reached step 6, false for a cancel before the import. */
-  onClose: (finished: boolean) => void;
+  /**
+   * finished is true when the flow reached step 6, false for a cancel before
+   * the import. summary is given only when finished is true.
+   */
+  onClose: (finished: boolean, summary?: ImportFlowSummary) => void;
   /** Called once conversations (or Claude memories) are stored. */
   onImportComplete?: () => void;
 }) {
@@ -81,10 +104,17 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
   const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [embedding, setEmbedding] = useState<EmbeddingState>({ kind: 'none' });
   const [directResult, setDirectResult] = useState<ImportDirectResult | null>(null);
+  // ⑥に出す件数。閉じるときに要約として親 (PersonaWizard の実績一覧) へ返す。
+  const [importCounts, setImportCounts] = useState<{ conversations: number; messages: number } | null>(null);
   const mountedRef = useRef(true);
   const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const onImportCompleteRef = useRef(onImportComplete);
   useEffect(() => { onImportCompleteRef.current = onImportComplete; }, [onImportComplete]);
+  // Muse の流れのファイル取り込み (SOUL / IDENTITY / MEMORY / AGENTS)。
+  // コールバックはこのファイルの他の経路と同じく ref 経由で最新を呼ぶ。取り込みが
+  // 成功すると goAfterImport の分とで onImportComplete が 2 回呼ばれるが、どちらも
+  // 「記憶が増えたので読み直してよい」の合図であり、2 回目も正しい。
+  const museFiles = useMuseFileImport(personaId, () => onImportCompleteRef.current?.());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -102,7 +132,20 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
   };
 
   const closable = step === 'input' || step === 'done';
-  const requestClose = () => { if (closable) onClose(step === 'done'); };
+
+  const buildSummary = (): ImportFlowSummary => ({
+    source,
+    conversations: importCounts?.conversations,
+    messages: importCounts?.messages,
+    message: directResult?.message || importSummary || '',
+    museFilesImported: museFiles.imported,
+  });
+
+  const requestClose = () => {
+    if (!closable) return;
+    if (step === 'done') onClose(true, buildSummary());
+    else onClose(false);
+  };
 
   // ③以降は閉じられない設計 (不変条件 1) なので、Tab キーでフォーカスが背後の
   // 画面 (PersonaWizard のカードなど) へ抜けて別の操作が走らないよう、
@@ -143,9 +186,12 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
     return data.message || uiText('components.memory.ImportFlowModal.importDone');
   };
 
-  const goEmbedding = () => {
+  // ③ (とスレッド選択) の次へ。Muse のときはファイル取り込みの二択を④の前に挟む
+  // — AGENTS.md から作る Memopedia のページも④のエンベディング作成で拾えるように
+  // (docs/intent/import_flow_redesign.md「Muse のファイル取り込み」、不変条件 6)。
+  const goAfterImport = () => {
     onImportCompleteRef.current?.();
-    setStep('embedding');
+    setStep(source === 'muse' ? 'muse-files' : 'embedding');
   };
 
   // 追跡不能 (importUntracked) から「次へ」で進むときもスレッド設定を試せるよう、
@@ -154,11 +200,14 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
 
   const afterImport = async (request: ImportStartRequest, data: ImportProgressData) => {
     setImportSummary(summarize(data));
+    if (typeof data.conversations === 'number' && typeof data.messages === 'number') {
+      setImportCounts({ conversations: data.conversations, messages: data.messages });
+    }
     await threadStep(request);
   };
 
   const threadStep = async (request: ImportStartRequest) => {
-    if (!request.selectThread) { goEmbedding(); return; }
+    if (!request.selectThread) { goAfterImport(); return; }
     try {
       const threadList = sortThreadsByLastActivity(await fetchThreads(personaId));
       if (!mountedRef.current) return;
@@ -166,18 +215,18 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
         await activateThread(personaId, threadList[0].thread_id);
         if (!mountedRef.current) return;
         setThreadNote(uiText('components.memory.ImportFlowModal.threadAutoActivated'));
-        goEmbedding();
+        goAfterImport();
       } else if (threadList.length > 1) {
         setThreads(threadList);
         setSelectedThreadId(threadList[0].thread_id);
         setStep('thread-select');
       } else {
-        goEmbedding();
+        goAfterImport();
       }
     } catch (e) {
       // スレッドの設定に失敗しても取り込みは済んでいるので、④へ進める。
       console.error('Failed to set the thread after import', e);
-      if (mountedRef.current) goEmbedding();
+      if (mountedRef.current) goAfterImport();
     }
   };
 
@@ -219,7 +268,7 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
   // 取り込まれた分がエンベディングから漏れるので、先に終了状態を確かめ直す。
   const resumeFromUntracked = async () => {
     const request = activeRequestRef.current;
-    if (!request) { goEmbedding(); return; }
+    if (!request) { goAfterImport(); return; }
     setImportUntracked(false);
     let data: ImportProgressData;
     try {
@@ -278,7 +327,7 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
     } finally {
       if (mountedRef.current) setThreadBusy(false);
     }
-    if (mountedRef.current) goEmbedding();
+    if (mountedRef.current) goAfterImport();
   };
 
   // ---- step 4: embedding ----
@@ -439,7 +488,7 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
         );
       })}</div>
       <div className={importStyles.actions}>
-        <button data-i18n="components.memory.MemoryImportForm.text004" className={importStyles.cancelButton} onClick={goEmbedding} disabled={threadBusy}>{uiText('components.memory.MemoryImportForm.text004')}</button>
+        <button data-i18n="components.memory.MemoryImportForm.text004" className={importStyles.cancelButton} onClick={goAfterImport} disabled={threadBusy}>{uiText('components.memory.MemoryImportForm.text004')}</button>
         <button data-i18n="components.memory.MemoryImportForm.text005" className={importStyles.importButton} onClick={() => void confirmThread()} disabled={!selectedThreadId || threadBusy}>
           {threadBusy ? <Loader2 size={16} className={importStyles.loader} /> : null}
           {uiText('components.memory.MemoryImportForm.text005')}
@@ -468,6 +517,57 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
     </div>
   );
 
+  // Muse だけの必須二択: SOUL / IDENTITY / MEMORY / AGENTS を取り込むか。
+  // 押す以外に先へ進む方法は無く、ウィンドウも閉じられない (closable に含めない)。
+  // preview / 実行はメモリー画面の「ファイルからの引っ越し」と同じ MuseFileImport を使う。
+  // 失敗はこの中に出し、選び直すか「あとで」で④へ進める (行き止まりにしない)。
+  const renderMuseFiles = () => (
+    <div className={importStyles.embeddingDialog}>
+      {importSummary && (
+        <div className={`${importStyles.result} ${importStyles.success} ${styles.stepSummary}`}>
+          <CheckCircle size={16} />
+          <span>{importSummary}</span>
+        </div>
+      )}
+      <h3 data-i18n="components.memory.ImportFlowModal.museFilesTitle">{uiText('components.memory.ImportFlowModal.museFilesTitle')}</h3>
+      <p data-i18n="components.memory.ImportFlowModal.museFilesBody" className={styles.stepBody}>{uiText('components.memory.ImportFlowModal.museFilesBody')}</p>
+      <p data-i18n="components.memory.ImportFlowModal.museFilesLaterNote" className={styles.stepBody}>{uiText('components.memory.ImportFlowModal.museFilesLaterNote')}</p>
+      <div className={styles.museFilesDetail}>
+        <MuseFileImportView state={museFiles} />
+      </div>
+      <div className={importStyles.dialogActions}>
+        {museFiles.imported ? (
+          <button
+            data-i18n="components.memory.ImportFlowModal.next"
+            className={importStyles.importButton}
+            onClick={() => setStep('embedding')}
+            disabled={museFiles.busy}
+          >{uiText('components.memory.ImportFlowModal.next')}</button>
+        ) : (
+          <>
+            <button
+              data-i18n="components.memory.MemoryImportForm.text007"
+              className={importStyles.cancelButton}
+              onClick={() => setStep('embedding')}
+              disabled={museFiles.busy}
+            >{uiText('components.memory.MemoryImportForm.text007')}</button>
+            {!museFiles.preview && (
+              <button
+                data-i18n="components.memory.ImportFlowModal.museFilesImport"
+                className={importStyles.importButton}
+                onClick={museFiles.openPicker}
+                disabled={museFiles.busy}
+              >
+                {museFiles.busy ? <Loader2 size={16} className={importStyles.loader} /> : null}
+                {uiText('components.memory.ImportFlowModal.museFilesImport')}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   const renderChronicle = () => (
     <>
       <ChronicleOfferPanel personaId={personaId} onDone={() => setStep('done')} />
@@ -482,12 +582,13 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
       {importSummary && <p className={styles.summaryLine}>{importSummary}</p>}
       {threadNote && <p className={styles.summaryLine}>{threadNote}</p>}
       {directResult && <p className={styles.summaryLine}>{directResult.message}</p>}
+      {museFiles.imported && museFiles.result?.type === 'success' && <p className={styles.summaryLine}>{museFiles.result.message}</p>}
       {embeddingLine()}
       {embedding.kind === 'running' && (
         <p data-i18n="components.memory.ImportFlowModal.embeddingBackground" className={styles.footNote}>{uiText('components.memory.ImportFlowModal.embeddingBackground')}</p>
       )}
       <div className={importStyles.actions}>
-        <button data-i18n="components.memory.ImportFlowModal.close" className={importStyles.importButton} onClick={() => onClose(true)}>{uiText('components.memory.ImportFlowModal.close')}</button>
+        <button data-i18n="components.memory.ImportFlowModal.close" className={importStyles.importButton} onClick={() => onClose(true, buildSummary())}>{uiText('components.memory.ImportFlowModal.close')}</button>
       </div>
     </div>
   );
@@ -505,20 +606,16 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
           </>
         );
       case 'thread-select': return renderThreadSelect();
+      case 'muse-files': return renderMuseFiles();
       case 'embedding': return renderEmbedding();
       case 'chronicle': return renderChronicle();
       case 'done': return renderDone();
     }
   };
 
-  const stageIndex = STAGES.findIndex((group) => group.includes(step));
-  const stageLabels = [
-    uiText('components.memory.ImportFlowModal.stageFiles'),
-    uiText('components.memory.ImportFlowModal.stageImport'),
-    uiText('components.memory.ImportFlowModal.stageEmbedding'),
-    uiText('components.memory.ImportFlowModal.stageChronicle'),
-    uiText('components.memory.ImportFlowModal.stageDone'),
-  ];
+  const stages = stagesFor(source);
+  const stageIndex = stages.findIndex((group) => group.steps.includes(step));
+  const stageLabels = stages.map((group) => group.label);
 
   return (
     <ModalOverlay onClose={requestClose} className={styles.overlay}>
