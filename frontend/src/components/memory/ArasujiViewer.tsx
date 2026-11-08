@@ -936,8 +936,13 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 {/* 被覆補修の案内 (§16-2: 押すタイミングが分かる可視化)。
                     件数は cost-estimate (止め線適用後) — 0 なら何も出さない。
                     未編纂ゼロでもまとめ (consolidation_calls) が残っていれば
-                    出す — 実行は同じ mode: 'repair' でバックエンドが拾う。 */}
-                {repairEstimate && (repairEstimate.unprocessed_messages >= 1 || (repairEstimate.consolidation_calls ?? 0) >= 1 || repairEstimate.repair_incomplete) && (
+                    出す — 実行は同じ mode: 'repair' でバックエンドが拾う。
+                    生成・補修の走行中は帯ごと出さない — 件数はタブを開いた瞬間の
+                    数で、走行中はまさに減っていく途中なので、進捗表示と並ぶと
+                    矛盾した警告に見える (2026-11-08 まはーの実機)。終了時に
+                    loadRepairEstimate が数え直すので、残りがあればそこで出る。
+                    開始の入口がこの帯ごと消えるため、走行中の並走防御も兼ねる。 */}
+                {repairEstimate && !isGenerationBusy && (repairEstimate.unprocessed_messages >= 1 || (repairEstimate.consolidation_calls ?? 0) >= 1 || repairEstimate.repair_incomplete) && (
                     <div className={styles.repairBanner}>
                         <span className={styles.repairBannerText}>
                             {repairEstimate.unprocessed_messages >= 1 && (
@@ -954,22 +959,17 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {repairEstimate.repair_incomplete && (
                                 <>
                                     {(repairEstimate.unprocessed_messages >= 1 || (repairEstimate.consolidation_calls ?? 0) >= 1) && <br />}
-                                    {/* 未完了の印はジョブ開始時に置かれ完了時に外れるので、
-                                        走行中は「放置された未完了」ではない — 再実行を
-                                        促すのは止まっているときだけ (2026-09-01 実機指摘)。 */}
-                                    {isGenerationBusy
-                                        ? uiText("components.memory.ArasujiViewer.text068")
-                                        : uiText("components.memory.ArasujiViewer.text069")}
+                                    {/* 走行中はこの帯ごと出ないので、ここに来るのは
+                                        止まっている未完了だけ — 再実行を促してよい
+                                        (2026-09-01 実機指摘の走行中文言は、帯の
+                                        非表示化 2026-11-08 で役目を終えた)。 */}
+                                    {uiText("components.memory.ArasujiViewer.text069")}
                                 </>
                             )}
                         </span>
                         <button data-i18n="components.memory.ArasujiViewer.text070 components.memory.ArasujiViewer.text071"
                             className={styles.repairBannerBtn}
                             onClick={() => setShowRepairModal(true)}
-                            // pending (ポーリングが backend 状態を写す最大 2 秒) と
-                            // cancelling も塞ぐ — claim なしジョブの並走防御は
-                            // この無効化だけなので、進行中の状態を全部覆う。
-                            disabled={isGenerationBusy}
                             title={uiText("components.memory.ArasujiViewer.text070")}
                         >{uiText("components.memory.ArasujiViewer.text071")}</button>
                     </div>
