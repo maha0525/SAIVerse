@@ -10,6 +10,7 @@
 
 .modal {
     width: min(960px, 100%);
+    outline: none; /* フォーカスの閉じ込め先 (tabIndex=-1) なので枠線は出さない */
     background-color: #1e1f22;
     color: #e0e0e0;
     border: 1px solid #333;

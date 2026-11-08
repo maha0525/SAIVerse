@@ -104,6 +104,36 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
   const closable = step === 'input' || step === 'done';
   const requestClose = () => { if (closable) onClose(step === 'done'); };
 
+  // ③以降は閉じられない設計 (不変条件 1) なので、Tab キーでフォーカスが背後の
+  // 画面 (PersonaWizard のカードなど) へ抜けて別の操作が走らないよう、
+  // フォーカスをこのウィンドウの中に閉じ込める。
+  const modalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    modalRef.current?.focus();
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const root = modalRef.current;
+      if (!root) return;
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((el) => el.offsetParent !== null);
+      if (focusables.length === 0) { e.preventDefault(); root.focus(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !root.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault(); first.focus();
+      } else if (e.shiftKey && (active === first || active === root)) {
+        e.preventDefault(); last.focus();
+      }
+    };
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, []);
+
   // ---- step 3: import ----
 
   const summarize = (data: ImportProgressData): string => {
@@ -165,20 +195,44 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
           return;
         }
         if (!mountedRef.current) return;
-        if (data.running) {
-          setImportProgress(request.formatRunning
-            ? request.formatRunning(data)
-            : formatProgress(data.message, data.progress, data.total));
-          pollImport(request, 0);
-          return;
-        }
-        setImportProgress(null);
-        if (data.success) { await afterImport(request, data); return; }
-        // 失敗: 取り込みは完了していないので②へ戻し、閉じられる状態にする。
-        setInputError(request.failureMessage(data));
-        setStep('input');
+        await applyImportStatus(request, data);
       })();
     }, POLL_INTERVAL_MS);
+  };
+
+  const applyImportStatus = async (request: ImportStartRequest, data: ImportProgressData) => {
+    if (data.running) {
+      setImportProgress(request.formatRunning
+        ? request.formatRunning(data)
+        : formatProgress(data.message, data.progress, data.total));
+      pollImport(request, 0);
+      return;
+    }
+    setImportProgress(null);
+    if (data.success) { await afterImport(request, data); return; }
+    // 失敗: 取り込みは完了していないので②へ戻し、閉じられる状態にする。
+    setInputError(request.failureMessage(data));
+    setStep('input');
+  };
+
+  // 追跡不能からの「次へ」。取り込みがまだ走っているのに④へ進むと、その後に
+  // 取り込まれた分がエンベディングから漏れるので、先に終了状態を確かめ直す。
+  const resumeFromUntracked = async () => {
+    const request = activeRequestRef.current;
+    if (!request) { goEmbedding(); return; }
+    setImportUntracked(false);
+    let data: ImportProgressData;
+    try {
+      data = await getImportStatus(personaId, request.statusType);
+    } catch (e) {
+      // 再確認も届かないときは、閉じられないウィンドウに閉じ込めないことを優先して
+      // 先へ進む (漏れた分はメモリー画面の「未処理を埋める」で後から補完できる)。
+      console.error('Import status re-check failed', e);
+      if (mountedRef.current) await threadStep(request);
+      return;
+    }
+    if (!mountedRef.current) return;
+    await applyImportStatus(request, data);
   };
 
   const handleStart = async (request: ImportStartRequest) => {
@@ -354,11 +408,7 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
             <button
               data-i18n="components.memory.ImportFlowModal.next"
               className={importStyles.importButton}
-              onClick={() => {
-                // 取り込み自体は済んでいる可能性が高いので、スレッド設定を試してから④へ。
-                const request = activeRequestRef.current;
-                if (request) { void threadStep(request); } else { goEmbedding(); }
-              }}
+              onClick={() => void resumeFromUntracked()}
             >{uiText('components.memory.ImportFlowModal.next')}</button>
           </div>
         </>
@@ -472,7 +522,7 @@ export default function ImportFlowModal({ personaId, source, onClose, onImportCo
 
   return (
     <ModalOverlay onClose={requestClose} className={styles.overlay}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <div className={styles.modal} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" ref={modalRef} tabIndex={-1}>
         <div className={styles.header}>
           <h2 data-i18n="components.memory.ImportFlowModal.title" className={styles.title}>{uiText('components.memory.ImportFlowModal.title', { p1: importSourceName(source) })}</h2>
           {closable && (
