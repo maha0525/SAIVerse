@@ -99,6 +99,53 @@ def _resolve_records(export_file, conversation_ids: list) -> list:
     return records
 
 
+def _strip_muse_file_notes(text: str) -> str:
+    """Muse のファイル形式に付随する説明文を取り除く。
+
+    対象は (1) 「About this file」を含む引用ブロック (末尾の
+    "This note is not part of the file." までがユーザー向けの注記) と
+    (2) HTML コメント。どちらもファイルの使い方を説明する形式側の
+    文言で、ペルソナに取り込む本文ではない。本文の引用や記述には
+    触らないよう、引用ブロックは注記の文言を含む場合だけ落とす。
+    """
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    without_comments = re.sub(r"<!--.*?-->", "", normalized, flags=re.DOTALL)
+
+    lines = without_comments.split("\n")
+    kept: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        if lines[idx].lstrip().startswith(">"):
+            end = idx
+            block: list[str] = []
+            while end < len(lines) and lines[end].lstrip().startswith(">"):
+                block.append(lines[end])
+                end += 1
+            joined = "\n".join(block)
+            if "About this file" in joined or "This note is not part of the file" in joined:
+                idx = end
+                continue
+            kept.extend(block)
+            idx = end
+            continue
+        if lines[idx].strip() == "This note is not part of the file.":
+            idx += 1
+            continue
+        kept.append(lines[idx])
+        idx += 1
+
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+    return cleaned.strip()
+
+
+def _is_heading_only_section(section: dict) -> bool:
+    """見出し行だけで本文が無い節かどうか (ファイル名の H1 など)。"""
+    if section.get("title") is None:
+        return False
+    lines = section["content"].split("\n")
+    return not any(line.strip() for line in lines[1:])
+
+
 def _split_memory_items(text: str) -> list[dict]:
     """MEMORY.md をコア記憶の項目に分割する。
 
@@ -126,7 +173,9 @@ def _split_memory_items(text: str) -> list[dict]:
                 })
 
     if len(sections) >= 2:
-        return sections
+        sections = [s for s in sections if not _is_heading_only_section(s)]
+        if sections:
+            return sections
 
     paragraphs = [
         paragraph.strip()
@@ -521,6 +570,9 @@ async def preview_muse_files(
             entries.append(MuseFilePreviewEntry(filename=filename))
             continue
 
+        # Muse のファイル形式に付随する説明文 (About this file の注記や
+        # HTML コメント) は本文ではないので、取り込み前に取り除く。
+        text = _strip_muse_file_notes(text)
         items = _split_memory_items(text) if kind == "memory" else []
         parsed[kind] = {"filename": filename, "text": text, "items": items}
         entries.append(MuseFilePreviewEntry(
