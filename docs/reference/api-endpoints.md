@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 394（tag グループ: 26）
+**エンドポイント数**: 395（tag グループ: 26）
 
 ## addon
 
@@ -480,7 +480,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 
 | メソッド | パス | 説明 |
 |---|---|---|
-| POST | `/api/world/ais` |  |
+| POST | `/api/world/ais` | ペルソナを作る。 |
+| GET | `/api/world/ais/reserved-ids` | 新しいペルソナに使えない ID のうち、ai 表に行の無いもの。 |
 | PUT | `/api/world/ais/{ai_id}` | ペルソナの設定を保存する。 |
 | DELETE | `/api/world/ais/{ai_id}` |  |
 | POST | `/api/world/ais/{ai_id}/move` |  |

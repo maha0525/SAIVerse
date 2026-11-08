@@ -37,7 +37,7 @@ from manager.background import DatabasePollingMixin
 from manager.history import HistoryMixin
 from manager.blueprints import BlueprintMixin
 from manager.ids import build_identifier, is_valid_identifier
-from manager.persona import PersonaMixin, ai_stem_taken
+from manager.persona import CreationErrorDetail, PersonaMixin, ai_stem_taken
 from manager.visitors import VisitorMixin
 from manager.gateway import GatewayMixin
 from manager.user_state import UserStateMixin
@@ -1961,12 +1961,14 @@ class SAIVerseManager(
                     ruler_stem,
                     stem="ruler",
                     ensure_unique=True,
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
+                    exists=lambda s: ai_stem_taken(
+                        db, s, self.city_name, building_ids, self.saiverse_home,
+                    ),
                 )
             finally:
                 db.close()
 
-        success, message, ai_id, room_id = self._create_persona(
+        success, message, _error, ai_id, room_id = self._create_persona(
             name,
             system_prompt,
             custom_ai_id=ruler_stem,
@@ -2018,8 +2020,12 @@ class SAIVerseManager(
 
     def create_ai(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
-        """Creates a new AI and their private room."""
+    ) -> Tuple[bool, str, Optional[CreationErrorDetail], Optional[str], Optional[str]]:
+        """Creates a new AI and their private room.
+
+        ``(success, message, error, ai_id, room_id)`` を返す (manager/persona.py の
+        ``_create_persona`` と同じ形)。
+        """
         result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id, language=language)
         success = result[0]
         if success:
