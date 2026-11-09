@@ -39,6 +39,7 @@ per-persona Lock を取得してから submit_meta_judgment → run_meta_user �
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
 import threading
 from typing import Any, Dict, Iterator, Optional
@@ -65,6 +66,15 @@ class BeatGateClosedError(Exception):
         super().__init__(message)
         self.persona_id = persona_id
         self.purpose = purpose
+
+
+#: いまの実行の文脈で Beat ロックを握っているペルソナの集合。``hold`` が
+#: 最外周で取ったときに足し、抜けるときに戻す。contextvars なので、
+#: ``sea/tool_wait.py`` がツールのスレッドへ文脈を写すと、そのスレッドからは
+#: 「このツールを呼んだ親が握っているペルソナ」として見える。
+_HELD_BY_THIS_CONTEXT: "contextvars.ContextVar[frozenset]" = contextvars.ContextVar(
+    "beat_gate_held_personas", default=frozenset(),
+)
 
 
 class BeatLockFromToolThreadError(RuntimeError):
@@ -177,9 +187,12 @@ class BeatGate:
             raise ValueError("persona_id is required")
         lock = self._get_lock(persona_id)
         from sea.tool_wait import is_tool_thread
-        if is_tool_thread():
-            # ツールのスレッドで握れないなら、握っているのは完了を待っている
-            # 親 — 待てば永久に固まるので投げる (BeatLockFromToolThreadError)。
+        if is_tool_thread() and persona_id in _HELD_BY_THIS_CONTEXT.get():
+            # このツールを呼んで完了を待っている親が、このペルソナのロックを
+            # 握っている。待てば永久に固まるので、取れなければ投げる
+            # (BeatLockFromToolThreadError)。親と関係のない処理が一時的に
+            # 握っているだけのとき (このペルソナが親の集合に無いとき) は、
+            # 普段どおり待って取る。
             if not lock.acquire(blocking=False):
                 raise BeatLockFromToolThreadError(persona_id, purpose)
         else:
@@ -200,9 +213,16 @@ class BeatGate:
                     depths.pop(persona_id, None)
                     lock.release()
                     raise
+        held_token = None
+        if depth == 1:
+            held_token = _HELD_BY_THIS_CONTEXT.set(
+                _HELD_BY_THIS_CONTEXT.get() | {persona_id}
+            )
         try:
             yield self
         finally:
+            if held_token is not None:
+                _HELD_BY_THIS_CONTEXT.reset(held_token)
             current = self._depth_map().get(persona_id, 0)
             if current > 0:
                 if current == 1:

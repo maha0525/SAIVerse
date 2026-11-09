@@ -383,3 +383,34 @@ def test_hold_beat_from_tool_thread_succeeds_when_lock_is_free():
             return "ok"
 
     assert wait_tool_call_sync(tool_with_beat, {}, cancellation_token=None) == "ok"
+
+
+def test_hold_beat_from_tool_thread_waits_for_an_unrelated_holder():
+    """親が握っていないペルソナのロックは、関係のない処理が一時的に握っていても待って取る (Codex 2 巡目)。"""
+    import types as _types
+
+    from sea.beat_gate import BeatGate
+    from sea.tool_wait import wait_tool_call_sync
+
+    gate = BeatGate(_types.SimpleNamespace())
+    holder_has_lock = threading.Event()
+    release_holder = threading.Event()
+
+    def unrelated_holder():
+        with gate.hold("p3", purpose="unrelated_job"):
+            holder_has_lock.set()
+            release_holder.wait(5)
+
+    holder = threading.Thread(target=unrelated_holder, daemon=True)
+    holder.start()
+    assert holder_has_lock.wait(5)
+    threading.Timer(0.3, release_holder.set).start()
+
+    def tool_with_beat():
+        with gate.hold("p3", purpose="tool"):
+            return "acquired after the unrelated holder released"
+
+    assert wait_tool_call_sync(tool_with_beat, {}, cancellation_token=None) == (
+        "acquired after the unrelated holder released"
+    )
+    holder.join(5)
