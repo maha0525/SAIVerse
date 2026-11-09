@@ -27,6 +27,7 @@ import logging
 from typing import Any, Dict, Tuple, Union
 
 from llm_clients.exceptions import ModelUnavailableError
+from sea.cancellation import ExecutionCancelledException
 from tools.context import (
     get_active_llm_messages,
     get_active_manager,
@@ -165,6 +166,14 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
     # OFF のモデルの列では子は今までどおり自分で実行する。spell ループの外
     # (TOOL ノード・CLI) では None で、子は自分で文脈を組む。
     parent_state.update(get_realtime_spell_handover() or {})
+    # 停止を子まで届ける。親を待っている側が見ている停止の合図を子へ渡すと、
+    # 停止ボタンを押したとき子も自分の区切りで抜け、共有の PulseContext から
+    # 自分の line を外してから戻る (sea/tool_wait.py は、子の line が積まれて
+    # いる間は親を抜けさせずに待つ。docs/intent/stop_button.md)。
+    from sea.tool_wait import current_tool_cancellation_token
+    _stop_token = current_tool_cancellation_token()
+    if _stop_token is not None:
+        parent_state["_cancellation_token"] = _stop_token
 
     LOGGER.info(
         "[run_playbook] Spawning sub-line: persona=%s playbook=%s depth=%d→%d",
@@ -186,6 +195,10 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
     except ModelUnavailableError:
         # 使うモデルが無い・繋げない。エラー文字列にして親へ返すと、止まったことの
         # 知らせがペルソナの記憶に書かれてしまうので、返事ごと止める。
+        raise
+    except ExecutionCancelledException:
+        # 停止で子が抜けた。子の失敗ではないので、エラー文字列に畳まずに親へ
+        # 投げ、親の停止の処理に任せる (docs/intent/stop_button.md)。
         raise
     except Exception as exc:
         LOGGER.exception("[run_playbook] Sub-line execution failed for '%s'", name)

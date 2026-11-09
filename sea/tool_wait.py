@@ -57,6 +57,19 @@ _ABANDONED: "contextvars.ContextVar[Optional[threading.Event]]" = contextvars.Co
 )
 
 
+#: ツールのスレッドの文脈に置く、待つ側が見ている停止の合図
+#: (``CancellationToken``)。子の Playbook を走らせるツール (``run_playbook``)
+#: はこれを子へ渡し、停止を子まで届ける (docs/intent/stop_button.md)。
+_CALL_TOKEN: "contextvars.ContextVar[Optional[CancellationToken]]" = contextvars.ContextVar(
+    "tool_wait_cancellation_token", default=None,
+)
+
+
+def current_tool_cancellation_token() -> Optional[CancellationToken]:
+    """いまのツールを待っている側の停止の合図。ツールの外・合図の無い呼び出しでは None。"""
+    return _CALL_TOKEN.get()
+
+
 def is_tool_thread() -> bool:
     """いまのスレッドが、この関数群がツールを走らせている専用スレッドか。"""
     return threading.current_thread().name.startswith(TOOL_THREAD_NAME_PREFIX)
@@ -76,6 +89,62 @@ def _abandon_reason(token: Optional[CancellationToken]) -> Optional[str]:
     if interrupted_by in ABANDON_INTERRUPTED_BY:
         return interrupted_by
     return None
+
+
+def _entry_line_depth() -> Optional[int]:
+    """呼び出し時点の、共有の PulseContext の line の深さ (無ければ None)。"""
+    try:
+        from tools.context import get_active_pulse_context
+        pulse_ctx = get_active_pulse_context()
+    except Exception:  # noqa: BLE001 — 文脈が無い呼び出しでは深さを見ない
+        return None
+    line_depth = getattr(pulse_ctx, "line_depth", None)
+    if not callable(line_depth):
+        return None
+    return line_depth()
+
+
+def _child_line_running(entry_depth: Optional[int]) -> bool:
+    """このツールが共有の PulseContext に子の line を積んでいる最中か。
+
+    ``run_playbook`` は親と同じ PulseContext に子の line を積んで子を走らせる。
+    その最中に親が待つのをやめて抜けると、親の後始末 (``pop_line``) が子の
+    line を外し、子のその後の記録が親の line に帰属してしまう。子には停止の
+    合図を渡してあるので、子が自分で抜けて line を外すまで待つ。
+    """
+    if entry_depth is None:
+        return False
+    try:
+        from tools.context import get_active_pulse_context
+        pulse_ctx = get_active_pulse_context()
+        return pulse_ctx is not None and pulse_ctx.line_depth() > entry_depth
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _AbandonDecider:
+    """停止の合図を見て、いま待つのをやめるかを決める (呼び出しごとに一つ)。"""
+
+    def __init__(self, token: Optional[CancellationToken], name: str):
+        self._token = token
+        self._name = name
+        self._entry_depth = _entry_line_depth()
+        self._logged_wait = False
+
+    def reason(self) -> Optional[str]:
+        reason = _abandon_reason(self._token)
+        if reason is None:
+            return None
+        if _child_line_running(self._entry_depth):
+            if not self._logged_wait:
+                LOGGER.info(
+                    "[tool_wait] Stop requested (interrupted_by=%s) while tool '%s' runs a "
+                    "child line; waiting for the child to stop on the same signal",
+                    reason, self._name,
+                )
+                self._logged_wait = True
+            return None
+        return reason
 
 
 def _display_name(tool_func: Any, tool_name: Optional[str]) -> str:
@@ -108,6 +177,7 @@ def _start_daemon_thread(
     name: str,
     on_done: Callable[[bool, Any], None],
     abandoned: threading.Event,
+    token: Optional[CancellationToken],
 ) -> threading.Thread:
     """``func(**kwargs)`` を呼び出し側の contextvars を写した daemon スレッドで走らせる。
 
@@ -118,6 +188,7 @@ def _start_daemon_thread(
 
     def _call() -> Any:
         _ABANDONED.set(abandoned)
+        _CALL_TOKEN.set(token)
         return func(**kwargs)
 
     def _runner() -> None:
@@ -221,7 +292,10 @@ async def await_tool_call(
             )
 
     abandoned = threading.Event()
-    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done, abandoned)
+    decider = _AbandonDecider(cancellation_token, name)
+    _start_daemon_thread(
+        tool_func, tool_kwargs, name, _on_done, abandoned, cancellation_token,
+    )
 
     if cancellation_token is None:
         result = await future
@@ -231,7 +305,7 @@ async def await_tool_call(
             if done:
                 result = future.result()
                 break
-            reason = _abandon_reason(cancellation_token)
+            reason = decider.reason()
             if reason is not None:
                 abandoned.set()
                 future.cancel()  # 後で戻る結果は _set_outcome が捨てる
@@ -273,10 +347,13 @@ def wait_tool_call_sync(
         finished.set()
 
     abandoned = threading.Event()
-    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done, abandoned)
+    decider = _AbandonDecider(cancellation_token, name)
+    _start_daemon_thread(
+        tool_func, tool_kwargs, name, _on_done, abandoned, cancellation_token,
+    )
 
     while not finished.wait(POLL_INTERVAL_SECONDS if cancellation_token is not None else None):
-        reason = _abandon_reason(cancellation_token)
+        reason = decider.reason()
         if reason is not None:
             abandoned.set()
             _raise_abandoned(name, reason, started=True)
@@ -288,6 +365,7 @@ def wait_tool_call_sync(
 
 __all__ = [
     "ABANDON_INTERRUPTED_BY",
+    "current_tool_cancellation_token",
     "POLL_INTERVAL_SECONDS",
     "await_tool_call",
     "wait_tool_call_sync",

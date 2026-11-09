@@ -435,6 +435,10 @@ class PulseContext:
             return None
         return self._line_stack.pop()
 
+    def line_depth(self) -> int:
+        """Current depth of the line stack (number of active line frames)."""
+        return len(self._line_stack)
+
     def current_line(self) -> Optional[LineFrame]:
         """Return the topmost line frame, or ``None`` when no line is active."""
         if not self._line_stack:

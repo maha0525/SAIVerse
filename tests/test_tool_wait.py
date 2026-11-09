@@ -464,3 +464,88 @@ def test_abandoned_tool_cannot_enter_the_personas_beat_afterwards():
     t.join(5)
     assert "entered" not in outcome
     assert isinstance(outcome.get("error"), BeatLockFromToolThreadError)
+
+
+# ---------------------------------------------------------------------------
+# 子の line を走らせるツール (run_playbook) の停止 (PR #467 の Codex P1)。
+# 親が待つのをやめて先に後始末 (pop_line) すると、子の line が外され、子の
+# その後の記録が親の line に帰属する。子に停止を渡し、子が自分の line を
+# 外すまで親は待つ。
+# ---------------------------------------------------------------------------
+
+
+def test_stop_waits_until_the_child_line_is_popped():
+    from sea.cancellation import CancellationToken, ExecutionCancelledException
+    from sea.pulse_context import PulseContext
+    from sea.tool_wait import current_tool_cancellation_token, wait_tool_call_sync
+    from tools.context import persona_context
+
+    pulse_ctx = PulseContext(pulse_id="pulse-child")
+    pulse_ctx.push_line(role="main_line")
+    entry_depth = pulse_ctx.line_depth()
+    token = CancellationToken()
+    seen: dict = {}
+
+    def child_line_tool():
+        child_token = current_tool_cancellation_token()
+        seen["token_is_parents"] = child_token is token
+        pulse_ctx.push_line(role="sub_line")
+        try:
+            while not child_token.is_cancelled():
+                time.sleep(0.02)
+            time.sleep(0.4)  # 子が自分の区切りまで進んで抜ける間
+            seen["child_frame_was_still_on_top"] = pulse_ctx.line_depth() == entry_depth + 1
+        finally:
+            pulse_ctx.pop_line()
+        raise ExecutionCancelledException(interrupted_by=child_token.interrupted_by)
+
+    threading.Timer(0.2, lambda: token.cancel(interrupted_by="user_stop")).start()
+    with persona_context("p", ".", pulse_context=pulse_ctx):
+        with pytest.raises(ExecutionCancelledException):
+            wait_tool_call_sync(child_line_tool, {}, cancellation_token=token)
+        # 親が抜けた時点で、子はもう自分の line を外し終えている
+        assert pulse_ctx.line_depth() == entry_depth
+    assert seen["token_is_parents"] is True
+    assert seen["child_frame_was_still_on_top"] is True
+
+
+def test_run_playbook_hands_the_stop_signal_to_the_child_and_reraises_it():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from sea.cancellation import CancellationToken, ExecutionCancelledException
+    from sea.tool_wait import wait_tool_call_sync
+
+    tool_path = Path(__file__).resolve().parent.parent / "builtin_data" / "tools" / "run_playbook.py"
+    spec = importlib.util.spec_from_file_location("run_playbook_for_stop_test", str(tool_path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    from sea.runtime import SEARuntime
+    runtime = MagicMock()
+    runtime.decide_playbook_permission = (
+        lambda *a, **kw: SEARuntime.decide_playbook_permission(runtime, *a, **kw)
+    )
+    runtime._load_playbook_for = MagicMock(
+        return_value=SimpleNamespace(name="memory_research", router_callable=True)
+    )
+    captured: dict = {}
+
+    def fake_run(playbook, persona_obj, building_id, **kwargs):
+        captured["token"] = kwargs["parent_state"].get("_cancellation_token")
+        raise ExecutionCancelledException(interrupted_by="user_stop")
+
+    runtime._run_playbook = MagicMock(side_effect=fake_run)
+    persona_obj = SimpleNamespace(current_building_id="b")
+    manager = SimpleNamespace(sea_runtime=runtime, personas={"p": persona_obj})
+    pulse_ctx = SimpleNamespace(_line_stack=[object()], pulse_id="pulse-x")
+    token = CancellationToken()
+
+    with patch.object(module, "get_active_persona_id", return_value="p"), \
+         patch.object(module, "get_active_manager", return_value=manager), \
+         patch.object(module, "get_active_pulse_context", return_value=pulse_ctx):
+        with pytest.raises(ExecutionCancelledException):
+            wait_tool_call_sync(module.run_playbook, {"name": "memory_research"}, cancellation_token=token)
+    assert captured["token"] is token
