@@ -289,6 +289,11 @@ def prepare_openai_messages(
       ``convert_system_to_user`` turns system messages that follow a non-system
       message into ``<system>``-tagged user messages, leading ones stay.
 
+    Either way the list goes through ``present_system_notices``, whose first step
+    (``llm_clients.attached_documents.append_attached_documents``) appends the
+    text of documents the user attached to the user message
+    (docs/intent/user_attachment_delivery.md).
+
     Options are keyword-only: several neighbours accept None/bool, so a positional
     call that skips one shifts the rest without any error (NIM once passed
     convert_system_to_user into max_image_embeds, which embedded zero images).
@@ -325,6 +330,11 @@ def prepare_openai_messages(
         # 途中の通知は上で扱い済み。残る system は head とその前の指示だけ
         # なので、位置による変換は掛けない。
         convert_system_to_user = False
+    else:
+        # head の無い列も、添付文書の本文を発言の後ろへ足す最初の段だけは他の
+        # クライアントと同じく通す (head が無いので、それ以外は何も変わらない。
+        # accepts_mid_system はこの列では使われない)。
+        messages = present_system_notices(messages, accepts_mid_system=True)
 
     attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
         messages, max_image_embeds_override=max_image_embeds,

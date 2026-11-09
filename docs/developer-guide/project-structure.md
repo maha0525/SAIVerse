@@ -295,6 +295,20 @@ tools/
 
 **ツールの優先順位**: `~/.saiverse/user_data/tools/` > `expansion_data/<addon>/tools/` > `builtin_data/tools/`
 
+### llm_clients/
+
+LLM プロバイダごとのクライアント（`get_llm_client` で生成）と、送る直前の変換。一覧は [reference/providers.md](../reference/providers.md)。
+
+```
+llm_clients/
+├── factory.py        # get_llm_client（protocol からクライアントを選ぶ）
+├── base.py           # クライアントの共通の基底
+├── gemini.py / anthropic.py / openai.py / openai_codex.py / nvidia_nim.py / ollama.py / xai.py # 各プロバイダ
+├── anthropic_request_builder.py / openai_message_preparer.py # 送る形の組み立て
+├── system_notice.py  # 送る直前の変換（present_system_notices。システム通知の届け方・合言葉。system_notice_delivery intent）
+└── attached_documents.py # ユーザーが添付した文書の本文を、送る直前に発言の後ろへ足す（present_system_notices の最初の段。user_attachment_delivery intent）
+```
+
 ### database/
 
 データベース関連。

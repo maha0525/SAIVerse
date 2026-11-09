@@ -792,6 +792,8 @@ def _estimate_input_tokens(
     # (llm_clients/system_notice.py)。役割ごとのメディアの扱い
     # (:func:`_media_rules`) はその後の役割で決まるので、同じ変換を通してから
     # 数える (docs/intent/system_notice_delivery.md)。head の無い列は変わらない。
+    # どちらの列でも、添付文書の本文はここで発言の後ろへ足され (クライアントと同じ
+    # llm_clients/attached_documents.py)、送る量に数えられる。
     messages = present_system_notices(
         messages,
         accepts_mid_system=model_accepts_mid_conversation_system(model),

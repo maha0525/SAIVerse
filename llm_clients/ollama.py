@@ -187,7 +187,8 @@ class OllamaClient(LLMClient):
 
         会話の途中のシステム通知は合言葉付きタグの user にする — Ollama はチャット
         テンプレート次第で途中の system が落ちうるので、タグで囲む側に倒す
-        (llm_clients/system_notice.py の判定)。head の印が無い列は変換で変わらない。
+        (llm_clients/system_notice.py の判定)。head の印が無い列は、添付文書の本文を
+        発言の後ろへ足す (llm_clients/attached_documents.py) 以外は変換で変わらない。
 
         通知の画像は metadata にしか無いので、metadata を捨てる前に説明の文として
         本文に足す (:meth:`_present_notice_images`。画像そのものは送らない)。

@@ -7,6 +7,10 @@ SAIVerse 層が組んだ messages 列には、head (プロンプト先頭部) �
 並ぶ。各 LLM クライアントは送る形を組む前に :func:`present_system_notices` を
 通し、
 
+- 最初に、role=user の発言の ``metadata["documents"]`` に写した添付文書の本文を
+  発言の本文の後ろへ足す (llm_clients/attached_documents.py の
+  ``append_attached_documents``、docs/intent/user_attachment_delivery.md)。
+  足した本文は以下の「それ以外のメッセージ」の規則で合言葉を伏せられる。
 - head の system メッセージ: 本文の仮置き文字列
   (``SYSTEM_NOTICE_PASSPHRASE_PLACEHOLDER``) を実際の合言葉に置き換える。
 - head より後ろの role=system (と ``host``): 途中の system を受け取れるモデル
@@ -21,9 +25,10 @@ SAIVerse 層が組んだ messages 列には、head (プロンプト先頭部) �
   またいで連結した文字列で伏せる。
 
 head の印を持つメッセージが一つも無い列 (head を組まない要約・判定などの呼び出し)
-は何も変えずに返す — その列の先頭の system は呼び出し側の指示で、各クライアントの
-従来の扱い (先頭の system 欄へまとめる・OpenAI 互換の ``convert_system_to_user``)
-のまま送る。
+には、添付文書の本文を足す最初の段だけを行い、それ以外は変えずに返す — その列の
+先頭の system は呼び出し側の指示で、各クライアントの従来の扱い (先頭の system 欄へ
+まとめる・OpenAI 互換の ``convert_system_to_user``) のまま送る。合言葉が無いので
+伏せ字も行わない。
 
 変換はどれも決定的 (同じ入力・同じ合言葉に同じ出力) — 同じ head を使い続けて
 いる間、同じ記録から組む送信本文は一字も変わらない (不変条件 6)。
@@ -577,10 +582,18 @@ def present_system_notices(messages: List[Any], *, accepts_mid_system: bool) -> 
     タグ化した通知の写しの metadata には、タグで包む前の本文を残す。画像などの
     説明の文を足してからタグで包み直すクライアント (:func:`tag_presented_system_notice`)
     が使う。
+
+    最初の段で、ユーザーが添付した文書の本文を role=user の発言の後ろへ足す
+    (llm_clients/attached_documents.py の ``append_attached_documents``)。head の
+    有無にかかわらず行い、足した本文は下の通知以外のメッセージの分岐で、発言の
+    本文として合言葉を伏せられる。
     """
+    from .attached_documents import append_attached_documents
+
+    messages = append_attached_documents(messages)
     head = _head_index(messages)
     if head is None:
-        return list(messages)
+        return messages
     passphrase = system_notice_passphrase(messages)
     if not passphrase:
         _log.warning(
