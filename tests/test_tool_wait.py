@@ -549,3 +549,30 @@ def test_run_playbook_hands_the_stop_signal_to_the_child_and_reraises_it():
         with pytest.raises(ExecutionCancelledException):
             wait_tool_call_sync(module.run_playbook, {"name": "memory_research"}, cancellation_token=token)
     assert captured["token"] is token
+
+
+def test_a_new_message_after_stop_does_not_cancel_the_stop():
+    """停止ボタンの直後に新しい発言の割り込みが届いても、停止は消えない (PR #467 の Codex P2)。"""
+    from sea.cancellation import CancellationToken, ExecutionCancelledException
+    from sea.tool_wait import wait_tool_call_sync
+
+    token = CancellationToken()
+    token.cancel(interrupted_by="user_stop")
+    token.cancel(interrupted_by="user")  # 0.2 秒の見回りの間に届いた新しい発言
+    assert token.interrupted_by == "user_stop"
+
+    never = threading.Event()
+    started = time.monotonic()
+    with pytest.raises(ExecutionCancelledException):
+        wait_tool_call_sync(lambda: never.wait(), {}, cancellation_token=token)
+    assert time.monotonic() - started < 2
+
+
+def test_stop_after_an_interrupt_still_turns_into_a_stop():
+    """割り込み ("user") のあとに停止ボタンを押せば、停止に変わる (従来どおり)。"""
+    from sea.cancellation import CancellationToken
+
+    token = CancellationToken()
+    token.cancel(interrupted_by="user")
+    token.cancel(interrupted_by="user_stop")
+    assert token.interrupted_by == "user_stop"

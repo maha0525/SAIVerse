@@ -31,12 +31,16 @@ import logging
 import threading
 from typing import Any, Callable, Dict, Optional
 
-from sea.cancellation import CancellationToken, ExecutionCancelledException
+from sea.cancellation import (
+    STOP_INTERRUPTED_BY,
+    CancellationToken,
+    ExecutionCancelledException,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 #: 待つのをやめて抜ける ``interrupted_by`` の値。停止ボタンと終了処理だけ。
-ABANDON_INTERRUPTED_BY = frozenset({"user_stop", "server_shutdown"})
+ABANDON_INTERRUPTED_BY = STOP_INTERRUPTED_BY
 
 #: 取り消しの印を見る間隔 (秒)。
 POLL_INTERVAL_SECONDS = 0.2
