@@ -375,11 +375,16 @@ class PulseController:
         return [pid for pid in persona_ids if self.has_running(pid)]
 
     def cancel_running(self, persona_ids: Iterable[str], interrupted_by: str) -> int:
-        """渡されたペルソナの、走っている request をすべて取り消す。
+        """渡されたペルソナの、走っている request と待機の列の request をすべて取り消す。
 
         割り込まれて裏で走り続けている古い request にも ``interrupted_by`` を
-        刻む (``CancellationToken.cancel`` は上書きなので、"user" で割り込まれ
-        済みの印も停止ボタンの "user_stop" に変わる)。
+        刻む (割り込みの "user" のあとに停止の "user_stop" を刻めば停止に変わる。
+        逆に一度受けた停止は後の割り込みで消えない — sea/cancellation.py)。
+
+        待機の列 (割り込まれて再開を待つ request、忙しい間に届いて順番を待つ
+        request) にも刻む。刻まないと、停止のあと今の処理が終わった時点で列から
+        繰り上がって走り出す (PR #467 の Codex 指摘)。刻まれた request は繰り上がって
+        も、生成を始める前の取り消しの検査で止まる。
 
         Returns:
             取り消しを刻んだ request の数。
@@ -389,6 +394,7 @@ class PulseController:
             with self._get_lock(persona_id):
                 with self._running_lock:
                     requests = list(self._running.get(persona_id, ()))
+                requests += list(self._get_queue(persona_id))
                 for request in requests:
                     LOGGER.info(
                         "[PulseController] Cancelling running %s request for persona %s "

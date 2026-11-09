@@ -264,3 +264,25 @@ def test_running_snapshot_survives_concurrent_add_and_remove():
         for w in workers:
             w.join(2)
     assert errors == []
+
+
+def test_stop_also_reaches_requests_waiting_in_the_queue():
+    """割り込まれて再開を待つ request・順番を待つ request にも停止が届く (PR #467 の Codex 指摘)。
+
+    届かないと、停止のあと今の処理が終わった時点で列から繰り上がって走り出す。
+    刻まれた request は、繰り上がっても run_meta_user の冒頭の取り消しの検査で止まる。
+    """
+    from sea.pulse_controller import ExecutionRequest
+
+    controller = _make_controller()
+    interrupted = ExecutionRequest(type="schedule", persona_id="p1", building_id="b")
+    controller._queue_for_resumption(interrupted)
+    waiting = ExecutionRequest(type="schedule", persona_id="p1", building_id="b")
+    controller._add_to_queue(waiting)
+    queued = list(controller._get_queue("p1"))
+    assert len(queued) == 2
+
+    assert controller.cancel_running(["p1"], "user_stop") == 2
+    for request in queued:
+        assert request.cancellation_token.is_cancelled()
+        assert request.cancellation_token.interrupted_by == "user_stop"
