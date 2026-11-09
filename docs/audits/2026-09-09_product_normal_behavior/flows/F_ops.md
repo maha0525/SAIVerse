@@ -388,6 +388,7 @@ speak_hook / api_routes の中身) は追わない。
   `AddonCatalogPanel.tsx` が揃っており、intent のステータスは「Phase 4 完了」である。
   **roadmap が古い。** 実装を roadmap に合わせて戻す話ではない。
 - **既知の不一致 (2)**: 導入完了イベントの `restart_required` は `api_routes.py` の有無だけで決まる
+  **(2026-11-09 に直した: install / update / uninstall では常に `restart_required: true`。`docs/intent/addon_catalog_management.md` の 2026-11-09 訂正)**
   (`api/routes/addon_catalog.py:143-144`)。UI パネルだけを持つアドオンを導入すると
   「再起動不要」と表示されるが、パネルの反映にはフロントエンドの再ビルドが要る
   (`frontend/package.json:11-12` の `predev` / `prebuild`)。**§3 の 3 番目の期待
