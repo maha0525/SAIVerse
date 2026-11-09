@@ -78,7 +78,11 @@ _HELD_BY_THIS_CONTEXT: "contextvars.ContextVar[frozenset]" = contextvars.Context
 
 
 class BeatLockFromToolThreadError(RuntimeError):
-    """ツールのスレッドから、親の Beat が握っているロックを取りに行った。
+    """ツールのスレッドから、取ってはいけない Beat ロックを取りに行った。
+
+    二つの場合がある。(1) このツールを呼んで完了を待っている親が、同じ
+    ペルソナのロックを握っている (待てば永久に固まる)。(2) 停止で見捨て
+    られたツールが、後からペルソナの処理の列に入ろうとした。
 
     ツールは ``sea/tool_wait.py`` の専用スレッドで走り、親 (Beat ロックを
     握ったスレッド) はその完了を待っている。RLock はスレッド束縛なので、
@@ -87,11 +91,19 @@ class BeatLockFromToolThreadError(RuntimeError):
     取れなければその場で投げる (docs/intent/stop_button.md)。
     """
 
-    def __init__(self, persona_id: Optional[str], purpose: str):
+    def __init__(self, persona_id: Optional[str], purpose: str, *, abandoned: bool = False):
+        if abandoned:
+            detail = (
+                "the tool was abandoned by a stop; a stopped reply's tool must not "
+                "enter the persona's Beat afterwards"
+            )
+        else:
+            detail = (
+                "the Beat lock is held by the waiting parent; blocking here would deadlock"
+            )
         super().__init__(
             f"hold_beat(purpose={purpose}) for persona={persona_id} was called from a "
-            "tool thread while the Beat lock is held elsewhere (the waiting parent); "
-            "blocking here would deadlock"
+            f"tool thread: {detail}"
         )
         self.persona_id = persona_id
         self.purpose = purpose
@@ -186,7 +198,12 @@ class BeatGate:
         if not persona_id:
             raise ValueError("persona_id is required")
         lock = self._get_lock(persona_id)
-        from sea.tool_wait import is_tool_thread
+        from sea.tool_wait import current_tool_call_abandoned, is_tool_thread
+        if is_tool_thread() and current_tool_call_abandoned():
+            # 停止で見捨てられたツールは、ペルソナの処理の列に入らない —
+            # 止めた返事のための処理が、後から記録に割り込まないため
+            # (docs/intent/stop_button.md「抜けたときに何が残るか」)。
+            raise BeatLockFromToolThreadError(persona_id, purpose, abandoned=True)
         if is_tool_thread() and persona_id in _HELD_BY_THIS_CONTEXT.get():
             # このツールを呼んで完了を待っている親が、このペルソナのロックを
             # 握っている。待てば永久に固まるので、取れなければ投げる

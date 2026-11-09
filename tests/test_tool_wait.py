@@ -414,3 +414,53 @@ def test_hold_beat_from_tool_thread_waits_for_an_unrelated_holder():
         "acquired after the unrelated holder released"
     )
     holder.join(5)
+
+
+def test_abandoned_tool_cannot_enter_the_personas_beat_afterwards():
+    """停止で見捨てたツールは、親が抜けて新しい Beat が始まった後も、ロックが空いた後も、
+    ペルソナの Beat に入らずに投げる (Codex 3 巡目、docs/intent/stop_button.md)。"""
+    import types as _types
+
+    from sea.beat_gate import BeatGate, BeatLockFromToolThreadError
+    from sea.cancellation import CancellationToken, ExecutionCancelledException
+    from sea.tool_wait import wait_tool_call_sync
+
+    gate = BeatGate(_types.SimpleNamespace())
+    token = CancellationToken()
+    go_enter = threading.Event()
+    outcome: dict = {}
+
+    def slow_tool():
+        go_enter.wait(5)
+        try:
+            with gate.hold("p4", purpose="late_tool"):
+                outcome["entered"] = True
+        except BeatLockFromToolThreadError as exc:
+            outcome["error"] = exc
+
+    # 親: Beat を握ってツールを待ち、停止で抜ける
+    threading.Timer(0.3, lambda: token.cancel(interrupted_by="user_stop")).start()
+    with gate.hold("p4", purpose="parent"):
+        with pytest.raises(ExecutionCancelledException):
+            wait_tool_call_sync(slow_tool, {}, cancellation_token=token)
+
+    # 新しい Beat が同じペルソナのロックを握っている最中に、見捨てたツールが入ろうとする
+    new_beat_holding = threading.Event()
+    release_new_beat = threading.Event()
+
+    def new_beat():
+        with gate.hold("p4", purpose="new_reply"):
+            new_beat_holding.set()
+            release_new_beat.wait(5)
+
+    t = threading.Thread(target=new_beat, daemon=True)
+    t.start()
+    assert new_beat_holding.wait(5)
+    go_enter.set()
+    deadline = time.monotonic() + 5
+    while not outcome and time.monotonic() < deadline:
+        time.sleep(0.02)
+    release_new_beat.set()
+    t.join(5)
+    assert "entered" not in outcome
+    assert isinstance(outcome.get("error"), BeatLockFromToolThreadError)

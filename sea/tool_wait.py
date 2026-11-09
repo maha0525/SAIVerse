@@ -47,9 +47,25 @@ POLL_INTERVAL_SECONDS = 0.2
 TOOL_THREAD_NAME_PREFIX = "tool-wait:"
 
 
+#: ツールのスレッドの文脈に置く「待つのをやめた (見捨てた)」印。待つ側が
+#: 停止で抜けるときに set する。``sea.beat_gate`` は、見捨てられたツールが
+#: ペルソナの Beat ロックを取りに来たら、待たずに投げる — 止めた返事のため
+#: に動いていたツールが、後からペルソナの処理の列に割り込んで記録を書かない
+#: ため (docs/intent/stop_button.md「抜けたときに何が残るか」)。
+_ABANDONED: "contextvars.ContextVar[Optional[threading.Event]]" = contextvars.ContextVar(
+    "tool_wait_abandoned", default=None,
+)
+
+
 def is_tool_thread() -> bool:
     """いまのスレッドが、この関数群がツールを走らせている専用スレッドか。"""
     return threading.current_thread().name.startswith(TOOL_THREAD_NAME_PREFIX)
+
+
+def current_tool_call_abandoned() -> bool:
+    """いまのツールのスレッドが、待つ側に見捨てられた (停止で抜けられた) か。"""
+    event = _ABANDONED.get()
+    return event is not None and event.is_set()
 
 
 def _abandon_reason(token: Optional[CancellationToken]) -> Optional[str]:
@@ -91,16 +107,22 @@ def _start_daemon_thread(
     kwargs: Dict[str, Any],
     name: str,
     on_done: Callable[[bool, Any], None],
+    abandoned: threading.Event,
 ) -> threading.Thread:
     """``func(**kwargs)`` を呼び出し側の contextvars を写した daemon スレッドで走らせる。
 
     終わったら ``on_done(ok, value)`` を呼ぶ (ok=False のとき value は例外)。
+    ``abandoned`` は待つ側が見捨てたときに set する印で、スレッドの文脈に置く。
     """
     ctx = contextvars.copy_context()
 
+    def _call() -> Any:
+        _ABANDONED.set(abandoned)
+        return func(**kwargs)
+
     def _runner() -> None:
         try:
-            value = ctx.run(func, **kwargs)
+            value = ctx.run(_call)
         except BaseException as exc:  # noqa: BLE001 — 例外は呼び出し側へ運ぶ
             on_done(False, exc)
         else:
@@ -198,7 +220,8 @@ async def await_tool_call(
                 name,
             )
 
-    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done)
+    abandoned = threading.Event()
+    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done, abandoned)
 
     if cancellation_token is None:
         result = await future
@@ -210,6 +233,7 @@ async def await_tool_call(
                 break
             reason = _abandon_reason(cancellation_token)
             if reason is not None:
+                abandoned.set()
                 future.cancel()  # 後で戻る結果は _set_outcome が捨てる
                 _raise_abandoned(name, reason, started=True)
 
@@ -248,11 +272,13 @@ def wait_tool_call_sync(
         outcome["value"] = value
         finished.set()
 
-    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done)
+    abandoned = threading.Event()
+    _start_daemon_thread(tool_func, tool_kwargs, name, _on_done, abandoned)
 
     while not finished.wait(POLL_INTERVAL_SECONDS if cancellation_token is not None else None):
         reason = _abandon_reason(cancellation_token)
         if reason is not None:
+            abandoned.set()
             _raise_abandoned(name, reason, started=True)
 
     if outcome["ok"]:
