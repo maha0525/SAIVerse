@@ -229,3 +229,38 @@ def test_stop_sets_stop_event_of_the_displayed_building():
     manager._active_stop_events["b_view"] = stop_event
     assert manager.cancel_active_generation(building_id="b_view") is True
     assert stop_event.is_set()
+
+
+def test_running_snapshot_survives_concurrent_add_and_remove():
+    """終了処理の走査中に別スレッドが登録・削除しても例外にならない (Codex 指摘)。"""
+    from sea.pulse_controller import ExecutionRequest
+
+    pc = _make_controller()
+    stop = threading.Event()
+    errors: list = []
+
+    def churn(index: int) -> None:
+        pid = f"p{index}"
+        while not stop.is_set():
+            req = ExecutionRequest(type="auto", persona_id=pid, building_id="b")
+            with pc._get_lock(pid):
+                pc._add_running(req)
+            with pc._get_lock(pid):
+                pc._remove_running(req)
+
+    workers = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(4)]
+    for w in workers:
+        w.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                pc._running_snapshot()
+            except RuntimeError as exc:  # dictionary changed size during iteration
+                errors.append(exc)
+                break
+    finally:
+        stop.set()
+        for w in workers:
+            w.join(2)
+    assert errors == []

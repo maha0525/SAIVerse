@@ -67,6 +67,26 @@ class BeatGateClosedError(Exception):
         self.purpose = purpose
 
 
+class BeatLockFromToolThreadError(RuntimeError):
+    """ツールのスレッドから、親の Beat が握っているロックを取りに行った。
+
+    ツールは ``sea/tool_wait.py`` の専用スレッドで走り、親 (Beat ロックを
+    握ったスレッド) はその完了を待っている。RLock はスレッド束縛なので、
+    ツールのスレッドから同じペルソナのロックを取りに行くと、親の解放を
+    待ち、親はツールの完了を待つ — 永久に固まる。黙って固まらせずに、
+    取れなければその場で投げる (docs/intent/stop_button.md)。
+    """
+
+    def __init__(self, persona_id: Optional[str], purpose: str):
+        super().__init__(
+            f"hold_beat(purpose={purpose}) for persona={persona_id} was called from a "
+            "tool thread while the Beat lock is held elsewhere (the waiting parent); "
+            "blocking here would deadlock"
+        )
+        self.persona_id = persona_id
+        self.purpose = purpose
+
+
 class BeatGate:
     """persona 単位の Beat ロック レジストリ + 実行台帳の関所。
 
@@ -156,7 +176,14 @@ class BeatGate:
         if not persona_id:
             raise ValueError("persona_id is required")
         lock = self._get_lock(persona_id)
-        lock.acquire()
+        from sea.tool_wait import is_tool_thread
+        if is_tool_thread():
+            # ツールのスレッドで握れないなら、握っているのは完了を待っている
+            # 親 — 待てば永久に固まるので投げる (BeatLockFromToolThreadError)。
+            if not lock.acquire(blocking=False):
+                raise BeatLockFromToolThreadError(persona_id, purpose)
+        else:
+            lock.acquire()
         depths = self._depth_map()
         depth = depths.get(persona_id, 0) + 1
         depths[persona_id] = depth

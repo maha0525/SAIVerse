@@ -343,3 +343,43 @@ def test_tool_call_node_propagates_stop_instead_of_tool_error():
             asyncio.run(node(state))
     assert not str(state.get("last", "")).startswith("Tool error")
     tool.release.set()
+
+
+# ---------------------------------------------------------------------------
+# Beat ロックの取り直し: ツールのスレッドから親の握るロックを取りに行ったら、
+# 永久に固まらずにその場で投げる (Codex 指摘、docs/intent/stop_button.md)。
+# ---------------------------------------------------------------------------
+
+
+def test_hold_beat_from_tool_thread_raises_instead_of_deadlocking():
+    import types as _types
+
+    from sea.beat_gate import BeatGate, BeatLockFromToolThreadError
+    from sea.tool_wait import wait_tool_call_sync
+
+    gate = BeatGate(_types.SimpleNamespace())
+
+    def tool_that_reenters_beat():
+        with gate.hold("p1", purpose="nested"):
+            return "unreachable"
+
+    started = time.monotonic()
+    with gate.hold("p1", purpose="parent"):
+        with pytest.raises(BeatLockFromToolThreadError):
+            wait_tool_call_sync(tool_that_reenters_beat, {}, cancellation_token=None)
+    assert time.monotonic() - started < 5
+
+
+def test_hold_beat_from_tool_thread_succeeds_when_lock_is_free():
+    import types as _types
+
+    from sea.beat_gate import BeatGate
+    from sea.tool_wait import wait_tool_call_sync
+
+    gate = BeatGate(_types.SimpleNamespace())
+
+    def tool_with_beat():
+        with gate.hold("p2", purpose="own"):
+            return "ok"
+
+    assert wait_tool_call_sync(tool_with_beat, {}, cancellation_token=None) == "ok"

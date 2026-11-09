@@ -41,6 +41,16 @@ ABANDON_INTERRUPTED_BY = frozenset({"user_stop", "server_shutdown"})
 #: 取り消しの印を見る間隔 (秒)。
 POLL_INTERVAL_SECONDS = 0.2
 
+#: ツールを走らせるスレッドの名前の頭。``sea.beat_gate`` がこれを見て、
+#: ツールのスレッドから親の握る Beat ロックを取りに行く呼び出しを、
+#: 待たずに投げる (永久に固まらせない)。
+TOOL_THREAD_NAME_PREFIX = "tool-wait:"
+
+
+def is_tool_thread() -> bool:
+    """いまのスレッドが、この関数群がツールを走らせている専用スレッドか。"""
+    return threading.current_thread().name.startswith(TOOL_THREAD_NAME_PREFIX)
+
 
 def _abandon_reason(token: Optional[CancellationToken]) -> Optional[str]:
     """待つのをやめるべきなら、その ``interrupted_by`` を返す。続けるなら None。"""
@@ -96,7 +106,9 @@ def _start_daemon_thread(
         else:
             on_done(True, value)
 
-    thread = threading.Thread(target=_runner, name=f"tool-wait:{name}", daemon=True)
+    thread = threading.Thread(
+        target=_runner, name=f"{TOOL_THREAD_NAME_PREFIX}{name}", daemon=True,
+    )
     thread.start()
     return thread
 

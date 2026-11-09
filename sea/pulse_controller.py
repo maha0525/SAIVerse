@@ -175,6 +175,11 @@ class PulseController:
         # 記録する。メタ判断レーン (_current_meta) は載せない — メタ判断は停止
         # ボタンの対象外。読み書きは persona ごとの RLock (_get_lock) の内側で行う。
         self._running: Dict[str, List[ExecutionRequest]] = {}
+        # _running の読み書きはすべてこの鍵の内側で行う。persona ごとの RLock
+        # だけでは、終了処理 (全ペルソナを走査する) と各ペルソナの登録・削除が
+        # 同時に走ったとき、辞書の走査中の変更で例外になる。順序は常に
+        # persona の RLock → この鍵 (この鍵の内側で別の鍵を取らない)。
+        self._running_lock = threading.Lock()
 
         # 終了処理中は新規 Pulse を受け付けない (shutdown() が立てる)。
         # 立った後の submit は skipped、待機列の繰り上げも止まる。
@@ -224,11 +229,10 @@ class PulseController:
         # 抜ける (docs/intent/stop_button.md、sea/tool_wait.py)。
         active = list(self._current.items()) + list(self._current_meta.items())
         _seen = {id(req) for _, req in active}
-        for persona_id, requests in list(self._running.items()):
-            for req in list(requests):
-                if id(req) not in _seen:
-                    active.append((persona_id, req))
-                    _seen.add(id(req))
+        for persona_id, req in self._running_snapshot():
+            if id(req) not in _seen:
+                active.append((persona_id, req))
+                _seen.add(id(req))
         for persona_id, request in active:
             request.cancellation_token.cancel(interrupted_by="server_shutdown")
 
@@ -257,7 +261,7 @@ class PulseController:
                 if (
                     not self._current
                     and not self._current_meta
-                    and not any(list(self._running.values()))
+                    and not self._running_snapshot()
                 ):
                     LOGGER.info(
                         "[PulseController] Shutdown: all active executions settled"
@@ -271,7 +275,7 @@ class PulseController:
                 late = (
                     list(self._current.values())
                     + list(self._current_meta.values())
-                    + [req for reqs in list(self._running.values()) for req in list(reqs)]
+                    + [req for _pid, req in self._running_snapshot()]
                 )
                 for request in late:
                     if not request.cancellation_token.is_cancelled():
@@ -296,7 +300,7 @@ class PulseController:
         remaining = sorted(
             set(self._current)
             | set(self._current_meta)
-            | {pid for pid, reqs in list(self._running.items()) if reqs}
+            | {pid for pid, _req in self._running_snapshot()}
         )
         LOGGER.warning(
             "[PulseController] Shutdown: %d execution(s) did not settle within "
@@ -324,18 +328,33 @@ class PulseController:
 
     def _add_running(self, request: ExecutionRequest) -> None:
         """走っている処理の記録に足す。persona の RLock の内側で呼ぶ。"""
-        self._running.setdefault(request.persona_id, []).append(request)
+        with self._running_lock:
+            self._running.setdefault(request.persona_id, []).append(request)
 
     def _remove_running(self, request: ExecutionRequest) -> None:
         """走っている処理の記録から消す。persona の RLock の内側で呼ぶ。"""
-        requests = self._running.get(request.persona_id)
-        if not requests:
-            return
-        remaining = [req for req in requests if req is not request]
-        if remaining:
-            self._running[request.persona_id] = remaining
-        else:
-            del self._running[request.persona_id]
+        with self._running_lock:
+            requests = self._running.get(request.persona_id)
+            if not requests:
+                return
+            remaining = [req for req in requests if req is not request]
+            if remaining:
+                self._running[request.persona_id] = remaining
+            else:
+                del self._running[request.persona_id]
+
+    def _running_snapshot(self) -> List[tuple]:
+        """全ペルソナの走っている request を (persona_id, request) の一覧で写す。
+
+        終了処理が全ペルソナを走査するための写し。走査中に別スレッドが
+        登録・削除しても例外にならないよう、鍵の内側で写す。
+        """
+        with self._running_lock:
+            return [
+                (persona_id, req)
+                for persona_id, requests in self._running.items()
+                for req in requests
+            ]
 
     def running_requests(self, persona_id: str) -> List[ExecutionRequest]:
         """このペルソナのメインレーンで走っている request の一覧 (受付順)。
@@ -344,7 +363,8 @@ class PulseController:
         メタ判断レーンは含まない。
         """
         with self._get_lock(persona_id):
-            return list(self._running.get(persona_id, ()))
+            with self._running_lock:
+                return list(self._running.get(persona_id, ()))
 
     def has_running(self, persona_id: str) -> bool:
         """このペルソナのメインレーンに走っている request があるか。"""
@@ -367,7 +387,8 @@ class PulseController:
         count = 0
         for persona_id in persona_ids:
             with self._get_lock(persona_id):
-                requests = list(self._running.get(persona_id, ()))
+                with self._running_lock:
+                    requests = list(self._running.get(persona_id, ()))
                 for request in requests:
                     LOGGER.info(
                         "[PulseController] Cancelling running %s request for persona %s "
