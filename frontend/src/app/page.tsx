@@ -1560,18 +1560,35 @@ export default function Home() {
                 if (!res.ok) return;
                 const data = await res.json();
                 if (!disposed && currentBuildingIdRef.current === bid) {
-                    setServerRunning({ buildingId: bid, running: !!data.running });
+                    const running = !!data.running;
+                    // 答えが前回と同じなら state を差し替えない — 3 秒ごとに
+                    // 画面全体 (Home) を描き直さないため (入力のもたつきの原因になる)。
+                    setServerRunning(prev => (
+                        prev && prev.buildingId === bid && prev.running === running
+                            ? prev
+                            : { buildingId: bid, running }
+                    ));
                 }
             } catch (err) {
                 console.error('[RunningPoll] Failed to check running generation', err);
             }
         };
+        // タブが裏にある間は問い合わせない。表に戻ったらすぐ一度確かめる。
+        const tick = () => {
+            if (typeof document !== 'undefined' && document.hidden) return;
+            void check();
+        };
+        const onVisible = () => {
+            if (!document.hidden) void check();
+        };
         refreshServerRunningRef.current = () => { void check(); };
         void check();
-        const timer = setInterval(check, 3000);
+        const timer = setInterval(tick, 3000);
+        document.addEventListener('visibilitychange', onVisible);
         return () => {
             disposed = true;
             clearInterval(timer);
+            document.removeEventListener('visibilitychange', onVisible);
         };
     }, [currentBuildingId]);
 
