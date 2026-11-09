@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | ユーザーの添付は発言が中身を運び、添付から作るアイテムは閉じて置く (動画が最初から open で二重に届く件) | 実装はブランチ feature/attachment-delivery にあり、まだ develop に入っていない。次 = PR にしてまはーが確認し、実機で文書・動画を添付して、アイテムが閉じて置かれ、ペルソナが文書の中身を読めることを見る。 | まはー (PR 確認と実機確認) | [intent](../intent/user_attachment_delivery.md) | 2026-11-10 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | 実装はブランチ feature/gpt-image-2-6 の PR #451 にあり、まだ develop に入っていない。次 = まはーが PR を確認し、実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (PR 確認と実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-07 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | 実装は PR にあり、develop への取り込み待ち。次 = まはーが PR を確認し、取り込み・再起動後の通常利用でメティスが送信完了と応答待ちをログから分けて確認する。 | まはー (PR 確認と取り込み) → 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-10-31 |

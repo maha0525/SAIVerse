@@ -953,21 +953,9 @@ class SAIVerseManager(
         """Create a new picture item and place it in the specified building. Returns (item_id, slot_num)."""
         return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id, source_context=source_context)
 
-    def create_picture_item_for_user(self, name: str, description: str, file_path: str, building_id: str, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a picture item from user upload and place it in the specified building."""
-        return self.item_service.create_picture_item_for_user(name, description, file_path, building_id, creator_id=creator_id, source_context=source_context)
-
-    def create_document_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a document item from user upload and place it in the specified building."""
-        return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open, creator_id=creator_id, source_context=source_context)
-
-    def create_audio_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create an audio item from user upload and place it in the specified building."""
-        return self.item_service.create_audio_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
-
-    def create_video_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a video item from user upload and place it in the specified building."""
-        return self.item_service.create_video_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
+    def create_item_for_user(self, item_type: str, name: str, description: str, file_path: str, building_id: str, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
+        """Create a closed picture/document/audio/video item from a user's chat attachment and place it in the specified building."""
+        return self.item_service.create_item_for_user(item_type, name, description, file_path, building_id, creator_id=creator_id, source_context=source_context)
 
     def move_item_for_persona(self, persona_id: str, item_ids: list, destination_kind: str, destination_id: str) -> str:
         """Move items to a destination (building, persona, or bag)."""

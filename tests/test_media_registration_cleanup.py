@@ -302,9 +302,8 @@ def test_registration_of_existing_paths_never_deletes_files(world, monkeypatch, 
     existing = world.home / f"existing-{item_type}.bin"
     existing.write_bytes(b"shared with conversation history")
     _fail_registration(world, monkeypatch, "add", session_number=1)
-    create = getattr(world.service, f"create_{item_type}_item_for_user")
     with pytest.raises(RuntimeError, match="injected add"):
-        create("Upload", "Description", str(existing), "room")
+        world.service.create_item_for_user(item_type, "Upload", "Description", str(existing), "room")
     assert existing.read_bytes() == b"shared with conversation history"
     assert _rows(world) == (0, 0)
 
@@ -331,9 +330,9 @@ def test_upload_failure_still_returns_readable_attachment(world, monkeypatch, it
 
     from api.routes.chat import AttachmentData, _store_uploaded_attachment_v2
 
-    for kind in ("picture", "document", "audio", "video"):
-        method = f"create_{kind}_item_for_user"
-        monkeypatch.setattr(world.manager, method, getattr(world.service, method), raising=False)
+    monkeypatch.setattr(
+        world.manager, "create_item_for_user", world.service.create_item_for_user, raising=False,
+    )
     monkeypatch.setattr("saiverse.ffmpeg_runner.is_ffmpeg_available", lambda: True)
 
     def normalize(source, destination, **kwargs):

@@ -45,6 +45,12 @@ SUPPORTED_LLM_VIDEO_MIME = {
     "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
 }
 SUMMARY_SUFFIX = ".summary.txt"
+# ユーザーがチャットに添付した文書の本文を、添付した時点で発言の
+# metadata["documents"] の各項目 (``text``) へ写すときの上限の文字数
+# (api/routes/chat.py の _store_document_attachment が写し、
+# llm_clients/attached_documents.py が送る直前に発言の後ろへ付ける)。
+# docs/intent/user_attachment_delivery.md
+ATTACHED_DOCUMENT_MAX_CHARS = 8000
 
 
 def _ensure_image_dir() -> Path:

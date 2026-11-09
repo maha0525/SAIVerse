@@ -524,7 +524,8 @@ def _store_image_attachment(
     # Create picture Item with placeholder description
     item_id = None
     try:
-        item_id = manager.create_picture_item_for_user(
+        item_id = manager.create_item_for_user(
+            item_type="picture",
             name=att.filename,
             description=f"User uploaded image: {att.filename}",
             file_path=str(dest_path),
@@ -586,7 +587,17 @@ def _store_document_attachment(
     manager,
     building_id: str
 ) -> Dict[str, Any]:
-    """Store document and create document Item."""
+    """Store document and create document Item.
+
+    添付した時点の本文の写し (``text``、最大 ``ATTACHED_DOCUMENT_MAX_CHARS``
+    文字) と、上限で切ったか (``text_truncated``) を返す。呼び出し側が発言の
+    ``metadata["documents"]`` の項目へ写し、送る直前に
+    llm_clients/attached_documents.py が発言の後ろへ付ける
+    (docs/intent/user_attachment_delivery.md)。本文を取り出せないとき
+    (UTF-8 として読めない・PDF の抽出の失敗・抽出が空) は ``text`` を空文字にする。
+    """
+    from saiverse.media_utils import ATTACHED_DOCUMENT_MAX_CHARS
+
     dest_dir = get_saiverse_home() / "documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -594,38 +605,29 @@ def _store_document_attachment(
     dest_path = dest_dir / dest_name
     dest_path.write_bytes(data)
 
-    # Read content for summary
-    is_pdf = att.filename.lower().endswith('.pdf') or att.mime_type == 'application/pdf'
-    if is_pdf:
-        try:
-            import io
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(data))
-            text_parts = [page.extract_text() or "" for page in reader.pages[:5]]  # first 5 pages for summary
-            content = "\n".join(text_parts)
-        except Exception:
-            logging.warning("PDF text extraction failed for %s", att.filename, exc_info=True)
-            content = "(PDF text extraction failed)"
-    else:
-        try:
-            content = data.decode('utf-8')
-        except UnicodeDecodeError:
-            content = data.decode('utf-8', errors='replace')
+    # 本文を取り出す。上限を 1 文字でも超えたら読むのをやめる (超えたかどうかで
+    # text_truncated が決まるので、上限ちょうどでは止めない)。
+    content = _extract_attached_document_text(data, att, ATTACHED_DOCUMENT_MAX_CHARS)
+    text = content[:ATTACHED_DOCUMENT_MAX_CHARS]
+    text_truncated = len(content) > ATTACHED_DOCUMENT_MAX_CHARS
 
     # Generate summary (first 200 chars)
-    summary = content[:200].strip()
-    if len(content) > 200:
-        summary += "..."
+    if content:
+        summary = content[:200].strip()
+        if len(content) > 200:
+            summary += "..."
+    else:
+        summary = f"User uploaded document: {att.filename}"
 
-    # Create document Item
+    # Create document Item (closed; the user message carries the text)
     item_id = None
     try:
-        item_id = manager.create_document_item_for_user(
+        item_id = manager.create_item_for_user(
+            item_type="document",
             name=att.filename,
             description=summary,
             file_path=str(dest_path),
             building_id=building_id,
-            is_open=True,  # Auto-open so it appears in visual context
             creator_id="user",
             source_context='{"source": "upload"}',
         )
@@ -639,8 +641,56 @@ def _store_document_attachment(
         "source": "user_upload",
         "path": str(dest_path),
         "item_id": item_id,
-        "content_preview": content[:500] if len(content) > 500 else content
+        "content_preview": content[:500] if len(content) > 500 else content,
+        "text": text,
+        "text_truncated": text_truncated,
     }
+
+
+def _extract_attached_document_text(data: bytes, att: AttachmentData, max_chars: int) -> str:
+    """添付文書の本文を取り出す (取り出せないときは空文字)。
+
+    PDF はページの順に文字を抜き出し、連結した長さが ``max_chars`` を超えた
+    ところで読むのをやめる (返り値は ``max_chars`` より長いことがある)。PDF
+    以外は ``_ATTACHED_TEXT_ENCODINGS`` の順 (BOM 付きを含む UTF-8、次に
+    Windows の日本語のテキストに多い cp932) に厳密に読み、どれでも読めなければ
+    空文字 — ``errors='replace'`` で読んだ壊れた文字列をペルソナへ送らないため。
+    空白しか無い本文も空文字。
+    """
+    is_pdf = att.filename.lower().endswith('.pdf') or att.mime_type == 'application/pdf'
+    if is_pdf:
+        try:
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            content = ""
+            for idx, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                content = f"{content}\n{page_text}" if idx else page_text
+                if len(content) > max_chars:
+                    break
+        except Exception:
+            logging.warning("PDF text extraction failed for %s", att.filename, exc_info=True)
+            return ""
+    else:
+        for encoding in _ATTACHED_TEXT_ENCODINGS:
+            try:
+                content = data.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            logging.info(
+                "Attached document %s is not readable as %s; its text is not snapshotted",
+                att.filename, "/".join(_ATTACHED_TEXT_ENCODINGS),
+            )
+            return ""
+    return content if content.strip() else ""
+
+
+#: PDF 以外の添付文書を読む文字コードの順 (_extract_attached_document_text)。
+#: utf-8-sig は BOM の無い UTF-8 もそのまま読み、BOM があれば外す。
+_ATTACHED_TEXT_ENCODINGS = ("utf-8-sig", "cp932")
 
 AUDIO_EXTENSIONS = {'wav', 'mp3', 'ogg', 'oga', 'opus', 'aac', 'flac', 'aiff', 'm4a'}
 VIDEO_EXTENSIONS = {'mp4', 'webm', 'mov', 'avi', 'mpeg', 'mpg', '3gp', 'mkv', 'flv', 'wmv'}
@@ -691,15 +741,15 @@ def _store_audio_attachment(
             except OSError:
                 logging.warning("Failed to remove temp audio file: %s", tmp_input)
 
-    # Create audio Item (is_open=True so it appears in visual_context)
+    # Create audio Item (closed; the user message carries the audio via metadata["media"])
     item_id = None
     try:
-        item_id = manager.create_audio_item_for_user(
+        item_id = manager.create_item_for_user(
+            item_type="audio",
             name=att.filename,
             description=f"User uploaded audio: {att.filename}",
             file_path=str(dest_path),
             building_id=building_id,
-            is_open=True,
             creator_id="user",
             source_context='{"source": "upload"}',
         )
@@ -769,12 +819,12 @@ def _store_video_attachment(
 
     item_id = None
     try:
-        item_id = manager.create_video_item_for_user(
+        item_id = manager.create_item_for_user(
+            item_type="video",
             name=att.filename,
             description=f"User uploaded video: {att.filename}",
             file_path=str(dest_path),
             building_id=building_id,
-            is_open=True,
             creator_id="user",
             source_context='{"source": "upload"}',
         )
@@ -828,12 +878,12 @@ def _register_uploaded_video_by_uri(
 
     item_id = None
     try:
-        item_id = manager.create_video_item_for_user(
+        item_id = manager.create_item_for_user(
+            item_type="video",
             name=att.filename,
             description=f"User uploaded video: {att.filename}",
             file_path=str(dest_path),
             building_id=building_id,
-            is_open=True,
             creator_id="user",
             source_context='{"source": "upload"}',
         )
@@ -1110,7 +1160,11 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                         "mime_type": result["mime_type"],
                         "item_id": result.get("item_id"),
                         "item_name": att.filename,  # For history context
-                        "content_preview": result.get("content_preview")
+                        "content_preview": result.get("content_preview"),
+                        # 添付した時点の本文の写し。送る直前に発言の後ろへ付く
+                        # (llm_clients/attached_documents.py)。
+                        "text": result.get("text", ""),
+                        "text_truncated": bool(result.get("text_truncated")),
                     })
                 elif result["type"] in ("audio", "video"):
                     entry = {
