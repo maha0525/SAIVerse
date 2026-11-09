@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import inspect
 import io
 import json
 import logging
@@ -29,6 +28,7 @@ from sai_memory.memory.storage import (
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
+from sea.tool_wait import await_tool_call, wait_tool_call_sync
 from sea.message_stamp import (
     append_presented_message_id,
     clear_unstored_reply,
@@ -2620,10 +2620,19 @@ def _execute_handy_tool_inline(
         try:
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
+            # 待ち方は sea/tool_wait.py に一本化 (docs/intent/stop_button.md)。
             with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=bool(state.get("_auto_mode", False)), event_callback=event_callback, llm_messages=messages):
-                raw_result = tool_func(**tool_args)
+                raw_result = wait_tool_call_sync(
+                    tool_func, tool_args,
+                    cancellation_token=state.get("_cancellation_token"),
+                    tool_name=tool_name,
+                )
             result_str = str(raw_result)
             LOGGER.info("[sea][handy] Executed %s → %s", tool_name, result_str[:200])
+        except ExecutionCancelledException:
+            # 停止の合図で待つのをやめた (または取り消しが届いた)。ツールの
+            # 失敗として結果に畳まず、外側の停止の処理へ投げる。
+            raise
         except Exception as exc:
             result_str = f"Handy tool error ({tool_name}): {exc}"
             LOGGER.exception("[sea][handy] %s failed", tool_name)
@@ -2748,19 +2757,18 @@ async def _run_spell_tool_async(
         from sea.runtime_context import realtime_spell_handover
         rt_handover = realtime_spell_handover(state)
 
-        def _run():
-            # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
-            # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
-                return tool_func(**tool_args)
-
-        if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
-                raw_result = await tool_func(**tool_args)
-        else:
-            raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
-            if inspect.isawaitable(raw_result):
-                raw_result = await raw_result
+        # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
+        # fork their sub-line from the parent LLM node's actual messages.
+        # ツールの待ち方は sea/tool_wait.py に一本化している (同期のツールは
+        # 専用の daemon スレッドで走り、persona_context の contextvars はそこへ
+        # 写される)。停止ボタン・終了処理の合図が来たら、ツールが戻らなくても
+        # ExecutionCancelledException で抜ける (docs/intent/stop_button.md)。
+        with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
+            raw_result = await await_tool_call(
+                tool_func, tool_args,
+                cancellation_token=state.get("_cancellation_token"),
+                tool_name=tool_name,
+            )
 
         # Normalize via tools.core.parse_tool_result so 4-tuple returns
         # ``(text, ToolResult, file_path, metadata)`` are unpacked correctly.
@@ -2777,6 +2785,12 @@ async def _run_spell_tool_async(
         # スペルの結果の文字列に畳むと、止まったことの知らせがペルソナの記憶に
         # 書かれてしまう。返事ごと止めて、チャット画面のエラーにだけ出す
         # (docs/intent/persona_model_selection.md 決まったこと 8)。
+        raise
+    except ExecutionCancelledException:
+        # 取り消しは実行制御の正規イベントで、スペルの失敗ではない。結果の
+        # 文字列に畳まずに投げ、外側の停止の処理 (スペルループの
+        # ``_stop_open_round`` → 返事の後始末の通告②) に任せる
+        # (docs/intent/stop_button.md、reply_stop_exit.md §通告の内容)。
         raise
     except Exception as exc:
         result_str = f"Spell error ({tool_name}): {type(exc).__name__}: {exc}"
@@ -5387,6 +5401,9 @@ async def _execute_realtime_spells(
                 spell_name, args, persona, state, "__realtime__", event_callback,
                 messages=messages,
             )
+        except ExecutionCancelledException:
+            # 停止の合図 (docs/intent/stop_button.md) は次のスペルへ進まずに投げる。
+            raise
         except Exception:
             LOGGER.exception("[sea][realtime_spells] Spell '%s' failed", spell_name)
             continue
@@ -5602,6 +5619,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 except ModelUnavailableError:
                     # 使うモデルが無い・繋げない — 事前スペル抜きで続けず、返事ごと止める
                     raise
+                except ExecutionCancelledException:
+                    # 停止の合図 (docs/intent/stop_button.md) — 事前スペル抜きで
+                    # 続けず、外側の停止の処理へ投げる。
+                    raise
                 except Exception:
                     LOGGER.exception("[sea][pre_spells] Pre-spell execution failed; continuing without pre-spell results")
 
@@ -5630,6 +5651,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     await _execute_realtime_spells(
                         runtime, persona, building_id, state, event_callback,
                     )
+            except ExecutionCancelledException:
+                # 停止の合図 (docs/intent/stop_button.md) は握らずに投げる。
+                raise
             except Exception:
                 LOGGER.exception("[sea][realtime_spells] Realtime spell execution failed; continuing")
 

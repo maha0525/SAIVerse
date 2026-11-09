@@ -17,6 +17,13 @@ class ExecutionCancelledException(Exception):
         self.interrupted_by = interrupted_by
 
 
+#: 「止める」合図の原因。停止ボタン (``user_stop``) と SAIVerse の終了処理
+#: (``server_shutdown``)。新しい発言・自律・スケジュールによる割り込み
+#: ("user" / "auto" / "schedule") は、走っている処理の完了を待つ合図で、
+#: これとは別物 (docs/intent/stop_button.md)。
+STOP_INTERRUPTED_BY = frozenset({"user_stop", "server_shutdown"})
+
+
 class CancellationToken:
     """Token for signaling cancellation to running playbook executions.
     
@@ -45,7 +52,12 @@ class CancellationToken:
             interrupted_by: Type of request that caused the interruption (user/schedule/auto)
         """
         with self._lock:
-            self._interrupted_by = interrupted_by
+            # 一度受けた「止める」合図は、そのあとの普通の割り込みで上書き
+            # しない。停止ボタンの直後に新しい発言が届くと、割り込みが原因を
+            # "user" に書き換え、止めたはずの処理が固まったツールを待ち直して
+            # しまう (PR #467 の Codex 指摘)。「止める」同士では最初の原因を残す。
+            if self._interrupted_by not in STOP_INTERRUPTED_BY:
+                self._interrupted_by = interrupted_by
             self._cancelled.set()
     
     def is_cancelled(self) -> bool:
@@ -73,4 +85,4 @@ class CancellationToken:
             self._interrupted_by = None
 
 
-__all__ = ["CancellationToken", "ExecutionCancelledException"]
+__all__ = ["CancellationToken", "ExecutionCancelledException", "STOP_INTERRUPTED_BY"]

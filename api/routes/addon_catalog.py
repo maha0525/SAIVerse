@@ -228,12 +228,28 @@ def _has_api_routes(addon_id: str) -> bool:
     return (EXPANSION_DATA_DIR / addon_id / "api_routes.py").exists()
 
 
+#: アドオンのコードを置き換える操作。動いている SAIVerse は、アドオンの
+#: ツールを起動時に一度だけ読み込み (``tools._autodiscover_tools``)、ツールが
+#: import した補助モジュールも ``sys.modules`` に残し続ける。integration と
+#: server_hook は登録し直せるが、ツールとその補助モジュールは古いコードのまま
+#: 動き続けるので、これらの操作の後は再起動が要る (2026-11-09、X 連携 0.3.1 の
+#: 修正が「再起動は不要」の表示のまま反映されない形で発覚)。
+_CODE_CHANGING_OPERATIONS = frozenset({"install", "update", "uninstall"})
+
+
+def _restart_required(operation_label: str, addon_id: str) -> bool:
+    if operation_label in _CODE_CHANGING_OPERATIONS:
+        return True
+    return _has_api_routes(addon_id)
+
+
 def _try_register_addon(addon_id: str, manager) -> None:
     """インストール後に addon_loader の per-addon register API を呼ぶ。
 
-    api_routes.py を持つアドオンは動的 router 追加が不可なので、上位 (SSE
-    呼び出し側) で restart_required を立てる前提。ここでは integrations と
-    server_hooks の register のみ行う。
+    ツールと api_routes.py は動的に入れ替えられないので、導入・更新・
+    アンインストールでは上位 (SSE 呼び出し側の ``_restart_required``) が
+    restart_required を立てる。ここでは integrations と server_hooks の
+    register のみ行う。
     """
     try:
         from saiverse.addon_loader import (
@@ -434,7 +450,9 @@ async def _run_with_progress_sse(
                 )
             finally:
                 try:
-                    final_event["restart_required"] = _has_api_routes(addon_id)
+                    final_event["restart_required"] = _restart_required(
+                        operation_label, addon_id,
+                    )
                 except Exception:
                     LOGGER.warning(
                         "addon_catalog[%s]: restart_required の判定に失敗", addon_id,

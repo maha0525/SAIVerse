@@ -195,3 +195,31 @@ def test_failed_operation_is_recorded_as_failed(blocking_uninstall):
 def test_operation_status_rejects_malformed_addon_ids(bad_id):
     res = _client().get(f"/api/addon-catalog/operations/{bad_id}")
     assert res.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [("install", True), ("update", True), ("uninstall", True), ("options", False)],
+)
+def test_restart_required_for_operations_that_replace_addon_code(operation, expected):
+    """導入・更新・アンインストールの後は、api_routes.py が無くても再起動が要る。
+
+    動いている SAIVerse はアドオンのツールを起動時に一度だけ読み込み、ツールが
+    import した補助モジュールも残し続ける。2026-11-09、X 連携 (api_routes.py 無し)
+    の 0.3.1 への更新で「再起動は不要」と出したまま、古い保存処理が動き続ける
+    形だった。選択肢のやり直し (options) はコードを置き換えないので要らない。
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        async def run_to_end():
+            resp = await addon_catalog._run_with_progress_sse(operation, ADDON_ID, lambda _p: None)
+            chunks = [chunk async for chunk in resp.body_iterator]
+            return "".join(chunks)
+
+        text = loop.run_until_complete(run_to_end())
+    finally:
+        loop.close()
+    finished = [e for e in _events(text) if e.get("phase") == "finished"]
+    assert finished and finished[-1]["ok"] is True
+    assert finished[-1]["restart_required"] is expected
+    assert addon_catalog.get_operation_status(ADDON_ID).last_result["restart_required"] is expected

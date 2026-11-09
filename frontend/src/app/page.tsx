@@ -1535,6 +1535,63 @@ export default function Home() {
         return () => clearInterval(pollInterval);
     }, [isHistoryLoaded]);
 
+    // 停止ボタンの判断材料 (docs/intent/stop_button.md): 表示している建物に、
+    // 止められる処理が走っているペルソナがいるか。画面側の状態 (loadingStatus は
+    // この画面から送った発言の返事を待つ間だけ立つ) ではなくサーバーの記録で決める
+    // — リロード後・ペルソナの自律の行動・別のタブからの送信でも出すため。
+    // 表示している建物が変わったらすぐ、その後は 3 秒ごとに問い合わせる。
+    // 答えはどの建物についての答えかと組で持ち、表示中の建物の答えだけを使う
+    // (建物を切り替えた直後に、前の建物の答えでボタンを出さないため)。
+    const [serverRunning, setServerRunning] = useState<{ buildingId: string; running: boolean } | null>(null);
+    const serverRunningHere = !!serverRunning
+        && serverRunning.running
+        && serverRunning.buildingId === currentBuildingId;
+    const refreshServerRunningRef = useRef<() => void>(() => {});
+    useEffect(() => {
+        const bid = currentBuildingId;
+        if (!bid) {
+            refreshServerRunningRef.current = () => {};
+            return;
+        }
+        let disposed = false;
+        const check = async () => {
+            try {
+                const res = await apiFetch(`/api/chat/running?building_id=${encodeURIComponent(bid)}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!disposed && currentBuildingIdRef.current === bid) {
+                    const running = !!data.running;
+                    // 答えが前回と同じなら state を差し替えない — 3 秒ごとに
+                    // 画面全体 (Home) を描き直さないため (入力のもたつきの原因になる)。
+                    setServerRunning(prev => (
+                        prev && prev.buildingId === bid && prev.running === running
+                            ? prev
+                            : { buildingId: bid, running }
+                    ));
+                }
+            } catch (err) {
+                console.error('[RunningPoll] Failed to check running generation', err);
+            }
+        };
+        // タブが裏にある間は問い合わせない。表に戻ったらすぐ一度確かめる。
+        const tick = () => {
+            if (typeof document !== 'undefined' && document.hidden) return;
+            void check();
+        };
+        const onVisible = () => {
+            if (!document.hidden) void check();
+        };
+        refreshServerRunningRef.current = () => { void check(); };
+        void check();
+        const timer = setInterval(tick, 3000);
+        document.addEventListener('visibilitychange', onVisible);
+        return () => {
+            disposed = true;
+            clearInterval(timer);
+            document.removeEventListener('visibilitychange', onVisible);
+        };
+    }, [currentBuildingId]);
+
     // Server-driven user movement sync (game_move_party / end_game 控室帰還など):
     // サーバー側の実在地 (serverCurrentBuildingIdRef との差分) が変わった時だけ
     // 画面を追従させる。閲覧モード (currentBuildingIdRef ≠ 実在地) で他の建物を
@@ -3392,11 +3449,19 @@ export default function Home() {
         // Signal backend to cancel active LLM generation
         // Don't abort() the fetch — let the backend's cancellation flow
         // send streaming_complete and cancelled events naturally.
+        // 止める対象は「表示している建物」のペルソナ (ユーザーの今いる建物では
+        // ない。docs/intent/stop_button.md)。
         try {
-            await apiFetch('/api/chat/stop', { method: 'POST' });
+            await apiFetch('/api/chat/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ building_id: currentBuildingIdRef.current }),
+            });
         } catch (e) {
             console.error('Failed to send stop request:', e);
         }
+        // 止まったかどうかを次の 3 秒を待たずに確かめ直す
+        refreshServerRunningRef.current();
     };
 
     // Video files are uploaded via multipart so we never base64-encode the
@@ -4327,13 +4392,29 @@ export default function Home() {
                                 <Square size={16} />
                             </button>
                         ) : (
-                            <button
-                                className={styles.sendBtn}
-                                onClick={handleSendMessage}
-                                disabled={(isInputEmpty && attachments.length === 0) || sessionLogReadOnly || lostBuildingNotice !== null}
-                            >
-                                <Send size={20} />
-                            </button>
+                            <>
+                                {/* この画面の送信の返事待ちではないが、表示している建物で
+                                    止められる処理が走っている (リロード後・自律の行動・
+                                    別のタブからの送信)。送信ボタンは消さずに隣に並べる —
+                                    自律の行動の間も話しかけられる今の挙動を変えない。 */}
+                                {serverRunningHere && (
+                                    <button data-i18n="app.page.text085"
+                                        className={styles.stopBtn}
+                                        onClick={handleStopGeneration}
+                                        title={uiText("app.page.text085")}
+                                        aria-label={uiText("app.page.text085")}
+                                    >
+                                        <Square size={16} />
+                                    </button>
+                                )}
+                                <button
+                                    className={styles.sendBtn}
+                                    onClick={handleSendMessage}
+                                    disabled={(isInputEmpty && attachments.length === 0) || sessionLogReadOnly || lostBuildingNotice !== null}
+                                >
+                                    <Send size={20} />
+                                </button>
+                            </>
                         )}
                     </div>
                 </div>

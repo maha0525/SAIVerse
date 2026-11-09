@@ -23,7 +23,8 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
     from tools import TOOL_REGISTRY, canonicalize_tool_name
     from tools.context import persona_context
     from tools.core import parse_tool_result
-    from tools.mcp_client import maybe_await_tool_result
+    from sea.cancellation import ExecutionCancelledException
+    from sea.tool_wait import await_tool_call
 
     call_source = getattr(node_def, "call_source", "fc") or "fc"
     output_key = getattr(node_def, "output_key", None)
@@ -75,11 +76,13 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             _pulse_ctx = state.get("_pulse_context")
             # auto_mode は factory の capture 値でなく state の実効値を読む。
             _eff_auto_mode = effective_auto_mode(state, auto_mode)
+            # 待ち方は sea/tool_wait.py に一本化 — 停止ボタン・終了処理の合図なら
+            # ツールが戻らなくても抜ける (docs/intent/stop_button.md)。
             if persona_id and persona_dir:
                 with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
-                    result = await maybe_await_tool_result(tool_func, **tool_args)
+                    result = await await_tool_call(tool_func, tool_args, cancellation_token=cancellation_token, tool_name=tool_name)
             else:
-                result = await maybe_await_tool_result(tool_func, **tool_args)
+                result = await await_tool_call(tool_func, tool_args, cancellation_token=cancellation_token, tool_name=tool_name)
             # A native tool returning a tuple ``(content, snippet, file_path,
             # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw repr
             # into state["last"] (→ MEMORIZE / SAIMemory), the tool_result
@@ -128,6 +131,10 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                     node_id=node_id, playbook_name=playbook.name,
                     tool_call_id=_tc_id_for_im, tool_name=tool_name))
 
+        except ExecutionCancelledException:
+            # 取り消しはツールの失敗ではない — "Tool error" に畳まずに投げ、
+            # 外側の停止の処理に任せる (docs/intent/stop_button.md)。
+            raise
         except Exception as exc:
             error_msg = f"Tool error ({tool_name}): {exc}"
             state["last"] = error_msg

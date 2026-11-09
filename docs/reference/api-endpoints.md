@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 395（tag グループ: 26）
+**エンドポイント数**: 396（tag グループ: 26）
 
 ## addon
 
@@ -94,9 +94,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/chat/persona/{persona_id}/avatar` |  |
 | POST | `/api/chat/preview` | Preview the context that would be sent to the LLM, without executing. |
 | POST | `/api/chat/retry` | 既にあるユーザー発言に対して、応答だけをやり直す。 |
+| GET | `/api/chat/running` | 表示している建物に、止められる処理が走っているペルソナがいるか。 |
 | POST | `/api/chat/send` |  |
 | POST | `/api/chat/spell-confirmation-response` | Respond to a generic spell confirmation request. |
-| POST | `/api/chat/stop` | Stop the active LLM generation for the user's current building. |
+| POST | `/api/chat/stop` | 停止ボタン: 表示している建物にいるペルソナの処理をすべて止める。 |
 | POST | `/api/chat/utter` | 発言契機入室。 必要なら自動 move を伴って chat を実行する。 |
 | POST | `/api/chat/withdraw` | まだ誰も読んでいない自分の発言を取り下げ、本文を入力欄へ返す。 |
 

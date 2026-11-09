@@ -16,11 +16,12 @@ from sea.message_stamp import (
 from sea.playbook_models import PlaybookSchema
 from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY
 from sea.runtime_state import effective_auto_mode, set_playbook_var
+from sea.cancellation import ExecutionCancelledException
 from sea.runtime_utils import _format, _resolve_template_arg, event_building_id
+from sea.tool_wait import await_tool_call
 from tools import TOOL_REGISTRY, canonicalize_tool_name
 from tools.context import persona_context
 from tools.core import parse_tool_result
-from tools.mcp_client import maybe_await_tool_result
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class RuntimeEngine:
                 LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs)
 
                 if tool_func is None:
-                    # 未登録のツール名は失敗として下の except へ送る。maybe_await_tool_result は
+                    # 未登録のツール名は失敗として下の except へ送る。await_tool_call は
                     # None を渡されると例外を出さずに None を返すので、ここで止めないと
                     # 「None という結果の成功」が state["last"] / PulseContext / _messages に
                     # 記録される (runtime_nodes.py の tool_call ノードと同じ扱いに揃える)。
@@ -103,11 +104,13 @@ class RuntimeEngine:
                 # auto_mode は factory が capture した引数でなく state の実効値
                 # (親 Pulse からの継承込み) を読む。
                 _eff_auto_mode = effective_auto_mode(state, auto_mode)
+                # 待ち方は sea/tool_wait.py に一本化 — 停止ボタン・終了処理の
+                # 合図ならツールが戻らなくても抜ける (docs/intent/stop_button.md)。
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=_eff_auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
-                        result = await maybe_await_tool_result(tool_func, **kwargs)
+                        result = await await_tool_call(tool_func, kwargs, cancellation_token=cancellation_token, tool_name=tool_name)
                 else:
-                    result = await maybe_await_tool_result(tool_func, **kwargs)
+                    result = await await_tool_call(tool_func, kwargs, cancellation_token=cancellation_token, tool_name=tool_name)
 
                 # A native tool returning a tuple ``(content, snippet, file_path,
                 # metadata)`` (or the 2-/3-tuple forms) must NOT leak its raw
@@ -195,6 +198,10 @@ class RuntimeEngine:
                     state, persona_obj, playbook,
                     f"tool '{tool_name}' result:\n{result_str}",
                 )
+            except ExecutionCancelledException:
+                # 取り消しはツールの失敗ではない — "Tool error" に畳まずに投げ、
+                # 外側の停止の処理に任せる (docs/intent/stop_button.md)。
+                raise
             except Exception as exc:
                 error_msg = f"Tool error: {exc}"
                 state["last"] = error_msg
