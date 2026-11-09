@@ -1298,27 +1298,25 @@ class SAIVerseManager(
         """まだ誰も読んでいない自分の発言を取り下げ、本文を手元へ返す。"""
         return self.runtime.withdraw_user_message(message_id)
 
-    def cancel_active_generation(self) -> bool:
-        """Cancel the active LLM generation for personas in the user's current building.
+    def cancel_active_generation(self, building_id: Optional[str] = None) -> bool:
+        """停止ボタン: 表示している建物にいるペルソナの処理をすべて止める。
 
-        Sends cancellation signal via CancellationToken (stops SEA playbook execution
-        and closes LLM streaming connections) and sets the stop_event (breaks the
-        per-persona loop in backend_worker).
+        ``building_id`` は画面が表示している建物。渡されないときは (古い画面
+        からの呼び出し) ユーザーの今いる建物を使う。その建物にいるペルソナの
+        走っている request (新しい発言に割り込まれて裏で走り続けている古い
+        request を含む。PulseController の記録) に "user_stop" を刻み、その
+        建物の stop_event を立てる (backend_worker のペルソナループを断つ)。
+        固まったツールを待っている処理も、この合図で待つのをやめて抜ける
+        (docs/intent/stop_button.md、sea/tool_wait.py)。メタ判断は対象外。
         """
-        building_id = self.state.user_current_building_id
         if not building_id:
-            logging.warning("[cancel] No user_current_building_id; cannot cancel.")
+            building_id = self.state.user_current_building_id
+        if not building_id:
+            logging.warning("[cancel] No building_id and no user_current_building_id; cannot cancel.")
             return False
 
-        persona_ids = self.occupants.get(building_id, [])
-        cancelled = False
-
-        for pid in persona_ids:
-            req = self.pulse_controller._current.get(pid)
-            if req:
-                logging.info("[cancel] Cancelling active request for persona %s (pulse_id=%s)", pid, req.pulse_id)
-                req.cancellation_token.cancel(interrupted_by="user_stop")
-                cancelled = True
+        persona_ids = list(self.occupants.get(building_id, []))
+        cancelled = self.pulse_controller.cancel_running(persona_ids, "user_stop") > 0
 
         # Also set the stop_event so backend_worker breaks its persona loop
         stop_event = self._active_stop_events.get(building_id)
@@ -1332,10 +1330,20 @@ class SAIVerseManager(
 
         return cancelled
 
+    def running_persona_ids_in_building(self, building_id: str) -> List[str]:
+        """この建物にいるペルソナのうち、止められる処理が走っているものを返す。
+
+        停止ボタンを出すかどうかの判断材料 (docs/intent/stop_button.md)。
+        PulseController の記録 (メインレーン、割り込まれた古い request を含む)
+        だけを参照し、メタ判断は数えない。
+        """
+        persona_ids = list(self.occupants.get(building_id, []))
+        return self.pulse_controller.running_persona_ids(persona_ids)
+
     def stop_all_active_generations(self, timeout: float = 8.0) -> bool:
         """サーバー終了 (Ctrl+C / SIGTERM) 用: 走行中の全生成を締めてから返る。
 
-        停止ボタン (``cancel_active_generation``) がユーザーの現在建物の
+        停止ボタン (``cancel_active_generation``) が表示している建物の
         ペルソナだけを対象にするのに対し、こちらは全ペルソナ・全建物が対象。
         全建物の stop_event を立てて backend_worker の建物内ペルソナループを
         断ち (終了処理中に次のペルソナの生成が始まらないようにする)、

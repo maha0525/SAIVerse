@@ -918,11 +918,34 @@ def _store_uploaded_attachment_v2(
         logging.error(f"Failed to process attachment: {e}")
         return None
 
+class StopGenerationRequest(BaseModel):
+    # 画面が表示している建物。省略時はユーザーの今いる建物 (古い画面との互換)。
+    building_id: Optional[str] = None
+
+
 @router.post("/stop")
-def stop_generation(manager = Depends(get_manager)):
-    """Stop the active LLM generation for the user's current building."""
-    cancelled = manager.cancel_active_generation()
+def stop_generation(
+    req: Optional[StopGenerationRequest] = None,
+    manager = Depends(get_manager),
+):
+    """停止ボタン: 表示している建物にいるペルソナの処理をすべて止める。
+
+    docs/intent/stop_button.md。``building_id`` が無いときはユーザーの今いる建物。
+    """
+    building_id = req.building_id if req is not None else None
+    cancelled = manager.cancel_active_generation(building_id=building_id)
     return {"cancelled": cancelled}
+
+
+@router.get("/running")
+def get_running(building_id: str, manager = Depends(get_manager)):
+    """表示している建物に、止められる処理が走っているペルソナがいるか。
+
+    停止ボタンを出すかどうかを、画面側の状態ではなくサーバーの記録で決める
+    ための問い合わせ (docs/intent/stop_button.md)。メタ判断は数えない。
+    """
+    persona_ids = manager.running_persona_ids_in_building(building_id)
+    return {"running": bool(persona_ids), "persona_ids": persona_ids}
 
 
 def _cleanup_attachment_items(

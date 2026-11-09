@@ -225,6 +225,7 @@ sea/
 ├── window_refill.py      # 読み戻しの計画（純関数。残す量を下回る窓の開き直し — arasuji_levels §15）
 ├── session_window.py     # 提示コンテキストと圧縮区間の digest 置き換え
 ├── cancellation.py       # キャンセル
+├── tool_wait.py          # ツールを待つ関数（4 か所の待ち場所で共通。停止ボタン・終了処理の合図ならツールが戻らなくても抜ける。stop_button intent）
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。

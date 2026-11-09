@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
 from queue import Queue
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional
 
 from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
@@ -166,6 +166,15 @@ class PulseController:
         # ロックが担い、メタ判断は main の Beat 境界に挟まる直列 Beat になった。
         # _current_meta は観測用の記帳として残す。
         self._current_meta: Dict[str, ExecutionRequest] = {}
+        # メインレーンで「いま走っている処理」の記録 (docs/intent/stop_button.md)。
+        # _current は新しい発言に割り込まれると新しい request に差し替わるが、
+        # 割り込まれた古い request は Beat の後始末を終えるまで裏で走り続ける
+        # (固まったツールを待っていれば Beat ロックも握ったまま)。停止ボタンと
+        # 「止められる処理が走っているか」の問い合わせがそれにも届くよう、
+        # _current に載せた時点から _execute_unlocked の finally までをここに
+        # 記録する。メタ判断レーン (_current_meta) は載せない — メタ判断は停止
+        # ボタンの対象外。読み書きは persona ごとの RLock (_get_lock) の内側で行う。
+        self._running: Dict[str, List[ExecutionRequest]] = {}
 
         # 終了処理中は新規 Pulse を受け付けない (shutdown() が立てる)。
         # 立った後の submit は skipped、待機列の繰り上げも止まる。
@@ -210,7 +219,16 @@ class PulseController:
         # 最初に受付を閉じる — 取り消しで空いた席に新しい生成が座るのを防ぐ。
         self._shutting_down = True
 
+        # 割り込まれて裏で走り続けている古い request (_running) にも刻む —
+        # 固まったツールを待っているなら、"server_shutdown" で待つのをやめて
+        # 抜ける (docs/intent/stop_button.md、sea/tool_wait.py)。
         active = list(self._current.items()) + list(self._current_meta.items())
+        _seen = {id(req) for _, req in active}
+        for persona_id, requests in list(self._running.items()):
+            for req in list(requests):
+                if id(req) not in _seen:
+                    active.append((persona_id, req))
+                    _seen.add(id(req))
         for persona_id, request in active:
             request.cancellation_token.cancel(interrupted_by="server_shutdown")
 
@@ -236,7 +254,11 @@ class PulseController:
         deadline = time.monotonic() + timeout
         try:
             while time.monotonic() < deadline:
-                if not self._current and not self._current_meta:
+                if (
+                    not self._current
+                    and not self._current_meta
+                    and not any(list(self._running.values()))
+                ):
                     LOGGER.info(
                         "[PulseController] Shutdown: all active executions settled"
                     )
@@ -246,7 +268,11 @@ class PulseController:
                 # だが、万一それを外した登録が残っても、各周回で未取り消しの
                 # request に打ち直して最大 0.1 秒で回収する (cancel() は
                 # Event の再 set なので二度呼んで安全)。
-                late = list(self._current.values()) + list(self._current_meta.values())
+                late = (
+                    list(self._current.values())
+                    + list(self._current_meta.values())
+                    + [req for reqs in list(self._running.values()) for req in list(reqs)]
+                )
                 for request in late:
                     if not request.cancellation_token.is_cancelled():
                         LOGGER.info(
@@ -267,7 +293,11 @@ class PulseController:
             )
             return False
 
-        remaining = sorted(set(self._current) | set(self._current_meta))
+        remaining = sorted(
+            set(self._current)
+            | set(self._current_meta)
+            | {pid for pid, reqs in list(self._running.items()) if reqs}
+        )
         LOGGER.warning(
             "[PulseController] Shutdown: %d execution(s) did not settle within "
             "%.1fs (personas: %s); their draft rows may remain unconfirmed",
@@ -288,6 +318,66 @@ class PulseController:
             self._queues[persona_id] = []
         return self._queues[persona_id]
     
+    # ------------------------------------------------------------------
+    # いま走っている処理の記録 (docs/intent/stop_button.md)
+    # ------------------------------------------------------------------
+
+    def _add_running(self, request: ExecutionRequest) -> None:
+        """走っている処理の記録に足す。persona の RLock の内側で呼ぶ。"""
+        self._running.setdefault(request.persona_id, []).append(request)
+
+    def _remove_running(self, request: ExecutionRequest) -> None:
+        """走っている処理の記録から消す。persona の RLock の内側で呼ぶ。"""
+        requests = self._running.get(request.persona_id)
+        if not requests:
+            return
+        remaining = [req for req in requests if req is not request]
+        if remaining:
+            self._running[request.persona_id] = remaining
+        else:
+            del self._running[request.persona_id]
+
+    def running_requests(self, persona_id: str) -> List[ExecutionRequest]:
+        """このペルソナのメインレーンで走っている request の一覧 (受付順)。
+
+        新しい発言に割り込まれて裏で走り続けている古い request も含む。
+        メタ判断レーンは含まない。
+        """
+        with self._get_lock(persona_id):
+            return list(self._running.get(persona_id, ()))
+
+    def has_running(self, persona_id: str) -> bool:
+        """このペルソナのメインレーンに走っている request があるか。"""
+        return bool(self.running_requests(persona_id))
+
+    def running_persona_ids(self, persona_ids: Iterable[str]) -> List[str]:
+        """渡されたペルソナのうち、走っている request があるものを返す (渡された順)。"""
+        return [pid for pid in persona_ids if self.has_running(pid)]
+
+    def cancel_running(self, persona_ids: Iterable[str], interrupted_by: str) -> int:
+        """渡されたペルソナの、走っている request をすべて取り消す。
+
+        割り込まれて裏で走り続けている古い request にも ``interrupted_by`` を
+        刻む (``CancellationToken.cancel`` は上書きなので、"user" で割り込まれ
+        済みの印も停止ボタンの "user_stop" に変わる)。
+
+        Returns:
+            取り消しを刻んだ request の数。
+        """
+        count = 0
+        for persona_id in persona_ids:
+            with self._get_lock(persona_id):
+                requests = list(self._running.get(persona_id, ()))
+                for request in requests:
+                    LOGGER.info(
+                        "[PulseController] Cancelling running %s request for persona %s "
+                        "(pulse_id=%s, interrupted_by=%s)",
+                        request.type, persona_id, request.pulse_id, interrupted_by,
+                    )
+                    request.cancellation_token.cancel(interrupted_by=interrupted_by)
+                    count += 1
+        return count
+
     def submit(self, request: ExecutionRequest) -> Optional[List[str]]:
         """Submit an execution request for processing.
 
@@ -338,6 +428,7 @@ class PulseController:
             if current is None:
                 # No execution running, register and proceed
                 self._current[persona_id] = request
+                self._add_running(request)
                 action = "execute"
             elif self._should_interrupt(current, request):
                 # Cancel current execution
@@ -361,6 +452,7 @@ class PulseController:
 
                 # Register new request
                 self._current[persona_id] = request
+                self._add_running(request)
                 action = "execute"
             else:
                 # New request doesn't win - queue or skip based on policy
@@ -386,6 +478,7 @@ class PulseController:
             # の場合は席が無いので触らない。
             if self._shutting_down and self._current.get(persona_id) is request:
                 del self._current[persona_id]
+                self._remove_running(request)
                 request.dispatch_action = "skipped"
                 LOGGER.info(
                     "[PulseController] Rejecting %s request for persona %s "
@@ -541,6 +634,7 @@ class PulseController:
             with lock:
                 if self._current.get(persona_id) is request:
                     del self._current[persona_id]
+                self._remove_running(request)
 
                 # Notify user-complete callbacks (e.g., AutonomyManager resume)
                 if request.type == "user":
@@ -624,12 +718,14 @@ class PulseController:
 
             next_request = queue.pop(0)
             self._current[persona_id] = next_request
+            self._add_running(next_request)
 
             # publish-then-validate: 台帳へ登録した後に旗を再検査する。
             # shutdown() の一覧取得より後に載った登録は、この時点で必ず旗が
             # 見える — 見えたら自分で席を消して繰り上げをやめる。
             if self._shutting_down:
                 del self._current[persona_id]
+                self._remove_running(next_request)
                 LOGGER.info(
                     "[PulseController] Discarding queued %s request for "
                     "persona %s (shutdown in progress)",
