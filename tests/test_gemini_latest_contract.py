@@ -92,6 +92,7 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
     def test_fable_5_2_pricing_and_limits(self):
         config = model_configs.get_model_config("claude-fable-5.2")
         self.assertEqual(config["max_output_tokens"], 128000)
+        self.assertIs(config["supports_sampling_parameters"], False)
         self.assertAlmostEqual(
             model_configs.calculate_cost("claude-fable-5.2", 1_000_000, 1_000_000), 48.0
         )
