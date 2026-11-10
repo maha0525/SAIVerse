@@ -1,0 +1,139 @@
+/* ChronicleOfferPanel: shown once after a chat-log import finishes.
+   Dark is the default; light overrides follow at the end. */
+
+.panel {
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    border: 1px solid rgba(77, 171, 247, 0.35);
+    border-radius: 8px;
+    background-color: rgba(77, 171, 247, 0.06);
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #74c0fc;
+}
+
+.header h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+.body {
+    margin: 0.75rem 0 0 0;
+    color: #ccc;
+    font-size: 0.875rem;
+    line-height: 1.7;
+}
+
+.estimateBox {
+    margin: 1rem 0 0 0;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid rgba(127, 127, 127, 0.28);
+    border-radius: 8px;
+    background-color: rgba(127, 127, 127, 0.08);
+}
+
+.estimateRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 4px 0;
+    font-size: 0.85rem;
+}
+
+.estimateLabel {
+    color: #888;
+    flex-shrink: 0;
+}
+
+.estimateValue {
+    color: #e0e0e0;
+    text-align: right;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.laterNote {
+    margin: 0.5rem 0 0 0;
+    text-align: right;
+    color: #888;
+    font-size: 0.8125rem;
+}
+
+.progressLine {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    color: #e0e0e0;
+    font-size: 0.875rem;
+}
+
+.serverMessage {
+    margin: 0.5rem 0 0 0;
+    color: #aaa;
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+}
+
+.note {
+    margin: 0.5rem 0 0 0;
+    color: #888;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+}
+
+.outcome {
+    margin-top: 0.75rem;
+}
+
+@media (max-width: 480px) {
+    .estimateRow {
+        flex-wrap: wrap;
+        gap: 0.25rem 1rem;
+    }
+
+    .estimateValue {
+        margin-left: auto;
+    }
+}
+
+:global([data-theme="light"]) .panel {
+    background-color: #f0f7ff;
+    border-color: #bfdbfe;
+}
+
+:global([data-theme="light"]) .header {
+    color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .header h3,
+:global([data-theme="light"]) .estimateValue,
+:global([data-theme="light"]) .progressLine {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .body {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .estimateBox {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .estimateLabel,
+:global([data-theme="light"]) .laterNote,
+:global([data-theme="light"]) .note {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .serverMessage {
+    color: #475569;
+}

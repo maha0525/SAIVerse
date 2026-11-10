@@ -77,7 +77,7 @@ class FakeManager:
         return room
 
     def create_ai(self, name: str, system_prompt: str, home_city_id: int,
-                  custom_ai_id: Any = None, language: Any = None) -> Tuple[bool, str, Any, Any]:
+                  custom_ai_id: Any = None, language: Any = None) -> Tuple[bool, str, Any, Any, Any]:
         stem = custom_ai_id or f"persona_{len(self.created) + 1}"
         ai_id = f"{stem}_{self.city_name}"
         room = self.add_persona(ai_id, name)
@@ -92,7 +92,7 @@ class FakeManager:
         self.occupants[room] = [ai_id]
         self.building_memory_paths[room] = self.saiverse_home / "cities" / CITY / "buildings" / room / "log.json"
         self.building_histories[room] = []
-        return True, "created", ai_id, room
+        return True, "created", None, ai_id, room
 
     def delete_ai(self, ai_id: str) -> str:
         # 本物 (manager/admin.py の delete_ai) と同じく私室の building 行は消さない
@@ -486,7 +486,7 @@ def _register_on_create(manager: FakeManager) -> None:
 
     def create_and_register(*args: Any, **kwargs: Any) -> Any:
         created = create(*args, **kwargs)
-        manager.personas[created[2]] = SimpleNamespace(persona_id=created[2])
+        manager.personas[created[3]] = SimpleNamespace(persona_id=created[3])
         return created
 
     manager.create_ai = create_and_register
@@ -679,17 +679,23 @@ def test_import_new_removes_the_persona_and_its_room_when_import_fails(
         assert room not in table
     assert [b.building_id for b in manager.buildings] == []
 
-    # 正しい ZIP で同じ名前の新規取り込みが通る (私室の名前が衝突しない)
+    # 正しい ZIP で同じ名前の新規取り込みが通る (私室の名前が衝突しない)。
+    # 消したペルソナの記憶フォルダ (personas/tester_city_a/) は残るので、
+    # 作り直しはその ID を避けて番号を足す
+    # (docs/issues/persona_delete_leaves_orphans_and_reuses_ids.md)
+    assert (dst["home"] / "personas" / new_id).is_dir()
+    retry_id = f"tester_2_{CITY}"
+    retry_room = f"{retry_id}_room"
     monkeypatch.setattr(importer, "validate_pack", original_validate)
     res = world["use"](dst).post(
         "/api/people/persona-pack/import-new",
         files={"file": ("pack.zip", pack, "application/zip")},
     )
     assert res.status_code == 200, res.text
-    assert res.json()["persona_id"] == new_id
-    assert res.json()["room_id"] == room
-    assert [r[0] for r in _messages(dst["home"], new_id)] == ["m1", "m2"]
-    assert _buildings(manager) == [room]
+    assert res.json()["persona_id"] == retry_id
+    assert res.json()["room_id"] == retry_room
+    assert [r[0] for r in _messages(dst["home"], retry_id)] == ["m1", "m2"]
+    assert _buildings(manager) == [retry_room]
 
 
 def test_import_new_keeps_the_persona_when_its_memory_cannot_be_checked(

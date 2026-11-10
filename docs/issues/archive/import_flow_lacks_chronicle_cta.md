@@ -1,7 +1,7 @@
 # ログインポート完了の導線が Chronicle 化 (補修) へ誘導しない
 
 **発見**: 2026-09-01 (新規ペルソナ「ルミー」へのログインポート検証で、まはーが「Chronicle を作る場面が無いまま完了した」と気づいた)
-**状態**: 🔲 未解決 — リリース非遮断 (機能は Chronicle タブの帯から実行できる)。導線の改善
+**状態**: ✅ 解決 — 2026-11-07、取り込み完了後の共有の案内 (ChronicleOfferPanel) として実装 (PR #458、設計は [intent: import_chronicle_offer.md](../../intent/import_chronicle_offer.md))。5 つの取り込み口すべてに cost-estimate つきの「あらすじを作る / あとで」の選択が出る。下の「改善の方向 (案)」とほぼ同じ構成 (既存の repair モードを呼ぶだけ)。チュートリアルは StepChronicle が案内を担うため抑止し、同 PR で StepChronicle の保存キーの空振り (`chronicle_generation_active` → `chronicle_enabled`) も修正した。なお 2026-11-07 の実装はこの issue に気づかないまま、まはーの再指摘から始まった — 事前の docs/issues/ 照合を飛ばした結果で、解が一致したのは偶然。
 **深刻度**: P3
 
 ## 事象

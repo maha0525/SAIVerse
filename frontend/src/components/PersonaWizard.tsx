@@ -8,7 +8,9 @@ import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal, PackageOpen } from 'lucide-react';
 import styles from './PersonaWizard.module.css';
-import MemoryImport from './memory/MemoryImport';
+import ImportFlowModal from './memory/ImportFlowModal';
+import ImportSourcePicker, { importSourceName } from './memory/ImportSourcePicker';
+import { ImportFlowSummary, ImportSource } from './memory/types';
 import PersonaPackResult, { PersonaPackImportResult } from './memory/PersonaPackResult';
 import ModalOverlay from './common/ModalOverlay';
 import SettingsModal from './SettingsModal';
@@ -32,6 +34,9 @@ interface City {
 }
 
 type Step = 1 | 2 | 3;
+
+/** manager/persona.py の PERSONA_FOLDER_ERROR_CODE (記憶フォルダが残る ID の断り) */
+const PERSONA_MEMORY_FOLDER_EXISTS = 'persona_memory_folder_exists';
 
 /**
  * manager/ids.py slugify_identifier のフロント写し。名前を ID 用の ASCII slug に
@@ -79,6 +84,12 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const packInputRef = useRef<HTMLInputElement>(null);
     const [packResult, setPackResult] = useState<PersonaPackImportResult | null>(null);
 
+    // ステップ 2 で選んだ取り込み元。null でないあいだ ImportFlowModal を開く
+    const [importSource, setImportSource] = useState<ImportSource | null>(null);
+    // ステップ 2 で⑥まで終えた取り込みの実績。1 件以上あれば「取り込まない」の
+    // 代わりに「取り込みを終える」を出す (docs/intent/import_flow_redesign.md「複数の取り込み」)
+    const [importedItems, setImportedItems] = useState<ImportFlowSummary[]>([]);
+
     // Reset on open
     useEffect(() => {
         if (isOpen) {
@@ -92,6 +103,8 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setCreatedRoomId(null);
             setShowSettings(false);
             setPackResult(null);
+            setImportSource(null);
+            setImportedItems([]);
             loadCities();
             loadTakenIds();
         }
@@ -110,15 +123,31 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         }
     };
 
+    // 記憶フォルダの残る ID の一覧。取れなくても空で続ける (確定はバックエンドが行う)
+    const loadPersonaFolderIds = async (): Promise<string[]> => {
+        try {
+            const res = await apiFetch('/api/world/ais/reserved-ids');
+            if (!res.ok) return [];
+            const data = await res.json();
+            return Array.isArray(data?.persona_folder_ids) ? data.persona_folder_ids : [];
+        } catch (e) {
+            console.error('Failed to load reserved persona ids', e);
+            return [];
+        }
+    };
+
     const loadTakenIds = async () => {
         try {
             // 使用済み ID の照合なので、1 ページ分では足りない (欠けた分は
             // 「空いている」と誤って判定される)。全件読み切る
-            const [ais, buildings] = await Promise.all([
+            const [ais, buildings, folderIds] = await Promise.all([
                 fetchAllTableRows<{ AIID: string }>('ai'),
                 fetchAllTableRows<{ BUILDINGID: string }>('building'),
+                loadPersonaFolderIds(),
             ]);
-            setTakenAiIds(new Set(ais.map(a => a.AIID)));
+            // 削除したペルソナの記憶フォルダが残る ID も避ける (バックエンドは
+            // その ID での作成を断る — 新しいペルソナが前の記憶を開かないため)
+            setTakenAiIds(new Set([...ais.map(a => a.AIID), ...folderIds]));
             setTakenBuildingIds(new Set(buildings.map(b => b.BUILDINGID)));
         } catch (e) {
             // 取れなくても致命ではない (初期値の提案が素朴になるだけで、
@@ -201,7 +230,13 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             const data = await res.json().catch(() => ({ detail: res.statusText }));
 
             if (!res.ok) {
-                setError(data.detail || uiText("components.PersonaWizard.text004"));
+                // 文言表に文がある断りは識別子 (error_code) とパラメータで届く
+                // (api/routes/world.py の create_ai)。無い・知らない識別子は英語の detail を出す
+                if (data.error_code === PERSONA_MEMORY_FOLDER_EXISTS && data.error_params?.folder) {
+                    setError(uiText("components.PersonaWizard.memoryFolderExists", { p1: data.error_params.folder }));
+                } else {
+                    setError(data.detail || uiText("components.PersonaWizard.text004"));
+                }
                 return;
             }
 
@@ -218,6 +253,10 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 setCreatedPersonaId(personaId);
                 setCreatedRoomId(roomId);
             }
+            // 「戻る」から作り直すと作成先のペルソナが変わるので、前のペルソナの
+            // 取り込み実績と開きかけの取り込み元をここで空にする
+            setImportedItems([]);
+            setImportSource(null);
             setStep(2);
         } catch (e) {
             console.error('Failed to create persona', e);
@@ -252,6 +291,9 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setName(result.persona_name || result.persona_id || '');
             setCreatedPersonaId(result.persona_id ?? null);
             setCreatedRoomId(result.room_id ?? null);
+            // こちらも作成先が変わるので、前のペルソナの取り込み実績を持ち越さない
+            setImportedItems([]);
+            setImportSource(null);
             setPackResult(result);
             setStep(3);
         } catch (err) {
@@ -372,17 +414,65 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         </>
     );
 
+    // 実績一覧の 1 行: 取り込み元の表示名 — 件数 (件数が無い取り込みは⑥の文)。
+    // Muse の流れでファイルも取り込んだ回には短い付記を足す。
+    const importedItemText = (item: ImportFlowSummary): string => {
+        const detail = typeof item.conversations === 'number' && typeof item.messages === 'number'
+            ? uiText("components.PersonaWizard.importedCounts", { p1: item.conversations, p2: item.messages })
+            : item.message;
+        const parts = [importSourceName(item.source)];
+        if (detail) parts.push(detail);
+        const line = parts.join(uiText("components.PersonaWizard.importedSeparator"));
+        return item.museFilesImported
+            ? `${line}${uiText("components.PersonaWizard.importedMuseFilesNote")}`
+            : line;
+    };
+
+    // ステップ 2 は過去ログ取り込みの①と実績一覧を置くハブで、②〜⑥は
+    // ImportFlowModal が持つ (docs/intent/import_flow_redesign.md)。⑥で閉じたら
+    // ①へ戻って実績を積み、何回でも取り込める。ステップ 3 へ進むのは、0 件のときの
+    // 「取り込まない」カードか、1 件以上のときの「取り込みを終える」ボタンだけ (不変条件 5)。
     const renderStep2 = () => (
         <div className={styles.importStep}>
             <h3 data-i18n="components.PersonaWizard.text015">{uiText("components.PersonaWizard.text015")}</h3>
             <p data-i18n="components.PersonaWizard.text016">{uiText("components.PersonaWizard.text016")}</p>
+            {importedItems.length > 0 && (
+                <div className={styles.importedList}>
+                    <div data-i18n="components.PersonaWizard.importedHeading" className={styles.importedHeading}>{uiText("components.PersonaWizard.importedHeading")}</div>
+                    <ul>
+                        {importedItems.map((item, idx) => (
+                            <li key={idx} className={styles.importedItem}>
+                                <CheckCircle size={16} className={styles.importedIcon} />
+                                <span>{importedItemText(item)}</span>
+                            </li>
+                        ))}
+                    </ul>
+                    <div className={styles.importedActions}>
+                        <button data-i18n="components.PersonaWizard.finishImport" className={styles.nextButton} onClick={() => setStep(3)}>
+                            {uiText("components.PersonaWizard.finishImport")}<ArrowRight size={16} />
+                        </button>
+                    </div>
+                    <p data-i18n="components.PersonaWizard.importMoreHint" className={styles.importedHint}>{uiText("components.PersonaWizard.importMoreHint")}</p>
+                </div>
+            )}
             {createdPersonaId && (
-                <MemoryImport
-                    personaId={createdPersonaId}
-                    onImportComplete={() => {
-                        // Import completed with thread selection done
-                    }}
-                />
+                <>
+                    <ImportSourcePicker
+                        onSelect={setImportSource}
+                        onSkip={importedItems.length === 0 ? () => setStep(3) : undefined}
+                    />
+                    {importSource && (
+                        <ImportFlowModal
+                            key={importSource}
+                            personaId={createdPersonaId}
+                            source={importSource}
+                            onClose={(finished, summary) => {
+                                setImportSource(null);
+                                if (finished && summary) setImportedItems((prev) => [...prev, summary]);
+                            }}
+                        />
+                    )}
+                </>
             )}
         </div>
     );
@@ -448,13 +538,6 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         >
                             {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}{uiText("components.PersonaWizard.text025")}<ArrowRight size={16} />
                         </button>
-                    )}
-                    {step === 2 && (
-                        <>
-                            <button data-i18n="components.PersonaWizard.text026" className={styles.skipButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text026")}</button>
-                            <button data-i18n="components.PersonaWizard.text027" className={styles.nextButton} onClick={() => setStep(3)}>{uiText("components.PersonaWizard.text027")}<ArrowRight size={16} />
-                            </button>
-                        </>
                     )}
                 </div>
             </div>

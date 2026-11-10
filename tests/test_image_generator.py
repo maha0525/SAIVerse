@@ -46,6 +46,8 @@ class TestImageGenerator(unittest.TestCase):
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
+    @patch.object(_mod, '_generate_with_gpt_image_2_6_flare', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image_2_6_sunburst', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_is_image_model_available', return_value=True)
     @patch.object(_mod, '_generate_with_grok_imagine', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_gpt_image_1_5', side_effect=RuntimeError("No key"))
@@ -55,7 +57,8 @@ class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
     @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
     def test_generate_image_error_returns_error_text(
-        self, mock_nb2, mock_nbp, mock_sunburst, mock_flare, mock_gpt2, mock_gpt15, mock_grok, mock_avail
+        self, mock_nb2, mock_nbp, mock_sunburst, mock_flare, mock_gpt2, mock_gpt15, mock_grok, mock_avail,
+        mock_26sunburst, mock_26flare
     ):
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
@@ -72,6 +75,8 @@ class TestImageGenerator(unittest.TestCase):
         mock_common.return_value = (b'imgdata', 'image/png')
 
         cases = [
+            (_mod._generate_with_gpt_image_2_6_flare, "gpt-image-2.6-flare"),
+            (_mod._generate_with_gpt_image_2_6_sunburst, "gpt-image-2.6-sunburst"),
             (_mod._generate_with_gpt_image_2_5_flare, "gpt-image-2.5-flare"),
             (_mod._generate_with_gpt_image_2_5_sunburst, "gpt-image-2.5-sunburst"),
             (_mod._generate_with_gpt_image_1_5, "gpt-image-1.5"),
@@ -87,8 +92,8 @@ class TestImageGenerator(unittest.TestCase):
     @patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"})
     @patch('openai.OpenAI')
     def test_gpt_image_quality_clamp(self, mock_openai):
-        # xhigh/max are GPT Image 2.5-only quality levels: legacy models must
-        # receive 'high', 2.5 models must receive the value unchanged.
+        # xhigh/max are GPT Image 2.5 / 2.6 quality levels: legacy models must
+        # receive 'high', 2.5 and 2.6 models must receive the value unchanged.
         client = mock_openai.return_value
         fake_result = MagicMock()
         fake_result.data = [MagicMock(b64_json=base64.b64encode(b'img').decode())]
@@ -100,6 +105,8 @@ class TestImageGenerator(unittest.TestCase):
             ("gpt-image-1.5", "max", "high"),
             ("gpt-image-2.5-flare", "xhigh", "xhigh"),
             ("gpt-image-2.5-sunburst", "max", "max"),
+            ("gpt-image-2.6-flare", "xhigh", "xhigh"),
+            ("gpt-image-2.6-sunburst", "max", "max"),
         ]
         for openai_model, requested, expected in cases:
             with self.subTest(model=openai_model, quality=requested):
@@ -131,6 +138,31 @@ class TestImageGenerator(unittest.TestCase):
 
         self.assertIsInstance(info, ToolResult)
         self.assertIn('gpt_image_2_5_flare', text)
+        self.assertEqual(Path(path), temp_path)
+        mock_gen.assert_called_once()
+        temp_path.unlink(missing_ok=True)
+
+    @patch.object(_mod, '_is_image_model_available', return_value=True)
+    @patch.object(_mod, 'store_image_bytes')
+    @patch.object(_mod, '_generate_with_gpt_image_2_6_flare')
+    def test_generate_image_gpt_image_2_6_flare_dispatch(self, mock_gen, mock_store, mock_avail):
+        mock_gen.return_value = (b'imgdata', 'image/png')
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+            tmp.write(b'imgdata')
+            temp_path = Path(tmp.name)
+        mock_store.return_value = ({"uri": "saiverse://image/test", "mime_type": "image/png"}, temp_path)
+
+        with patch.object(_mod, 'get_active_persona_id', return_value=None, create=True), \
+             patch.object(_mod, 'get_active_manager', return_value=None, create=True), \
+             patch('tools.context.get_active_persona_id', return_value=None), \
+             patch('tools.context.get_active_manager', return_value=None):
+            text, info, path, metadata, item_id = generate_image(
+                'a cat', model='gpt_image_2_6_flare'
+            )
+
+        self.assertIsInstance(info, ToolResult)
+        self.assertIn('gpt_image_2_6_flare', text)
         self.assertEqual(Path(path), temp_path)
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
@@ -311,8 +343,10 @@ class TestImageGenerator(unittest.TestCase):
         self.assertEqual(model_schema['default'], name)
         self.assertEqual(inspect.signature(generate_image).parameters['model'].default, name)
         self.assertEqual(_mod._FALLBACK_ORDER, [
-            'nano_banana_2_1', 'nano_banana_pro', 'gpt_image_2_5_flare',
-            'gpt_image_2_5_sunburst', 'gpt_image_1_5', 'gpt_image_2', 'grok_imagine',
+            'nano_banana_2_1', 'nano_banana_pro',
+            'gpt_image_2_6_flare', 'gpt_image_2_6_sunburst',
+            'gpt_image_2_5_flare', 'gpt_image_2_5_sunburst',
+            'gpt_image_1_5', 'gpt_image_2', 'grok_imagine',
         ])
         self.assertEqual(_mod._get_model_api_key_env(name), 'GEMINI_API_KEY')
         with patch.dict(os.environ, {'GEMINI_API_KEY': 'synthetic'}, clear=True):

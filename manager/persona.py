@@ -2,18 +2,32 @@ import base64
 import logging
 import mimetypes
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
-from sqlalchemy import func
+from sqlalchemy import func, inspect
 from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
+    AddonPersonaConfig,
+    AiToolLink,
     Building as BuildingModel,
     BuildingOccupancyLog,
     BuildingToolLink,
+    FeedReadCursor,
+    LineHeadSnapshot,
+    PersonaBuildingState,
+    PersonaDayPlan,
+    PersonaEventLog,
+    PersonaPulseCursor,
+    PersonaSchedule,
+    PersonaTimetableTemplate,
+    RealtimeSpellBinding,
+    SessionAnchor,
+    SessionHeadSnapshot,
     User,
     UserAiLink,
 )
@@ -33,26 +47,156 @@ from saiverse.persona_model_selection import (
 )
 
 
+def persona_folder_names(saiverse_home: Path) -> List[str]:
+    """``<saiverse_home>/personas/`` 直下のフォルダ名の一覧 (名前順)。
+
+    ペルソナを削除しても記憶フォルダ (``personas/<id>/``) は消さないので、ここに
+    名前がある ID で新しいペルソナを作ると、新しいペルソナが前のペルソナの
+    memory.db を開く。作成の口はこの一覧にある ID を使わない
+    (docs/issues/persona_delete_leaves_orphans_and_reuses_ids.md)。
+    personas フォルダが無ければ空。一覧を読めなければ警告を出して空を返す。
+    """
+    root = Path(saiverse_home) / "personas"
+    try:
+        return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
+    except FileNotFoundError:
+        return []
+    except OSError:
+        logging.warning("Could not list the persona folders in %s", root, exc_info=True)
+        return []
+
+
+def find_persona_folder(saiverse_home: Path, ai_id: str) -> Optional[str]:
+    """``ai_id`` と大文字小文字を畳んで一致するペルソナフォルダの名前 (無ければ None)。
+
+    ``exists()`` で一回調べるのではなく一覧を比べる: Windows のファイルシステムは
+    大文字小文字を区別せず、Linux は区別する。AIID の重複検査は大文字小文字を
+    畳むので、フォルダの検査も同じ比べ方にそろえる。
+    """
+    target = ai_id.lower()
+    for name in persona_folder_names(saiverse_home):
+        if name.lower() == target:
+            return name
+    return None
+
+
+PERSONA_FOLDER_ERROR_CODE = "persona_memory_folder_exists"
+
+
+@dataclass(frozen=True)
+class CreationErrorDetail:
+    """作成を断った理由の識別子と、画面が文面を組み立てるのに要る値。
+
+    API は識別子とパラメータを返し、表示の文面は画面側 (messages.json) が持つ
+    (docs/intent/localization.md)。英語の message は API の message として別に残す
+    (ログ・API を直接呼ぶ読み手向け)。
+    """
+
+    code: str
+    params: Dict[str, str] = field(default_factory=dict)
+
+
+def persona_folder_error_detail(ai_id: str, folder_name: str) -> CreationErrorDetail:
+    """:func:`persona_folder_error` と同じ断りの識別子とパラメータ。"""
+    return CreationErrorDetail(
+        code=PERSONA_FOLDER_ERROR_CODE,
+        params={"ai_id": ai_id, "folder": folder_name},
+    )
+
+
+def persona_folder_error(ai_id: str, folder_name: str) -> str:
+    """記憶フォルダが残っている ID での作成を断る英語の文 (API の message・ログ向け)。
+
+    画面は :func:`persona_folder_error_detail` の識別子で文言表の文を出す。
+    """
+    return (
+        f"The ID '{ai_id}' cannot be used: a previous persona's memory folder still "
+        f"exists at ~/.saiverse/personas/{folder_name} (IDs are compared "
+        "case-insensitively because they become folder names). A new persona with "
+        "this ID would open those memories. Choose a different ID; to inherit the "
+        "memories intentionally, use a persona pack."
+    )
+
+
 def ai_stem_taken(
-    db, stem: str, city_slug: str, building_ids: BuildingIdAvailability,
+    db,
+    stem: str,
+    city_slug: str,
+    building_ids: BuildingIdAvailability,
+    saiverse_home: Path,
 ) -> bool:
-    """``stem`` が AIID または私室 Building の席を埋めているか。
+    """``stem`` が AIID・記憶フォルダ・私室 Building のどれかの席を埋めているか。
 
     自動生成の連番 (persona_N / ruler_N) を選ぶ側が、AIID と私室の両方の空きを
     まとめて予約するための検査。AIID の比較は大文字小文字を畳む — ID はフォルダ名
     (``~/.saiverse/personas/<id>/``) になり、Windows のファイルシステムは大文字
-    小文字を区別しないため、DB 上は別行でも保存先が同じになる。私室の ID は
+    小文字を区別しないため、DB 上は別行でも保存先が同じになる。削除したペルソナの
+    ID も、記憶フォルダが残っていれば埋まっているとみなす (:func:`find_persona_folder`)
+    — 同じ ID の新しいペルソナが前のペルソナの memory.db を開かないため。私室の ID は
     新しい建物に付けてよい ID かの規則 (``building_ids``。既存の建物・``deleted_`` の
     形・消した建物の付け替えが済んでいない元の ID を避ける) で見る — 私室の ID だけ
     使えない番号を選ぶと、AIID と私室の番号が食い違う。
     """
-    candidate = f"{stem}_{city_slug}".lower()
+    candidate = f"{stem}_{city_slug}"
     room = private_room_candidate(stem, city_slug)
     return (
-        db.query(AIModel).filter(func.lower(AIModel.AIID) == candidate).first()
+        db.query(AIModel).filter(func.lower(AIModel.AIID) == candidate.lower()).first()
         is not None
+        or find_persona_folder(saiverse_home, candidate) is not None
         or not building_ids.is_usable(room)
     )
+
+
+def purge_persona_state_rows(db, ai_id: str) -> Dict[str, int]:
+    """ペルソナ削除の後始末: 現在の状態として読まれる行を消す (``delete_ai`` の双子が共有)。
+
+    FK (ai.AIID) は宣言のみで DB は強制しないので、消さないと孤児行が残り、主キーや
+    UNIQUE に AIID を含む表 (user_ai_link など) は同じ ID での作成を落とす。過去の
+    記録 (使用量・入退室・会話・出来事・タスク・メタ判断など) は残す。どの表を消し、
+    どれを残すかの仕分けと根拠は
+    docs/issues/persona_delete_leaves_orphans_and_reuses_ids.md の「仕分け表」。
+
+    開いた session を受け取り、commit / rollback は呼び手が行う (ai 行の削除と同じ
+    commit で確定させるため。task_book.purge_persona_entries と同じ形)。この DB に
+    無い表は飛ばす (legacy の表は後で DROP される)。
+
+    Returns:
+        {表名: 削除した行数}。
+    """
+    existing = set(inspect(db.connection()).get_table_names())
+    targets = [
+        (UserAiLink, UserAiLink.AIID == ai_id),
+        (AiToolLink, AiToolLink.AIID == ai_id),
+        (PersonaSchedule, PersonaSchedule.PERSONA_ID == ai_id),
+        # 受信箱は archived (処理済みの過去の記録) の行だけ残し、それ以外を消す。
+        # 「pending だけ消す」と書くと、pending / archived 以外の値が増えたときに
+        # その行が持ち主の無いまま残る
+        (
+            PersonaEventLog,
+            (PersonaEventLog.PERSONA_ID == ai_id) & (PersonaEventLog.STATUS != "archived"),
+        ),
+        (AddonPersonaConfig, AddonPersonaConfig.persona_id == ai_id),
+        (PersonaBuildingState, PersonaBuildingState.PERSONA_ID == ai_id),
+        (LineHeadSnapshot, LineHeadSnapshot.PERSONA_ID == ai_id),
+        (SessionHeadSnapshot, SessionHeadSnapshot.PERSONA_ID == ai_id),
+        (SessionAnchor, SessionAnchor.PERSONA_ID == ai_id),
+        (PersonaPulseCursor, PersonaPulseCursor.PERSONA_ID == ai_id),
+        (FeedReadCursor, FeedReadCursor.PERSONA_ID == ai_id),
+        (
+            RealtimeSpellBinding,
+            (RealtimeSpellBinding.OWNER_KIND == "persona")
+            & (RealtimeSpellBinding.OWNER_ID == ai_id),
+        ),
+        (PersonaDayPlan, PersonaDayPlan.persona_id == ai_id),
+        (PersonaTimetableTemplate, PersonaTimetableTemplate.PERSONA_ID == ai_id),
+    ]
+    counts: Dict[str, int] = {}
+    for model, condition in targets:
+        table = model.__tablename__
+        if table not in existing:
+            continue
+        counts[table] = db.query(model).filter(condition).delete(synchronize_session=False)
+    return counts
 
 
 EMBED_MODEL_MISMATCH_SOURCE = "embed_model_mismatch"
@@ -496,7 +640,7 @@ class PersonaMixin:
         room_system_instruction: Optional[str] = None,
         room_description: Optional[str] = None,
         language: Optional[str] = None,
-    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    ) -> Tuple[bool, str, Optional[CreationErrorDetail], Optional[str], Optional[str]]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
         This is triggered by an AI action.
@@ -510,6 +654,12 @@ class PersonaMixin:
             persona_role: Special persona role (AI.PERSONA_ROLE)。None=通常、'ruler'=Region RPG GM
             room_name / room_capacity / room_system_instruction / room_description:
                           私室のオーバーライド。Ruler では私室の代わりに Region の控室として使う
+
+        Returns:
+            ``(success, message, error, ai_id, room_id)``。``error`` は断りの識別子と
+            パラメータ (:class:`CreationErrorDetail`) で、画面が文言表の文で出せる断り
+            (いまは記憶フォルダの断りだけ) のときにだけ入り、それ以外は None。
+            ``ai_id`` / ``room_id`` は失敗時 None。
         """
         db = self.SessionLocal()
         try:
@@ -522,7 +672,7 @@ class PersonaMixin:
                 .first()
             )
             if existing_ai:
-                return False, f"A persona named '{name}' already exists in this city.", None, None
+                return False, f"A persona named '{name}' already exists in this city.", None, None, None
 
             # AIID は ~/.saiverse/personas/<id>/ のフォルダ名・API パス引数に
             # なる永続キーなので、Building / Region と同じ文字種契約に従う
@@ -533,7 +683,7 @@ class PersonaMixin:
             building_ids = BuildingIdAvailability(db, self.saiverse_home)
             if custom_ai_id:
                 if not is_valid_identifier(custom_ai_id):
-                    return (False, charset_error("Persona ID", custom_ai_id), None, None)
+                    return (False, charset_error("Persona ID", custom_ai_id), None, None, None)
                 ai_stem = custom_ai_id
             else:
                 # 日本語名など slug が残らない名前は persona_<連番> へ落ちる。
@@ -547,7 +697,9 @@ class PersonaMixin:
                 ai_stem = build_identifier(
                     name,
                     stem="persona",
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
+                    exists=lambda s: ai_stem_taken(
+                        db, s, self.city_name, building_ids, self.saiverse_home,
+                    ),
                 )
             new_ai_id = f"{ai_stem}_{self.city_name}"
 
@@ -564,6 +716,21 @@ class PersonaMixin:
                     f"A persona with the ID '{new_ai_id}' already exists "
                     "(IDs are compared case-insensitively because they become "
                     "folder names).",
+                    None,
+                    None,
+                    None,
+                )
+
+            # 削除したペルソナの記憶フォルダが残る ID は使わない: ペルソナを削除しても
+            # personas/<id>/ は消さないので、同じ ID の新しいペルソナは前のペルソナの
+            # memory.db を開く。手入力の ID も名前から作った ID も断る (連番は
+            # ai_stem_taken が先に避けている)
+            leftover_folder = find_persona_folder(self.saiverse_home, new_ai_id)
+            if leftover_folder is not None:
+                return (
+                    False,
+                    persona_folder_error(new_ai_id, leftover_folder),
+                    persona_folder_error_detail(new_ai_id, leftover_folder),
                     None,
                     None,
                 )
@@ -745,19 +912,19 @@ class PersonaMixin:
             # 共通初期化フック (交流 Track 確保 + AutonomyManager 同期 等)
             self._on_persona_registered(new_ai_id)
 
-            return True, f"Persona '{name}' created successfully.", new_ai_id, new_building_id
+            return True, f"Persona '{name}' created successfully.", None, new_ai_id, new_building_id
         except Exception as exc:
             db.rollback()
             logging.error(
                 "Failed to create new persona '%s': %s", name, exc, exc_info=True
             )
-            return False, f"An internal error occurred: {exc}", None, None
+            return False, f"An internal error occurred: {exc}", None, None, None
         finally:
             db.close()
 
     def create_ai(self, name: str, system_prompt: str) -> str:
         """Creates a new AI and their private room, similar to _create_persona."""
-        success, message, _ai_id, _room_id = self._create_persona(name, system_prompt)
+        success, message, _error, _ai_id, _room_id = self._create_persona(name, system_prompt)
         if success:
             return (
                 f"AI '{name}' and their room created successfully. "
@@ -769,9 +936,11 @@ class PersonaMixin:
         """Deletes an AI after checking its state.
 
         既存の流儀 (同一 transaction 内で関連テーブル → ai 行の順に処理し、
-        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行も
-        ここで**削除**する (残置ではなく削除 — FK は宣言のみで DB は強制しない
-        アプリ層検査の方針のため、消さないと孤児行が残る)。
+        最後に一括 commit) に合わせて、タスク帳 (task_book) の当該ペルソナ行と、
+        現在の状態として読まれる行 (purge_persona_state_rows — user_ai_link・
+        予定・anchor など) もここで**削除**する (残置ではなく削除 — FK は宣言のみで
+        DB は強制しないアプリ層検査の方針のため、消さないと孤児行が残り、
+        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない。
 
         注意: 本メソッドは AdminService 側の同名定義 (manager/admin.py) と
         行単位の複製関係にある — 片方を変えたらもう片方も揃えること。
@@ -796,9 +965,11 @@ class PersonaMixin:
             ).update({"EXIT_TIMESTAMP": datetime.now()})
 
             task_book.purge_persona_entries(db, ai_id)
+            purged = purge_persona_state_rows(db, ai_id)
 
             db.delete(ai)
             db.commit()
+            logging.info("Deleted the state rows of AI '%s': %s", ai_id, purged)
 
             if ai_id in self.personas:
                 persona_name = self.personas[ai_id].persona_name

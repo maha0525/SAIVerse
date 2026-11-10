@@ -37,6 +37,8 @@ SAIVerse のアイテム（建物に置かれた物・ペルソナの持ち物�
 
 添付は `saiverse://` URI 経由でペルソナから参照される（→ [reference/saiverse-uri.md](../reference/saiverse-uri.md)）。
 
+添付の中身は、その発言と一緒にペルソナへ届く（文書は本文の先頭 8000 字が発言の後ろに付く）。添付すると同じファイルのアイテムが今いる建物に置かれるが、「AI コンテキストから除外」した状態で置かれるので、中身が部屋の様子として二重に届くことはない。ペルソナがあとで見直したいときは、自分でアイテムを開く。
+
 ## 関連
 
 - [concepts/item.md](../concepts/item.md) - アイテムの仕組み（ItemLocation・pickup/place）

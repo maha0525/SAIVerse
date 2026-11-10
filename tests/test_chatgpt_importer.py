@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -190,6 +193,113 @@ class ChatGPTImporterTest(unittest.TestCase):
         self.assertEqual(
             classify_unmarked_system_message({}, header["content"]), CHATGPT_IMPORT_KIND,
         )
+
+
+class _FakeAdapterBase:
+    """append_persona_message の成否を role で制御できるフェイク。
+
+    本物のアダプタは保存に失敗すると例外を飲んで None を返すので、
+    フェイクも同じ契約 (成功時は id、失敗時は None) に合わせる。
+    """
+
+    fail_roles: set = set()
+    backfill_error: Exception | None = None
+
+    def __init__(self, persona_id: str) -> None:
+        self.persona_id = persona_id
+
+    def is_ready(self) -> bool:
+        return True
+
+    def append_persona_message(self, payload, *, thread_suffix=None):
+        if payload.get("role") in self.fail_roles:
+            return None
+        return "id"
+
+    def backfill_missing_message_embeddings(self):
+        if self.backfill_error is not None:
+            raise self.backfill_error
+        return {"embedded": 0, "total_missing": 0}
+
+    def reembed_stale_messages(self):
+        return {"embedded": 0, "total": 0}
+
+    def close(self) -> None:
+        pass
+
+
+class ChatGPTImporterFailureTest(unittest.TestCase):
+    """保存失敗の集計と、--output json で標準出力に案内を混ぜないことの検証。
+
+    サンプル会話は見出し 1 + 発言 2 = 3 件を取り込む。
+    """
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.sample_path = Path(self.tmp_dir.name) / "sample_conversations.json"
+        self.sample_path.write_text(
+            json.dumps([_sample_conversation()]), encoding="utf-8"
+        )
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def _run_import(self, adapter_cls):
+        import argparse
+
+        import scripts.import_chatgpt_conversations as importer
+
+        args = argparse.Namespace(
+            select=None, select_all=True, preview=40, roles="user,assistant",
+            thread_suffix=None, no_header=False, dry_run=False, persona="p1",
+            output="json",
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(importer, "SAIMemoryAdapter", adapter_cls):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = importer.handle_import(ChatGPTExport(self.sample_path), args)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_all_saves_failing_is_reported_as_failed(self) -> None:
+        class _AllFail(_FakeAdapterBase):
+            fail_roles = {"system", "user", "assistant"}
+
+        rc, out, _err = self._run_import(_AllFail)
+        self.assertEqual(rc, 1)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertEqual(results[0]["messages_imported"], 0)
+        self.assertEqual(results[0]["messages_failed"], 3)
+
+    def test_partial_failure_is_reported_as_partial(self) -> None:
+        class _UserFail(_FakeAdapterBase):
+            fail_roles = {"user"}
+
+        rc, out, _err = self._run_import(_UserFail)
+        self.assertEqual(rc, 1)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "partial")
+        self.assertEqual(results[0]["messages_imported"], 2)
+        self.assertEqual(results[0]["messages_failed"], 1)
+
+    def test_json_output_keeps_stdout_pure(self) -> None:
+        rc, out, err = self._run_import(_FakeAdapterBase)
+        self.assertEqual(rc, 0)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "imported")
+        self.assertEqual(results[0]["messages_imported"], 3)
+        self.assertNotIn("インポート完了", out)
+        self.assertIn("インポート完了", err)
+
+    def test_backfill_failure_still_returns_pure_json(self) -> None:
+        class _BackfillFail(_FakeAdapterBase):
+            backfill_error = RuntimeError("boom")
+
+        rc, out, err = self._run_import(_BackfillFail)
+        self.assertEqual(rc, 0)
+        results = json.loads(out)
+        self.assertEqual(results[0]["status"], "imported")
+        self.assertIn("バックフィルに失敗", err)
 
 
 if __name__ == "__main__":

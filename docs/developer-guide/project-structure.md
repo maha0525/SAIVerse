@@ -92,6 +92,7 @@ saiverse/
 │                           #   対応する型は provider 設定の reflex_judgment 欄で宣言する（reflex_judgment.md）。
 │                           #   最初の利用者は自動想起の選別（auto_recall_jev_rerank.md）
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
+├── gemini_timing.py        # Gemini の DEBUG 計測（準備・HTTP 本文送信・応答待ち、本文を記録しない）
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
 ├── persona_model_selection.py # ペルソナが話す標準モデルの決め方（一時上書き → 個別 → グローバル → 組み込み）の唯一の置き場 /
@@ -224,6 +225,7 @@ sea/
 ├── window_refill.py      # 読み戻しの計画（純関数。残す量を下回る窓の開き直し — arasuji_levels §15）
 ├── session_window.py     # 提示コンテキストと圧縮区間の digest 置き換え
 ├── cancellation.py       # キャンセル
+├── tool_wait.py          # ツールを待つ関数（4 か所の待ち場所で共通。停止ボタン・終了処理の合図ならツールが戻らなくても抜ける。stop_button intent）
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。
@@ -292,6 +294,20 @@ tools/
 ```
 
 **ツールの優先順位**: `~/.saiverse/user_data/tools/` > `expansion_data/<addon>/tools/` > `builtin_data/tools/`
+
+### llm_clients/
+
+LLM プロバイダごとのクライアント（`get_llm_client` で生成）と、送る直前の変換。一覧は [reference/providers.md](../reference/providers.md)。
+
+```
+llm_clients/
+├── factory.py        # get_llm_client（protocol からクライアントを選ぶ）
+├── base.py           # クライアントの共通の基底
+├── gemini.py / anthropic.py / openai.py / openai_codex.py / nvidia_nim.py / ollama.py / xai.py # 各プロバイダ
+├── anthropic_request_builder.py / openai_message_preparer.py # 送る形の組み立て
+├── system_notice.py  # 送る直前の変換（present_system_notices。システム通知の届け方・合言葉。system_notice_delivery intent）
+└── attached_documents.py # ユーザーが添付した文書の本文を、送る直前に発言の後ろへ足す（present_system_notices の最初の段。user_attachment_delivery intent）
+```
 
 ### database/
 

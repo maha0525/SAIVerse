@@ -43,7 +43,7 @@ class AttachmentPathTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
-        manager.create_picture_item_for_user.return_value = "item-1"
+        manager.create_item_for_user.return_value = "item-1"
 
         result = _store_image_attachment(b"jpeg-bytes", att, manager, "building_x")
 
@@ -57,7 +57,7 @@ class AttachmentPathTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="note.txt", type="document", mime_type="text/plain")
         manager = MagicMock()
-        manager.create_document_item_for_user.return_value = "item-2"
+        manager.create_item_for_user.return_value = "item-2"
 
         result = _store_document_attachment(b"hello doc", att, manager, "building_x")
 
@@ -102,7 +102,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
-        manager.create_picture_item_for_user.return_value = "item-1"
+        manager.create_item_for_user.return_value = "item-1"
 
         with patch("threading.Thread") as mock_thread:
             result = _store_image_attachment(
@@ -120,7 +120,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
-        manager.create_picture_item_for_user.return_value = "item-1"
+        manager.create_item_for_user.return_value = "item-1"
 
         with patch(
             "saiverse.media_summary.generate_contextual_image_description",
@@ -147,7 +147,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
-        manager.create_picture_item_for_user.return_value = "item-1"
+        manager.create_item_for_user.return_value = "item-1"
 
         with patch(
             "saiverse.media_summary.generate_contextual_image_description",
@@ -170,7 +170,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
-        manager.create_picture_item_for_user.return_value = "item-1"
+        manager.create_item_for_user.return_value = "item-1"
 
         with patch(
             "saiverse.media_summary.generate_contextual_image_description",
@@ -190,7 +190,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="voice.wav", type="audio", mime_type="audio/wav")
         manager = MagicMock()
-        manager.create_audio_item_for_user.return_value = "item-audio-1"
+        manager.create_item_for_user.return_value = "item-audio-1"
 
         with patch("saiverse.ffmpeg_runner.is_ffmpeg_available", return_value=True), \
              patch("saiverse.ffmpeg_runner.normalize_audio") as mock_normalize, \
@@ -217,7 +217,7 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
 
         att = AttachmentData(data="", filename="voice.wav", type="audio", mime_type="audio/wav")
         manager = MagicMock()
-        manager.create_audio_item_for_user.return_value = "item-audio-1"
+        manager.create_item_for_user.return_value = "item-audio-1"
 
         with patch("saiverse.ffmpeg_runner.is_ffmpeg_available", return_value=True), \
              patch("saiverse.ffmpeg_runner.normalize_audio") as mock_normalize, \

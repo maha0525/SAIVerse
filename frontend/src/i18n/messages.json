@@ -3223,10 +3223,6 @@
     "ja": " 件あります",
     "en": " messages"
   },
-  "components.memory.ArasujiViewer.text068": {
-    "ja": "処理を実行中です。",
-    "en": "Processing is in progress."
-  },
   "components.memory.ArasujiViewer.text069": {
     "ja": "前回の処理が完了していません。再実行してください。",
     "en": "The previous operation did not finish. Please run it again."
@@ -3420,8 +3416,8 @@
     "en": "Free (no pricing configured for this model)"
   },
   "components.memory.ArasujiViewer.text117": {
-    "ja": "約 ${p1} {p2}",
-    "en": "Approx. ${p1} {p2}"
+    "ja": "約 {p1}",
+    "en": "Approx. {p1}"
   },
   "components.memory.ArasujiViewer.text118": {
     "ja": "キャンセル",
@@ -4624,8 +4620,8 @@
     "en": "(no preview)"
   },
   "components.memory.MemoryImportForm.text004": {
-    "ja": "スキップ",
-    "en": "Skip"
+    "ja": "選ばずに進む",
+    "en": "Continue without choosing"
   },
   "components.memory.MemoryImportForm.text005": {
     "ja": "このスレッドを使用",
@@ -4636,8 +4632,8 @@
     "en": "Generate embeddings for memory recall?"
   },
   "components.memory.MemoryImportForm.text007": {
-    "ja": "スキップ",
-    "en": "Skip"
+    "ja": "あとで",
+    "en": "Later"
   },
   "components.memory.MemoryImportForm.text008": {
     "ja": "作成する",
@@ -4695,14 +4691,6 @@
     "ja": "インポート",
     "en": "Import"
   },
-  "components.memory.MemoryImportForm.text022": {
-    "ja": "ドロップしてアップロード",
-    "en": "Drop to upload"
-  },
-  "components.memory.MemoryImportForm.text023": {
-    "ja": "クリックまたはドラッグ&ドロップでアップロード",
-    "en": "Click or drag and drop to upload"
-  },
   "components.memory.MemoryImportForm.text024": {
     "ja": "インポートする会話を選択",
     "en": "Select conversations to import"
@@ -4750,14 +4738,6 @@
   "components.memory.MemoryImportForm.text035": {
     "ja": "クリックまたはドラッグ&ドロップでアップロード",
     "en": "Click or drag and drop to upload"
-  },
-  "components.memory.MemoryImportForm.text036": {
-    "ja": "ChatGPT 公式エクスポート",
-    "en": "Official ChatGPT export"
-  },
-  "components.memory.MemoryImportForm.text037": {
-    "ja": "拡張機能エクスポート",
-    "en": "Extension export"
   },
   "components.memory.MemoryImportProgress.text001": {
     "ja": "インポート中...",
@@ -5567,30 +5547,6 @@
     "ja": "pulse_id 付きの messages がまだありません。",
     "en": "No messages with a pulse_id yet."
   },
-  "components.memory.useMemoryImport.text001": {
-    "ja": "{p1} スレッドを自動設定しました。",
-    "en": "Automatically selected thread {p1}."
-  },
-  "components.memory.useMemoryImport.text002": {
-    "ja": "ファイルに会話が見つかりませんでした。",
-    "en": "No conversations found in the file."
-  },
-  "components.memory.useMemoryImport.text003": {
-    "ja": "インポート開始...",
-    "en": "Starting import..."
-  },
-  "components.memory.useMemoryImport.text004": {
-    "ja": "インポート開始...",
-    "en": "Starting import..."
-  },
-  "components.memory.useMemoryImport.text005": {
-    "ja": "Nativeインポート開始...",
-    "en": "Starting Native import..."
-  },
-  "components.memory.useMemoryImport.text006": {
-    "ja": "インポート完了！アクティブスレッドを設定しました。",
-    "en": "Import complete! Active thread has been set."
-  },
   "components.memory.WorkingMemoryViewer.text001": {
     "ja": "読み込み中...",
     "en": "Loading..."
@@ -5856,12 +5812,36 @@
     "en": "Leave blank to use the default prompt"
   },
   "components.PersonaWizard.text015": {
-    "ja": "ChatGPTからログをインポート",
-    "en": "Import logs from ChatGPT"
+    "ja": "過去の会話を取り込む",
+    "en": "Import past conversations"
   },
   "components.PersonaWizard.text016": {
-    "ja": "ChatGPTのエクスポートデータをインポートすると、過去の会話を記憶として引き継げます。 この手順はスキップして後から行うこともできます。",
-    "en": "Import ChatGPT export data to carry past conversations over as memories. You can skip this step and do it later."
+    "ja": "ほかの AI との会話のエクスポートを取り込むと、過去の会話を記憶として引き継げます。取り込まずに進んで、あとから行うこともできます。",
+    "en": "Import an export of conversations with another AI to carry them over as memories. You can also go on without importing and do it later."
+  },
+  "components.PersonaWizard.importedHeading": {
+    "ja": "ここまでに取り込んだもの",
+    "en": "Imported so far"
+  },
+  "components.PersonaWizard.importedCounts": {
+    "ja": "{p1} 件の会話・{p2} 件のメッセージ",
+    "en": "{p1} conversations, {p2} messages"
+  },
+  "components.PersonaWizard.importedSeparator": {
+    "ja": " — ",
+    "en": " — "
+  },
+  "components.PersonaWizard.importedMuseFilesNote": {
+    "ja": "（ファイルも取り込み済み）",
+    "en": " (files imported too)"
+  },
+  "components.PersonaWizard.finishImport": {
+    "ja": "取り込みを終える",
+    "en": "Finish importing"
+  },
+  "components.PersonaWizard.importMoreHint": {
+    "ja": "ほかの取り込み元からも続けて取り込めます。下から選んでください。",
+    "en": "You can keep importing from other sources. Choose one below."
   },
   "components.PersonaWizard.text017": {
     "ja": "ペルソナを作成しました",
@@ -5898,14 +5878,6 @@
   "components.PersonaWizard.text025": {
     "ja": "次へ ",
     "en": "Next "
-  },
-  "components.PersonaWizard.text026": {
-    "ja": "スキップ",
-    "en": "Skip"
-  },
-  "components.PersonaWizard.text027": {
-    "ja": "完了 ",
-    "en": "Done "
   },
   "components.PersonaWizard.text028": {
     "ja": "ペルソナを作成",
@@ -8867,30 +8839,6 @@
     "ja": "）が伴います。 生成は会話が一定量を超えたときに少しずつ行われ、 過去ログを取り込んでも自動でまとめて生成されることはありません。",
     "en": "). Generation happens gradually when conversation exceeds a threshold. Imported past logs are not automatically summarized all at once."
   },
-  "components.tutorial.steps.StepChronicle.text006": {
-    "ja": "あらすじになっていない過去メッセージ: ",
-    "en": "Past messages not yet summarized: "
-  },
-  "components.tutorial.steps.StepChronicle.text007": {
-    "ja": "件",
-    "en": "items"
-  },
-  "components.tutorial.steps.StepChronicle.text008": {
-    "ja": "まとめてあらすじ化した場合の推定コスト: ",
-    "en": "Estimated cost to summarize all: "
-  },
-  "components.tutorial.steps.StepChronicle.text009": {
-    "ja": "推定LLM呼び出し: ",
-    "en": "Estimated LLM calls: "
-  },
-  "components.tutorial.steps.StepChronicle.text010": {
-    "ja": "回",
-    "en": "calls"
-  },
-  "components.tutorial.steps.StepChronicle.text011": {
-    "ja": "まとめてのあらすじ化は自動では行われません。メモリー画面の「Chronicle」タブから実行したときだけ発生します。",
-    "en": "Bulk summarization is never automatic. It runs only when you request it from the Chronicle tab in the memory screen."
-  },
   "components.tutorial.steps.StepChronicle.text012": {
     "ja": "Chronicle 自動生成を有効にする（推奨）",
     "en": "Enable automatic Chronicle generation (recommended)"
@@ -11543,10 +11491,6 @@
     "ja": "Stelis",
     "en": "Stelis"
   },
-  "components.memory.MemoryImportForm.label002": {
-    "ja": "Native (SAIVerse)",
-    "en": "Native (SAIVerse)"
-  },
   "components.memory.MemoryNotesViewer.label001": {
     "ja": "pulse: ",
     "en": "pulse: "
@@ -12272,8 +12216,8 @@
     "en": "Import a persona pack"
   },
   "components.memory.PersonaPack.importDescription": {
-    "ja": "選んだパックの記録を、このペルソナに合流させます。まだ無い記録だけが追加され、今ある記録は消えません。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",
-    "en": "Merges the records in the chosen pack into this persona. Only records that are not here yet are added, and nothing already here is removed. To welcome the pack as a new persona, import it from the persona creation screen."
+    "ja": "選んだパックの記録を、このペルソナに合流させます。本体で書き出したパックは、まだ無い記録を足します。Lite から帰るパックは、食い違う記録を一件ずつ見比べて、どちらを残すかを選べます。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",
+    "en": "Merges the records in the chosen pack into this persona. A pack exported from this app adds the records that are not here yet. A pack coming back from Lite lets you compare each conflicting record and choose which one to keep. To welcome the pack as a new persona, import it from the persona creation screen."
   },
   "components.memory.PersonaPack.chooseFile": {
     "ja": "ZIP ファイルを選ぶ",
@@ -12286,6 +12230,18 @@
   "components.memory.PersonaPack.mergeHint": {
     "ja": "Memopedia のページは、内容が違うときは更新日時が新しい方が残ります (上書きされた方は編集履歴から戻せます)。Chronicle の記事は、取り込み先のどの記事もまだまとめていない会話のぶんだけが入ります。所持品と私室・その他の記録は合流では取り込まず、スキップとして数えます。",
     "en": "When a Memopedia page differs, the more recently updated version is kept (the overwritten text can be restored from the edit history). Chronicle articles are imported only for conversations that no article in this persona covers yet. Items, the private room, and other records are not merged; they are counted as skipped."
+  },
+  "components.memory.PersonaPack.mergeReturnHint": {
+    "ja": "Lite で増えた記録を足します。本体と食い違う記録はありません。",
+    "en": "Adds the records created in Lite. Nothing conflicts with this persona."
+  },
+  "components.memory.PersonaPack.mergeResumeHint": {
+    "ja": "途中で止まった取り込みの続きを行います。",
+    "en": "Continues the import that stopped partway."
+  },
+  "components.memory.PersonaPack.compareAgain": {
+    "ja": "もう一度確かめる",
+    "en": "Check the pack again"
   },
   "components.memory.PersonaPack.mergeAction": {
     "ja": "このペルソナに合流させる",
@@ -12346,6 +12302,18 @@
   "components.memory.PersonaPack.categoryPages": {
     "ja": "Memopedia のページ",
     "en": "Memopedia pages"
+  },
+  "components.memory.PersonaPack.categoryCorePages": {
+    "ja": "コア記憶",
+    "en": "Core memories"
+  },
+  "components.memory.PersonaPack.categoryFragments": {
+    "ja": "Fragment",
+    "en": "Fragments"
+  },
+  "components.memory.PersonaPack.resultChoicePages": {
+    "ja": "Memopedia のページとコア記憶",
+    "en": "Memopedia pages and core memories"
   },
   "components.memory.PersonaPack.categoryChronicle": {
     "ja": "Chronicle",
@@ -12419,6 +12387,190 @@
     "ja": "合流の後は、あらすじ (Chronicle) の画面に出る案内から、あらすじの補修を一度実行してください。取り込んだあらすじを、このペルソナのあらすじの流れにつなぎます。実行の前に、内容と費用の確認があります。",
     "en": "After merging, run the Chronicle repair once from the notice on the Chronicle screen. It connects the imported summaries to this persona's chronicle. You can review the content and cost before it runs."
   },
+  "components.memory.PersonaPack.comparing": {
+    "ja": "見比べています…",
+    "en": "Comparing…"
+  },
+  "components.memory.PersonaPack.compareStale": {
+    "ja": "見比べたあとで本体の内容が変わったので、適用しませんでした。「もう一度確かめる」を押して見比べ直してください。",
+    "en": "The persona changed after the comparison, so nothing was applied. Press \"Check the pack again\" to compare once more."
+  },
+  "components.memory.PersonaPack.compareExpired": {
+    "ja": "見比べた内容が残っていません。「もう一度確かめる」を押して見比べ直してください。",
+    "en": "The comparison is gone. Press \"Check the pack again\" to compare once more."
+  },
+  "components.memory.PersonaPack.comparePartial": {
+    "ja": "発言とページは合流しましたが、プロフィールを保存できませんでした。「もう一度確かめる」を押して見比べ直すと、残りの項目だけが出ます。",
+    "en": "Messages and pages were merged, but the profile could not be saved. Press \"Check the pack again\" to compare once more; only what is left will be listed."
+  },
+  "components.memory.PersonaPack.reviewTitle": {
+    "ja": "どちらを残すかを選びます",
+    "en": "Choose what to keep"
+  },
+  "components.memory.PersonaPack.reviewLead": {
+    "ja": "Lite で変えた記憶のうち、本体と食い違っているものです。一件ずつ、どちらを残すかを選んでください。",
+    "en": "These are the records changed in Lite that differ from this persona. Choose which one to keep for each."
+  },
+  "components.memory.PersonaPack.reviewAllLite": {
+    "ja": "全部 Lite を残す",
+    "en": "Keep Lite for all"
+  },
+  "components.memory.PersonaPack.reviewAllBody": {
+    "ja": "全部 本体を残す",
+    "en": "Keep this persona for all"
+  },
+  "components.memory.PersonaPack.reviewUndecided": {
+    "ja": "未選択 {p1} 件",
+    "en": "{p1} not chosen yet"
+  },
+  "components.memory.PersonaPack.reviewAllDecided": {
+    "ja": "全件選びました",
+    "en": "All chosen"
+  },
+  "components.memory.PersonaPack.reviewDeleteNote": {
+    "ja": "発言を消しても、あらすじに内容が残ることがあります。",
+    "en": "Deleting a message can leave its content in the Chronicle."
+  },
+  "components.memory.PersonaPack.reviewBody": {
+    "ja": "本体",
+    "en": "This persona"
+  },
+  "components.memory.PersonaPack.reviewLite": {
+    "ja": "Lite",
+    "en": "Lite"
+  },
+  "components.memory.PersonaPack.reviewKindMessage": {
+    "ja": "発言",
+    "en": "Message"
+  },
+  "components.memory.PersonaPack.reviewKindPage": {
+    "ja": "Memopedia のページ",
+    "en": "Memopedia page"
+  },
+  "components.memory.PersonaPack.reviewKindCore": {
+    "ja": "コア記憶",
+    "en": "Core memory"
+  },
+  "components.memory.PersonaPack.reviewKindName": {
+    "ja": "名前",
+    "en": "Name"
+  },
+  "components.memory.PersonaPack.reviewKindSystemPrompt": {
+    "ja": "システムプロンプト",
+    "en": "System prompt"
+  },
+  "components.memory.PersonaPack.reviewKindDescription": {
+    "ja": "説明文",
+    "en": "Description"
+  },
+  "components.memory.PersonaPack.reviewKindThread": {
+    "ja": "いま続いているスレッド",
+    "en": "Current thread"
+  },
+  "components.memory.PersonaPack.reviewKeepBody": {
+    "ja": "本体の内容を残す",
+    "en": "Keep this persona's version"
+  },
+  "components.memory.PersonaPack.reviewKeepLite": {
+    "ja": "Lite の内容を残す",
+    "en": "Keep the Lite version"
+  },
+  "components.memory.PersonaPack.reviewContinueBody": {
+    "ja": "本体のスレッドを続ける",
+    "en": "Continue this persona's thread"
+  },
+  "components.memory.PersonaPack.reviewContinueLite": {
+    "ja": "Lite のスレッドを続ける",
+    "en": "Continue the Lite thread"
+  },
+  "components.memory.PersonaPack.reviewDelete": {
+    "ja": "消す",
+    "en": "Delete"
+  },
+  "components.memory.PersonaPack.reviewKeep": {
+    "ja": "残す",
+    "en": "Keep"
+  },
+  "components.memory.PersonaPack.reviewRestore": {
+    "ja": "戻す",
+    "en": "Bring back"
+  },
+  "components.memory.PersonaPack.reviewStayDeleted": {
+    "ja": "消したままにする",
+    "en": "Leave deleted"
+  },
+  "components.memory.PersonaPack.reviewDeletedInLite": {
+    "ja": "Lite で消しました",
+    "en": "Deleted in Lite"
+  },
+  "components.memory.PersonaPack.reviewDeletedInBody": {
+    "ja": "本体では消えています",
+    "en": "Deleted in this persona"
+  },
+  "components.memory.PersonaPack.reviewUpdatedAt": {
+    "ja": "更新: {p1}",
+    "en": "Updated: {p1}"
+  },
+  "components.memory.PersonaPack.reviewEmpty": {
+    "ja": "（空）",
+    "en": "(empty)"
+  },
+  "components.memory.PersonaPack.reviewShowAll": {
+    "ja": "全文を見る",
+    "en": "Show all"
+  },
+  "components.memory.PersonaPack.reviewCollapse": {
+    "ja": "たたむ",
+    "en": "Collapse"
+  },
+  "components.memory.PersonaPack.reviewPrev": {
+    "ja": "前へ",
+    "en": "Previous"
+  },
+  "components.memory.PersonaPack.reviewNext": {
+    "ja": "次へ",
+    "en": "Next"
+  },
+  "components.memory.PersonaPack.reviewRange": {
+    "ja": "{p1}〜{p2} 件目 / 全 {p3} 件",
+    "en": "{p1}-{p2} of {p3}"
+  },
+  "components.memory.PersonaPack.reviewLoading": {
+    "ja": "読み込んでいます…",
+    "en": "Loading…"
+  },
+  "components.memory.PersonaPack.reviewLoadFailed": {
+    "ja": "一覧を読めませんでした: {p1}",
+    "en": "The list could not be loaded: {p1}"
+  },
+  "components.memory.PersonaPack.reviewApply": {
+    "ja": "選んだ内容で合流させる",
+    "en": "Merge with these choices"
+  },
+  "components.memory.PersonaPack.resultChoicesTitle": {
+    "ja": "選んだ内容",
+    "en": "Your choices"
+  },
+  "components.memory.PersonaPack.resultKeptLite": {
+    "ja": "Lite を残した",
+    "en": "Kept Lite"
+  },
+  "components.memory.PersonaPack.resultKeptBody": {
+    "ja": "本体を残した",
+    "en": "Kept this persona"
+  },
+  "components.memory.PersonaPack.resultDeleted": {
+    "ja": "発言を {p1} 件、ページを {p2} 件消しました。",
+    "en": "Deleted {p1} messages and {p2} pages."
+  },
+  "components.memory.PersonaPack.resultFragmentsWithoutPage": {
+    "ja": "指しているページが無いので、Fragment を {p1} 件足しませんでした。",
+    "en": "{p1} Fragments were not added because their page is missing."
+  },
+  "components.memory.PersonaPack.resultBackup": {
+    "ja": "合流の前の記憶の複製: {p1}",
+    "en": "Copy of the memory from before the merge: {p1}"
+  },
   "components.memory.PersonaPack.chronicleMarksPending": {
     "ja": "取り込んだあらすじが会話と二重に表示されるのを防ぐ印を、まだ書き込めていない会話があります。あらすじの補修を実行すると書き込まれます。",
     "en": "Some conversations do not yet have the marks that keep imported summaries from showing twice alongside the conversation. Running the Chronicle repair writes them."
@@ -12434,6 +12586,10 @@
   "components.PersonaWizard.packImportFailed": {
     "ja": "パックから迎えられませんでした: {p1}",
     "en": "Could not welcome the persona from the pack: {p1}"
+  },
+  "components.PersonaWizard.memoryFolderExists": {
+    "ja": "この ID は使えません。前のペルソナの記憶フォルダ (~/.saiverse/personas/{p1}) が残っているためです。新しいペルソナには別の ID を選んでください。記憶ごと引き継ぎたいときはペルソナまるごとパックを使ってください。",
+    "en": "This ID cannot be used: a previous persona's memory folder still exists at ~/.saiverse/personas/{p1}. A new persona with this ID would open those memories. Choose a different ID; to inherit the memories intentionally, use a Persona Pack."
   },
   "api.systemNoticeMigration.abortedTitle": {
     "ja": "システム通知の記録の移行に失敗しました",
@@ -12610,5 +12766,645 @@
   "app.page.attachmentImageAlt": {
     "ja": "添付画像 {p1}",
     "en": "Attachment {p1}"
+  },
+  "components.memory.ImportSourcePicker.heading": {
+    "ja": "どこから取り込みますか？",
+    "en": "Where do the logs come from?"
+  },
+  "components.memory.ImportSourcePicker.officialName": {
+    "ja": "ChatGPT 公式エクスポート",
+    "en": "Official ChatGPT export"
+  },
+  "components.memory.ImportSourcePicker.officialDesc": {
+    "ja": "ChatGPT のデータエクスポートで届く ZIP、またはその中の conversations.json",
+    "en": "The ZIP from ChatGPT's data export, or the conversations.json inside it"
+  },
+  "components.memory.ImportSourcePicker.claudeName": {
+    "ja": "Claude 公式エクスポート",
+    "en": "Official Claude export"
+  },
+  "components.memory.ImportSourcePicker.claudeDesc": {
+    "ja": "claude.ai のエクスポートで届くカテゴリ別の ZIP (会話・Claude Code・プロジェクト・メモリー)",
+    "en": "The per-category ZIPs from the claude.ai export (conversations, Claude Code, projects, memories)"
+  },
+  "components.memory.ImportSourcePicker.museName": {
+    "ja": "Muse 公式エクスポート",
+    "en": "Official Muse export"
+  },
+  "components.memory.ImportSourcePicker.museDesc": {
+    "ja": "Muse の「Download your agent data」で届く EYI_Package の ZIP",
+    "en": "The EYI_Package ZIP from Muse's \"Download your agent data\""
+  },
+  "components.memory.ImportSourcePicker.extensionName": {
+    "ja": "拡張機能エクスポート",
+    "en": "Extension export"
+  },
+  "components.memory.ImportSourcePicker.extensionDesc": {
+    "ja": "ブラウザー拡張機能で保存した会話のファイル (.json / .md / .txt)",
+    "en": "A conversation file saved with a browser extension (.json / .md / .txt)"
+  },
+  "components.memory.ImportSourcePicker.nativeName": {
+    "ja": "Native (SAIVerse)",
+    "en": "Native (SAIVerse)"
+  },
+  "components.memory.ImportSourcePicker.nativeDesc": {
+    "ja": "SAIVerse から書き出したスレッドの JSON。同じ ID のスレッドは上書きされます",
+    "en": "Thread JSON exported from SAIVerse. Threads with the same IDs are overwritten"
+  },
+  "components.memory.ImportSourcePicker.skipName": {
+    "ja": "取り込まない",
+    "en": "Don't import"
+  },
+  "components.memory.ImportSourcePicker.skipDesc": {
+    "ja": "あとからメモリー画面の「引っ越し」タブで取り込めます。",
+    "en": "You can import later from the Moving tab of the memory screen."
+  },
+  "components.memory.ImportFlowModal.title": {
+    "ja": "取り込み: {p1}",
+    "en": "Import: {p1}"
+  },
+  "components.memory.ImportFlowModal.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.memory.ImportFlowModal.next": {
+    "ja": "次へ",
+    "en": "Next"
+  },
+  "components.memory.ImportFlowModal.stageFiles": {
+    "ja": "ファイルと会話",
+    "en": "Files and conversations"
+  },
+  "components.memory.ImportFlowModal.stageMuseFiles": {
+    "ja": "Muse のファイル",
+    "en": "Muse files"
+  },
+  "components.memory.ImportFlowModal.museFilesTitle": {
+    "ja": "Muse のファイルも取り込みますか？",
+    "en": "Import the Muse files too?"
+  },
+  "components.memory.ImportFlowModal.museFilesBody": {
+    "ja": "Muse のエクスポート ZIP には SOUL.md・IDENTITY.md・MEMORY.md・AGENTS.md が入っていません。これらは Muse 側から別に入手してください。取り込むと、SOUL.md と IDENTITY.md はシステムプロンプトの末尾に、MEMORY.md はコア記憶に、AGENTS.md は Memopedia のページに入ります。",
+    "en": "The Muse export ZIP does not include SOUL.md, IDENTITY.md, MEMORY.md, or AGENTS.md. Get these files from Muse separately. When imported, SOUL.md and IDENTITY.md are appended to the system prompt, MEMORY.md goes into core memory, and AGENTS.md becomes a Memopedia page."
+  },
+  "components.memory.ImportFlowModal.museFilesLaterNote": {
+    "ja": "「あとで」を選んでも、メモリー画面の「ファイルからの引っ越し」の節からいつでも取り込めます。",
+    "en": "If you choose \"Later\", you can import them any time from the \"Moving in from files\" section of the memory screen."
+  },
+  "components.memory.ImportFlowModal.museFilesImport": {
+    "ja": "ファイルを取り込む",
+    "en": "Import files"
+  },
+  "components.memory.ImportFlowModal.stageImport": {
+    "ja": "取り込み",
+    "en": "Import"
+  },
+  "components.memory.ImportFlowModal.stageEmbedding": {
+    "ja": "エンベディング",
+    "en": "Embeddings"
+  },
+  "components.memory.ImportFlowModal.stageChronicle": {
+    "ja": "あらすじ",
+    "en": "Chronicle"
+  },
+  "components.memory.ImportFlowModal.stageDone": {
+    "ja": "完了",
+    "en": "Done"
+  },
+  "components.memory.ImportFlowModal.importedCounts": {
+    "ja": "{p1} 件の会話・{p2} 件のメッセージを取り込みました。",
+    "en": "Imported {p1} conversations and {p2} messages."
+  },
+  "components.memory.ImportFlowModal.importDone": {
+    "ja": "取り込みが完了しました。",
+    "en": "The import is complete."
+  },
+  "components.memory.ImportFlowModal.threadAutoActivated": {
+    "ja": "会話を続けるスレッドを自動で設定しました。",
+    "en": "The thread to continue from was set automatically."
+  },
+  "components.memory.ImportFlowModal.threadActivated": {
+    "ja": "選んだスレッドから会話を続けるように設定しました。",
+    "en": "The conversation will continue from the selected thread."
+  },
+  "components.memory.ImportFlowModal.inputNote": {
+    "ja": "取り込みを始めると、エンベディングとあらすじを選び終えるまで、この画面は閉じられません。",
+    "en": "Once the import starts, this window cannot be closed until you have made the embedding and Chronicle choices."
+  },
+  "components.memory.ImportFlowModal.importingNote": {
+    "ja": "取り込み中はこの画面を閉じられません。",
+    "en": "This window cannot be closed while importing."
+  },
+  "components.memory.ImportFlowModal.importUntracked": {
+    "ja": "取り込みの進み具合を確認できなくなりました。取り込まれた会話は、メモリー画面で確かめてください。",
+    "en": "Lost track of the import's progress. Check the memory screen for the imported conversations."
+  },
+  "components.memory.ImportFlowModal.embeddingBody": {
+    "ja": "エンベディングは、記憶想起 (意味の近さによる検索) に使われる索引です。作らない場合、取り込んだ会話はこの検索の対象になりません。メモリー画面の「エンベディング管理」の「未処理を埋める」で、あとから作れます。",
+    "en": "Embeddings are the index used for memory recall (search by closeness of meaning). Without them, the imported conversations are not covered by that search. You can create them later with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingRunning": {
+    "ja": "エンベディングを作成しています: {p1}",
+    "en": "Creating embeddings: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingEnded": {
+    "ja": "エンベディングの作成処理が終わりました: {p1}",
+    "en": "The embedding job has ended: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingStartFailed": {
+    "ja": "エンベディングの作成を開始できませんでした: {p1}",
+    "en": "Could not start creating embeddings: {p1}"
+  },
+  "components.memory.ImportFlowModal.embeddingUntracked": {
+    "ja": "エンベディングの作成の進み具合を確認できなくなりました。作られていない分は、メモリー画面の「エンベディング管理」の「未処理を埋める」で作れます。",
+    "en": "Lost track of the embedding job. Anything left can be created with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingSkipped": {
+    "ja": "エンベディングは作成していません。メモリー画面の「エンベディング管理」の「未処理を埋める」で、あとから作れます。",
+    "en": "No embeddings were created. You can create them later with \"Fill missing\" under Embedding management in the memory screen."
+  },
+  "components.memory.ImportFlowModal.embeddingBackground": {
+    "ja": "エンベディングの作成は裏で続きます。この画面を閉じても止まりません。",
+    "en": "The embedding job continues in the background; closing this window does not stop it."
+  },
+  "components.memory.ImportFlowModal.doneTitle": {
+    "ja": "取り込みが完了しました",
+    "en": "Import complete"
+  },
+  "components.memory.ImportFlowModal.importFailed": {
+    "ja": "取り込みに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.ImportFlowModal.reembedStartFallback": {
+    "ja": "エンベディングの作成を開始できませんでした。",
+    "en": "Could not start creating embeddings."
+  },
+  "components.memory.MemoryImportForm.previewFailed": {
+    "ja": "ファイルの読み取りに失敗しました。",
+    "en": "Could not read the file."
+  },
+  "components.memory.MemoryImport.reembedStarting": {
+    "ja": "開始しています...",
+    "en": "Starting..."
+  },
+  "components.memory.MemoryImportForm.noConversations": {
+    "ja": "ファイルに会話が見つかりませんでした。",
+    "en": "No conversations found in the file."
+  },
+  "components.memory.MemoryImportForm.starting": {
+    "ja": "インポート開始...",
+    "en": "Starting import..."
+  },
+  "components.memory.MemoryImportForm.nativeStarting": {
+    "ja": "Nativeインポート開始...",
+    "en": "Starting Native import..."
+  },
+  "components.memory.MemoryImportForm.extensionConfirm": {
+    "ja": "このファイルを取り込みます",
+    "en": "Import this file"
+  },
+  "components.memory.ChronicleOfferPanel.estimating": {
+    "ja": "あらすじを作る場合の費用を見積もっています…",
+    "en": "Estimating the cost of a Chronicle..."
+  },
+  "components.memory.ClaudeImportPanel.text001": {
+    "ja": "Claude からのエクスポート手順",
+    "en": "How to export from Claude"
+  },
+  "components.memory.ClaudeImportPanel.text002": {
+    "ja": "Claude の「設定 → プライバシー → データをエクスポート」を開く",
+    "en": "In Claude, open Settings → Privacy → Export data"
+  },
+  "components.memory.ClaudeImportPanel.text003": {
+    "ja": "期間を選んでエクスポートを実行する（受付メールの後、しばらくするとダウンロード用のメールが届く）",
+    "en": "Choose a period and run the export (after a confirmation email, a download email arrives a little later)"
+  },
+  "components.memory.ClaudeImportPanel.text004": {
+    "ja": "メールからダウンロードできるのは manifest（JSON ファイル）のみ。開くと中に複数の ZIP のダウンロード URL が並んでいる",
+    "en": "The email link downloads only a manifest (JSON file); inside it are download URLs for several ZIP files"
+  },
+  "components.memory.ClaudeImportPanel.text005": {
+    "ja": "manifest 内の各 export_url から ZIP をダウンロードする（リンクは 24 時間で失効し、一度開くと使えなくなることがあるため、開いたらすぐ保存する）",
+    "en": "Download each ZIP from the export_url entries in the manifest (links expire after 24 hours and may stop working once used, so save each file as soon as you open its link)"
+  },
+  "components.memory.ClaudeImportPanel.text006": {
+    "ja": "ダウンロードした ZIP を、下の対応する枠にドラッグ＆ドロップ（またはクリックして選択）してください。どの枠に入れるか迷っても、中身から自動判定してお知らせします。",
+    "en": "Drag and drop each downloaded ZIP onto its matching slot below (or click a slot to pick a file). If a file lands in the wrong slot, its contents are detected automatically and you will be told where it belongs."
+  },
+  "components.memory.ClaudeImportPanel.text010": {
+    "ja": "会話",
+    "en": "Conversations"
+  },
+  "components.memory.ClaudeImportPanel.text011": {
+    "ja": "通常のチャット。取り込みたい会話を選んで、このペルソナのスレッドとして取り込みます。",
+    "en": "Regular chats. Pick the conversations you want and import them as threads of this persona."
+  },
+  "components.memory.ClaudeImportPanel.text012": {
+    "ja": "Claude Code",
+    "en": "Claude Code"
+  },
+  "components.memory.ClaudeImportPanel.text013": {
+    "ja": "クラウドセッションの記録からスレッドを再構成して取り込みます（ツール実行だけの部分は除外されます）。",
+    "en": "Rebuilds threads from cloud session transcripts (tool-only parts are skipped)."
+  },
+  "components.memory.ClaudeImportPanel.text014": {
+    "ja": "プロジェクト",
+    "en": "Projects"
+  },
+  "components.memory.ClaudeImportPanel.text015": {
+    "ja": "プロジェクトの指示と資料をスレッドとして取り込みます。指示はスレッド冒頭に system ロールで入り、希望すればペルソナのシステムプロンプトにも追記できます。",
+    "en": "Imports each project's instructions and documents as a thread. Instructions go at the start of the thread as a system role, and can optionally be appended to the persona's system prompt."
+  },
+  "components.memory.ClaudeImportPanel.text016": {
+    "ja": "記憶",
+    "en": "Memories"
+  },
+  "components.memory.ClaudeImportPanel.text017": {
+    "ja": "Claude が蓄積した記憶を転記します。全体記憶は見出しごとにコア記憶へ、それ以外は Memopedia へ入ります。転記する項目を選べます。",
+    "en": "Transcribes the memories Claude accumulated. The overall memory goes into core memory one heading at a time, and everything else goes into Memopedia. You can choose which items to transcribe."
+  },
+  "components.memory.ClaudeImportPanel.text018": {
+    "ja": "frames（取り込み対象外）",
+    "en": "frames (not imported)"
+  },
+  "components.memory.ClaudeImportPanel.text019": {
+    "ja": "生成された HTML などの成果物のため、SAIVerse には取り込みません。",
+    "en": "Contains generated artifacts such as HTML, so it is not imported into SAIVerse."
+  },
+  "components.memory.ClaudeImportPanel.text020": {
+    "ja": "Claude のエクスポートとして認識できませんでした。",
+    "en": "The file was not recognized as a Claude export."
+  },
+  "components.memory.ClaudeImportPanel.text021": {
+    "ja": "frames は生成された HTML などの成果物のため、取り込み対象外です。",
+    "en": "frames contains generated artifacts such as HTML and is not imported."
+  },
+  "components.memory.ClaudeImportPanel.text022": {
+    "ja": "これは manifest（ダウンロード先の一覧）です。中に書かれた各 export_url から ZIP をダウンロードし、その ZIP をアップロードしてください。",
+    "en": "This is the manifest (a list of download URLs). Download the ZIP files from the export_url entries inside it, then upload those ZIPs."
+  },
+  "components.memory.ClaudeImportPanel.text023": {
+    "ja": "light_metadata にはアカウント情報しか含まれないため、取り込み対象外です。",
+    "en": "light_metadata only contains account information and is not imported."
+  },
+  "components.memory.ClaudeImportPanel.text024": {
+    "ja": "このファイルは「{p1}」の枠に入れてください。",
+    "en": "This file belongs in the \"{p1}\" slot."
+  },
+  "components.memory.ClaudeImportPanel.text025": {
+    "ja": "ファイルに取り込める内容が見つかりませんでした。",
+    "en": "No importable content was found in the file."
+  },
+  "components.memory.ClaudeImportPanel.text030": {
+    "ja": "コア記憶",
+    "en": "Core memory"
+  },
+  "components.memory.ClaudeImportPanel.text031": {
+    "ja": "プロジェクト記憶",
+    "en": "Project memory"
+  },
+  "components.memory.ClaudeImportPanel.text032": {
+    "ja": "記憶ファイル",
+    "en": "Memory file"
+  },
+  "components.memory.ClaudeImportPanel.text033": {
+    "ja": "Memopedia の「{p1}」に {p2} 件を転記しました（既存のためスキップ: {p3} 件）。",
+    "en": "Transcribed {p2} item(s) into Memopedia under \"{p1}\" ({p3} skipped as already present)."
+  },
+  "components.memory.ClaudeImportPanel.text034": {
+    "ja": "転記する記憶を選択",
+    "en": "Select memories to transcribe"
+  },
+  "components.memory.ClaudeImportPanel.text035": {
+    "ja": "種類が「コア記憶」の項目（Claude が常に参照していた全体記憶の各見出し）はペルソナのコア記憶に追加され、追加したことはペルソナにも通知されます。それ以外は Memopedia の「Claude引っ越し」の下にページとして転記されます。",
+    "en": "Items of kind \"Core memory\" (each heading of the overall memory Claude always referred to) are added to the persona's core memory, and the persona is notified of the addition. Everything else is transcribed as pages under the \"Claude引っ越し\" trunk in Memopedia."
+  },
+  "components.memory.ClaudeImportPanel.text036": {
+    "ja": "種類",
+    "en": "Kind"
+  },
+  "components.memory.ClaudeImportPanel.text037": {
+    "ja": "文字数",
+    "en": "Characters"
+  },
+  "components.memory.ClaudeImportPanel.text038": {
+    "ja": "{p1} 件を転記",
+    "en": "Transcribe {p1} item(s)"
+  },
+  "components.memory.ClaudeImportPanel.text042": {
+    "ja": "インポートに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.ClaudeImportPanel.text043": {
+    "ja": "インポート開始...",
+    "en": "Starting import..."
+  },
+  "components.memory.ClaudeImportPanel.text060": {
+    "ja": "インポートする会話を選択",
+    "en": "Select conversations to import"
+  },
+  "components.memory.ClaudeImportPanel.text061": {
+    "ja": "{p1} 件中 {p2} 件選択",
+    "en": "{p2} of {p1} selected"
+  },
+  "components.memory.ClaudeImportPanel.text062": {
+    "ja": "タイトル",
+    "en": "Title"
+  },
+  "components.memory.ClaudeImportPanel.text063": {
+    "ja": "メッセージ数",
+    "en": "Message count"
+  },
+  "components.memory.ClaudeImportPanel.text064": {
+    "ja": "作成日",
+    "en": "Created"
+  },
+  "components.memory.ClaudeImportPanel.text065": {
+    "ja": "プレビュー",
+    "en": "Preview"
+  },
+  "components.memory.ClaudeImportPanel.text066": {
+    "ja": "(無題)",
+    "en": "(untitled)"
+  },
+  "components.memory.ClaudeImportPanel.text067": {
+    "ja": "指示あり",
+    "en": "Has instructions"
+  },
+  "components.memory.ClaudeImportPanel.text068": {
+    "ja": "選択したプロジェクトの指示をペルソナのシステムプロンプトに追記する",
+    "en": "Append the selected projects' instructions to the persona's system prompt"
+  },
+  "components.memory.ClaudeImportPanel.text069": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.memory.ClaudeImportPanel.text070": {
+    "ja": "{p1} 件をインポート",
+    "en": "Import {p1} item(s)"
+  },
+  "components.memory.ClaudeImportPanel.text039": {
+    "ja": "コア記憶に {p1} 件を追加しました（既存のためスキップ: {p2} 件）。",
+    "en": "Added {p1} item(s) to core memory ({p2} skipped as already present)."
+  },
+  "components.memory.ClaudeImportPanel.text053": {
+    "ja": "コア記憶の合計が容量の目安を超えています（{p1} / {p2} 文字）。切り詰めはせず、整理はペルソナ自身に任されます。",
+    "en": "Core memory now exceeds its size guideline ({p1} / {p2} characters). Nothing is cut; tidying it up is left to the persona."
+  },
+  "components.memory.MuseImportPanel.text001": {
+    "ja": "Muse からのエクスポート手順",
+    "en": "How to export from Muse"
+  },
+  "components.memory.MuseImportPanel.text002": {
+    "ja": "Muse の「Settings > Data Controls」を開く",
+    "en": "In Muse, open Settings > Data Controls"
+  },
+  "components.memory.MuseImportPanel.text003": {
+    "ja": "「Download your agent data」を実行する（受付後、ダウンロード用のリンクが届く）",
+    "en": "Run \"Download your agent data\" (a download link arrives after the request is accepted)"
+  },
+  "components.memory.MuseImportPanel.text004": {
+    "ja": "届いた EYI_Package の ZIP をダウンロードする（リンクは失効することがあるため、届いたらすぐ保存する）",
+    "en": "Download the EYI_Package ZIP from the link (links can expire, so save it as soon as it arrives)"
+  },
+  "components.memory.MuseImportPanel.text005": {
+    "ja": "SOUL・長期記憶（MEMORY.md）・アイコンは Muse のエクスポートに含まれないため、この取り込みでは移りません。",
+    "en": "SOUL, long-term memory (MEMORY.md), and icons are not included in Muse exports, so they are not transferred by this import."
+  },
+  "components.memory.MuseImportPanel.text006": {
+    "ja": "ワークスペースファイルは zip 内にあっても一覧のメタデータのみを取り込み、ファイル自体は復元されません。",
+    "en": "Workspace files are imported only as listing metadata even when they are in the ZIP; the files themselves are not restored."
+  },
+  "components.memory.MuseImportPanel.text007": {
+    "ja": "Muse のエクスポート ZIP をドラッグ＆ドロップ（またはクリックして選択）してください。",
+    "en": "Drag and drop the Muse export ZIP here (or click to choose a file)."
+  },
+  "components.memory.MuseImportPanel.text008": {
+    "ja": "EYI_Package_*.zip",
+    "en": "EYI_Package_*.zip"
+  },
+  "components.memory.MuseImportPanel.text009": {
+    "ja": "Muse のエクスポートとして認識できませんでした。ZIP 内の manifest.json を確認してください。",
+    "en": "The file was not recognized as a Muse export. Check the manifest.json inside the ZIP."
+  },
+  "components.memory.MuseImportPanel.text010": {
+    "ja": "ファイルに取り込める会話が見つかりませんでした。",
+    "en": "No importable conversations were found in the file."
+  },
+  "components.memory.MuseImportPanel.text013": {
+    "ja": "インポートする会話を選択",
+    "en": "Select conversations to import"
+  },
+  "components.memory.MuseImportPanel.text014": {
+    "ja": "{p1} 件中 {p2} 件選択",
+    "en": "{p2} of {p1} selected"
+  },
+  "components.memory.MuseImportPanel.text015": {
+    "ja": "タイトル",
+    "en": "Title"
+  },
+  "components.memory.MuseImportPanel.text016": {
+    "ja": "メッセージ数",
+    "en": "Message count"
+  },
+  "components.memory.MuseImportPanel.text017": {
+    "ja": "作成日",
+    "en": "Created"
+  },
+  "components.memory.MuseImportPanel.text018": {
+    "ja": "プレビュー",
+    "en": "Preview"
+  },
+  "components.memory.MuseImportPanel.text019": {
+    "ja": "(無題)",
+    "en": "(untitled)"
+  },
+  "components.memory.MuseImportPanel.text020": {
+    "ja": "ワークスペースファイル: {p1} 件（メタデータのみ。ファイル自体は復元されません）",
+    "en": "Workspace files: {p1} (metadata only; the files themselves are not restored)"
+  },
+  "components.memory.MuseImportPanel.text021": {
+    "ja": "エクスポート日時: {p1}",
+    "en": "Exported: {p1}"
+  },
+  "components.memory.MuseImportPanel.text022": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.memory.MuseImportPanel.text023": {
+    "ja": "{p1} 件をインポート",
+    "en": "Import {p1} item(s)"
+  },
+  "components.memory.MuseImportPanel.text025": {
+    "ja": "インポートを開始しています...",
+    "en": "Starting import..."
+  },
+  "components.memory.MuseImportPanel.text026": {
+    "ja": "{p1}/{p2} 会話を処理中...",
+    "en": "Processing {p1}/{p2} conversations..."
+  },
+  "components.memory.MuseImportPanel.text029": {
+    "ja": "インポートに失敗しました。",
+    "en": "Import failed."
+  },
+  "components.memory.MuseFileImport.addFiles": {
+    "ja": "ファイルを追加",
+    "en": "Add files"
+  },
+  "components.memory.MuseImportPanel.text040": {
+    "ja": "ファイルからの引っ越し",
+    "en": "Moving in from files"
+  },
+  "components.memory.MuseImportPanel.text041": {
+    "ja": "SOUL.md・IDENTITY.md・MEMORY.md・AGENTS.md はエクスポート ZIP に含まれないため、個別にアップロードして取り込みます。",
+    "en": "SOUL.md, IDENTITY.md, MEMORY.md, and AGENTS.md are not included in the export ZIP, so upload them here individually."
+  },
+  "components.memory.MuseImportPanel.text042": {
+    "ja": "ファイルを選択（.md）",
+    "en": "Choose files (.md)"
+  },
+  "components.memory.MuseImportPanel.text043": {
+    "ja": "システムプロンプトへ追記",
+    "en": "Append to system prompt"
+  },
+  "components.memory.MuseImportPanel.text044": {
+    "ja": "コア記憶へ追加",
+    "en": "Add to core memory"
+  },
+  "components.memory.MuseImportPanel.text045": {
+    "ja": "Memopedia へ転記",
+    "en": "Transcribe to Memopedia"
+  },
+  "components.memory.MuseImportPanel.text046": {
+    "ja": "対象外",
+    "en": "Not supported"
+  },
+  "components.memory.MuseImportPanel.text047": {
+    "ja": "{p1} 件に分割",
+    "en": "Split into {p1} item(s)"
+  },
+  "components.memory.MuseImportPanel.text048": {
+    "ja": "選択したファイルを取り込む",
+    "en": "Import selected files"
+  },
+  "components.memory.MuseImportPanel.text049": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.memory.MuseImportPanel.text050": {
+    "ja": "ファイルのプレビューに失敗しました。.md ファイルを選び直してください。",
+    "en": "Could not preview the files. Please choose the .md files again."
+  },
+  "components.memory.MuseImportPanel.text051": {
+    "ja": "ファイルの取り込みに失敗しました。",
+    "en": "File import failed."
+  },
+  "components.memory.MuseImportPanel.text052": {
+    "ja": "ファイルの取り込みが完了しました。",
+    "en": "File import completed."
+  },
+  "components.memory.MuseImportPanel.text053": {
+    "ja": "システムプロンプト追記 {p1} 件 / コア記憶の追加 {p2} 件 / Memopedia {p3}",
+    "en": "System prompt: {p1} file(s) appended / Core memory: {p2} added / Memopedia: {p3}"
+  },
+  "components.memory.MuseImportPanel.text054": {
+    "ja": "作成",
+    "en": "created"
+  },
+  "components.memory.MuseImportPanel.text055": {
+    "ja": "更新",
+    "en": "updated"
+  },
+  "components.memory.MuseImportPanel.text056": {
+    "ja": "なし",
+    "en": "none"
+  },
+  "components.memory.ChronicleOfferPanel.text001": {
+    "ja": "取り込んだ会話のあらすじを作りますか？",
+    "en": "Create a Chronicle for the imported conversations?"
+  },
+  "components.memory.ChronicleOfferPanel.text002": {
+    "ja": "あらすじを作らない場合、ペルソナが自然に思い出せるのは直近の会話だけで、取り込んだ古い出来事は本人からは見えません (検索では見つけられます)。",
+    "en": "Without a Chronicle, the persona naturally recalls only recent conversations; older imported events stay out of its view (search can still find them)."
+  },
+  "components.memory.ChronicleOfferPanel.text003": {
+    "ja": "あらすじを作ると、古い出来事も本人の長期記憶として思い出せるようになります。",
+    "en": "With a Chronicle, the persona can recall older events as part of its long-term memory."
+  },
+  "components.memory.ChronicleOfferPanel.text004": {
+    "ja": "対象の会話",
+    "en": "Conversations to summarize"
+  },
+  "components.memory.ChronicleOfferPanel.text005": {
+    "ja": "{p1} 件",
+    "en": "{p1} messages"
+  },
+  "components.memory.ChronicleOfferPanel.text006": {
+    "ja": "AI の呼び出し",
+    "en": "AI calls"
+  },
+  "components.memory.ChronicleOfferPanel.text007": {
+    "ja": "約 {p1} 回 ({p2})",
+    "en": "About {p1} calls ({p2})"
+  },
+  "components.memory.ChronicleOfferPanel.text008": {
+    "ja": "概算費用",
+    "en": "Estimated cost"
+  },
+  "components.memory.ChronicleOfferPanel.text009": {
+    "ja": "無料 (このモデルには料金設定がありません)",
+    "en": "Free (no pricing configured for this model)"
+  },
+  "components.memory.ChronicleOfferPanel.text010": {
+    "ja": "約 {p1}",
+    "en": "About {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text011": {
+    "ja": "あらすじを作る (推奨)",
+    "en": "Create Chronicle (recommended)"
+  },
+  "components.memory.ChronicleOfferPanel.text012": {
+    "ja": "あとで",
+    "en": "Later"
+  },
+  "components.memory.ChronicleOfferPanel.text013": {
+    "ja": "記憶画面の Chronicle タブからいつでも作れます。",
+    "en": "You can create it any time from the Chronicle tab in the memory screen."
+  },
+  "components.memory.ChronicleOfferPanel.text014": {
+    "ja": "あらすじを作成しています ({p1} / {p2})",
+    "en": "Creating Chronicle ({p1} / {p2})"
+  },
+  "components.memory.ChronicleOfferPanel.text015": {
+    "ja": "あらすじを作成しています…",
+    "en": "Creating Chronicle..."
+  },
+  "components.memory.ChronicleOfferPanel.text016": {
+    "ja": "次へ進んでも、作成は背景で続きます。進み具合は記憶画面の Chronicle タブで確かめられます。",
+    "en": "Going on does not stop the job; it continues in the background. You can check its progress in the Chronicle tab of the memory screen."
+  },
+  "components.memory.ChronicleOfferPanel.text017": {
+    "ja": "あらすじを作成しました。",
+    "en": "The Chronicle has been created."
+  },
+  "components.memory.ChronicleOfferPanel.text018": {
+    "ja": "あらすじを作成できませんでした: {p1}",
+    "en": "Could not create the Chronicle: {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text019": {
+    "ja": "あらすじの作成は中止されました。",
+    "en": "Chronicle creation was cancelled."
+  },
+  "components.memory.ChronicleOfferPanel.text020": {
+    "ja": "次へ",
+    "en": "Next"
+  },
+  "components.memory.ChronicleOfferPanel.text021": {
+    "ja": "あらすじの作成を開始できませんでした: {p1}",
+    "en": "Could not start Chronicle creation: {p1}"
+  },
+  "components.memory.ChronicleOfferPanel.text022": {
+    "ja": "進み具合を確認できなくなりました。作成が続いているかは、記憶画面の Chronicle タブで確かめてください。",
+    "en": "Lost track of the job's progress. Check the Chronicle tab in the memory screen to see whether it is still running."
   }
 }

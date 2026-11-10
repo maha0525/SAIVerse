@@ -27,7 +27,7 @@ DB は明示的に flush してから commit を試す。**commit 呼び出し�
 - `builtin_data/tools/image_generator.py:769-816`: 生成結果を保存して snippet と `metadata.media` を用意する。`create_picture_item` の例外は `800-803` で握り、`816` で **画像 path・metadata・履歴用 snippet を返す**。Item 登録が失敗しても、生成画像そのものはツール成果物として到達できる。
 - `api/routes/chat.py:_store_image_attachment / _store_document_attachment / _store_audio_attachment / _store_video_attachment`: 登録失敗後も URI/path を返し、同ファイルの `send_message` (`1020-1072`) が画像・文書・音声・動画を会話 metadata に組み込む。複数添付の一つだけ登録失敗した場合にも、他の添付を含めて削除しない。
 - `api/routes/chat.py:_register_uploaded_video_by_uri`: 前のアップロードで保存済みの動画を参照する。登録側にはそのファイルの所有権がない。
-- `manager/admin.py:create_item` と `create_picture_item` / `create_*_item_for_user`: 呼び手から FILE_PATH を受け取るだけなので、失敗時にそのパスを削除しない。
+- `manager/admin.py:create_item` と `create_picture_item` / `create_item_for_user`: 呼び手から FILE_PATH を受け取るだけなので、失敗時にそのパスを削除しない。
 
 したがって、既存方針の「登録失敗なら生成画像を削除」をそのまま実装すると、課金済みの返却成果物や会話添付が壊れる。**画像は現在の返却を維持する。登録失敗の伝え方・保存した画像の再登録導線が必要かは別途判断を要する。** 捨てる仕様には変更していない。安全に消せる新規・未公開の画像失敗経路は、現在の登録呼び手からは確認できなかった。
 

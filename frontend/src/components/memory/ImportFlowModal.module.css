@@ -1,0 +1,340 @@
+/* ImportFlowModal and ImportSourcePicker (docs/intent/import_flow_redesign.md).
+   Dark is the default; light overrides follow at the end. */
+
+/* Above MemoryModal / PersonaWizard / TutorialWizard (1000) and PeopleModal (2000).
+   The body prefix outranks ModalOverlay's own .overlay rule whatever the
+   stylesheet order (the overlay is portaled to document.body). */
+:global(body) .overlay {
+    z-index: 5000;
+}
+
+.modal {
+    width: min(960px, 100%);
+    outline: none; /* フォーカスの閉じ込め先 (tabIndex=-1) なので枠線は出さない */
+    background-color: #1e1f22;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #333;
+}
+
+.title {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    color: #aaa;
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 4px;
+    display: flex;
+    flex-shrink: 0;
+}
+
+.closeButton:hover {
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.stages {
+    list-style: none;
+    margin: 0;
+    padding: 0.75rem 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    border-bottom: 1px solid #2a2b2e;
+    font-size: 0.85rem;
+}
+
+.stage {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #666;
+}
+
+.stageNumber {
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+}
+
+.stageActive {
+    color: #4dabf7;
+    font-weight: 600;
+}
+
+.stageDone {
+    color: #8ce99a;
+}
+
+.body {
+    padding: 1.5rem;
+    min-width: 0;
+}
+
+.inputError {
+    margin: 0 0 1rem 0;
+}
+
+.footNote {
+    margin: 1rem 0 0 0;
+    color: #888;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+}
+
+.stepSummary {
+    margin: 0 0 1.5rem 0;
+    text-align: left;
+}
+
+.stepBody {
+    margin: 0 auto 1.5rem auto;
+    max-width: 40rem;
+    color: #aaa;
+    font-size: 0.9rem;
+    line-height: 1.7;
+    text-align: left;
+}
+
+/* Muse のファイル取り込みステップ: プレビューの表と結果は左揃えにする
+   (囲みの embeddingDialog は中央揃え)。 */
+.museFilesDetail {
+    text-align: left;
+    margin: 0 0 1.5rem 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.summaryLine {
+    margin: 0.5rem 0 0 0;
+    color: #ccc;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.statusLine {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    color: #aaa;
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+}
+
+.statusError {
+    color: #ffa8a8;
+}
+
+.doneContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 1rem 0;
+}
+
+.doneIcon {
+    color: #51cf66;
+}
+
+.doneTitle {
+    margin: 0.75rem 0 0.25rem 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+}
+
+/* ---- ImportSourcePicker ---- */
+
+.picker {
+    margin-bottom: 1rem;
+}
+
+.pickerHeading {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+}
+
+.pickerGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.75rem;
+}
+
+.sourceCard {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    text-align: left;
+    padding: 0.9rem 1rem;
+    border: 1px solid #3a3b3f;
+    border-radius: 8px;
+    background-color: #1a1b1e;
+    color: inherit;
+    cursor: pointer;
+    transition: border-color 0.2s, background-color 0.2s;
+    min-width: 0;
+}
+
+.sourceCard:hover {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.06);
+}
+
+.sourceCardSkip {
+    border-style: dashed;
+}
+
+.sourceIcon {
+    color: #4dabf7;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.sourceCardSkip .sourceIcon {
+    color: #888;
+}
+
+.sourceText {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.sourceName {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
+.sourceDesc {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: #888;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+    .header,
+    .stages,
+    .body {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+}
+
+/* ---- Light mode ---- */
+
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #e2e8f0;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.18);
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeButton:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.04);
+}
+
+:global([data-theme="light"]) .stages {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .stage {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .stageActive {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .stageDone {
+    color: #15803d;
+}
+
+:global([data-theme="light"]) .footNote,
+:global([data-theme="light"]) .statusLine {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .stepBody {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .summaryLine {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .statusError {
+    color: #b91c1c;
+}
+
+:global([data-theme="light"]) .doneIcon {
+    color: #16a34a;
+}
+
+:global([data-theme="light"]) .sourceCard {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sourceCard:hover {
+    border-color: #2563eb;
+    background-color: rgba(37, 99, 235, 0.04);
+}
+
+:global([data-theme="light"]) .sourceIcon {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .sourceCardSkip .sourceIcon {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .sourceName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .sourceDesc {
+    color: #64748b;
+}

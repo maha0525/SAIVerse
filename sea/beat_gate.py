@@ -39,6 +39,7 @@ per-persona Lock を取得してから submit_meta_judgment → run_meta_user �
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
 import threading
 from typing import Any, Dict, Iterator, Optional
@@ -63,6 +64,47 @@ class BeatGateClosedError(Exception):
             f"{detail or 'pending outbox items remain (fail-closed)'}"
         )
         super().__init__(message)
+        self.persona_id = persona_id
+        self.purpose = purpose
+
+
+#: いまの実行の文脈で Beat ロックを握っているペルソナの集合。``hold`` が
+#: 最外周で取ったときに足し、抜けるときに戻す。contextvars なので、
+#: ``sea/tool_wait.py`` がツールのスレッドへ文脈を写すと、そのスレッドからは
+#: 「このツールを呼んだ親が握っているペルソナ」として見える。
+_HELD_BY_THIS_CONTEXT: "contextvars.ContextVar[frozenset]" = contextvars.ContextVar(
+    "beat_gate_held_personas", default=frozenset(),
+)
+
+
+class BeatLockFromToolThreadError(RuntimeError):
+    """ツールのスレッドから、取ってはいけない Beat ロックを取りに行った。
+
+    二つの場合がある。(1) このツールを呼んで完了を待っている親が、同じ
+    ペルソナのロックを握っている (待てば永久に固まる)。(2) 停止で見捨て
+    られたツールが、後からペルソナの処理の列に入ろうとした。
+
+    ツールは ``sea/tool_wait.py`` の専用スレッドで走り、親 (Beat ロックを
+    握ったスレッド) はその完了を待っている。RLock はスレッド束縛なので、
+    ツールのスレッドから同じペルソナのロックを取りに行くと、親の解放を
+    待ち、親はツールの完了を待つ — 永久に固まる。黙って固まらせずに、
+    取れなければその場で投げる (docs/intent/stop_button.md)。
+    """
+
+    def __init__(self, persona_id: Optional[str], purpose: str, *, abandoned: bool = False):
+        if abandoned:
+            detail = (
+                "the tool was abandoned by a stop; a stopped reply's tool must not "
+                "enter the persona's Beat afterwards"
+            )
+        else:
+            detail = (
+                "the Beat lock is held by the waiting parent; blocking here would deadlock"
+            )
+        super().__init__(
+            f"hold_beat(purpose={purpose}) for persona={persona_id} was called from a "
+            f"tool thread: {detail}"
+        )
         self.persona_id = persona_id
         self.purpose = purpose
 
@@ -156,7 +198,22 @@ class BeatGate:
         if not persona_id:
             raise ValueError("persona_id is required")
         lock = self._get_lock(persona_id)
-        lock.acquire()
+        from sea.tool_wait import current_tool_call_abandoned, is_tool_thread
+        if is_tool_thread() and current_tool_call_abandoned():
+            # 停止で見捨てられたツールは、ペルソナの処理の列に入らない —
+            # 止めた返事のための処理が、後から記録に割り込まないため
+            # (docs/intent/stop_button.md「抜けたときに何が残るか」)。
+            raise BeatLockFromToolThreadError(persona_id, purpose, abandoned=True)
+        if is_tool_thread() and persona_id in _HELD_BY_THIS_CONTEXT.get():
+            # このツールを呼んで完了を待っている親が、このペルソナのロックを
+            # 握っている。待てば永久に固まるので、取れなければ投げる
+            # (BeatLockFromToolThreadError)。親と関係のない処理が一時的に
+            # 握っているだけのとき (このペルソナが親の集合に無いとき) は、
+            # 普段どおり待って取る。
+            if not lock.acquire(blocking=False):
+                raise BeatLockFromToolThreadError(persona_id, purpose)
+        else:
+            lock.acquire()
         depths = self._depth_map()
         depth = depths.get(persona_id, 0) + 1
         depths[persona_id] = depth
@@ -173,9 +230,16 @@ class BeatGate:
                     depths.pop(persona_id, None)
                     lock.release()
                     raise
+        held_token = None
+        if depth == 1:
+            held_token = _HELD_BY_THIS_CONTEXT.set(
+                _HELD_BY_THIS_CONTEXT.get() | {persona_id}
+            )
         try:
             yield self
         finally:
+            if held_token is not None:
+                _HELD_BY_THIS_CONTEXT.reset(held_token)
             current = self._depth_map().get(persona_id, 0)
             if current > 0:
                 if current == 1:

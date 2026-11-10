@@ -173,6 +173,10 @@ class TestWithMock(unittest.TestCase):
 - **Windows の SQLite ロック**: Windows ではファイルハンドルが開いたままだと削除・置換で `WinError 32` が出やすい。teardown で接続を確実に close してから片付ける。
 - **隔離テスト環境**: バックエンドを本番データなしで叩くには `test_fixtures/`（`SAIVERSE_HOME=test_data/.saiverse`、ポート 18000）。詳細は [test_environment.md](../test_environment.md)。LLM コストを避けるなら `--quick`。
 
+## Gemini 通信時間の隔離検証
+
+`python -m pytest tests/test_gemini_request_timing.py -n 0` は、実際の Google SDK / httpx / httpcore をメモリ内 network backend に接続し、準備・本文送信・応答ヘッダーの時間差、並行キャッシュの親子 ID、SDK 再試行、失敗、DEBUG/INFO、ストリーム close を検査する。実 API や本番ペルソナを呼ばない。記録の読み方は [Gemini の送信・応答時間](../intent/gemini_request_timing.md)。
+
 ## CI/CD
 
 現在の [Discord Gateway CI](../../.github/workflows/discord_gateway.yml) は、`discord_gateway/` や指定の依存ファイルを変更する PR で、Discord Gateway の lint とテストを実行する。リポジトリ全体の Python テストや frontend の検査を実行する workflow ではない。

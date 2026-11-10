@@ -231,6 +231,8 @@ class ConversationSummary(BaseModel):
     update_time: Optional[str]
     message_count: int
     preview: Optional[str]
+    # Claude projects のみ: プロジェクト指示 (prompt_template) を持つか
+    has_instructions: Optional[bool] = None
 
 class PreviewResponse(BaseModel):
     conversations: List[ConversationSummary]
@@ -272,6 +274,69 @@ class ExtensionImportStatusResponse(BaseModel):
     embedding_failed: Optional[int] = None
     # One line on why embedding stopped or left messages without vectors.
     embedding_error: Optional[str] = None
+
+class ClaudeMemoryItemSummary(BaseModel):
+    """Claude エクスポート memories カテゴリの転記候補 1 件。"""
+    idx: int
+    id: str
+    kind: str  # conversations_memory / project_memory / memory_file
+    title: str
+    preview: Optional[str] = None
+    char_count: int = 0
+
+class ClaudePreviewResponse(BaseModel):
+    """Claude 公式エクスポートのプレビュー。category でどの ZIP かを返す。
+
+    conversations / claude_code / projects は conversations に会話一覧、
+    memories は memory_items に転記候補一覧が入る。
+    """
+    category: str
+    conversations: List[ConversationSummary] = []
+    memory_items: List[ClaudeMemoryItemSummary] = []
+    cache_key: str
+    total_count: int
+
+class ClaudeImportRequest(BaseModel):
+    cache_key: str
+    conversation_ids: List[str]  # conversation_id or idx as string
+    skip_embedding: bool = False
+    # projects のみ: 選択したプロジェクトの指示 (prompt_template) をペルソナの
+    # システムプロンプト末尾に追記する
+    append_instructions_to_system_prompt: bool = False
+
+class MusePreviewResponse(BaseModel):
+    """Muse 公式エクスポートのプレビュー。会話は通常 1 件。"""
+    conversations: List[ConversationSummary] = []
+    cache_key: str
+    total_count: int
+    workspace_file_count: int = 0
+    exported_at: Optional[str] = None
+
+class MuseImportRequest(BaseModel):
+    cache_key: str
+    conversation_ids: List[str]  # conversation_id or idx as string
+    skip_embedding: bool = False
+
+class MuseFilePreviewEntry(BaseModel):
+    """Muse エクスポートに含まれない個別ファイル 1 件のプレビュー。"""
+    filename: str
+    kind: Optional[str] = None  # "soul" | "identity" | "memory" | "agents"
+    destination: Optional[str] = None  # "system_prompt" | "core_memory" | "memopedia"
+    item_count: int = 0
+    char_count: int = 0
+
+class MuseFilePreviewResponse(BaseModel):
+    files: List[MuseFilePreviewEntry] = []
+    cache_key: str
+    total_count: int  # 判定できたファイル数
+
+class MuseFileImportRequest(BaseModel):
+    cache_key: str
+    kinds: List[str] = []
+
+class ClaudeMemoryImportRequest(BaseModel):
+    cache_key: str
+    item_ids: List[str]  # item id or idx as string
 
 class NativeImportStatusResponse(BaseModel):
     running: bool
@@ -649,3 +714,16 @@ class StorageLayersResponse(BaseModel):
 # NOTE: Tracks Viewer のモデル (TrackItem / TracksStatusCount / TracksResponse) は
 # 2026-08-21 に API ルートごと退役した (track_retirement.md §2 住人 9)。フロントの
 # 消費はゼロで、残っていた読み手は debug スクリプトだけだった。
+
+
+class PersonaPackApplyRequest(BaseModel):
+    """見比べたパックの適用 (api/routes/people/persona_pack.py の apply_persona_pack)。
+
+    choices は {項目のキー: "lite" か "body"}。bulk は choices に無い項目の選択で、
+    一件ごとの選択が bulk に勝つ。どちらも無い項目があれば断る。
+    """
+
+    token: str
+    bulk: Optional[str] = None
+    choices: Dict[str, str] = {}
+    overwrite_profile: bool = False

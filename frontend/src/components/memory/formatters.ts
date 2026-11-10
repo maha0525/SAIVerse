@@ -1,7 +1,17 @@
 
 import { getFormatLocale, getLocale, t as uiText } from '@/i18n/core';
 import { CheckCircle, AlertCircle } from 'lucide-react';
-import { MemoryImportUiResult } from './types';
+import { MemoryImportUiResult, ThreadSummary } from './types';
+
+/**
+ * 取り込み後の「どのスレッドから会話を続けるか」の並び順: 最終発言が新しい順。
+ * スレッド一覧 API は順序を約束しないので、選ぶ画面の側で並べる。最終発言の
+ * 時刻が無いスレッドは末尾。
+ */
+export function sortThreadsByLastActivity(threads: ThreadSummary[]): ThreadSummary[] {
+  const key = (t: ThreadSummary) => (typeof t.last_created_at === 'number' && Number.isFinite(t.last_created_at) ? t.last_created_at : -Infinity);
+  return [...threads].sort((a, b) => key(b) - key(a));
+}
 
 export function getResultMeta(result: MemoryImportUiResult) {
   if (result.type === 'success') {

@@ -542,7 +542,20 @@ def import_official_chatgpt(
     if selected_count == 0:
         raise HTTPException(status_code=400, detail="No valid conversations found for the given selection.")
     
-    # 4. Start background task
+    # 4. Reserve the running slot. Two requests for the same persona that arrive
+    # before the background task sets its status would both pass the check above
+    # and import the same conversations twice, so the re-check and the reservation
+    # happen together under the lock (same shape as the Claude / Muse imports).
+    with _official_import_lock:
+        status = _official_import_status.get(persona_id, {})
+        if status.get("running"):
+            raise HTTPException(status_code=409, detail="Import already in progress.")
+        _official_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": selected_count,
+            "message": "Starting import...",
+        }
+
+    # 5. Start background task
     background_tasks.add_task(
         _run_official_import_task,
         persona_id,
@@ -603,7 +616,20 @@ async def import_extension_export(
             tmp_path.unlink()
         raise HTTPException(status_code=400, detail=f"Invalid file: {str(e)}")
     
-    # 3. Start background task
+    # 3. Reserve the running slot before registering the task (see the official
+    # import above). If another request won the slot meanwhile, drop our upload.
+    with _extension_import_lock:
+        status = _extension_import_status.get(persona_id, {})
+        if status.get("running"):
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise HTTPException(status_code=409, detail="Import already in progress.")
+        _extension_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": msg_count,
+            "message": "Starting import...",
+        }
+
+    # 4. Start background task
     background_tasks.add_task(
         _run_extension_import_task,
         persona_id,

@@ -1,6 +1,47 @@
-export type ImportSubTab = 'official' | 'extension' | 'native';
+/** Where a chat-log import comes from (step 1 of docs/intent/import_flow_redesign.md). */
+export type ImportSource = 'official' | 'claude' | 'muse' | 'extension' | 'native';
 
-export type MemoryImportStep = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
+/** Status endpoint of each import route (GET /import/{type}/status). */
+export type ImportStatusType = 'extension' | 'official' | 'native' | 'claude' | 'muse';
+
+/**
+ * What a source's step-2 screen hands to ImportFlowModal to run step 3.
+ * `start` posts the import with skip_embedding=true: the embedding choice is
+ * asked after the import (step 4) and runs through POST /reembed.
+ */
+export interface ImportStartRequest {
+  statusType: ImportStatusType;
+  start: () => Promise<{ ok: boolean; error?: string }>;
+  /** Progress text shown before the first status response. */
+  initialProgress: string;
+  /** Progress text for a running status; formatProgress is used when absent. */
+  formatRunning?: (data: MemoryImportProgress) => string;
+  /** Error text for a finished status without success. */
+  failureMessage: (data: MemoryImportProgress) => string;
+  /** false skips the thread step (native packages keep their own thread ids). */
+  selectThread: boolean;
+}
+
+/** Result of an import that stores no conversations (Claude memories). */
+export interface ImportDirectResult {
+  message: string;
+}
+
+/**
+ * What one pass of ImportFlowModal imported, handed to onClose when the flow
+ * closes from step 6. PersonaWizard lists these at its import hub
+ * (docs/intent/import_flow_redesign.md「複数の取り込み」).
+ */
+export interface ImportFlowSummary {
+  source: ImportSource;
+  /** Counts shown at step 6; absent when the import reported no counts. */
+  conversations?: number;
+  messages?: number;
+  /** Step 6 text used when there are no counts (e.g. Claude memories only). */
+  message: string;
+  /** True when the Muse file import (SOUL / IDENTITY / MEMORY / AGENTS) ran in this pass. */
+  museFilesImported: boolean;
+}
 
 export interface MemoryImportProps {
   personaId: string;
@@ -34,6 +75,8 @@ export interface ConversationSummary {
   update_time: string | null;
   message_count: number;
   preview: string | null;
+  /** Claude projects のみ: プロジェクト指示 (prompt_template) を持つか */
+  has_instructions?: boolean | null;
 }
 
 export interface PreviewData {
@@ -58,6 +101,97 @@ export interface NativePreviewData {
   threads: NativePreviewThread[];
 }
 
+/** Claude 公式エクスポートのカテゴリ (インポート対象) */
+export type ClaudeCategory = 'conversations' | 'claude_code' | 'projects' | 'memories';
+
+export interface ClaudeMemoryItemSummary {
+  idx: number;
+  id: string;
+  /** core_memory はコア記憶へ、それ以外は Memopedia へ転記される */
+  kind: 'core_memory' | 'project_memory' | 'memory_file' | string;
+  title: string;
+  preview: string | null;
+  char_count: number;
+}
+
+export interface ClaudePreviewData {
+  category: ClaudeCategory | string;
+  conversations: ConversationSummary[];
+  memory_items: ClaudeMemoryItemSummary[];
+  cache_key: string;
+  total_count: number;
+}
+
+/** preview が 400 で返す構造化エラー (カテゴリ違い・対象外カテゴリの案内) */
+export interface ClaudePreviewErrorDetail {
+  code?: string;
+  detected_category?: string | null;
+  expected_category?: string | null;
+}
+
+export interface ClaudeImportRequest {
+  cache_key: string;
+  conversation_ids: string[];
+  skip_embedding: boolean;
+  append_instructions_to_system_prompt?: boolean;
+}
+
+export interface MusePreviewData {
+  conversations: ConversationSummary[];
+  cache_key: string;
+  total_count: number;
+  workspace_file_count: number;
+  exported_at: string | null;
+}
+
+export interface MuseImportRequest {
+  cache_key: string;
+  conversation_ids: string[];
+  skip_embedding: boolean;
+}
+
+export interface MuseFilePreviewEntry {
+  filename: string;
+  kind: string | null;
+  destination: string | null;
+  item_count: number;
+  char_count: number;
+}
+
+export interface MuseFilePreviewData {
+  files: MuseFilePreviewEntry[];
+  cache_key: string;
+  total_count: number;
+}
+
+export interface MuseFileImportResult {
+  success: boolean;
+  system_prompt_appended: string[];
+  core_created: number;
+  core_skipped: number;
+  core_total_chars: number;
+  core_budget: number;
+  memopedia_action: string | null;
+  trunk_title: string;
+  message: string;
+}
+
+export interface ClaudeMemoryImportResult {
+  success: boolean;
+  created: number;
+  skipped: number;
+  trunk_title: string;
+  /** 全体記憶の見出しから追加したコア記憶の件数 */
+  core_created: number;
+  core_skipped: number;
+  /** 追加後のコア記憶の合計文字数と容量の目安 (目安超過は知らせるだけで切り詰めない) */
+  core_total_chars: number;
+  core_budget: number;
+  memopedia_requested: number;
+  core_requested: number;
+  message: string;
+}
+
 export interface MemoryImportRequest {
   cache_key: string;
   conversation_ids: string[];
@@ -70,6 +204,10 @@ export interface MemoryImportProgress {
   message?: string;
   progress?: number;
   total?: number;
+  // Conversations/messages stored by a completed import (official-import routes
+  // report both counts in their success status payload).
+  conversations?: number;
+  messages?: number;
   // Background embedding of the messages this import stored (chat-log imports only).
   embedding_running?: boolean | null;
   embedding_progress?: number | null;

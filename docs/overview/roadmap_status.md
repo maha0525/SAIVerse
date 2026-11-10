@@ -95,7 +95,7 @@
 
 - 🟡 **チュートリアル** — `frontend/src/components/tutorial/`（PersonaWizard / StepPersonaChoice 等）。最低限のみ実装。**拡充が課題**
 - 🔲 **ユーザー向けマニュアル** — 利用者目線の概念解説（開発者向けリファレンス §10 とは別物）が存在しない。導入のハードルになっている
-- ✅ **ログインポート** — 過去の対話履歴を持ち込む導線。ChatGPT 公式エクスポート ZIP（`conversations.json`、分割ファイル対応）+ Chrome 拡張機能エクスポートをパースして SAIMemory にインポート（`tools/utilities/chatgpt_importer.py` / `api/routes/people/import_chatlog.py` / `MemoryImportForm.tsx`）。source 検出失敗時はヘッダー日付でタイムスタンプ補完
+- ✅ **ログインポート** — 過去の対話履歴を持ち込む導線。ChatGPT 公式エクスポート ZIP（`conversations.json`、分割ファイル対応）+ Chrome 拡張機能エクスポートをパースして SAIMemory にインポート（`tools/utilities/chatgpt_importer.py` / `api/routes/people/import_chatlog.py` / `MemoryImportForm.tsx`）。source 検出失敗時はヘッダー日付でタイムスタンプ補完。Claude 公式エクスポート（manifest 経由のカテゴリ別 ZIP: conversations / claude_code_cloud / projects / memories→Memopedia 転記）にも対応（`tools/utilities/claude_importer.py` / `api/routes/people/import_claude.py` / `ClaudeImportPanel.tsx`、[intent](../intent/claude_import.md)）
 
 ---
 

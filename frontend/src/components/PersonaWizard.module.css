@@ -366,6 +366,57 @@
     margin-bottom: 1.5rem;
 }
 
+/* ステップ 2 の「ここまでに取り込んだもの」(docs/intent/import_flow_redesign.md「複数の取り込み」) */
+.importedList {
+    margin: 0 0 1.5rem;
+    padding: 1rem 1.25rem;
+    border: 1px solid #2b8a3e;
+    border-radius: 8px;
+    background-color: rgba(43, 138, 62, 0.08);
+    min-width: 0;
+}
+
+.importedHeading {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.importedList ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.importedItem {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: 0.9rem;
+    color: #d0d0d0;
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.importedIcon {
+    color: #51cf66;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.importedActions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.75rem;
+}
+
+.importStep p.importedHint {
+    margin: 0.75rem 0 0;
+    font-size: 0.8125rem;
+}
+
 /* Loading */
 .loading {
     display: flex;
@@ -554,4 +605,17 @@
 :global([data-theme="light"]) .result.error {
     background-color: rgba(250, 82, 82, 0.08);
     color: #dc2626;
+}
+
+:global([data-theme="light"]) .importedList {
+    border-color: #86efac;
+    background-color: #f0fdf4;
+}
+
+:global([data-theme="light"]) .importedItem {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .importedIcon {
+    color: #16a34a;
 }

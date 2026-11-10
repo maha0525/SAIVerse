@@ -6,6 +6,7 @@ import { AlertCircle, FileArchive, Loader2, PackageOpen, X } from 'lucide-react'
 
 import styles from './PersonaPack.module.css';
 import PersonaPackResult, { PersonaPackImportResult } from './PersonaPackResult';
+import PersonaPackReview, { PersonaPackChoice, PersonaPackCompare } from './PersonaPackReview';
 
 interface PersonaPackPanelProps {
     personaId: string;
@@ -36,6 +37,23 @@ async function errorDetail(res: Response): Promise<string> {
     return `${res.status} ${res.statusText}`;
 }
 
+/** 適用の失敗の案内。見比べ直しを求める応答 (detail.code) は一覧を閉じて案内の文を出す。 */
+async function applyFailure(res: Response): Promise<{ message: string; compareAgain: boolean }> {
+    const data = await res.json().catch(() => null);
+    const code = data?.detail?.code;
+    if (code === 'compare_stale') {
+        return { message: uiText('components.memory.PersonaPack.compareStale'), compareAgain: true };
+    }
+    if (code === 'compare_expired') {
+        return { message: uiText('components.memory.PersonaPack.compareExpired'), compareAgain: true };
+    }
+    if (code === 'compare_partial') {
+        return { message: uiText('components.memory.PersonaPack.comparePartial'), compareAgain: true };
+    }
+    const detail = data && typeof data.detail === 'string' ? data.detail : `${res.status} ${res.statusText}`;
+    return { message: uiText('components.memory.PersonaPack.importFailed', { p1: detail }), compareAgain: false };
+}
+
 /**
  * ペルソナまるごとパック (docs/intent/persona_pack.md) — MemoryImport の中に置く節。
  * ZIP をこのペルソナへ合流させる節と、このペルソナを ZIP にまとめる節を、この順で置く。
@@ -49,8 +67,10 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
 
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [overwriteProfile, setOverwriteProfile] = useState(false);
+    const [isComparing, setIsComparing] = useState(false);
     const [isImporting, setIsImporting] = useState(false);
     const [importError, setImportError] = useState<string | null>(null);
+    const [compare, setCompare] = useState<PersonaPackCompare | null>(null);
     const [result, setResult] = useState<PersonaPackImportResult | null>(null);
 
     const handleExport = async () => {
@@ -86,28 +106,75 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         e.target.value = '';
         if (!file) return;
         setSelectedFile(file);
-        setOverwriteProfile(false);
-        setImportError(null);
-        setResult(null);
+        void startCompare(file);
+    };
+
+    /** 見比べの ZIP と一覧を消す。消せなくても画面は閉じる (サーバーが 24 時間後に消す) */
+    const discardCompare = async (token: string) => {
+        const url = `/api/people/${encodeURIComponent(personaId)}/persona-pack/compare/${encodeURIComponent(token)}`;
+        try {
+            const res = await apiFetch(url, { method: 'DELETE' });
+            if (!res.ok) console.warn('Persona pack comparison could not be discarded', await errorDetail(res));
+        } catch (error) {
+            console.warn('Persona pack comparison could not be discarded', error);
+        }
     };
 
     const handleCancel = () => {
+        if (compare) void discardCompare(compare.token);
         setSelectedFile(null);
         setOverwriteProfile(false);
+        setCompare(null);
         setImportError(null);
         setResult(null);
     };
 
-    const handleMerge = async () => {
-        if (!selectedFile) return;
+    /** 見比べた ZIP を適用する */
+    const applyCompared = async (
+        token: string,
+        bulk: PersonaPackChoice | null,
+        choices: Record<string, PersonaPackChoice>,
+    ) => {
         setIsImporting(true);
         setImportError(null);
+        try {
+            const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/persona-pack/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, bulk, choices, overwrite_profile: overwriteProfile }),
+            });
+            if (!res.ok) {
+                const failure = await applyFailure(res);
+                setImportError(failure.message);
+                if (failure.compareAgain) setCompare(null);
+                return;
+            }
+            const data = (await res.json()) as PersonaPackImportResult;
+            setResult(data);
+            setCompare(null);
+            setSelectedFile(null);
+        } catch (error) {
+            console.error('Persona pack apply failed', error);
+            setImportError(uiText('components.memory.PersonaPack.importFailed', { p1: String(error) }));
+        } finally {
+            setIsImporting(false);
+        }
+    };
+
+    /**
+     * ZIP を選んだら先に見比べる (取り込み先には書かない)。Lite から帰るパックか本体のパックかで
+     * 確かめる内容が違い、それはサーバーが中身を読むまで分からない。
+     */
+    async function startCompare(file: File) {
+        setIsComparing(true);
+        setOverwriteProfile(false);
+        setImportError(null);
         setResult(null);
+        setCompare(null);
         try {
             const form = new FormData();
-            form.append('file', selectedFile);
-            form.append('overwrite_profile', overwriteProfile ? 'true' : 'false');
-            const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/persona-pack/import`, {
+            form.append('file', file);
+            const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/persona-pack/compare`, {
                 method: 'POST',
                 body: form,
             });
@@ -115,16 +182,16 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                 setImportError(uiText('components.memory.PersonaPack.importFailed', { p1: await errorDetail(res) }));
                 return;
             }
-            const data = (await res.json()) as PersonaPackImportResult;
-            setResult(data);
-            setSelectedFile(null);
+            setCompare((await res.json()) as PersonaPackCompare);
         } catch (error) {
-            console.error('Persona pack import failed', error);
+            console.error('Persona pack compare failed', error);
             setImportError(uiText('components.memory.PersonaPack.importFailed', { p1: String(error) }));
         } finally {
-            setIsImporting(false);
+            setIsComparing(false);
         }
-    };
+    }
+
+    const isBusy = isComparing || isImporting;
 
     return (
         <div className={styles.panel}>
@@ -141,31 +208,63 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                     onChange={handleFileChange}
                 />
                 <div className={styles.actions}>
-                    <button data-i18n="components.memory.PersonaPack.chooseFile" className={styles.secondaryButton} onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
+                    <button data-i18n="components.memory.PersonaPack.chooseFile" className={styles.secondaryButton} onClick={() => fileInputRef.current?.click()} disabled={isBusy || (compare !== null && compare.total > 0)}>
                         <PackageOpen size={16} />
                         {uiText('components.memory.PersonaPack.chooseFile')}
                     </button>
                 </div>
 
-                {selectedFile && (
+                {selectedFile && compare === null && (
                     <div className={styles.confirmBox}>
                         <div className={styles.fileName}>{selectedFile.name}</div>
-                        <label className={styles.checkboxRow}>
-                            <input
-                                type="checkbox"
-                                checked={overwriteProfile}
-                                onChange={(e) => setOverwriteProfile(e.target.checked)}
-                                disabled={isImporting}
-                            />
-                            <span data-i18n="components.memory.PersonaPack.overwriteProfile">{uiText('components.memory.PersonaPack.overwriteProfile')}</span>
-                        </label>
-                        <p data-i18n="components.memory.PersonaPack.mergeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeHint')}</p>
                         <div className={styles.actions}>
-                            <button data-i18n="components.memory.PersonaPack.mergeAction" className={styles.primaryButton} onClick={() => void handleMerge()} disabled={isImporting}>
-                                {isImporting ? <Loader2 size={16} className={styles.spin} /> : <PackageOpen size={16} />}
+                            {isComparing ? (
+                                <span data-i18n="components.memory.PersonaPack.comparing" className={styles.busy}>
+                                    <Loader2 size={16} className={styles.spin} />
+                                    {uiText('components.memory.PersonaPack.comparing')}
+                                </span>
+                            ) : (
+                                <button data-i18n="components.memory.PersonaPack.compareAgain" className={styles.primaryButton} onClick={() => void startCompare(selectedFile)}>
+                                    <PackageOpen size={16} />
+                                    {uiText('components.memory.PersonaPack.compareAgain')}
+                                </button>
+                            )}
+                            <button data-i18n="components.memory.PersonaPack.cancel" className={styles.secondaryButton} onClick={handleCancel} disabled={isBusy}>
+                                <X size={16} />
+                                {uiText('components.memory.PersonaPack.cancel')}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* 食い違いの無いパック。プロフィールの上書きを選べるのは本体のパックだけで、Lite から帰るパックは項目ごとに見比べる */}
+                {selectedFile && compare !== null && compare.total === 0 && (
+                    <div className={styles.confirmBox}>
+                        <div className={styles.fileName}>{selectedFile.name}</div>
+                        {compare.has_changes ? (
+                            compare.resume
+                                ? <p data-i18n="components.memory.PersonaPack.mergeResumeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeResumeHint')}</p>
+                                : <p data-i18n="components.memory.PersonaPack.mergeReturnHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeReturnHint')}</p>
+                        ) : (
+                            <>
+                                <label className={styles.checkboxRow}>
+                                    <input
+                                        type="checkbox"
+                                        checked={overwriteProfile}
+                                        onChange={(e) => setOverwriteProfile(e.target.checked)}
+                                        disabled={isBusy}
+                                    />
+                                    <span data-i18n="components.memory.PersonaPack.overwriteProfile">{uiText('components.memory.PersonaPack.overwriteProfile')}</span>
+                                </label>
+                                <p data-i18n="components.memory.PersonaPack.mergeHint" className={styles.hint}>{uiText('components.memory.PersonaPack.mergeHint')}</p>
+                            </>
+                        )}
+                        <div className={styles.actions}>
+                            <button data-i18n="components.memory.PersonaPack.mergeAction" className={styles.primaryButton} onClick={() => void applyCompared(compare.token, null, {})} disabled={isBusy}>
+                                {isBusy ? <Loader2 size={16} className={styles.spin} /> : <PackageOpen size={16} />}
                                 {uiText('components.memory.PersonaPack.mergeAction')}
                             </button>
-                            <button data-i18n="components.memory.PersonaPack.cancel" className={styles.secondaryButton} onClick={handleCancel} disabled={isImporting}>
+                            <button data-i18n="components.memory.PersonaPack.cancel" className={styles.secondaryButton} onClick={handleCancel} disabled={isBusy}>
                                 <X size={16} />
                                 {uiText('components.memory.PersonaPack.cancel')}
                             </button>
@@ -174,6 +273,16 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                             )}
                         </div>
                     </div>
+                )}
+
+                {selectedFile && compare !== null && compare.total > 0 && (
+                    <PersonaPackReview
+                        personaId={personaId}
+                        compare={compare}
+                        applying={isImporting}
+                        onApply={(bulk, choices) => void applyCompared(compare.token, bulk, choices)}
+                        onCancel={handleCancel}
+                    />
                 )}
 
                 {importError && (

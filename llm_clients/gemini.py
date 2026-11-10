@@ -50,6 +50,21 @@ def _prompt_block_user_message(block_reason: str) -> str:
     return f"Geminiの安全性フィルターにより、応答がブロックされました（{block_reason}）。"
 
 
+def _billed_output_tokens(usage: Any) -> int:
+    """出力として課金されるトークン数を返す。
+
+    Gemini の ``candidates_token_count`` は思考を含まず、思考は
+    ``thoughts_token_count`` に分かれて届くが、課金は両方とも出力の単価になる。
+    OpenAI と Anthropic の出力トークンは思考込みなので、記録の意味もこれで揃う。
+    """
+    total = 0
+    for field in ("candidates_token_count", "thoughts_token_count"):
+        value = getattr(usage, field, None)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
 def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
     """Detect a structured-output parse failure raised *inside* the google-genai SDK.
 
@@ -302,6 +317,12 @@ def _install_gemini_stream_patch() -> None:
 _install_gemini_stream_patch()
 
 from .gemini_utils import build_gemini_clients
+from saiverse.gemini_timing import (
+    bind_gemini_timing,
+    gemini_timing_scope,
+    mark_gemini_stage,
+    timed_gemini_iterator,
+)
 
 from saiverse.media_utils import (
     iter_image_media,
@@ -1009,7 +1030,7 @@ class GeminiClient(LLMClient):
                     "[gemini][continuous_cache] background create crashed", exc_info=True,
                 )
 
-        controller.spawn_background(_run)
+        controller.spawn_background(bind_gemini_timing(_run))
 
     @staticmethod
     def _record_continuous_cache_storage(
@@ -2095,18 +2116,19 @@ class GeminiClient(LLMClient):
         """
         held: List[str] = []
         try:
-            return self._generate_impl(
-                messages,
-                tools,
-                history_snippets,
-                response_schema,
-                temperature=temperature,
-                enable_cache=enable_cache,
-                cache_ttl=cache_ttl,
-                max_output_tokens=max_output_tokens,
-                continuous_cache=continuous_cache,
-                _cc_held=held,
-            )
+            with gemini_timing_scope("generate"):
+                return self._generate_impl(
+                    messages,
+                    tools,
+                    history_snippets,
+                    response_schema,
+                    temperature=temperature,
+                    enable_cache=enable_cache,
+                    cache_ttl=cache_ttl,
+                    max_output_tokens=max_output_tokens,
+                    continuous_cache=continuous_cache,
+                    _cc_held=held,
+                )
         finally:
             # 応答 (再試行を含む) が終わるまで参照を持ち、置き換え済みのキャッシュを
             # 使用中に消さない。
@@ -2156,6 +2178,7 @@ class GeminiClient(LLMClient):
         active_client = self.client
         sys_msg, contents, _boundary_idx = self._convert_messages_with_boundary(messages)
         self._validate_contents(contents)
+        mark_gemini_stage("contents_ready")
 
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
@@ -2278,6 +2301,7 @@ class GeminiClient(LLMClient):
                     )
                     all_parts: List[Any] = []
                     saw_any_chunk = False
+                    saw_text_chunk = False
                     last_chunk = None
                     last_finish_reason = None
                     last_safety_ratings = None
@@ -2285,6 +2309,8 @@ class GeminiClient(LLMClient):
 
                     for chunk in stream:
                         last_chunk = chunk
+                        if not saw_any_chunk:
+                            mark_gemini_stage("first_chunk")
                         saw_any_chunk = True
                         get_llm_logger().debug("Gemini stream chunk: %s", _stream_chunk_summary(chunk))
 
@@ -2304,6 +2330,13 @@ class GeminiClient(LLMClient):
                             if sr is not None:
                                 last_safety_ratings = sr
                             if candidate.content and candidate.content.parts:
+                                if not saw_text_chunk and any(
+                                    getattr(part, "text", None)
+                                    and not is_truthy_flag(getattr(part, "thought", None))
+                                    for part in candidate.content.parts
+                                ):
+                                    saw_text_chunk = True
+                                    mark_gemini_stage("first_text")
                                 all_parts.extend(candidate.content.parts)
 
                     if not saw_any_chunk:
@@ -2371,15 +2404,16 @@ class GeminiClient(LLMClient):
                             # Debug: log available fields in usage_metadata
                             logging.info("[DEBUG] Gemini usage_metadata attrs: %s",
                                         [a for a in dir(usage) if not a.startswith('_')])
-                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, cached=%s, total=%s",
+                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, thoughts=%s, cached=%s, total=%s",
                                         getattr(usage, "prompt_token_count", None),
                                         getattr(usage, "candidates_token_count", None),
+                                        getattr(usage, "thoughts_token_count", None),
                                         getattr(usage, "cached_content_token_count", None),
                                         getattr(usage, "total_token_count", None))
                             cached = getattr(usage, "cached_content_token_count", 0) or 0
                             self._store_usage(
                                 input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                                output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                                output_tokens=_billed_output_tokens(usage),
                                 cached_tokens=cached,
                             )
 
@@ -2451,14 +2485,15 @@ class GeminiClient(LLMClient):
                 if usage:
                     logging.info("[DEBUG] Gemini non-stream usage attrs: %s",
                                 [a for a in dir(usage) if not a.startswith('_')])
-                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, cached=%s",
+                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, thoughts=%s, cached=%s",
                                 getattr(usage, "prompt_token_count", None),
                                 getattr(usage, "candidates_token_count", None),
+                                getattr(usage, "thoughts_token_count", None),
                                 getattr(usage, "cached_content_token_count", None))
                     cached = getattr(usage, "cached_content_token_count", 0) or 0
                     self._store_usage(
                         input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                        output_tokens=_billed_output_tokens(usage),
                         cached_tokens=cached,
                     )
 
@@ -2763,17 +2798,20 @@ class GeminiClient(LLMClient):
         """
         held: List[str] = []
         try:
-            yield from self._generate_stream_impl(
-                messages,
-                tools,
-                history_snippets,
-                response_schema,
-                temperature=temperature,
-                enable_cache=enable_cache,
-                cache_ttl=cache_ttl,
-                max_output_tokens=max_output_tokens,
-                continuous_cache=continuous_cache,
-                _cc_held=held,
+            yield from timed_gemini_iterator(
+                self._generate_stream_impl(
+                    messages,
+                    tools,
+                    history_snippets,
+                    response_schema,
+                    temperature=temperature,
+                    enable_cache=enable_cache,
+                    cache_ttl=cache_ttl,
+                    max_output_tokens=max_output_tokens,
+                    continuous_cache=continuous_cache,
+                    _cc_held=held,
+                ),
+                "generate_stream",
             )
         finally:
             self._continuous_release_held(held)
@@ -2904,6 +2942,8 @@ class GeminiClient(LLMClient):
         try:
             for chunk in stream:
                 chunk_count += 1
+                if chunk_count == 1:
+                    mark_gemini_stage("first_chunk")
                 last_chunk = chunk
                 get_llm_logger().debug(
                     "Gemini stream chunk #%d: %s", chunk_count, _stream_chunk_summary(chunk),
@@ -3019,6 +3059,7 @@ class GeminiClient(LLMClient):
                 now = time.monotonic()
                 if first_text_chunk_time is None:
                     first_text_chunk_time = now
+                    mark_gemini_stage("first_text")
                     logging.debug("[gemini_stream] First text chunk at +%.2fs", now - stream_start)
                 last_text_chunk_time = now
 
@@ -3083,14 +3124,15 @@ class GeminiClient(LLMClient):
             if usage:
                 logging.info("[DEBUG] generate_stream usage attrs: %s",
                             [a for a in dir(usage) if not a.startswith('_')])
-                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, cached=%s",
+                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, thoughts=%s, cached=%s",
                             getattr(usage, "prompt_token_count", None),
                             getattr(usage, "candidates_token_count", None),
+                            getattr(usage, "thoughts_token_count", None),
                             getattr(usage, "cached_content_token_count", None))
                 cached = getattr(usage, "cached_content_token_count", 0) or 0
                 self._store_usage(
                     input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
-                    output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    output_tokens=_billed_output_tokens(usage),
                     cached_tokens=cached,
                 )
 
@@ -3176,6 +3218,7 @@ class GeminiClient(LLMClient):
         held: List[str] = cc_held if cc_held is not None else []
         sys_msg, contents, _boundary_idx = self._convert_messages_with_boundary(messages)
         self._validate_contents(contents)
+        mark_gemini_stage("contents_ready")
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
             "safety_settings": self._build_safety_settings(),

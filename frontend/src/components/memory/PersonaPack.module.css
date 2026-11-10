@@ -221,7 +221,197 @@
     overflow-wrap: anywhere;
 }
 
+/* 見比べの一覧 (PersonaPackReview) */
+
+.review {
+    margin-top: 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 1rem;
+    background-color: white;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.review .sectionTitle,
+.review .sectionText {
+    margin-bottom: 0;
+}
+
+.reviewNotice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    color: #b45309;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.reviewBulkActive {
+    border-color: #2563eb;
+    color: #1d4ed8;
+}
+
+.reviewList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.reviewItem {
+    border-top: 1px solid #e2e8f0;
+    padding-top: 0.75rem;
+    min-width: 0;
+}
+
+.reviewKind {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 0.4rem;
+}
+
+.reviewColumns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.5rem;
+}
+
+.reviewSide {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.reviewSideSelected {
+    border-color: #2563eb;
+    background-color: #eff6ff;
+}
+
+.reviewSideHeader {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.reviewTime {
+    color: #475569;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.reviewHeading {
+    font-weight: 600;
+    font-size: 0.9rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.reviewSummary {
+    color: #475569;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.reviewText {
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.reviewTextFolded {
+    max-height: 9rem;
+    overflow: hidden;
+}
+
+.reviewMissing {
+    color: #475569;
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.reviewLink {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    color: #2563eb;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.reviewLink:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.reviewOption {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: auto;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.reviewPager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
 /* ダークモード */
+
+:global([data-theme="dark"]) .review {
+    border-color: #334155;
+    background-color: #0f172a;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .reviewItem,
+:global([data-theme="dark"]) .reviewSide {
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .reviewSideSelected {
+    border-color: #60a5fa;
+    background-color: rgba(96, 165, 250, 0.12);
+}
+
+:global([data-theme="dark"]) .reviewBulkActive {
+    border-color: #60a5fa;
+    color: #93c5fd;
+}
+
+:global([data-theme="dark"]) .reviewNotice {
+    color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .reviewKind,
+:global([data-theme="dark"]) .reviewTime,
+:global([data-theme="dark"]) .reviewSummary,
+:global([data-theme="dark"]) .reviewMissing {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .reviewLink {
+    color: #60a5fa;
+}
 
 :global([data-theme="dark"]) .sectionText,
 :global([data-theme="dark"]) .hint,

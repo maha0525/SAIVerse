@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool
 from typing import List, Optional, Any
 import shutil
@@ -521,10 +522,35 @@ def get_available_prompts():
     return sorted(prompts)
 
 # AI
+@router.get("/ais/reserved-ids")
+def get_reserved_ai_ids(manager: SAIVerseManager = Depends(get_manager)):
+    """新しいペルソナに使えない ID のうち、ai 表に行の無いもの。
+
+    ``persona_folder_ids`` は ``<saiverse_home>/personas/`` 直下のフォルダ名
+    (完全な ID)。ペルソナを削除しても記憶フォルダは消さないので、ここに名前のある
+    ID は作成の口が断る (manager/persona.py の find_persona_folder)。ペルソナ作成の
+    画面が連番の候補を選ぶときに、ai 表・building 表と合わせて避ける。
+    """
+    from manager.persona import persona_folder_names
+
+    return {"persona_folder_ids": persona_folder_names(Path(manager.saiverse_home))}
+
 @router.post("/ais")
 def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
-    success, msg, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id, language=ai.language)
+    """ペルソナを作る。
+
+    失敗は 400 で ``detail`` (英語の message) を返す。画面が文言表の文で出せる断り
+    (manager/persona.py の CreationErrorDetail — いまは記憶フォルダの断りだけ) は、
+    ``error_code`` と ``error_params`` も載せる (docs/intent/localization.md: API は
+    識別子とパラメータを返し、表示の文面は画面側が持つ)。
+    """
+    success, msg, error, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id, language=ai.language)
     if not success:
+        if error is not None:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": msg, "error_code": error.code, "error_params": dict(error.params)},
+            )
         raise HTTPException(status_code=400, detail=msg)
     return {"message": msg, "ai_id": ai_id, "room_id": room_id}
 

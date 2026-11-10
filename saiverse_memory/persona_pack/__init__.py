@@ -9,6 +9,7 @@ from .importer import (
     PROFILE_PROTECTED_COLUMNS,
     ImportCounts,
     PersonaPackImportResult,
+    compare_persona_pack,
     import_persona_pack,
     validate_pack,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "ImportCounts",
     "PersonaPackExportResult",
     "PersonaPackImportResult",
+    "compare_persona_pack",
     "decode_value",
     "export_persona_pack",
     "import_persona_pack",

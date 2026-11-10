@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 import os
 import json
@@ -26,6 +27,7 @@ from llm_clients import (
     OPENAI_TOOLS_SPEC,
 )
 from llm_clients.exceptions import InvalidRequestError
+from llm_clients.gemini import _billed_output_tokens
 
 if not saiverse_tools.OPENAI_TOOLS_SPEC:
     saiverse_tools._autodiscover_tools()
@@ -1194,6 +1196,71 @@ class TestLLMClients(unittest.TestCase):
         outputs = list(response_generator)
         mock_start_stream.assert_called_once()
         self.assertEqual(outputs, ["Stream test", "!"])
+
+    @staticmethod
+    def _thinking_usage():
+        return SimpleNamespace(
+            prompt_token_count=100,
+            candidates_token_count=40,
+            thoughts_token_count=300,
+            cached_content_token_count=0,
+        )
+
+    @staticmethod
+    def _gemini_chunk(text, usage):
+        chunk = MagicMock()
+        chunk.prompt_feedback = None
+        candidate = MagicMock()
+        candidate.content.parts = [MagicMock(text=text, function_call=None, thought=False)]
+        candidate.index = 0
+        candidate.finish_reason = "STOP"
+        chunk.candidates = [candidate]
+        chunk.usage_metadata = usage
+        return chunk
+
+    def test_gemini_billed_output_is_the_body_alone_without_thoughts(self):
+        usage = SimpleNamespace(candidates_token_count=40, thoughts_token_count=None)
+        self.assertEqual(_billed_output_tokens(usage), 40)
+
+    @patch('llm_clients.gemini.genai')
+    def test_gemini_buffered_stream_usage_counts_thoughts_as_output(self, mock_genai):
+        mock_client_instance = MagicMock()
+        mock_genai.Client.return_value = mock_client_instance
+        mock_client_instance.models.generate_content_stream.return_value = [
+            self._gemini_chunk("OK", self._thinking_usage()),
+        ]
+
+        client = GeminiClient("gemini-1.5-flash")
+        client.generate([{"role": "user", "content": "Hi"}], tools=[])
+
+        self.assertEqual(client.consume_usage().output_tokens, 340)
+
+    @patch('llm_clients.gemini.GeminiClient._start_stream')
+    @patch('llm_clients.gemini.genai')
+    def test_gemini_generate_stream_usage_counts_thoughts_as_output(self, mock_genai, mock_start_stream):
+        mock_genai.Client.return_value = MagicMock()
+        mock_start_stream.return_value = [self._gemini_chunk("OK", self._thinking_usage())]
+
+        client = GeminiClient("gemini-1.5-flash")
+        list(client.generate_stream([{"role": "user", "content": "Hi"}], tools=[]))
+
+        self.assertEqual(client.consume_usage().output_tokens, 340)
+
+    @patch('llm_clients.gemini.types.GenerateContentConfig')
+    @patch.object(GeminiClient, "_schema_from_json", return_value=MagicMock())
+    @patch('llm_clients.gemini.genai')
+    def test_gemini_non_stream_usage_counts_thoughts_as_output(self, mock_genai, _schema, _config):
+        mock_client_instance = MagicMock()
+        mock_genai.Client.return_value = mock_client_instance
+        mock_client_instance.models.generate_content.return_value = self._gemini_chunk(
+            '{"key":"value"}', self._thinking_usage(),
+        )
+
+        client = GeminiClient("gemini-1.5-flash")
+        schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
+        client.generate([{"role": "user", "content": "Hi"}], tools=[], response_schema=schema)
+
+        self.assertEqual(client.consume_usage().output_tokens, 340)
 
     @patch('llm_clients.gemini.GeminiClient._start_stream')
     @patch('llm_clients.gemini.genai')

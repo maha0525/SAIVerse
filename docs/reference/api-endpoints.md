@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 381（tag グループ: 26）
+**エンドポイント数**: 396（tag グループ: 26）
 
 ## addon
 
@@ -94,9 +94,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/chat/persona/{persona_id}/avatar` |  |
 | POST | `/api/chat/preview` | Preview the context that would be sent to the LLM, without executing. |
 | POST | `/api/chat/retry` | 既にあるユーザー発言に対して、応答だけをやり直す。 |
+| GET | `/api/chat/running` | 表示している建物に、止められる処理が走っているペルソナがいるか。 |
 | POST | `/api/chat/send` |  |
 | POST | `/api/chat/spell-confirmation-response` | Respond to a generic spell confirmation request. |
-| POST | `/api/chat/stop` | Stop the active LLM generation for the user's current building. |
+| POST | `/api/chat/stop` | 停止ボタン: 表示している建物にいるペルソナの処理をすべて止める。 |
 | POST | `/api/chat/utter` | 発言契機入室。 必要なら自動 move を伴って chat を実行する。 |
 | POST | `/api/chat/withdraw` | まだ誰も読んでいない自分の発言を取り下げ、本文を入力欄へ返す。 |
 
@@ -295,8 +296,17 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/debug/memopedia-conversion/runs` | 取り消せる変換の一覧 (新しい順)。 |
 | GET | `/api/people/{persona_id}/experience-ledger` | 台帳の索引 — カテゴリごとにグループ化した棚の一覧 (統計付き)。 |
 | GET | `/api/people/{persona_id}/experience-ledger/{page_id}` | ページを開く = 動的合成 (fragment / 関与あらすじの履歴 / 共起ページ)。 |
+| POST | `/api/people/{persona_id}/import/claude` | プレビュー済み Claude エクスポートから選択した会話を背景で取り込む。 |
+| POST | `/api/people/{persona_id}/import/claude/memories` | memories カテゴリの選択アイテムを転記する (同期)。 |
+| POST | `/api/people/{persona_id}/import/claude/preview` | Claude 公式エクスポートの ZIP/JSON を解析し、取り込み候補の一覧を返す。 |
+| GET | `/api/people/{persona_id}/import/claude/status` | Claude 取り込みタスクの状態 (背景埋め込みの進捗を含む)。 |
 | POST | `/api/people/{persona_id}/import/extension` | Import Chrome extension export (JSON or Markdown) in background. |
 | GET | `/api/people/{persona_id}/import/extension/status` | Get the status of extension import task. |
+| POST | `/api/people/{persona_id}/import/muse` | プレビュー済み Muse エクスポートから選択した会話を背景で取り込む。 |
+| POST | `/api/people/{persona_id}/import/muse/files` | プレビュー済みの個別ファイルをペルソナへ同期で取り込む。 |
+| POST | `/api/people/{persona_id}/import/muse/files/preview` | SOUL / IDENTITY / MEMORY / AGENTS の個別アップロードを判定する。 |
+| POST | `/api/people/{persona_id}/import/muse/preview` | Muse 公式エクスポートの ZIP を解析し、取り込み候補の一覧を返す。 |
+| GET | `/api/people/{persona_id}/import/muse/status` | Muse 取り込みタスクの状態 (背景埋め込みの進捗を含む)。 |
 | POST | `/api/people/{persona_id}/import/native` | Import native SAIVerse JSON. |
 | POST | `/api/people/{persona_id}/import/native/preview` | Preview a native JSON file before importing. |
 | GET | `/api/people/{persona_id}/import/native/status` | Poll native import progress. |
@@ -333,6 +343,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
 | GET | `/api/people/{persona_id}/persona-pack` | ペルソナ一体をペルソナまるごとパック (ZIP) にしてダウンロードさせる。読み取り専用。 |
+| POST | `/api/people/{persona_id}/persona-pack/apply` | 見比べた ZIP を選択どおりに合流させる (intent §5)。結果の内訳を返す。 |
+| POST | `/api/people/{persona_id}/persona-pack/compare` | パックと取り込み先を見比べる (取り込み先には書かない)。トークンと件数を返す。 |
+| DELETE | `/api/people/{persona_id}/persona-pack/compare/{token}` | 見比べの ZIP と一覧を消す (画面のキャンセル)。既に無ければ何もしない。 |
+| GET | `/api/people/{persona_id}/persona-pack/compare/{token}/items` | 見比べの一覧の offset 件目から limit 件を返す。full でなければ長い本文は切って返す。 |
 | POST | `/api/people/{persona_id}/persona-pack/import` | パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
@@ -467,7 +481,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 
 | メソッド | パス | 説明 |
 |---|---|---|
-| POST | `/api/world/ais` |  |
+| POST | `/api/world/ais` | ペルソナを作る。 |
+| GET | `/api/world/ais/reserved-ids` | 新しいペルソナに使えない ID のうち、ai 表に行の無いもの。 |
 | PUT | `/api/world/ais/{ai_id}` | ペルソナの設定を保存する。 |
 | DELETE | `/api/world/ais/{ai_id}` |  |
 | POST | `/api/world/ais/{ai_id}/move` |  |

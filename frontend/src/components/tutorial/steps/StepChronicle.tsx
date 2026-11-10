@@ -1,47 +1,24 @@
 "use client";
-import { apiFetch } from '@/i18n/api';
-
-import { getFormatLocale } from '@/i18n/core';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
-
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { BookOpen, AlertTriangle } from 'lucide-react';
-import { formatCost } from '@/lib/formatCost';
-import styles from './Steps.module.css';
-
-interface ChronicleCostEstimate {
-    total_messages: number;
-    processed_messages: number;
-    unprocessed_messages: number;
-    estimated_llm_calls: number;
-    estimated_cost_usd: number;
-    model_name: string;
-    is_free_tier: boolean;
-    batch_size: number;
-    currency?: string;
-}
 
 interface StepChronicleProps {
     enabled: boolean;
     onChange: (enabled: boolean) => void;
-    personaId: string | null;
 }
 
-export default function StepChronicle({ enabled, onChange, personaId }: StepChronicleProps) {
+/**
+ * Tutorial step for the Chronicle auto-generation setting only. The count of
+ * unsummarized messages and the cost estimate are shown by the import flow's
+ * Chronicle step (ImportFlowModal, reached through the embedded PersonaWizard),
+ * so they are not repeated here (docs/intent/import_flow_redesign.md).
+ */
+export default function StepChronicle({ enabled, onChange }: StepChronicleProps) {
     useLocale();
-    const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
-
-    useEffect(() => {
-        if (personaId) {
-            apiFetch(`/api/people/${personaId}/arasuji/cost-estimate`)
-                .then(res => res.ok ? res.json() : null)
-                .then(data => { if (data) setCostEstimate(data); })
-                .catch(() => {});
-        }
-    }, [personaId]);
 
     return (
         <div>
@@ -63,26 +40,6 @@ export default function StepChronicle({ enabled, onChange, personaId }: StepChro
                 <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
                 <div data-i18n="components.tutorial.steps.StepChronicle.text003 components.tutorial.steps.StepChronicle.text005">{uiText("components.tutorial.steps.StepChronicle.text003")}<strong data-i18n="components.tutorial.steps.StepChronicle.text004">{uiText("components.tutorial.steps.StepChronicle.text004")}</strong>{uiText("components.tutorial.steps.StepChronicle.text005")}</div>
             </div>
-
-            {costEstimate && costEstimate.unprocessed_messages > 0 && (
-                <div style={{
-                    padding: '0.75rem',
-                    marginBottom: '1rem',
-                    background: 'rgba(100, 100, 100, 0.1)',
-                    borderRadius: '6px',
-                    fontSize: '0.85rem',
-                    lineHeight: '1.6',
-                }}>
-                    <div data-i18n="components.tutorial.steps.StepChronicle.text006 components.tutorial.steps.StepChronicle.text007">{uiText("components.tutorial.steps.StepChronicle.text006")}<strong>{costEstimate.unprocessed_messages.toLocaleString(getFormatLocale())}</strong>{uiText("components.tutorial.steps.StepChronicle.text007")}</div>
-                    <div data-i18n="components.tutorial.steps.StepChronicle.text008">{uiText("components.tutorial.steps.StepChronicle.text008")}<strong>
-                            {costEstimate.is_free_tier ? `${formatCost(0, costEstimate.currency)} (Free tier)` : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)}
-                        </strong>
-                        {' '}({costEstimate.model_name})
-                    </div>
-                    <div data-i18n="components.tutorial.steps.StepChronicle.text009 components.tutorial.steps.StepChronicle.text010">{uiText("components.tutorial.steps.StepChronicle.text009")}{costEstimate.estimated_llm_calls}{uiText("components.tutorial.steps.StepChronicle.text010")}</div>
-                    <div data-i18n="components.tutorial.steps.StepChronicle.text011" style={{ marginTop: '0.25rem' }}>{uiText("components.tutorial.steps.StepChronicle.text011")}</div>
-                </div>
-            )}
 
             <div style={{
                 padding: '1rem',

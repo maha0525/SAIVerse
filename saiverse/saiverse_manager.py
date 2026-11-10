@@ -37,7 +37,7 @@ from manager.background import DatabasePollingMixin
 from manager.history import HistoryMixin
 from manager.blueprints import BlueprintMixin
 from manager.ids import build_identifier, is_valid_identifier
-from manager.persona import PersonaMixin, ai_stem_taken
+from manager.persona import CreationErrorDetail, PersonaMixin, ai_stem_taken
 from manager.visitors import VisitorMixin
 from manager.gateway import GatewayMixin
 from manager.user_state import UserStateMixin
@@ -953,21 +953,9 @@ class SAIVerseManager(
         """Create a new picture item and place it in the specified building. Returns (item_id, slot_num)."""
         return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id, source_context=source_context)
 
-    def create_picture_item_for_user(self, name: str, description: str, file_path: str, building_id: str, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a picture item from user upload and place it in the specified building."""
-        return self.item_service.create_picture_item_for_user(name, description, file_path, building_id, creator_id=creator_id, source_context=source_context)
-
-    def create_document_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a document item from user upload and place it in the specified building."""
-        return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open, creator_id=creator_id, source_context=source_context)
-
-    def create_audio_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create an audio item from user upload and place it in the specified building."""
-        return self.item_service.create_audio_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
-
-    def create_video_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a video item from user upload and place it in the specified building."""
-        return self.item_service.create_video_item_for_user(name, description, file_path, building_id, is_open=is_open, creator_id=creator_id, source_context=source_context)
+    def create_item_for_user(self, item_type: str, name: str, description: str, file_path: str, building_id: str, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
+        """Create a closed picture/document/audio/video item from a user's chat attachment and place it in the specified building."""
+        return self.item_service.create_item_for_user(item_type, name, description, file_path, building_id, creator_id=creator_id, source_context=source_context)
 
     def move_item_for_persona(self, persona_id: str, item_ids: list, destination_kind: str, destination_id: str) -> str:
         """Move items to a destination (building, persona, or bag)."""
@@ -1298,27 +1286,25 @@ class SAIVerseManager(
         """まだ誰も読んでいない自分の発言を取り下げ、本文を手元へ返す。"""
         return self.runtime.withdraw_user_message(message_id)
 
-    def cancel_active_generation(self) -> bool:
-        """Cancel the active LLM generation for personas in the user's current building.
+    def cancel_active_generation(self, building_id: Optional[str] = None) -> bool:
+        """停止ボタン: 表示している建物にいるペルソナの処理をすべて止める。
 
-        Sends cancellation signal via CancellationToken (stops SEA playbook execution
-        and closes LLM streaming connections) and sets the stop_event (breaks the
-        per-persona loop in backend_worker).
+        ``building_id`` は画面が表示している建物。渡されないときは (古い画面
+        からの呼び出し) ユーザーの今いる建物を使う。その建物にいるペルソナの
+        走っている request (新しい発言に割り込まれて裏で走り続けている古い
+        request を含む。PulseController の記録) に "user_stop" を刻み、その
+        建物の stop_event を立てる (backend_worker のペルソナループを断つ)。
+        固まったツールを待っている処理も、この合図で待つのをやめて抜ける
+        (docs/intent/stop_button.md、sea/tool_wait.py)。メタ判断は対象外。
         """
-        building_id = self.state.user_current_building_id
         if not building_id:
-            logging.warning("[cancel] No user_current_building_id; cannot cancel.")
+            building_id = self.state.user_current_building_id
+        if not building_id:
+            logging.warning("[cancel] No building_id and no user_current_building_id; cannot cancel.")
             return False
 
-        persona_ids = self.occupants.get(building_id, [])
-        cancelled = False
-
-        for pid in persona_ids:
-            req = self.pulse_controller._current.get(pid)
-            if req:
-                logging.info("[cancel] Cancelling active request for persona %s (pulse_id=%s)", pid, req.pulse_id)
-                req.cancellation_token.cancel(interrupted_by="user_stop")
-                cancelled = True
+        persona_ids = list(self.occupants.get(building_id, []))
+        cancelled = self.pulse_controller.cancel_running(persona_ids, "user_stop") > 0
 
         # Also set the stop_event so backend_worker breaks its persona loop
         stop_event = self._active_stop_events.get(building_id)
@@ -1332,10 +1318,20 @@ class SAIVerseManager(
 
         return cancelled
 
+    def running_persona_ids_in_building(self, building_id: str) -> List[str]:
+        """この建物にいるペルソナのうち、止められる処理が走っているものを返す。
+
+        停止ボタンを出すかどうかの判断材料 (docs/intent/stop_button.md)。
+        PulseController の記録 (メインレーン、割り込まれた古い request を含む)
+        だけを参照し、メタ判断は数えない。
+        """
+        persona_ids = list(self.occupants.get(building_id, []))
+        return self.pulse_controller.running_persona_ids(persona_ids)
+
     def stop_all_active_generations(self, timeout: float = 8.0) -> bool:
         """サーバー終了 (Ctrl+C / SIGTERM) 用: 走行中の全生成を締めてから返る。
 
-        停止ボタン (``cancel_active_generation``) がユーザーの現在建物の
+        停止ボタン (``cancel_active_generation``) が表示している建物の
         ペルソナだけを対象にするのに対し、こちらは全ペルソナ・全建物が対象。
         全建物の stop_event を立てて backend_worker の建物内ペルソナループを
         断ち (終了処理中に次のペルソナの生成が始まらないようにする)、
@@ -1961,12 +1957,14 @@ class SAIVerseManager(
                     ruler_stem,
                     stem="ruler",
                     ensure_unique=True,
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
+                    exists=lambda s: ai_stem_taken(
+                        db, s, self.city_name, building_ids, self.saiverse_home,
+                    ),
                 )
             finally:
                 db.close()
 
-        success, message, ai_id, room_id = self._create_persona(
+        success, message, _error, ai_id, room_id = self._create_persona(
             name,
             system_prompt,
             custom_ai_id=ruler_stem,
@@ -2018,8 +2016,12 @@ class SAIVerseManager(
 
     def create_ai(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
-    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
-        """Creates a new AI and their private room."""
+    ) -> Tuple[bool, str, Optional[CreationErrorDetail], Optional[str], Optional[str]]:
+        """Creates a new AI and their private room.
+
+        ``(success, message, error, ai_id, room_id)`` を返す (manager/persona.py の
+        ``_create_persona`` と同じ形)。
+        """
         result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id, language=language)
         success = result[0]
         if success:

@@ -6,6 +6,8 @@ import os
 import sys
 from typing import Any
 
+from saiverse.gemini_timing import trace_gemini_request
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -40,6 +42,7 @@ def build_gemini_clients(
     timeout_ms = None if effective_timeout == 0 else int(effective_timeout * 1000)
 
     def _http_options() -> Any:
+        client_args = {"event_hooks": {"request": [trace_gemini_request]}}
         retry_options = genai.types.HttpRetryOptions(
             attempts=5,
             initial_delay=1.0,
@@ -47,10 +50,11 @@ def build_gemini_clients(
             http_status_codes=[408, 429, 500, 502, 503, 504],
         )
         if timeout_ms is None:
-            return genai.types.HttpOptions(retry_options=retry_options)
+            return genai.types.HttpOptions(retry_options=retry_options, client_args=client_args)
         return genai.types.HttpOptions(
             timeout=timeout_ms,
             retry_options=retry_options,
+            client_args=client_args,
         )
 
     free_key = os.getenv("GEMINI_FREE_API_KEY")
