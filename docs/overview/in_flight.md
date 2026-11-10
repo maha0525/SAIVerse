@@ -48,14 +48,13 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | ユーザーの添付は発言が中身を運び、添付から作るアイテムは閉じて置く (動画が最初から open で二重に届く件) | develop に入り、v0.3.30 に載る。次 = まはーが実機で文書・動画を添付して、アイテムが閉じて置かれ、ペルソナが文書の中身を読めることを見る。 | まはー (実機確認) | [intent](../intent/user_attachment_delivery.md) | 2026-11-10 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | develop に入り、v0.3.30 に載る。次 = 更新・再起動後の通常利用で、メティスが backend.log から送信完了と応答待ちを分けて確認する。 | 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-11-10 |
 | 🟣 検証待ち | Claude 公式エクスポートの取り込み (引っ越しタブの Claude サブタブ) | 本体と実機確認で出た追加対応 4 点は develop に入り、v0.3.30 に載る。次 = まはーが実機で、全体記憶がコア記憶に見出しごとに入ること、記憶ファイルのページ名・概要、スレッドの並び順を見る。 | まはー (実機確認) | [intent](../intent/claude_import.md) | 2026-11-10 |
 | 🟣 検証待ち | 返事を待つ間の表示 (送った直後の名前・開発用の段階名の撤去・添付画像の即時表示) | v0.3.28 で発行済み。次 = まはーが実機で、送信から返事までの文言の移り変わりと、添付画像が送った瞬間に出ることを見る。 | まはー (実機確認) | [intent](../intent/chat_progress_display.md) | 2026-11-10 |
 | 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通り、Contributor 版は v0.3.27 で発行済み。次 = まはーが、会話の途中の system メッセージを user に変換する設定をやめるかを決める。 | まはー (変換の判断) | [intent](../intent/meta_muse_provider.md) | 2026-11-10 |
-| 🟣 検証待ち | 停止ボタン — ツールが固まっても停止で抜け、走っている間は必ず出す (an nin さん報告) | develop に入り、v0.3.30 に載る。次 = リリース後に an nin さんの環境で停止が効くかを聞く。 | リリース → 報告者 | [intent](../intent/stop_button.md) | 2026-11-10 |
+| 🟣 検証待ち | 停止ボタン — ツールが固まっても停止で抜け、走っている間は必ず出す (an nin さん報告) | v0.3.30 で発行済み。次 = an nin さんに更新を案内し、X 連携のツールが止まったときに停止ボタンで抜けられるかを聞く。 | まはー (報告者への連絡) → 報告者 | [intent](../intent/stop_button.md) | 2026-11-10 |
 | 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
 | 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正は v0.3.27 で発行済み。次 = Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-11-10 |
 | 🟣 検証待ち | 画像の枚数上限の既定を廃止し、バイトの非常弁で要求サイズ上限を避ける | v0.3.27 で発行済み。次 = 画像の多い Gemini の会話で、全部の画像が画像のまま送られ、新しい画像の回もキャッシュが当たることをログで見る。 | まはー (実機確認) | [issue](../issues/image_attachment_limit_breaks_cache_prefix.md) | 2026-11-10 |
