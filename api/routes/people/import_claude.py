@@ -412,8 +412,21 @@ def import_claude_export(
     if not selected_records:
         raise HTTPException(status_code=400, detail="No valid conversations found for the given selection.")
 
+    # 背景タスクが状態を立てる前に同ペルソナの要求が重なると、冒頭のチェックを
+    # 両方とも通過して、同じ会話の二重取り込みとプロジェクト指示の二重追記が起きる。
+    # 検証が済んだこの時点で、ロック内で実行中チェックと状態の予約を一体で行い、
+    # 指示の追記とタスク登録はその後に置く (Muse 取り込みと同じ形)。
+    with _claude_import_lock:
+        status = _claude_import_status.get(persona_id, {})
+        if status.get("running"):
+            raise HTTPException(status_code=409, detail="Import already in progress.")
+        _claude_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": len(selected_records),
+            "message": "Starting import...",
+        }
+
     # プロジェクト指示のシステムプロンプト追記は同期で先に行う (失敗したら
-    # 取り込み自体を始めない — 中途半端な適用を避ける)。
+    # 取り込み自体を始めない — 中途半端な適用を避ける)。失敗したら予約も外す。
     if request.append_instructions_to_system_prompt:
         instructions = [
             export_file.project_instructions[r.identifier]
@@ -421,7 +434,15 @@ def import_claude_export(
             if r.identifier in export_file.project_instructions
         ]
         if instructions:
-            _append_instructions_to_system_prompt(manager, persona_id, instructions)
+            try:
+                _append_instructions_to_system_prompt(manager, persona_id, instructions)
+            except Exception:
+                with _claude_import_lock:
+                    _claude_import_status[persona_id] = {
+                        "running": False, "success": False,
+                        "message": "Failed to append project instructions to the system prompt.",
+                    }
+                raise
 
     background_tasks.add_task(
         _run_claude_import_task,
