@@ -1452,4 +1452,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.28 -> 0.3.29 (banner dismissal fix only).",
     ),
+    # ---- v0.3.30 ----
+    # 過去ログの取り込み (Claude・Muse・取り込みの一本道化)、Lite からの合流、停止ボタン、
+    # 添付の届け方ほか。DB の形は変わらず、起動時に世界のデータを書き換える処理も無いので、
+    # このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_30",
+        scope="city",
+        from_version="0.3.29",
+        to_version="0.3.30",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.29 -> 0.3.30 (no schema or world-data changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_30",
+        scope="ai",
+        from_version="0.3.29",
+        to_version="0.3.30",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.29 -> 0.3.30 (no schema or world-data changes).",
+    ),
 ]
