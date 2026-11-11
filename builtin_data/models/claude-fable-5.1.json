@@ -9,6 +9,7 @@
   "thinking_display": "summarized",
   "max_output_tokens": 64000,
   "supports_images": true,
+  "supports_sampling_parameters": false,
   "parameters": {
     "thinking_effort": {
       "type": "enum",

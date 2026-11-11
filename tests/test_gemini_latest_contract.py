@@ -76,6 +76,19 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertIs(config["cache"]["explicit_supported"], False)
         self.assertEqual(config["timeout"], 900)
 
+    def test_carbon_definition_follows_argon(self):
+        """Gemini 4 Carbon: Argon と同じ契約 (thinking_level / 暗黙キャッシュのみ / 15 分)。"""
+        config = model_configs.get_model_config("gemini-4-carbon")
+        self.assertEqual(config["model"], "gemini-4-carbon")
+        self.assertTrue(config["prefer_paid"])
+        self.assertFalse(config["supports_sampling_parameters"])
+        self.assertEqual(
+            config["parameters"]["thinking_level"]["options"], ["low", "medium", "high"]
+        )
+        self.assertIs(config["cache"]["explicit_supported"], False)
+        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(_gemini_version("gemini-4-carbon"), (4, 0))
+
     def test_paid_model_pricing_matches_standard_tier(self):
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),
