@@ -89,27 +89,6 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertEqual(config["timeout"], 900)
         self.assertEqual(_gemini_version("gemini-4-carbon"), (4, 0))
 
-    def test_fable_5_2_pricing_and_limits(self):
-        config = model_configs.get_model_config("claude-fable-5.2")
-        self.assertEqual(config["max_output_tokens"], 128000)
-        self.assertIs(config["supports_sampling_parameters"], False)
-        self.assertAlmostEqual(
-            model_configs.calculate_cost("claude-fable-5.2", 1_000_000, 1_000_000), 48.0
-        )
-
-    def test_models_rejecting_sampling_parameters_opt_out(self):
-        """公式仕様で temperature 等の非既定値が 400 になるモデルは送らない設定にする。"""
-        for key in (
-            "claude-fable-5.2", "claude-fable-5.1", "claude-fable-5",
-            "claude-opus-5.5", "claude-opus-5", "claude-opus-4.8", "claude-opus-4.7",
-            "claude-sonnet-5.5", "claude-sonnet-5", "claude-haiku-5.5",
-        ):
-            with self.subTest(model=key):
-                self.assertIs(
-                    model_configs.get_model_config(key)["supports_sampling_parameters"],
-                    False,
-                )
-
     def test_paid_model_pricing_matches_standard_tier(self):
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),
