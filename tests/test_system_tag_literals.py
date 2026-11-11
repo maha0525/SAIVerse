@@ -11,10 +11,17 @@ docs/intent/system_notice_delivery.md「検証計画」の静的検査。シス�
 (builtin_data/playbooks/public/ — action の文はそのままペルソナへの指示になる)、
 フロントエンドのソース (タグ剥がしの再発を防ぐ)。残ってよいファイルは下の
 許可リストに理由付きで書く。
+
+Python ファイルの一覧は git から取る (``git ls-files``)。フォルダを歩いて集めると、
+リポジトリのフォルダの中に置かれた worktree (``.claude/worktrees/`` や
+``.worktrees/`` — どれもリポジトリ一式の写し) の古いコードまで検査してしまい、
+本体に違反が無くても失敗する (2026-11-12、写し 37 個ぶんの約 3 万ファイルを
+読んで 1,800 件超を違反に数えていた)。
 """
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 from typing import Iterator, List, Set, Tuple
 
@@ -45,11 +52,24 @@ _SKIP_TOP = {
 
 
 def _iter_py_files() -> Iterator[Path]:
-    for path in REPO_ROOT.rglob("*.py"):
-        rel = path.relative_to(REPO_ROOT)
+    # git が管理しているファイルと、未追跡でも ignore されていない新規ファイル。
+    # ignore されている場所 (worktree の写し・temp/・.venv など) は一覧に出ない。
+    listed = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files",
+         "--cached", "--others", "--exclude-standard", "*.py"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+        check=True,
+    ).stdout
+    for line in listed.splitlines():
+        if not line.strip():
+            continue
+        rel = Path(line)
         if rel.parts[0] in _SKIP_TOP or "__pycache__" in rel.parts:
             continue
         if any(part in {".venv", "node_modules"} for part in rel.parts):
+            continue
+        path = REPO_ROOT / rel
+        if not path.is_file():  # 作業ツリーで削除済みで未コミット
             continue
         yield path
 
@@ -87,13 +107,20 @@ def _tag_literals(path: Path) -> List[Tuple[int, str]]:
 
 def test_system_tag_literals_live_only_in_the_allowed_files():
     offenders = {}
+    seen = set()
     for path in _iter_py_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
+        seen.add(rel)
         if rel in ALLOWED_PY:
             continue
         hits = _tag_literals(path)
         if hits:
             offenders[rel] = hits
+    # 一覧が空・的外れなら検査は何も見ずに通ってしまう。許可リストのファイルは
+    # 必ず本体にあるので、それが一覧に載っていることで「本体を見た」を確かめる。
+    assert set(ALLOWED_PY) <= seen, (
+        f"git ls-files の一覧に本体のファイルが無い: {sorted(set(ALLOWED_PY) - seen)}"
+    )
     assert offenders == {}, (
         "システム通知は role=system・タグ無し本文で作る (タグで囲むのはクライアント層だけ — "
         "docs/intent/system_notice_delivery.md)。<system を含む文字列リテラル: "
