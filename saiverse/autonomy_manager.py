@@ -285,6 +285,14 @@ class AutonomyManager:
         # (または持ち主の記録が無い) ときだけ効く。終了処理が DB の区間で遅れて
         # いる間に次のライフが始まっていたら、遅れた取り消しは次のライフの予約も
         # 世代も触らない (2026-10-12 Codex 敵対レビュー 段 3 9 巡目 medium)。
+        #
+        # 記録の付け替えのタイミングだけには頼らない (10 巡目 medium 2 件 —
+        # 持ち主の変更は旧ライフの手渡し済みの発火を失効させず、古い見張りの回復
+        # は持ち主を巻き戻せた)。ティックの callback は張った予約のライフの印
+        # (life_key) も閉じ込め (:meth:`_tick_callback`)、発火の入口・張り直し・
+        # 生成の直前で「持ち主の記録」と「DB から読んだ、いま走っているライフ」
+        # (:meth:`_check_gate`) の両方と照合する。見張りの回復は持ち主が別の
+        # ライフなら張らない (:meth:`arm_tick_if_absent`)。
         self._tick_life_owner: Optional[Tuple[str, int]] = None
 
     # ------------------------------------------------------------------
@@ -389,6 +397,9 @@ class AutonomyManager:
         予約を張らない回も記録する — ライフが始まったという事実は止まっていても
         変わらず、前のライフの遅れた終了の取り消し (:meth:`cancel_tick_for_life`)
         に、このライフの世代を進めさせないため。None なら記録を更新しない。
+        張る予約の callback にもこの ``life_owner`` を印として閉じ込める
+        (:meth:`_tick_callback` — None なら印の照合を飛ばす)。持ち主の記録が
+        替わったことで、前のライフの手渡し済みの発火は入口の照合で拒否される。
         """
         minutes = self.resolve_interval_minutes(life_mode=life_mode)
         fire_at = clock.now() + timedelta(minutes=minutes)
@@ -398,7 +409,8 @@ class AutonomyManager:
             if self._state == AutonomyState.STOPPED:
                 return False
             self._schedule_locked(
-                tick_reservation_key(self.persona_id), fire_at, self._tick_callback(),
+                tick_reservation_key(self.persona_id), fire_at,
+                self._tick_callback(life_owner),
             )
         LOGGER.info(
             "[Autonomy:%s] tick armed at %s (T=%d min)",
@@ -419,6 +431,16 @@ class AutonomyManager:
         回は keep-alive を再照合する (:meth:`_reconcile_keepalive`)。
         ``life_owner`` (走っているライフの ``(営業日, 番号)``) は、張れた回だけ
         ティックの持ち主として同じロック区間で記録する (None なら更新しない)。
+        張る予約の callback にも印として閉じ込める (:meth:`_tick_callback`)。
+
+        **持ち主の記録が別のライフなら張らず、記録も触らない** — 見張りは
+        ライフを DB から読んでからここへ来るので、その読みは古くなりうる。前の
+        ライフを読んだ見張りが、次のライフの予約がワーカーへ手渡されて辞書から
+        外れた瞬間に再開すると、前のライフの持ち分として予約を作り直し、持ち主を
+        巻き戻していた (2026-10-12 Codex 敵対レビュー 段 3 10 巡目 medium)。別の
+        ライフが持ち主なら、そのライフが運転している (自分の読みが古い)。
+        持ち主の記録が無い・一致するときだけ従来どおり。
+
         Returns: 今回張ったか。
         """
         scheduler = self._scheduler()
@@ -426,15 +448,27 @@ class AutonomyManager:
             return False
         minutes = self.resolve_interval_minutes(life_mode=life_mode)
         fire_at = clock.now() + timedelta(minutes=minutes)
+        foreign_owner: Optional[Tuple[str, int]] = None
         with self._lock:
             if self._state == AutonomyState.STOPPED:
                 return False
-            armed = scheduler.schedule_if_absent(
-                fire_at=fire_at, callback=self._tick_callback(),
-                key=tick_reservation_key(self.persona_id),
-            ) is not None
-            if armed and life_owner is not None:
-                self._tick_life_owner = life_owner
+            owner = self._tick_life_owner
+            if life_owner is not None and owner is not None and owner != life_owner:
+                foreign_owner = owner
+                armed = False
+            else:
+                armed = scheduler.schedule_if_absent(
+                    fire_at=fire_at, callback=self._tick_callback(life_owner),
+                    key=tick_reservation_key(self.persona_id),
+                ) is not None
+                if armed and life_owner is not None:
+                    self._tick_life_owner = life_owner
+        if foreign_owner is not None:
+            LOGGER.info(
+                "[Autonomy:%s] tick restore for the life %s skipped: the tick "
+                "belongs to the life %s (this read of the running life is stale)",
+                self.persona_id, life_owner, foreign_owner,
+            )
         if armed:
             self._reconcile_keepalive()
         return armed
@@ -552,8 +586,11 @@ class AutonomyManager:
             if self._state == AutonomyState.STOPPED:
                 return False
             fire_at = self._last_standard_call + timedelta(minutes=minutes)
+            # callback は置き換える予約のものをそのまま引き継ぐ (callback=None)
+            # — 押し直しは時刻だけを動かし、予約のライフの印と世代を取り替え
+            # ない (2026-10-12 Codex 敵対レビュー 段 3 10 巡目)。
             moved = scheduler.schedule_if_present(
-                fire_at=fire_at, callback=self._tick_callback(), key=key,
+                fire_at=fire_at, callback=None, key=key,
             ) is not None
         if moved:
             LOGGER.debug(
@@ -612,11 +649,17 @@ class AutonomyManager:
     # 発火
     # ------------------------------------------------------------------
 
-    def _tick_callback(self):
-        """いまの運転の世代とライフの世代を閉じ込めたティックの callback。
-        ``self._lock`` を持って呼ぶ。"""
+    def _tick_callback(self, life_key: Optional[Tuple[str, int]] = None):
+        """いまの運転の世代・ライフの世代と、予約のライフの印を閉じ込めたティックの
+        callback。``self._lock`` を持って呼ぶ。
+
+        ``life_key`` はこの予約が属するライフ ``(営業日, 番号)`` — ライフ開始の
+        節目・見張りの回復はそのライフ、発火の張り直しは元の発火の印を渡す
+        (押し直しは callback ごと引き継ぐ)。None は印の照合を飛ばす (テストの
+        直接駆動・印の無い予約)。
+        """
         return functools.partial(
-            self._handle_tick, self._generation, self._life_generation,
+            self._handle_tick, self._generation, self._life_generation, life_key,
         )
 
     def _watchdog_callback(self):
@@ -634,20 +677,31 @@ class AutonomyManager:
         return generation is not None and generation != self._generation
 
     def _tick_stale_reason_locked(
-        self, generation: Optional[int], life_generation: Optional[int],
+        self,
+        generation: Optional[int],
+        life_generation: Optional[int],
+        life_key: Optional[Tuple[str, int]] = None,
     ) -> Optional[str]:
         """ティックの発火が古いなら理由を返す (いまのものなら None)。``self._lock`` を持って呼ぶ。
 
         - ``"stopped"`` — 止まっている、または停止を跨いだ古い運転の世代
         - ``"outside life"`` — ライフ終了の節目 (:meth:`cancel_tick_for_life`) を跨いだ
-          古いライフの世代 (次のライフが始まっていても)
+          古いライフの世代 (次のライフが始まっていても)、またはティックの持ち主の
+          記録がこの発火の印 (``life_key``) と別のライフ — 終了処理が最初の取り
+          消しの前から遅れている間に次のライフが開始すると、持ち主を照合する
+          取り消しは世代を進めないので、世代だけでは前のライフの手渡し済みの
+          発火を見分けられない (2026-10-12 Codex 敵対レビュー 段 3 10 巡目 medium)
 
-        世代が None (閉じ込めずに直接呼ばれた — テストの直接駆動) はその照合を
-        飛ばす。
+        世代・印が None (閉じ込めずに直接呼ばれた — テストの直接駆動) はその照合
+        を飛ばす。持ち主の記録が無い (取り消しの後・再起動の後) ときの印の照合は、
+        DB から読んだ走っているライフとの照合 (:meth:`_check_gate`) が受け持つ。
         """
         if self._stale_locked(generation):
             return "stopped"
         if life_generation is not None and life_generation != self._life_generation:
+            return "outside life"
+        owner = self._tick_life_owner
+        if life_key is not None and owner is not None and owner != life_key:
             return "outside life"
         return None
 
@@ -699,16 +753,21 @@ class AutonomyManager:
         self,
         generation: Optional[int] = None,
         life_generation: Optional[int] = None,
+        life_key: Optional[Tuple[str, int]] = None,
     ) -> None:
         """ティックの予約の発火 (ワーカースレッド上で走る — LLM を呼んでよい)。
 
-        ``generation`` / ``life_generation`` は予約を張った時点の運転の世代と
-        ライフの世代 (:meth:`_tick_callback`)。停止を跨いだ古い発火・ライフ終了を
-        跨いだ古い発火 (どちらも手渡し済みで取り消しが届かなかったもの) は、
-        再開・次のライフの開始の後でも何もしない。
+        ``generation`` / ``life_generation`` / ``life_key`` は予約を張った時点の
+        運転の世代・ライフの世代・予約のライフの印 (:meth:`_tick_callback`)。
+        停止を跨いだ古い発火・ライフ終了を跨いだ古い発火・別のライフの発火
+        (どれも手渡し済みで取り消しが届かなかったもの) は、再開・次のライフの
+        開始の後でも何もしない。印 (``life_key``) は張り直しと生成の直前の照合へ
+        そのまま運ぶ。
         """
         with self._lock:
-            if self._tick_stale_reason_locked(generation, life_generation) is not None:
+            if self._tick_stale_reason_locked(
+                generation, life_generation, life_key,
+            ) is not None:
                 return
             generation = self._generation
             life_generation = self._life_generation
@@ -718,7 +777,9 @@ class AutonomyManager:
         self._current_cycle_id = report.cycle_id
         started_at = clock.now()
         try:
-            report.status, report.reason = self._run_tick(generation, life_generation)
+            report.status, report.reason = self._run_tick(
+                generation, life_generation, life_key,
+            )
         except Exception as exc:
             LOGGER.exception("[Autonomy:%s] tick error: %s", self.persona_id, exc)
             report.status = "error"
@@ -781,7 +842,11 @@ class AutonomyManager:
     _SUPERSEDE_GRACE = timedelta(seconds=5)
 
     def _check_gate(
-        self, now: datetime, *, check_conversation: bool = True,
+        self,
+        now: datetime,
+        *,
+        check_conversation: bool = True,
+        life_key: Optional[Tuple[str, int]] = None,
     ) -> Tuple[Optional[str], bool, Any]:
         """ティックを打ってよいかのゲート (発火の冒頭と、生成開始の直前の両方)。
 
@@ -789,6 +854,13 @@ class AutonomyManager:
         「アラームも締め切りも無い回」だけ (v0.4 計画 §5 段 3-5) なので、発火の
         冒頭は引き当ての**前**に会話以外を見て、会話は引き当ての結果
         (締め切りの回か) を見てから :meth:`_conversation_refusal` で見る。
+
+        ``life_key`` (この発火の予約のライフの印) は、DB から読んだいま走っている
+        ライフ ``(営業日, 0)`` と照合する — 別のライフなら ``"outside life"`` で
+        拒否し、予約は消さない (次のライフの予約は自分の印で守られ、この発火が
+        張り直した予約なら次のライフの開始の節目・見張りが張り直す)。持ち主の
+        記録 (in-memory) の付け替えのタイミングに頼らない最終の防壁 (2026-10-12
+        Codex 敵対レビュー 段 3 10 巡目 medium)。None は照合を飛ばす。
 
         Returns:
             ``(拒否の理由, 予約を消すか, 営業日の basis)``。通すときは理由が None。
@@ -824,6 +896,14 @@ class AutonomyManager:
             # ライフが現に走っていない (終了の節目が済んだ回を含む) — 次の
             # ライフ開始の節目が張り直す。
             return ("outside life", True, basis)
+        # 走っているライフの印は (営業日, 0) — v0.5 のライフは一日一つで、ゲートも
+        # 見張り (autonomy_wiring._ensure_tick_reservation) も lives[0] を読む。
+        if life_key is not None and life_key != (basis.plan_date, 0):
+            LOGGER.info(
+                "[Autonomy:%s] tick of the life %s refused: the running life is %s",
+                persona_id, life_key, (basis.plan_date, 0),
+            )
+            return ("outside life", False, basis)
         if check_conversation:
             refusal = self._conversation_refusal()
             if refusal is not None:
@@ -877,6 +957,7 @@ class AutonomyManager:
         deadline: bool = False,
         generation: Optional[int] = None,
         life_generation: Optional[int] = None,
+        life_key: Optional[Tuple[str, int]] = None,
     ) -> Optional[str]:
         """生成開始の直前の再検査 — ``fire_tick`` が **Beat ロックの内側**で呼ぶ。
 
@@ -902,6 +983,10 @@ class AutonomyManager:
         ライフ終了を跨いだ回は、この発火が自分で張った予約 (札の一致するもの)
         だけを消す — 次のライフの予約は札が違うので残る。
 
+        ``life_key`` はこの発火の予約のライフの印 — 持ち主の記録 (世代の照合と
+        同じロック区間) と、DB から読んだ走っているライフ (:meth:`_check_gate`)
+        の両方と照合する (2026-10-12 Codex 敵対レビュー 段 3 10 巡目 medium)。
+
         世代の照合は**最後にもう一度** (許可を返す直前に、``self._lock`` の中で)
         行う。:meth:`_check_gate` はライフを DB から読むので、その読みの間に
         停止→再開やライフの切り替わりが完了しうる — 冒頭の照合は早期の節約で、
@@ -920,19 +1005,21 @@ class AutonomyManager:
         from saiverse.autonomy_wiring import autonomy_start_refusal
 
         with self._lock:
-            reason = self._tick_stale_reason_locked(generation, life_generation)
+            reason = self._tick_stale_reason_locked(
+                generation, life_generation, life_key,
+            )
         cancel = reason == "outside life"
         if reason is None:
             now = clock.now()
             reason, cancel, _basis = self._check_gate(
-                now, check_conversation=not deadline,
+                now, check_conversation=not deadline, life_key=life_key,
             )
             if reason is None:
-                # 最後の照合 — 世代と状態、標準呼び出しの追い越しを同じロック区間で
-                # 見て、ここを通ったときだけ許可する。
+                # 最後の照合 — 世代と状態・持ち主、標準呼び出しの追い越しを同じ
+                # ロック区間で見て、ここを通ったときだけ許可する。
                 with self._lock:
                     reason = self._tick_stale_reason_locked(
-                        generation, life_generation,
+                        generation, life_generation, life_key,
                     )
                     cancel = reason == "outside life"
                     last = self._last_standard_call
@@ -963,8 +1050,12 @@ class AutonomyManager:
         self,
         generation: Optional[int] = None,
         life_generation: Optional[int] = None,
+        life_key: Optional[Tuple[str, int]] = None,
     ) -> Tuple[str, Optional[str]]:
         """ティック 1 回の本体。``(status, reason)`` を返す。
+
+        ``life_key`` はこの発火の予約のライフの印 — 張り直す次回の予約へ同じ印を
+        引き継ぎ、ゲートと生成直前の照合で走っているライフと見比べる。
 
         生成開始のフェンス: ``fire_tick`` に :meth:`_start_fence` を渡し、Beat
         ロックの内側・生成の直前でゲートをもう一度見る (冒頭のゲートからそこまで
@@ -991,9 +1082,12 @@ class AutonomyManager:
         #    切れないため。中で標準呼び出しが成功すれば notify_standard_call が
         #    もう少し後ろへ押し直す。
         with self._lock:
-            # 世代も照合する — 入口の後に停止→再開、またはライフの終了 (→ 次の
-            # ライフの開始) が挟まった古い発火が、新しい予約を上書きしない。
-            stale = self._tick_stale_reason_locked(generation, life_generation)
+            # 世代と持ち主も照合する — 入口の後に停止→再開、またはライフの終了
+            # (→ 次のライフの開始) が挟まった古い発火・持ち主が次のライフへ
+            # 替わった前のライフの発火が、新しい予約を上書きしない。
+            stale = self._tick_stale_reason_locked(
+                generation, life_generation, life_key,
+            )
             if stale is not None:
                 return ("skipped", stale)
             last = self._last_standard_call
@@ -1007,7 +1101,8 @@ class AutonomyManager:
             # 張り直した予約の札 — この発火の後始末 (_cancel_own_tick) が
             # 「自分が張った予約だけ」を見分けるのに使う。
             own_token = self._schedule_locked(
-                tick_reservation_key(persona_id), next_at, self._tick_callback(),
+                tick_reservation_key(persona_id), next_at,
+                self._tick_callback(life_key),
             )
         if superseded_until is not None:
             LOGGER.info(
@@ -1022,7 +1117,11 @@ class AutonomyManager:
         #    消すのはこの発火が自分で張った予約 (札 own_token) だけ — ゲートの
         #    判断から取り消しまでの間に、再開の再同期が張った新しい予約は (同じ
         #    時刻でも) 残す (段 3 3・4 巡目 medium)。
-        reason, cancel, basis = self._check_gate(fired_at, check_conversation=False)
+        #    ライフの印 (life_key) が走っているライフと違えば拒否し、予約は
+        #    消さない (_check_gate — 段 3 10 巡目 medium)。
+        reason, cancel, basis = self._check_gate(
+            fired_at, check_conversation=False, life_key=life_key,
+        )
         if reason is not None:
             if cancel:
                 self._cancel_own_tick(own_token)
@@ -1061,7 +1160,7 @@ class AutonomyManager:
             pre_generation_check=lambda: self._start_fence(
                 interval, refusals, own_token=own_token,
                 deadline=assignment.is_deadline, generation=generation,
-                life_generation=life_generation,
+                life_generation=life_generation, life_key=life_key,
             ),
         )
         if outcome.get("runtime_outcome") == "refused" or refusals:

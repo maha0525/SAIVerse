@@ -1663,8 +1663,10 @@ def test_a_stop_and_restart_during_the_final_gate_read_does_not_start_the_tick(
     am = _running_life(manager, session_factory)
     original_gate = am._check_gate
 
-    def _gate_with_stop_and_restart_inside(now, *, check_conversation=True):
-        verdict = original_gate(now, check_conversation=check_conversation)
+    def _gate_with_stop_and_restart_inside(now, *, check_conversation=True, life_key=None):
+        verdict = original_gate(
+            now, check_conversation=check_conversation, life_key=life_key,
+        )
         if check_conversation:  # 生成直前のフェンスの読み (冒頭のゲートは会話を見ない)
             assert am.stop() is True
             assert am.start() is True
@@ -1704,8 +1706,10 @@ def test_a_stop_published_during_the_final_gate_read_does_not_start_the_tick(
     am = _running_life(manager, session_factory)
     original_gate = am._check_gate
 
-    def _gate_with_a_stop_published_inside(now, *, check_conversation=True):
-        verdict = original_gate(now, check_conversation=check_conversation)
+    def _gate_with_a_stop_published_inside(now, *, check_conversation=True, life_key=None):
+        verdict = original_gate(
+            now, check_conversation=check_conversation, life_key=life_key,
+        )
         if check_conversation:  # 生成直前のフェンスの読み (冒頭のゲートは会話を見ない)
             publish(manager)
         return verdict
@@ -1933,3 +1937,169 @@ def test_the_watchdog_restore_records_the_running_life_as_the_owner(
     clock.advance_to(BASE + timedelta(hours=22))
     _end_life(manager)
     assert _tick_at(manager) is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 10 巡目 medium 2 件: 持ち主の記録の付け
+# 替えのタイミングに頼らず、ティックの callback に予約のライフの印 (life_key) を
+# 焼き込んで、発火時に持ち主の記録と走っているライフの両方と照合する。見張りの
+# 回復は持ち主が別のライフなら張らない
+# ---------------------------------------------------------------------------
+
+
+def test_a_previous_lifes_handed_off_tick_does_not_run_when_the_end_is_late(
+    manager, session_factory, monkeypatch,
+):
+    """medium 1 の再現順序: 前のライフの予約がワーカーへ手渡された後、翌 06:59 の
+    就寝の終了処理が**最初の取り消しの前から**遅れ、その間に 07:00 起床の次の
+    ライフが開始した (07:30 の予約)。終了側の二度の取り消しは持ち主が次のライフ
+    なので世代を進めない — それでも前のライフの手渡し済みの発火は、印が持ち主と
+    違うので 07:05 に走らず、次のライフの 07:30 の予約も動かさない。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    _start_life(manager)  # 07-04 07:00〜翌 06:59
+    stale_fire = _hand_off_tick(manager)  # 前のライフの印を持つ発火
+
+    seen: Dict[str, Any] = {}
+    original = day_plan._cancel_keepalive_reservation
+
+    def _keepalive_cancel_with_the_next_life_started(mgr, persona_id):
+        # 終了の節目の最初の段 (ティックの取り消しより前) で次のライフが開始する
+        if not seen:
+            clock.advance_to(BASE + timedelta(days=1, hours=7))
+            _start_life(manager)
+            seen["next_at"] = _tick_at(manager)
+        return original(mgr, persona_id)
+
+    monkeypatch.setattr(
+        day_plan, "_cancel_keepalive_reservation",
+        _keepalive_cancel_with_the_next_life_started,
+    )
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+    generation_before = am.life_generation
+    _end_life(manager)
+
+    next_at = BASE + timedelta(days=1, hours=7, minutes=30)
+    assert seen["next_at"] == next_at
+    # 二度の取り消しはどちらも持ち主が違うので世代を進めない (= 世代だけでは
+    # 前のライフの発火を見分けられない状況)
+    assert am.life_generation == generation_before
+    assert am._tick_life_owner == ("2026-07-05", 0)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=7, minutes=5))
+    stale_fire()
+    assert manager.fire_tick.calls == []
+    assert _tick_at(manager) == next_at  # 次のライフの初回の予約は動かない
+
+    _fire_tick_reservation(manager)
+    assert clock.now() == next_at
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+
+
+def test_a_stale_watchdog_restore_does_not_roll_the_owner_back(
+    manager, session_factory, monkeypatch,
+):
+    """medium 2 の再現順序: 見張りが前のライフ (走っている) を読んだ後で遅れ、
+    その間に前のライフの終了処理が最初の取り消しを済ませ、次のライフが開始して
+    その予約がワーカーへ手渡された (辞書から外れた)。ここで見張りが再開して
+    回復を試みる — 持ち主は次のライフなので張らず、持ち主も巻き戻さない。
+    終了の commit の後の取り消しは次のライフの予約にも手渡し済みの発火にも
+    触らず、次のライフのティックは 07:30 に走る。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    _start_life(manager)  # 07-04 07:00〜翌 06:59
+    # 見張りが読んだ前のライフ (走っている — 開始済み・未終了)
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=58))
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID, now=clock.now())
+    assert basis.source == "life" and basis.plan_date == PLAN_DATE
+    stale_read = basis.lives[0]
+
+    seen = _start_the_next_life_inside_the_end(monkeypatch, manager, hand_off=True)
+    original = day_plan._sync_cache_ttl_for_life_end
+
+    def _sync_then_the_stale_watchdog_resumes(mgr, persona_id, life, *, life_key):
+        result = original(mgr, persona_id, life, life_key=life_key)
+        # 次のライフの開始・手渡しの後 (ended の commit の前) に、前のライフを
+        # 読んだ見張りが回復の段へ進む (watchdog_tick が読みの後に呼ぶ実物)
+        seen["restored"] = wiring._ensure_tick_reservation(
+            manager, PERSONA_ID, stale_read, life_key=(PLAN_DATE, 0),
+        )
+        seen["owner_after_restore"] = am._tick_life_owner
+        return result
+
+    monkeypatch.setattr(
+        day_plan, "_sync_cache_ttl_for_life_end", _sync_then_the_stale_watchdog_resumes,
+    )
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+    _end_life(manager)
+
+    assert seen["next_at"] == BASE + timedelta(days=1, hours=7, minutes=30)
+    assert seen["restored"] is False
+    assert seen["owner_after_restore"] == ("2026-07-05", 0)
+    assert am._tick_life_owner == ("2026-07-05", 0)  # 終了の取り消しも触らない
+    assert _tick_at(manager) is None  # 次のライフの予約は手渡し中 (作り直されていない)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=7, minutes=30))
+    seen["handed_off"]()
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+    # 手渡し済みの発火は次のライフの印で張り直している
+    assert _tick_at(manager) == BASE + timedelta(days=1, hours=8)
+
+
+def test_the_watchdog_restore_skips_when_another_life_owns_the_tick(
+    manager, session_factory,
+):
+    """見張りの回復の単体: 持ち主の記録が別のライフなら、予約が無くても張らず、
+    記録も触らない。持ち主が一致する・記録が無いときは張る。"""
+    am = _running_life(manager, session_factory)
+    assert am._tick_life_owner == (PLAN_DATE, 0)
+    _hand_off_tick(manager)  # 予約が辞書から外れた状態
+
+    assert am.arm_tick_if_absent(life_owner=("2026-07-03", 0)) is False
+    assert _tick_at(manager) is None
+    assert am._tick_life_owner == (PLAN_DATE, 0)
+
+    assert am.arm_tick_if_absent(life_owner=(PLAN_DATE, 0)) is True
+    assert _tick_at(manager) is not None
+
+    _hand_off_tick(manager)
+    am._tick_life_owner = None  # 再起動 (in-memory の記録が消える)
+    assert am.arm_tick_if_absent(life_owner=(PLAN_DATE, 0)) is True
+    assert am._tick_life_owner == (PLAN_DATE, 0)
+
+
+def test_the_gate_refuses_a_tick_whose_life_is_not_the_running_life(
+    manager, session_factory,
+):
+    """最終の防壁の単体: 持ち主の記録と印が一致していても (記録の付け替えが
+    まだ届いていない区間)、DB から読んだ走っているライフと印が違えば打たない。
+    予約は消さない — 次のライフの開始の節目・見張りが張り直す。"""
+    am = _running_life(manager, session_factory)
+    other_life = ("2026-07-03", 0)
+    assert am.arm_tick(life_owner=other_life) is True  # 記録と印は別のライフ
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "outside life"
+    assert _tick_at(manager) is not None  # 予約は消さない
+
+
+def test_a_standard_call_pushback_keeps_the_reservations_life_key(
+    manager, session_factory,
+):
+    """押し直しは時刻だけを動かし、予約の callback (ライフの印・世代) をそのまま
+    引き継ぐ。"""
+    am = _running_life(manager, session_factory)
+    key = tick_reservation_key(PERSONA_ID)
+    before = manager.event_scheduler._entries_by_key[key].callback
+    assert before.args[2] == (PLAN_DATE, 0)
+
+    clock.advance_to(clock.now() + timedelta(minutes=10))
+    assert am.notify_standard_call() is True
+    after = manager.event_scheduler._entries_by_key[key].callback
+    assert after is before
+    assert _tick_at(manager) == clock.now() + timedelta(minutes=30)

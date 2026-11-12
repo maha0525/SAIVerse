@@ -197,7 +197,7 @@ class EventScheduler:
     def schedule_if_present(
         self,
         fire_at: datetime,
-        callback: Callable[[], None],
+        callback: Optional[Callable[[], None]],
         key: str,
     ) -> Optional[ReservationToken]:
         """有効な予約が **あるときだけ** 時刻を置き換える (無ければ何もしない)。
@@ -207,6 +207,12 @@ class EventScheduler:
         その隙間に別スレッドが消した予約を生き返らせてしまう。用途は「生きて
         いる予約だけを後ろへずらす」操作 (例: ティックの予約を最後の標準呼び出し
         から T 分へ押し直す — 予約が無い = ライフ外では生やさない)。
+
+        ``callback`` が None なら、置き換える予約の callback をそのまま引き継ぐ
+        (時刻だけを動かす)。callback が張った時点の印 (世代・持ち主など) を閉じ
+        込めている呼び手は、押し直しでその印を取り替えないためにこちらを使う —
+        読んでから置き換えるまでを同じロック区間で行うので、間に入れ替わった
+        予約の callback を取り違えない。
 
         置き換えた予約は新しい札を持つ (古い札の持ち主の :meth:`cancel_if_token`
         は、置き換え後の予約を消さない)。
@@ -225,7 +231,7 @@ class EventScheduler:
                 fire_at_ts=fire_ts,
                 seq=next(self._seq_counter),
                 key=key,
-                callback=callback,
+                callback=existing.callback if callback is None else callback,
             )
             self._entries_by_key[key] = entry
             heapq.heappush(self._heap, entry)
