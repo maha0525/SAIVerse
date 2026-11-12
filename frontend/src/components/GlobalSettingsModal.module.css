@@ -845,39 +845,11 @@
     color: #f1f5f9;
 }
 
+/* 「変更」で広がる欄。中身は common/ModelPicker で、色は ModelPicker 側が持つ */
 .roleDropdown {
     background: #1e293b;
     border-top: 1px solid #334155;
-    max-height: 200px;
-    overflow-y: auto;
-}
-
-.roleDropdownItem {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem 1rem 0.5rem 1.5rem;
-    cursor: pointer;
-    transition: background 0.15s;
-}
-
-.roleDropdownItem:hover {
-    background: #334155;
-}
-
-.roleDropdownItem.selected {
-    background: #1e3a8a;
-}
-
-.roleDropdownName {
-    font-size: 0.85rem;
-    color: #f1f5f9;
-}
-
-.roleDropdownProvider {
-    font-size: 0.75rem;
-    color: #94a3b8;
-    margin-left: 0.75rem;
+    padding: 0.75rem 1rem;
 }
 
 /* ── Light Mode: Model Roles ── */
@@ -941,22 +913,6 @@
 :global([data-theme="light"]) .roleDropdown {
     background: #ffffff;
     border-top-color: #e2e8f0;
-}
-
-:global([data-theme="light"]) .roleDropdownItem:hover {
-    background: #f1f5f9;
-}
-
-:global([data-theme="light"]) .roleDropdownItem.selected {
-    background: #dbeafe;
-}
-
-:global([data-theme="light"]) .roleDropdownName {
-    color: #1f2937;
-}
-
-:global([data-theme="light"]) .roleDropdownProvider {
-    color: #64748b;
 }
 
 /* ── Mobile: Model Roles ── */

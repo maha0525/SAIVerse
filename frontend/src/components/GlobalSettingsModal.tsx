@@ -7,6 +7,7 @@ import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayNam
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch } from 'lucide-react';
 import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
+import { fetchModelList, type PickerModel } from '@/lib/modelList';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -15,6 +16,7 @@ import FeedManagementPanel from './settings/FeedManagementPanel';
 import MovementNoticeSetting from './settings/MovementNoticeSetting';
 import SystemNoticeReviewEntry from './SystemNoticeReviewEntry';
 import ModalOverlay from './common/ModalOverlay';
+import ModelPicker from './common/ModelPicker';
 import WatermarkBar, { WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
 
 interface GlobalSettingsModalProps {
@@ -40,17 +42,6 @@ interface PresetInfo {
     provider: string;
     display_name: string;
     is_available: boolean;
-}
-
-interface ModelInfo {
-    id: string;
-    display_name: string;
-    provider: string;
-    is_available: boolean;
-    supports_structured_output?: boolean;
-    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
-     *  反射判断の役割の選択肢にだけ出す。 */
-    reflex_only?: boolean;
 }
 
 /** 反射判断の役割のキー (saiverse/model_defaults.py の MODEL_ROLES と同じ名前)。
@@ -178,7 +169,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Model Roles
     const [modelRoles, setModelRoles] = useState<Record<string, ModelRoleInfo>>({});
     const [modelPresets, setModelPresets] = useState<PresetInfo[]>([]);
-    const [modelsAvailable, setModelsAvailable] = useState<ModelInfo[]>([]);
+    const [modelsAvailable, setModelsAvailable] = useState<PickerModel[]>([]);
     const [expandedModelRole, setExpandedModelRole] = useState<string | null>(null);
     const [modelRolesLoading, setModelRolesLoading] = useState(false);
 
@@ -858,18 +849,19 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const loadModelRoles = async () => {
         setModelRolesLoading(true);
         try {
-            const [rolesRes, modelsRes] = await Promise.all([
+            // モデルの一覧は、どの画面も同じ GET /api/config/models を使う
+            // (API キーが無くて使えないモデルは、サーバーが一覧から外して返す)
+            const [rolesRes, modelList] = await Promise.all([
                 apiFetch('/api/tutorial/model-roles'),
-                apiFetch('/api/tutorial/available-models'),
+                fetchModelList(),
             ]);
             if (rolesRes.ok) {
                 const data = await rolesRes.json();
                 setModelRoles(data.current);
                 setModelPresets(data.presets);
             }
-            if (modelsRes.ok) {
-                const data = await modelsRes.json();
-                setModelsAvailable(data.models);
+            if (modelList) {
+                setModelsAvailable(modelList);
             }
         } catch (e) {
             console.error('Failed to load model roles', e);
@@ -1527,20 +1519,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     </div>
                                                     {expandedModelRole === role && (
                                                         <div className={styles.roleDropdown}>
-                                                            {modelsAvailable
-                                                                .filter(m => m.is_available)
-                                                                .filter(m => !m.reflex_only || role === REFLEX_JUDGMENT_ROLE)
-                                                                .map(model => (
-                                                                    <div
-                                                                        key={model.id}
-                                                                        className={`${styles.roleDropdownItem} ${model.id === info.value ? styles.selected : ''}`}
-                                                                        onClick={() => handleModelRoleChange(info.env_key, model.id)}
-                                                                    >
-                                                                        <span className={styles.roleDropdownName}>{model.display_name}</span>
-                                                                        <span className={styles.roleDropdownProvider}>{model.provider}</span>
-                                                                    </div>
-                                                                ))
-                                                            }
+                                                            {/* 選んだ瞬間に保存する。開閉は上の「変更」ボタンが持つ */}
+                                                            <ModelPicker
+                                                                alwaysOpen
+                                                                models={modelsAvailable.filter(m => !m.reflex_only || role === REFLEX_JUDGMENT_ROLE)}
+                                                                value={info.value || ''}
+                                                                onChange={(modelId) => handleModelRoleChange(info.env_key, modelId)}
+                                                                ariaLabel={getModelRoleLabel(role, info.label)}
+                                                            />
                                                         </div>
                                                     )}
                                                 </div>

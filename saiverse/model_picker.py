@@ -30,6 +30,12 @@ _PLACEMENT_FIELDS = ("picker_group", "current_models")
 CUSTOM_GROUP = "custom"
 CUSTOM_GROUP_LABEL = "ローカル・カスタム"
 
+#: 反射判断専用のプロバイダ (型付きの質問に確率で答えるだけで、文章を書けない) を
+#: まとめるボタンの名前。どれもモデルが 1 つずつなので、1 つのボタンに集める。
+#: 会話用の欄には、画面の側が reflex_only のモデルを渡さないので出ない。
+REFLEX_GROUP = "reflex"
+REFLEX_GROUP_LABEL = "反射判断専用"
+
 #: Gemini は有料と無料を別のボタンにする (決まったこと 2)。分ける目印はモデル定義の
 #: ``prefer_paid``。
 GEMINI_PROVIDER_ID = "gemini"
@@ -39,10 +45,12 @@ _FIXED_GROUP_LABELS = {
     GEMINI_PAID_GROUP: "Gemini (有料)",
     GEMINI_FREE_GROUP: "Gemini (無料)",
     CUSTOM_GROUP: CUSTOM_GROUP_LABEL,
+    REFLEX_GROUP: REFLEX_GROUP_LABEL,
 }
 
 #: ボタンの並び順。ここに無いグループは名前の順でこの後ろに並び、custom は最後。
 FIXED_GROUP_ORDER: tuple[str, ...] = (
+    REFLEX_GROUP,
     "anthropic",
     "openai",
     "openai_codex",
@@ -135,16 +143,19 @@ def _group_of(
     provider_id: str | None,
     placement: Mapping[str, Any] | None,
     user_made: bool,
-) -> str:
+) -> tuple[str, bool]:
+    """どのボタンに入るかと、そのボタンが複数のプロバイダをまとめるものかを返す。"""
     if placement:
         declared = placement.get("picker_group")
         if isinstance(declared, str) and declared:
-            return declared
+            return declared, True
     if user_made:
-        return CUSTOM_GROUP
+        return CUSTOM_GROUP, True
     if provider_id == GEMINI_PROVIDER_ID:
-        return GEMINI_PAID_GROUP if config.get("prefer_paid") else GEMINI_FREE_GROUP
-    return provider_id or CUSTOM_GROUP
+        return (GEMINI_PAID_GROUP if config.get("prefer_paid") else GEMINI_FREE_GROUP), False
+    if provider_id:
+        return provider_id, False
+    return CUSTOM_GROUP, True
 
 
 def _provider_display_name(provider_id: str | None, provider: Mapping[str, Any] | None) -> str:
@@ -184,7 +195,7 @@ def compute_placements() -> dict[str, PickerPlacement]:
         if shipped is None and provider and provider.get("source") == LAYER_USER_DATA:
             shipped = _shipped_placement_fields()
         placement, user_made = _placement_source(provider_id, provider, shipped)
-        group = _group_of(config, provider_id, placement, user_made)
+        group, shared = _group_of(config, provider_id, placement, user_made)
         provider_name = _provider_display_name(provider_id, provider)
         listed = _current_models_of(placement)
 
@@ -205,9 +216,10 @@ def compute_placements() -> dict[str, PickerPlacement]:
             position = (1, 0)
         name_key = (str(display_name).casefold(), key)
 
-        heading = provider_name if group == CUSTOM_GROUP else None
+        heading = provider_name if shared else None
         if heading is not None:
-            # custom の中はプロバイダの名前の見出しで分け、見出しの中で同じ規則で並べる。
+            # 複数のプロバイダをまとめるボタンの中は、プロバイダの名前の見出しで分け、
+            # 見出しの中で同じ規則で並べる。
             sort_key: tuple[Any, ...] = (heading.casefold(), heading, *position, *name_key)
         else:
             sort_key = (*position, *name_key)
@@ -248,6 +260,8 @@ __all__ = [
     "GEMINI_FREE_GROUP",
     "GEMINI_PAID_GROUP",
     "PickerPlacement",
+    "REFLEX_GROUP",
+    "REFLEX_GROUP_LABEL",
     "compute_placements",
     "sort_model_keys",
 ]

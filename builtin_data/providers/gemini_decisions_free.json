@@ -21,5 +21,6 @@
       "output_tokens": "total_output_tokens"
     },
     "supported_types": ["noul", "choice", "score"]
-  }
+  },
+  "picker_group": "reflex"
 }

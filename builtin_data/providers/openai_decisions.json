@@ -19,5 +19,6 @@
       "output_tokens": "output_tokens"
     },
     "supported_types": ["noul", "choice", "score"]
-  }
+  },
+  "picker_group": "reflex"
 }

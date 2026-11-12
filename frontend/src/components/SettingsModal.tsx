@@ -12,6 +12,8 @@ import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
 import DebugPanel from './DebugPanel';
 import { formatCost } from '@/lib/formatCost';
+import { fetchModelList, type PickerModel } from '@/lib/modelList';
+import ModelPicker from './common/ModelPicker';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -88,19 +90,10 @@ interface UserChoice {
     name: string;
 }
 
-interface ModelChoice {
-    id: string;
-    name: string;
-    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
-     *  会話に使う欄では選択肢に出さない — 反射判断の欄だけが選べる。 */
-    reflex_only?: boolean;
-    config_error?: { path: string; source: string; reason: string } | null;
-}
-
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
     useLocale();
     const [config, setConfig] = useState<AIConfig | null>(null);
-    const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
+    const [availableModels, setAvailableModels] = useState<PickerModel[]>([]);
     const [availableUsers, setAvailableUsers] = useState<UserChoice[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -189,11 +182,13 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         }
     }, [isOpen, personaId, availableModels]); // dependent on availableModels to safely set default
 
+    // モデルの一覧は、どの画面も同じ GET /api/config/models を使う。API キーが無くて
+    // 使えないモデルは一覧に載らないので、保存済みの値がそれに当たるときは
+    // 「一覧に無い値」として表示される (ModelPicker の unknownValueLabel)。
     const loadModels = async () => {
         try {
-            const res = await apiFetch('/api/info/models');
-            if (res.ok) {
-                const data = await res.json();
+            const data = await fetchModelList();
+            if (data) {
                 setAvailableModels(data);
             }
         } catch (e) {
@@ -504,126 +499,91 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text012" className={styles.label}>{uiText("components.SettingsModal.text012")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={defaultModel}
-                                    onChange={(e) => setDefaultModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text013" value="">{uiText("components.SettingsModal.text013")}</option>
-                                    {defaultModel && !conversationModels.some(m => m.id === defaultModel) && (
-                                        <option data-i18n="components.SettingsModal.text014" value={defaultModel}>{uiText("components.SettingsModal.text014")}{defaultModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setDefaultModel}
+                                    emptyLabel={uiText("components.SettingsModal.text013")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text014")}
+                                    ariaLabel={uiText("components.SettingsModal.text012")}
+                                />
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text015" className={styles.label}>{uiText("components.SettingsModal.text015")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={lightweightModel}
-                                    onChange={(e) => setLightweightModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text016" value="">{uiText("components.SettingsModal.text016")}</option>
-                                    {lightweightModel && !conversationModels.some(m => m.id === lightweightModel) && (
-                                        <option data-i18n="components.SettingsModal.text017" value={lightweightModel}>{uiText("components.SettingsModal.text017")}{lightweightModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setLightweightModel}
+                                    emptyLabel={uiText("components.SettingsModal.text016")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text017")}
+                                    ariaLabel={uiText("components.SettingsModal.text015")}
+                                />
                                 <div data-i18n="components.SettingsModal.text018" className={styles.description}>{uiText("components.SettingsModal.text018")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text019" className={styles.label}>{uiText("components.SettingsModal.text019")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={memoryWeaveModel}
-                                    onChange={(e) => setMemoryWeaveModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text020" value="">{uiText("components.SettingsModal.text020")}</option>
-                                    {memoryWeaveModel && !conversationModels.some(m => m.id === memoryWeaveModel) && (
-                                        <option data-i18n="components.SettingsModal.text021" value={memoryWeaveModel}>{uiText("components.SettingsModal.text021")}{memoryWeaveModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setMemoryWeaveModel}
+                                    emptyLabel={uiText("components.SettingsModal.text020")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text021")}
+                                    ariaLabel={uiText("components.SettingsModal.text019")}
+                                />
                                 <div data-i18n="components.SettingsModal.text022" className={styles.description}>{uiText("components.SettingsModal.text022")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text023" className={styles.label}>{uiText("components.SettingsModal.text023")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={visionModel}
-                                    onChange={(e) => setVisionModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text024" value="">{uiText("components.SettingsModal.text024")}</option>
-                                    {visionModel && !conversationModels.some(m => m.id === visionModel) && (
-                                        <option data-i18n="components.SettingsModal.text025" value={visionModel}>{uiText("components.SettingsModal.text025")}{visionModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setVisionModel}
+                                    emptyLabel={uiText("components.SettingsModal.text024")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text025")}
+                                    ariaLabel={uiText("components.SettingsModal.text023")}
+                                />
                                 <div data-i18n="components.SettingsModal.text026" className={styles.description}>{uiText("components.SettingsModal.text026")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text027" className={styles.label}>{uiText("components.SettingsModal.text027")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={audioModel}
-                                    onChange={(e) => setAudioModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text028" value="">{uiText("components.SettingsModal.text028")}</option>
-                                    {audioModel && !conversationModels.some(m => m.id === audioModel) && (
-                                        <option data-i18n="components.SettingsModal.text029" value={audioModel}>{uiText("components.SettingsModal.text029")}{audioModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setAudioModel}
+                                    emptyLabel={uiText("components.SettingsModal.text028")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text029")}
+                                    ariaLabel={uiText("components.SettingsModal.text027")}
+                                />
                                 <div data-i18n="components.SettingsModal.text030" className={styles.description}>{uiText("components.SettingsModal.text030")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text031" className={styles.label}>{uiText("components.SettingsModal.text031")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={conversationModels}
                                     value={videoModel}
-                                    onChange={(e) => setVideoModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.text032" value="">{uiText("components.SettingsModal.text032")}</option>
-                                    {videoModel && !conversationModels.some(m => m.id === videoModel) && (
-                                        <option data-i18n="components.SettingsModal.text033" value={videoModel}>{uiText("components.SettingsModal.text033")}{videoModel}</option>
-                                    )}
-                                    {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setVideoModel}
+                                    emptyLabel={uiText("components.SettingsModal.text032")}
+                                    unknownValueLabel={uiText("components.SettingsModal.text033")}
+                                    ariaLabel={uiText("components.SettingsModal.text031")}
+                                />
                                 <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.reflexJudgmentModelLabel" className={styles.label}>{uiText("components.SettingsModal.reflexJudgmentModelLabel")}</label>
-                                <select
-                                    className={styles.select}
+                                <ModelPicker
+                                    models={availableModels}
                                     value={reflexJudgmentModel}
-                                    onChange={(e) => setReflexJudgmentModel(e.target.value)}
-                                >
-                                    <option data-i18n="components.SettingsModal.reflexJudgmentModelGlobal" value="">{uiText("components.SettingsModal.reflexJudgmentModelGlobal")}</option>
-                                    {reflexJudgmentModel && !availableModels.some(m => m.id === reflexJudgmentModel) && (
-                                        <option data-i18n="components.SettingsModal.reflexJudgmentModelUnknown" value={reflexJudgmentModel}>{uiText("components.SettingsModal.reflexJudgmentModelUnknown")}{reflexJudgmentModel}</option>
-                                    )}
-                                    {availableModels.map(m => (
-                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                    ))}
-                                </select>
+                                    onChange={setReflexJudgmentModel}
+                                    emptyLabel={uiText("components.SettingsModal.reflexJudgmentModelGlobal")}
+                                    unknownValueLabel={uiText("components.SettingsModal.reflexJudgmentModelUnknown")}
+                                    ariaLabel={uiText("components.SettingsModal.reflexJudgmentModelLabel")}
+                                />
                                 <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>
                             </div>
 

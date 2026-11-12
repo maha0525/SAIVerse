@@ -215,6 +215,22 @@ def test_picker_group_を書いたプロバイダはその名前のボタンに�
     assert placements["ol-1"].is_current is True
 
 
+def test_反射判断専用のプロバイダは_reflex_のボタンにまとまり先頭に並ぶ(layers, monkeypatch):
+    b = layers["builtin"]
+    provider(b, "typesafe", "TypeSafe System One", picker_group="reflex")
+    provider(b, "localjev", "localjev (local)", picker_group="reflex")
+    provider(b, "anthropic", "Anthropic")
+    model(b, "jev-ts", "Jev (TypeSafe)", "typesafe")
+    model(b, "jev-local", "Jev (localjev)", "localjev")
+    model(b, "a-1", "A 1", "anthropic")
+    placements = load(monkeypatch)
+    for key, heading in (("jev-ts", "TypeSafe System One"), ("jev-local", "localjev (local)")):
+        assert placements[key].picker_group == "reflex"
+        assert placements[key].picker_group_label == "反射判断専用"
+        assert placements[key].picker_heading == heading
+    assert placements["jev-ts"].picker_group_order < placements["a-1"].picker_group_order
+
+
 def test_利用者が追加したモデルはリストに無くても最初から出す(layers, monkeypatch):
     provider(layers["builtin"], "openai", "OpenAI", current_models=["gpt-a"])
     model(layers["builtin"], "gpt-a", "GPT A", "openai")
