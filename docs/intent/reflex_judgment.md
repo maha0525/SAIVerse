@@ -344,7 +344,10 @@ Gemini の Decisions API は System One とほぼ同じ形で、基準 (`criteri
   整え、4 枚に達したら残りは落とし、合計を超える画像はその 1 枚だけ落とす (どちらも
   WARNING)。会話用クライアントの枚数上限とバイトの非常弁は `__skip_image_summary__` の
   画像を数えないので、反射判断の層で先に絞る。全 `request_shape` と通常の LLM に同じ
-  上限が掛かる。
+  上限が掛かる。加えて、整える前にヘッダだけを読んで寸法を確かめ、6400 万画素を超える
+  画像と Pillow の decompression bomb の警告が出る画像はデコードせずに落とす
+  (Codex の 2 巡目の指摘。`load_image_bytes_for_llm` は縮小の前に全部デコードするので、
+  送る量の上限だけでは判断のワーカーのメモリと CPU を守れない)。
 - **送り方は `request_shape` ごとに違う**。jev 互換の三つの `request_shape` はどれも
   画像を送れる。通常の LLM は LLM クライアントの画像の扱いに任せるので、クライアントが
   添付の画像を埋め込まない provider では届かない — 実装時点 (2026-11-12) で、Ollama の

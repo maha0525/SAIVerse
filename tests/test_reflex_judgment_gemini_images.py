@@ -21,6 +21,7 @@ import io
 import json
 import os
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -992,3 +993,26 @@ def test_images_beyond_the_total_byte_cap_are_dropped(monkeypatch, tmp_path):
     blocks = _send("gemini_decisions", [small, big, small])["body"]["input"]
     sizes = [_decoded_size(b["data"])[1] for b in blocks[1:]]
     assert sizes == [(300, 300), (300, 300)]
+
+
+def test_an_image_with_too_many_pixels_is_dropped_before_decoding(monkeypatch, tmp_path):
+    # 寸法の巨大な画像は、ヘッダだけを読んで落とし、全デコード (load_image_bytes_for_llm)
+    # に進まない。1 ビットの画像なら作るのも保存するのも軽い。
+    _use_shape(monkeypatch, "gemini_decisions", supports_images=True)
+    huge = tmp_path / "huge.png"
+    Image.new("1", (9000, 9000), 0).save(huge, format="PNG")
+    small = _descriptor(_image_file(tmp_path, "small.png", size=(300, 300)))
+
+    import saiverse.media_utils as media_utils
+
+    real_load = media_utils.load_image_bytes_for_llm
+    loaded = []
+
+    def spy(path, mime_type, max_bytes=None):
+        loaded.append(Path(path).name)
+        return real_load(path, mime_type, max_bytes)
+
+    monkeypatch.setattr(media_utils, "load_image_bytes_for_llm", spy)
+    blocks = _send("gemini_decisions", [_descriptor(huge), small])["body"]["input"]
+    assert [_decoded_size(b["data"])[1] for b in blocks[1:]] == [(300, 300)]
+    assert loaded == ["small.png"]

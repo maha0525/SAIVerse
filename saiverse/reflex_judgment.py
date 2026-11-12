@@ -94,6 +94,7 @@ import threading
 import time
 import unicodedata
 import uuid
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1765,6 +1766,14 @@ def _fit_system_one_edges(data: bytes, format_name: str) -> Optional[bytes]:
         return buf.getvalue()
 
 
+#: 整える前の画像の画素数の上限 (幅 × 高さ)。``load_image_bytes_for_llm`` は長辺の
+#: 縮小の前に画像を全部デコードするので、寸法の巨大な画像 (圧縮率の高い画像を含む) を
+#: そのまま渡すと、送る量の上限 (:data:`_MAX_REFLEX_IMAGE_BYTES`) に届く前に判断の
+#: ワーカーがメモリと CPU を使い切りうる。ヘッダだけを読んで寸法を確かめ、超える画像は
+#: デコードせずに落とす。4800 万画素級のスマートフォンの写真は通る値にしてある。
+_MAX_REFLEX_IMAGE_PIXELS = 64_000_000
+
+
 def _prepare_one_image(
     descriptor: Any, backend: ReflexBackend,
 ) -> Tuple[Optional[_PreparedImage], str]:
@@ -1775,6 +1784,10 @@ def _prepare_one_image(
        失敗しても元のバイト列を返すので、開けない画像をそのまま送らないために要る。
     3. PNG / JPEG 以外 (GIF・WebP など) と動く PNG は、最初のフレームを PNG に描き直す。
     4. ``system_one`` の形なら各辺を範囲に収める (:func:`_fit_system_one_edges`)。
+
+    1 の前に、ヘッダだけを読んで画素数を :data:`_MAX_REFLEX_IMAGE_PIXELS` と比べる
+    (``Image.open`` は画素をデコードしない)。超える画像と、Pillow の
+    decompression bomb の警告・例外が出る画像は、デコードせずに落とす。
     """
     if not isinstance(descriptor, Mapping):
         return None, "it is not an image descriptor"
@@ -1782,16 +1795,28 @@ def _prepare_one_image(
     if not raw_path:
         return None, "it has no file path"
     path = Path(raw_path)
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, "Pillow is not available"
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as header:
+                width, height = header.size
+    except Exception as exc:
+        return None, f"its size could not be read ({type(exc).__name__})"
+    if width * height > _MAX_REFLEX_IMAGE_PIXELS:
+        return None, (
+            f"it has {width}x{height} pixels, more than {_MAX_REFLEX_IMAGE_PIXELS} "
+            "allowed before decoding"
+        )
     from saiverse.media_utils import load_image_bytes_for_llm
 
     mime_type = str(descriptor.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png")
     data, _effective_mime = load_image_bytes_for_llm(path, mime_type)
     if not data:
         return None, "the file could not be read"
-    try:
-        from PIL import Image
-    except ImportError:
-        return None, "Pillow is not available"
     try:
         with Image.open(io.BytesIO(data)) as img:
             img.load()
