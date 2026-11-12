@@ -8,5 +8,14 @@
     "HTTP-Referer": "https://saiverse.net",
     "X-OpenRouter-Title": "SAIVerse",
     "X-OpenRouter-Categories": "roleplay,general-chat"
-  }
+  },
+  "current_models": [
+    "openrouter-deepseek-v4.1-flash-1017",
+    "openrouter-deepseek-v4-pro-0813",
+    "openrouter-kimi-k3.1-pro",
+    "openrouter-z-ai-glm-5.3",
+    "openrouter-z-ai-glm-5.3-flash",
+    "openrouter-qwen3.8-max",
+    "openrouter-qwen3.8-flash"
+  ]
 }

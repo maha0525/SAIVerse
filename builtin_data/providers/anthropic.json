@@ -2,5 +2,11 @@
   "id": "anthropic",
   "display_name": "Anthropic",
   "protocol": "anthropic_native",
-  "api_key_env": "CLAUDE_API_KEY"
+  "api_key_env": "CLAUDE_API_KEY",
+  "current_models": [
+    "claude-fable-5.2",
+    "claude-opus-5.5",
+    "claude-sonnet-5.5",
+    "claude-haiku-5.5"
+  ]
 }

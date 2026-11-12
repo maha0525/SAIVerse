@@ -23,6 +23,7 @@ from saiverse.model_configs import (
     get_cache_config,
     is_model_available,
 )
+from saiverse.model_picker import compute_placements, sort_model_keys
 
 router = APIRouter()
 
@@ -45,6 +46,15 @@ class ModelInfo(BaseModel):
     reflex_only: bool = False
     available: bool = True
     config_error: Optional[Dict[str, str]] = None
+    # モデルを選ぶ欄での置き場所 (saiverse/model_picker.py、docs/intent/model_picker.md)。
+    # picker_group はどのボタンに入るか、picker_group_label は画面が知らないグループの
+    # ときに使うボタンの表示名、picker_group_order はボタンの並び順、picker_heading は
+    # custom のボタンの中で分ける見出し (ほかは None)、is_current は最初から出すかどうか。
+    picker_group: str = ""
+    picker_group_label: str = ""
+    picker_group_order: int = 0
+    picker_heading: Optional[str] = None
+    is_current: bool = True
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -107,11 +117,18 @@ def get_models():
 
     Missing-key models are omitted; invalid-provider models remain visible as unavailable.
     Includes pricing info (USD per 1M tokens) when available.
+
+    行はモデルを選ぶ欄の並び順 (ボタンの並び順 → ボタンの中の並び順) で返す。
+    並べ方は saiverse/model_picker.py が決め、画面は受け取った順のまま表示する。
     """
     choices = get_model_choices_with_display_names()
+    placements = compute_placements()
+    names = dict(choices)
+    ordered = sort_model_keys([mid for mid, _ in choices], placements)
     pricing_at = datetime.now(timezone.utc)
     result = []
-    for mid, name in choices:
+    for mid in ordered:
+        name = names[mid]
         error = get_model_config_error(mid)
         if not is_model_available(mid) and not error:
             continue
@@ -137,6 +154,7 @@ def get_models():
             "price_period_ends_at": pricing.get("period_ends_at"),
             "rate_limit": rate_limit,
             "reflex_only": is_reflex_only_model(mid),
+            **placements[mid].as_fields(),
         })
     return result
 

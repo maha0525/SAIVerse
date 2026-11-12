@@ -29,6 +29,17 @@
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
+### モデルを選ぶ欄での並べ方 (`current_models` / `picker_group`)
+
+モデルを選ぶ欄は、先にプロバイダのボタンを選び、次にそのプロバイダのモデルから選ぶ。並べ方を決めるのは `saiverse/model_picker.py` の一か所で、`GET /api/config/models` は行をこの並び順で返し、各行に `picker_group` / `picker_group_label` / `picker_group_order` / `picker_heading` / `is_current` を載せる。設計は [`docs/intent/model_picker.md`](../intent/model_picker.md)。
+
+プロバイダ定義には、そのための省略できる項目が 2 つある。
+
+- **`current_models`**: 最初から出すモデルを、モデル定義のファイル名 (拡張子なし = 設定キー) で、表示したい順に並べた配列。リストに無い標準のモデルは「他のモデル」に畳まれる (消えはしない)。利用者が自分で追加したモデルと拡張パックのモデルは、リストに無くても最初から出る。この項目を持たないプロバイダは全部を最初から出す。`builtin_data/providers/` では `gemini` / `anthropic` / `openai` / `openai_codex` / `xai` / `openrouter` が持つ。Gemini は 1 つのリストに有料と無料の設定キーを並べ、ボタンを分けるのはモデル定義の `prefer_paid`。新しい世代のモデルを足したときは、このリストを手で更新する。書いた名前が実在するモデルを指していることは `tests/test_model_picker.py` が検査する。
+- **`picker_group`**: どのボタンにまとめるかの名前 (安全な識別子)。`ollama` / `lmstudio` / `llama_cpp_server` は `"custom"` を書いており、利用者が自分で作ったプロバイダ (user_data の層のプロバイダ) と一緒に「ローカル・カスタム」のボタンに入る。このボタンの中は、プロバイダの表示名を見出しにして分ける。
+
+ボタンの並び順は anthropic、openai、openai_codex、Gemini (有料)、Gemini (無料)、xai、openrouter、nvidia_nim の順で、それ以外は名前の順でその後ろ、「ローカル・カスタム」が最後。画面から標準のプロバイダを上書き編集しても、どのボタンに入るかと最初から出すモデルは、配られている定義 (`builtin_data/` と拡張パック) のとおりのまま変わらない。上書きの中に写された `current_models` と `picker_group` は見ない。「ローカル・カスタム」に入るのは、同じ id の配られている定義が無いプロバイダ (利用者が自分で作ったもの) と、`picker_group` に `custom` と書いてある標準のプロバイダだけ。
+
 ### OpenAI は推論中の温度を受け付けない
 
 `openai` は `openai_compat_options` に `supports_sampling_with_reasoning: false` を宣言する。
@@ -228,4 +239,4 @@ Gemini の [Decisions API](https://aistudio.google.com/docs/decisions-api)（`v1
 
 `GET /api/providers` は各行の `available`（設定の構造が有効か）と `config_error`（無ければ null）を返す。API キーの有無は従来の `api_key_configured` で別途確認する。モデルの2本の一覧 API も `available` と `config_error` を返し、壊れた provider を参照するモデルを黙って隠さない。
 
-`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。
+`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`current_models` は省略・null か、非空文字列だけのリスト。`picker_group` は省略・null か、安全な識別子の文字列。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。
