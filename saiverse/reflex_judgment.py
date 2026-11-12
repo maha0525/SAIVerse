@@ -94,7 +94,6 @@ import threading
 import time
 import unicodedata
 import uuid
-import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1786,8 +1785,7 @@ def _prepare_one_image(
     4. ``system_one`` の形なら各辺を範囲に収める (:func:`_fit_system_one_edges`)。
 
     1 の前に、ヘッダだけを読んで画素数を :data:`_MAX_REFLEX_IMAGE_PIXELS` と比べる
-    (``Image.open`` は画素をデコードしない)。超える画像と、Pillow の
-    decompression bomb の警告・例外が出る画像は、デコードせずに落とす。
+    (``Image.open`` は画素をデコードしない)。超える画像は、デコードせずに落とす。
     """
     if not isinstance(descriptor, Mapping):
         return None, "it is not an image descriptor"
@@ -1799,11 +1797,14 @@ def _prepare_one_image(
         from PIL import Image
     except ImportError:
         return None, "Pillow is not available"
+    # 警告のフィルター (warnings.catch_warnings) はプロセス全体の共有状態で、判断の
+    # ワーカーは並行して走るので触らない。上限 (6400 万画素) は Pillow の
+    # decompression bomb の警告の閾値 (Image.MAX_IMAGE_PIXELS、既定約 8900 万画素) より
+    # 小さいので、警告が出る画像は下の寸法の検査で必ず落ちる。その 2 倍を超える画像は
+    # Image.open が DecompressionBombError を投げ、ここで落ちる。
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as header:
-                width, height = header.size
+        with Image.open(path) as header:
+            width, height = header.size
     except Exception as exc:
         return None, f"its size could not be read ({type(exc).__name__})"
     if width * height > _MAX_REFLEX_IMAGE_PIXELS:
