@@ -18,9 +18,20 @@
     }
   },
   "pricing": {
-    "input_per_1m_tokens": 0.95,
-    "cached_input_per_1m_tokens": 0.15,
-    "output_per_1m_tokens": 4,
-    "currency": "USD"
+    "input_per_1m_tokens": 1.9,
+    "cached_input_per_1m_tokens": 0.3,
+    "output_per_1m_tokens": 6,
+    "currency": "USD",
+    "periods": [
+      {
+        "starts_at": "0001-01-01T00:00:00+00:00",
+        "ends_at": "2026-12-01T10:00:00+09:00",
+        "rates": {
+          "input_per_1m_tokens": 0.95,
+          "cached_input_per_1m_tokens": 0.15,
+          "output_per_1m_tokens": 4
+        }
+      }
+    ]
   }
 }

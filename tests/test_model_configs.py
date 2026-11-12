@@ -167,7 +167,7 @@ class TestAugust2026ModelCatalog(unittest.TestCase):
         expected = {
             "claude-opus-5": ("claude-opus-5", 1_000_000, 5, 25),
             "grok-4.6": ("grok-4.6", 500_000, 2, 6),
-            "sakana-namazu-v1.0": ("sakana-namazu-v1.0", 262_144, 0.95, 4),
+            "sakana-namazu-v1.0": ("sakana-namazu-v1.0", 262_144, 1.9, 6),
             "openrouter-deepseek-v4-pro-0813": (
                 "deepseek/deepseek-v4-pro-0813", 1_048_576, 0.435, 0.87,
             ),
