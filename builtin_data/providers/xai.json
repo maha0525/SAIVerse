@@ -2,5 +2,8 @@
   "id": "xai",
   "display_name": "xAI",
   "protocol": "xai_native",
-  "api_key_env": "XAI_API_KEY"
+  "api_key_env": "XAI_API_KEY",
+  "current_models": [
+    "grok-4.7"
+  ]
 }

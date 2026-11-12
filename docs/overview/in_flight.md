@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | モデルを選ぶ欄の作り直し (プロバイダを先に選ぶ・最初から出すモデルのリスト・全画面で同じ欄) | 実装済みで、メティスがテスト用の環境の画面で 4 つの画面を確かめた。次 = レビューを通して PR を出し、まはーが本番の画面で見て「ローカル・カスタム」のまとめ方を判断する。 | まはー (実機確認) | [intent](../intent/model_picker.md) | 2026-11-13 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | develop に入り、v0.3.30 に載る。次 = 更新・再起動後の通常利用で、メティスが backend.log から送信完了と応答待ちを分けて確認する。 | 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-11-10 |

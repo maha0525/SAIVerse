@@ -111,6 +111,8 @@ function harness(buildingId = 'a') {
         if (name === 'lucide-react') return new Proxy({}, { get: () => () => null });
         if (name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, field) => field }) };
         if (name.endsWith('/ImageUpload')) return { __esModule: true, default: () => null };
+        if (name.endsWith('/ModelPicker')) return { __esModule: true, default: () => null };
+        if (name.endsWith('/lib/modelList')) return { fetchModelList: async () => [] };
         if (name === '@/i18n/core') return { t: id => id };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/lib/movementNotices' || name === '@/lib/buildingSettingsSave') {

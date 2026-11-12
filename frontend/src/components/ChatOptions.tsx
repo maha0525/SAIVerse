@@ -7,32 +7,13 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
-import { X, ChevronDown, Star } from 'lucide-react';
+import { X, ChevronDown } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
 import { formatPricePeriodEnd, isPricePeriodOver } from '@/lib/modelPricing';
+import type { ModelRateLimit as RateLimitInfo, PickerModel as ModelInfo } from '@/lib/modelList';
 import ModelEditorModal from './settings/ModelEditorModal';
 import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
-
-interface RateLimitInfo {
-    rpd: number;
-    reset_timezone: string;
-}
-
-interface ModelInfo {
-    id: string;
-    name: string;
-    provider?: string | null;
-    group?: string | null;  // UI grouping label (falls back to provider)
-    input_price?: number | null;
-    output_price?: number | null;
-    currency?: string;
-    price_period_ends_at?: string | null;
-    rate_limit?: RateLimitInfo | null;
-    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
-     *  チャットのモデル一時上書きは会話に使うので、選択肢には出さない。 */
-    reflex_only?: boolean;
-    config_error?: { path: string; source: string; reason: string } | null;
-}
+import ModelPicker from './common/ModelPicker';
 
 interface ParamSpec {
     label: string;
@@ -353,23 +334,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    const GROUP_LABELS: Record<string, string> = {
-        anthropic: 'Anthropic',
-        openai: 'OpenAI',
-        gemini: 'Google Gemini',
-        openrouter: 'OpenRouter',
-        nvidia_nim: 'NVIDIA NIM',
-        xai: 'xAI',
-        ollama: 'Ollama',
-        llama_cpp: 'llama.cpp',
-        plamo: 'PLaMo',
-        sakana: 'Sakana AI',
-    };
-
-    const groupLabel = (group: string): string => {
-        return GROUP_LABELS[group] || group;
-    };
-
     const isFavorite = (modelId: string) => favoriteModels.includes(modelId);
 
     const toggleFavorite = async (modelId: string) => {
@@ -388,31 +352,11 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    // Group models by group field, with favorites at top.
     // 選択肢に出すのは文章を書けるモデルだけ — 反射判断専用の宛先 (reflex_only) は
     // ここでの選択が会話の一時上書きなので外す。表示名の解決に使う models 自体は
-    // 絞らない (すでに選ばれている値の名前を出せなくなるため)。
-    const groupedModels = useMemo(() => {
-        const selectable = models.filter(m => !m.reflex_only);
-        const favorites = selectable.filter(m => favoriteModels.includes(m.id));
-        const byGroup: Record<string, ModelInfo[]> = {};
-        for (const m of selectable) {
-            const group = m.group || m.provider || 'other';
-            if (!byGroup[group]) byGroup[group] = [];
-            byGroup[group].push(m);
-        }
-        // Sort groups: known providers first, then alphabetical
-        const groupOrder = ['anthropic', 'openai', 'gemini', 'openrouter', 'nvidia_nim', 'xai', 'ollama', 'llama_cpp'];
-        const sortedGroups = Object.keys(byGroup).sort((a, b) => {
-            const ai = groupOrder.indexOf(a);
-            const bi = groupOrder.indexOf(b);
-            if (ai !== -1 && bi !== -1) return ai - bi;
-            if (ai !== -1) return -1;
-            if (bi !== -1) return 1;
-            return a.localeCompare(b);
-        });
-        return { favorites, byGroup, sortedGroups };
-    }, [models, favoriteModels]);
+    // 絞らない (すでに選ばれている値の名前を出せなくなるため)。グループ分けと
+    // お気に入りを上に出すのは ModelPicker が受け持つ。
+    const selectableModels = useMemo(() => models.filter(m => !m.reflex_only), [models]);
 
     // モデル変更は直列化する — 素早い A→B 切替で A の応答が後着すると、選択欄は B
     // なのにパラメータ・水位表示が A に戻る (Codex 指摘 2026-07-30)。seq が最新で
@@ -760,38 +704,15 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                             <div className={styles.section}>
                                 <div className={styles.formGroup}>
                                     <label data-i18n="components.ChatOptions.text036">{uiText("components.ChatOptions.text036")}</label>
-                                    <div className={styles.modelSelectRow}>
-                                        <select
-                                            className={styles.select}
-                                            value={currentModel}
-                                            onChange={(e) => handleModelChange(e.target.value)}
-                                        >
-                                            <option data-i18n="components.ChatOptions.text037" value="">{uiText("components.ChatOptions.text037")}</option>
-                                            {groupedModels.favorites.length > 0 && (
-                                                <optgroup data-i18n="components.ChatOptions.text038" label={uiText("components.ChatOptions.text038")}>
-                                                    {groupedModels.favorites.map(m => (
-                                                        <option key={`fav-${m.id}`} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                                    ))}
-                                                </optgroup>
-                                            )}
-                                            {groupedModels.sortedGroups.map(group => (
-                                                <optgroup key={group} label={groupLabel(group)}>
-                                                    {groupedModels.byGroup[group].map(m => (
-                                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
-                                                    ))}
-                                                </optgroup>
-                                            ))}
-                                        </select>
-                                        {currentModel && (
-                                            <button data-i18n="components.ChatOptions.text039 components.ChatOptions.text040"
-                                                className={`${styles.favoriteBtn} ${isFavorite(currentModel) ? styles.favoriteBtnActive : ''}`}
-                                                onClick={() => toggleFavorite(currentModel)}
-                                                title={isFavorite(currentModel) ? uiText("components.ChatOptions.text039") : uiText("components.ChatOptions.text040")}
-                                            >
-                                                <Star size={18} fill={isFavorite(currentModel) ? 'currentColor' : 'none'} />
-                                            </button>
-                                        )}
-                                    </div>
+                                    <ModelPicker
+                                        models={selectableModels}
+                                        value={currentModel}
+                                        onChange={handleModelChange}
+                                        emptyLabel={uiText("components.ChatOptions.text037")}
+                                        favorites={favoriteModels}
+                                        onToggleFavorite={toggleFavorite}
+                                        ariaLabel={uiText("components.ChatOptions.text036")}
+                                    />
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel) return null;

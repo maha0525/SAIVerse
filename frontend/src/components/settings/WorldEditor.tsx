@@ -8,6 +8,8 @@ import styles from './WorldEditor.module.css';
 import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen, Upload, ChevronLeft, ChevronRight } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
 import FileUpload from '../common/FileUpload';
+import ModelPicker from '../common/ModelPicker';
+import { fetchModelList, type PickerModel } from '../../lib/modelList';
 import { DB_TABLE_PAGE_SIZE, fetchAllTableRows, fetchTablePage } from '../../lib/dbTable';
 
 // Helper Form Components - defined outside component to prevent re-creation on each render
@@ -105,15 +107,6 @@ interface Playbook {
     user_selectable: boolean;
     nodes_json?: string;
     schema_json?: string;
-}
-
-interface ModelChoice {
-    id: string;
-    name: string;
-    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
-     *  この画面が出すのは会話に使う欄だけなので、印の付いたものは選択肢に出さない。 */
-    reflex_only?: boolean;
-    config_error?: { path: string; source: string; reason: string } | null;
 }
 
 /** 建物を消したら何が一緒に消え、何が残るか (GET /api/world/buildings/{id}/deletion-preview)。
@@ -294,7 +287,7 @@ export default function WorldEditor() {
     const [aiOptions, setAiOptions] = useState<AI[]>([]);
     const [bagOptions, setBagOptions] = useState<Item[]>([]);
 
-    const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
+    const [modelChoices, setModelChoices] = useState<PickerModel[]>([]);
     // 標準モデル・軽量モデルの選択肢。どちらも会話に使う役割なので、文章を書けない
     // 反射判断専用の宛先は出さない (選んでも保存の時点で断られる)。
     const conversationModelChoices = modelChoices.filter(m => !m.reflex_only);
@@ -383,7 +376,7 @@ export default function WorldEditor() {
     // Bag は「アイテムの入れ物になっているアイテム」なので、選択肢を作るには
     // 一覧の 1 ページではなく全アイテムから拾う必要がある
     const loadBagOptions = async () => { try { const rows = await fetchAllTableRows<Item>('item'); setBagOptions(rows.filter(i => i.TYPE === 'bag')); } catch (e) { console.error('loadBagOptions failed:', e); } };
-    const loadModels = async () => { try { const res = await apiFetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { console.error('loadModels failed:', e); } };
+    const loadModels = async () => { try { const data = await fetchModelList(); if (data) setModelChoices(data); } catch (e) { console.error('loadModels failed:', e); } };
     const loadPlaybooks = async () => { try { const res = await apiFetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { console.error('loadPlaybooks failed:', e); } };
     const loadAvailablePrompts = async () => { try { const res = await apiFetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { console.error('loadAvailablePrompts failed:', e); } };
 
@@ -818,20 +811,22 @@ export default function WorldEditor() {
                                 <option data-i18n="components.settings.WorldEditor.text070" value="">{uiText("components.settings.WorldEditor.text070")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             {selectedAI && <>
-                                <Field label={uiText("components.settings.WorldEditor.text071")}><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
-                                    <option data-i18n="components.settings.WorldEditor.text072" value="">{uiText("components.settings.WorldEditor.text072")}</option>
-                                    {formData.default_model && !conversationModelChoices.some(m => m.id === formData.default_model) && (
-                                        <option data-i18n="components.settings.WorldEditor.text073" value={formData.default_model}>{uiText("components.settings.WorldEditor.text073")}{formData.default_model}</option>
-                                    )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
-                                </Select></Field>
-                                <Field label={uiText("components.settings.WorldEditor.text074")}><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
-                                    <option data-i18n="components.settings.WorldEditor.text075" value="">{uiText("components.settings.WorldEditor.text075")}</option>
-                                    {formData.lightweight_model && !conversationModelChoices.some(m => m.id === formData.lightweight_model) && (
-                                        <option data-i18n="components.settings.WorldEditor.text076" value={formData.lightweight_model}>{uiText("components.settings.WorldEditor.text076")}{formData.lightweight_model}</option>
-                                    )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
-                                </Select></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text071")}><ModelPicker
+                                    models={conversationModelChoices}
+                                    value={formData.default_model || ''}
+                                    onChange={(id) => setFormData({ ...formData, default_model: id })}
+                                    emptyLabel={uiText("components.settings.WorldEditor.text072")}
+                                    unknownValueLabel={uiText("components.settings.WorldEditor.text073")}
+                                    ariaLabel={uiText("components.settings.WorldEditor.text071")}
+                                /></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text074")}><ModelPicker
+                                    models={conversationModelChoices}
+                                    value={formData.lightweight_model || ''}
+                                    onChange={(id) => setFormData({ ...formData, lightweight_model: id })}
+                                    emptyLabel={uiText("components.settings.WorldEditor.text075")}
+                                    unknownValueLabel={uiText("components.settings.WorldEditor.text076")}
+                                    ariaLabel={uiText("components.settings.WorldEditor.text074")}
+                                /></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>
                                     <label data-i18n="components.settings.WorldEditor.text078 components.settings.WorldEditor.text079" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                         <input

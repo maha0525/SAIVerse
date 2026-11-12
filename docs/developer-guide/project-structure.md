@@ -95,6 +95,7 @@ saiverse/
 ├── gemini_timing.py        # Gemini の DEBUG 計測（準備・HTTP 本文送信・応答待ち、本文を記録しない）
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
+├── model_picker.py         # モデルを選ぶ欄の並べ方を決める一か所（どのボタンに入るか・最初から出すか・並び順。model_picker.md）
 ├── persona_model_selection.py # ペルソナが話す標準モデルの決め方（一時上書き → 個別 → グローバル → 組み込み）の唯一の置き場 /
 │                           #   設定を変えたときの決め直しとロック / 返事の始まりに決めるモデルと接続（ReplyModelBinding）/
 │                           #   設定ファイルの無いモデル名を保存しない検査と知らせの文面（persona_model_selection.md）
