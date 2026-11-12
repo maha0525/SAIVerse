@@ -1,0 +1,295 @@
+{
+  "実験": "exp4_invalid_and_partial_failure — 不正な入力と途中の失敗",
+  "隔離ホーム": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp4_invalid_and_partial_failure_home",
+  "呼んだもの": "api.routes.people.memopedia.import_memopedia(<ペルソナ>, body=<各場面の入力>, clear=<各場面>, manager=<偽 manager>)",
+  "場面": [
+    {
+      "場面": "1. pages の項目が無い入力",
+      "この入力で見たいこと": "削除だけ走って何も入らない形にならないか",
+      "渡した入力": {
+        "version": 1
+      },
+      "clear": true,
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 0,
+        "message": "Imported 0 pages"
+      },
+      "生きているページ (前)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "生きているページ (後)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "コア記憶の一覧 (前)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶の一覧 (後)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "あらすじの一覧 (後)": [
+        "あらすじ"
+      ]
+    },
+    {
+      "場面": "2. pages が空配列の入力",
+      "この入力で見たいこと": "同上",
+      "渡した入力": {
+        "version": 1,
+        "pages": []
+      },
+      "clear": true,
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 0,
+        "message": "Imported 0 pages"
+      },
+      "生きているページ (前)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "生きているページ (後)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "コア記憶の一覧 (前)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶の一覧 (後)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "あらすじの一覧 (後)": [
+        "あらすじ"
+      ]
+    },
+    {
+      "場面": "3. 取り込める行が 1 つも無い入力 (全部 Chronicle)",
+      "この入力で見たいこと": "除外される行しか無いのに、先行削除だけ走らないか",
+      "渡した入力": {
+        "version": 1,
+        "pages": [
+          {
+            "id": "legacy-ch-1",
+            "parent_id": null,
+            "title": "旧書き出しの残骸",
+            "summary": "",
+            "content": "x",
+            "category": "chronicle"
+          }
+        ]
+      },
+      "clear": true,
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 0,
+        "message": "Imported 0 pages"
+      },
+      "生きているページ (前)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "生きているページ (後)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語"
+      ],
+      "コア記憶の一覧 (前)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶の一覧 (後)": [],
+      "あらすじの一覧 (後)": [
+        "あらすじ"
+      ]
+    },
+    {
+      "場面": "4. 一部の行が作成に失敗する入力",
+      "この入力で見たいこと": "失敗した行が応答の件数と利用者への表示にどう現れるか",
+      "渡した入力": {
+        "version": 1,
+        "pages": [
+          {
+            "id": "ok-1",
+            "parent_id": null,
+            "title": "入る行",
+            "summary": "",
+            "content": "本文",
+            "category": "terms"
+          },
+          {
+            "id": "ng-1",
+            "parent_id": null,
+            "title": {
+              "壊れた": "表題"
+            },
+            "summary": "",
+            "content": "本文",
+            "category": "terms"
+          },
+          {
+            "id": "ok-2",
+            "parent_id": null,
+            "title": "これも入る行",
+            "summary": "",
+            "content": "本文",
+            "category": "terms"
+          }
+        ]
+      },
+      "clear": true,
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 2,
+        "message": "Imported 2 pages"
+      },
+      "生きているページ (前)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "生きているページ (後)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] これも入る行",
+        "[terms] 入る行",
+        "[terms] 用語"
+      ],
+      "コア記憶の一覧 (前)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶の一覧 (後)": [],
+      "あらすじの一覧 (後)": [
+        "あらすじ"
+      ]
+    },
+    {
+      "場面": "5. 既にある識別子と同じ行を含む入力",
+      "この入力で見たいこと": "衝突した行が黙って落ちるか、上書きされるか",
+      "渡した入力": {
+        "version": 1,
+        "pages": [
+          {
+            "id": "root_terms",
+            "parent_id": null,
+            "title": "用語を上書きしたい",
+            "summary": "",
+            "content": "上書き本文",
+            "category": "terms"
+          },
+          {
+            "id": "new-1",
+            "parent_id": null,
+            "title": "新しい行",
+            "summary": "",
+            "content": "本文",
+            "category": "terms"
+          }
+        ]
+      },
+      "clear": false,
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 1,
+        "message": "Imported 1 pages"
+      },
+      "生きているページ (前)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "生きているページ (後)": [
+        "[chronicle] chronicle:1",
+        "[chronicle] 時間の地図",
+        "[core] コア記憶",
+        "[core] コア記憶 c:1",
+        "[core] コア記憶 c:2",
+        "[events] 出来事",
+        "[people] 人物",
+        "[plans] 計画",
+        "[terms] 新しい行",
+        "[terms] 用語",
+        "[terms] 知識ページ"
+      ],
+      "コア記憶の一覧 (前)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶の一覧 (後)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "あらすじの一覧 (後)": [
+        "あらすじ"
+      ]
+    }
+  ]
+}

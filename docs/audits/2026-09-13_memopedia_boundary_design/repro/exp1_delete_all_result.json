@@ -1,0 +1,307 @@
+{
+  "実験": "exp1_delete_all — 手帳の全削除が何を巻き込むか",
+  "隔離ホーム": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp1_delete_all_home",
+  "記憶 DB": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp1_delete_all_home\\personas\\probe_delete_all\\memory.db",
+  "用意したもの": {
+    "core_ids": [
+      1,
+      2
+    ],
+    "trashed_core_id": 3,
+    "knowledge_page_id": "5218b3c3-7630-41d9-abb2-41c5432b0745",
+    "knowledge_short_id": 6,
+    "fragment_id": "40c26ec0-7678-44b0-a5e5-14a69588a902",
+    "desk_ref": "memopedia:6",
+    "chronicle_entry_id": "d8b04c34-ce6d-4cfa-820f-53c5f77a7a97",
+    "theme_page_id": "035f4b00-7169-4be6-bc9c-f2732767e248"
+  },
+  "操作前": {
+    "保存表の行": [
+      {
+        "id": "d8b04c34-ce6d-4cfa-820f-53c5f77a7a97",
+        "category": "chronicle",
+        "parent_id": "root_chronicle",
+        "title": "chronicle:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 7
+      },
+      {
+        "id": "root_chronicle",
+        "category": "chronicle",
+        "parent_id": null,
+        "title": "時間の地図",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 1
+      },
+      {
+        "id": "root_core",
+        "category": "core",
+        "parent_id": null,
+        "title": "コア記憶",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 2
+      },
+      {
+        "id": "dd873646-ff62-4b42-bc56-b59c2c7bd0e0",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 3
+      },
+      {
+        "id": "fe87c337-cabc-4c2c-b38f-1ba50694d158",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:2",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 4
+      },
+      {
+        "id": "826989ff-0726-435d-a82c-adce1ffd77ad",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:3",
+        "is_deleted": 1,
+        "metadata": "metadata あり",
+        "short_id": 5
+      },
+      {
+        "id": "root_events",
+        "category": "events",
+        "parent_id": null,
+        "title": "出来事",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_people",
+        "category": "people",
+        "parent_id": null,
+        "title": "人物",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_plans",
+        "category": "plans",
+        "parent_id": null,
+        "title": "計画",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_terms",
+        "category": "terms",
+        "parent_id": null,
+        "title": "用語",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "5218b3c3-7630-41d9-abb2-41c5432b0745",
+        "category": "terms",
+        "parent_id": null,
+        "title": "知識ページ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 6
+      },
+      {
+        "id": "root_theme",
+        "category": "theme",
+        "parent_id": null,
+        "title": "テーマ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 8
+      },
+      {
+        "id": "035f4b00-7169-4be6-bc9c-f2732767e248",
+        "category": "theme",
+        "parent_id": "root_theme",
+        "title": "テーマページ",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 9
+      }
+    ],
+    "付随データ": {
+      "生きているページ": 12,
+      "Fragment": 1,
+      "ページの埋め込み": 0,
+      "ページの編集来歴": 4,
+      "机に開いた参照": [
+        "memopedia:6"
+      ]
+    },
+    "正規の読み取り": {
+      "コア記憶の一覧 (list_core_memories)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶のごみ箱 (list_deleted_core_memories)": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "コア記憶の合計字数 (total_core_memory_chars)": 32,
+      "あらすじの一覧 (get_all_entries_ordered)": [
+        "あらすじ"
+      ]
+    },
+    "頭のコア記憶の章": {
+      "capture": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "render": "## コア記憶（自分で選んで刻んだ、常に携えている知識）\n- [core:1] まはーは野菜がほぼ食べられない\n- [core:2] 工房の棚は三段で、上段に定規を置く"
+    }
+  },
+  "呼んだもの": "api.routes.people.memopedia.delete_all_memopedia_pages(\"probe_delete_all\", manager=<偽 manager>)",
+  "API の応答 (原文)": {
+    "success": true,
+    "deleted_count": 4,
+    "message": "Deleted 4 Memopedia pages"
+  },
+  "操作後": {
+    "保存表の行": [
+      {
+        "id": "d8b04c34-ce6d-4cfa-820f-53c5f77a7a97",
+        "category": "chronicle",
+        "parent_id": "root_chronicle",
+        "title": "chronicle:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 7
+      },
+      {
+        "id": "root_chronicle",
+        "category": "chronicle",
+        "parent_id": null,
+        "title": "時間の地図",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 1
+      },
+      {
+        "id": "root_core",
+        "category": "core",
+        "parent_id": null,
+        "title": "コア記憶",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 2
+      },
+      {
+        "id": "826989ff-0726-435d-a82c-adce1ffd77ad",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:3",
+        "is_deleted": 1,
+        "metadata": "metadata あり",
+        "short_id": 5
+      },
+      {
+        "id": "root_events",
+        "category": "events",
+        "parent_id": null,
+        "title": "出来事",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_people",
+        "category": "people",
+        "parent_id": null,
+        "title": "人物",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_plans",
+        "category": "plans",
+        "parent_id": null,
+        "title": "計画",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_terms",
+        "category": "terms",
+        "parent_id": null,
+        "title": "用語",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_theme",
+        "category": "theme",
+        "parent_id": null,
+        "title": "テーマ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 8
+      }
+    ],
+    "付随データ": {
+      "生きているページ": 8,
+      "Fragment": 0,
+      "ページの埋め込み": 0,
+      "ページの編集来歴": 4,
+      "机に開いた参照": [
+        "memopedia:6"
+      ]
+    },
+    "正規の読み取り": {
+      "コア記憶の一覧 (list_core_memories)": [],
+      "コア記憶のごみ箱 (list_deleted_core_memories)": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "コア記憶の合計字数 (total_core_memory_chars)": 0,
+      "あらすじの一覧 (get_all_entries_ordered)": [
+        "あらすじ"
+      ]
+    },
+    "頭のコア記憶の章": {
+      "capture": [],
+      "render": null
+    }
+  },
+  "読み取りの前後": {
+    "コア記憶の一覧": {
+      "前": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "後": []
+    },
+    "コア記憶のごみ箱": {
+      "前": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "後": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ]
+    },
+    "あらすじの一覧": {
+      "前": [
+        "あらすじ"
+      ],
+      "後": [
+        "あらすじ"
+      ]
+    }
+  }
+}

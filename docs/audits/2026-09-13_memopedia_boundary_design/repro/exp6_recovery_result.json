@@ -1,0 +1,143 @@
+{
+  "実験": "exp6_recovery — 壊れたあと自力で戻せるか",
+  "隔離ホーム": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp6_recovery_home",
+  "壊し方": "健全なペルソナから export_memopedia で書き出し、別のペルソナへ import_memopedia(clear=False) で取り込む",
+  "手当て": [
+    {
+      "手当て": "1. 手帳の木 (GET /people/{id}/memopedia/tree) に壊れた行は見えるか",
+      "結果": {
+        "画面に出るカテゴリ": [
+          "people",
+          "terms",
+          "plans",
+          "events",
+          "theme"
+        ],
+        "木に出るページの表題": {
+          "people": [
+            "人物"
+          ],
+          "terms": [
+            "取り込み先の知識ページ",
+            "持ち出し元の知識ページ",
+            "用語"
+          ],
+          "plans": [
+            "計画"
+          ],
+          "events": [
+            "出来事"
+          ],
+          "theme": []
+        }
+      }
+    },
+    {
+      "手当て": "2. 手帳の 1 件削除 (DELETE .../memopedia/pages/{page_id}) で取り除けるか",
+      "結果": [
+        {
+          "消そうとした行": "コア記憶 c:1",
+          "応答": {
+            "success": true
+          }
+        },
+        {
+          "消そうとした行": "コア記憶 c:2",
+          "応答": {
+            "success": true
+          }
+        }
+      ],
+      "そのあとの読み取り": {
+        "コア記憶の一覧 (list_core_memories)": [
+          "c:1 取り込み先にもとからあった記憶"
+        ],
+        "コア記憶のごみ箱 (list_deleted_core_memories)": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+        "コア記憶の合計字数 (total_core_memory_chars)": 15,
+        "あらすじの一覧 (get_all_entries_ordered)": [
+          "あらすじ"
+        ]
+      },
+      "そのあとの頭のコア記憶の章": {
+        "capture": [
+          "c:1 取り込み先にもとからあった記憶"
+        ],
+        "render": "## コア記憶（自分で選んで刻んだ、常に携えている知識）\n- [core:1] 取り込み先にもとからあった記憶"
+      }
+    },
+    {
+      "手当て": "3. コア記憶の 1 件削除 (DELETE .../core-memory/{memory_id}) で取り除けるか",
+      "core:1 を指定した応答": {
+        "ok": true,
+        "total_chars": 24,
+        "budget": 2000,
+        "over_budget": false,
+        "unconfirmed_count": 0
+      },
+      "core:2 を指定した応答": "EXCEPTION HTTPException: 404: core:2 が見つからないか、既に削除されています。",
+      "そのあとの読み取り": {
+        "コア記憶の一覧 (list_core_memories)": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+        "コア記憶のごみ箱 (list_deleted_core_memories)": [
+          "c:1 取り込み先にもとからあった記憶"
+        ],
+        "コア記憶の合計字数 (total_core_memory_chars)": 24,
+        "あらすじの一覧 (get_all_entries_ordered)": [
+          "あらすじ"
+        ]
+      }
+    },
+    {
+      "手当て": "4. もう一度「Memopedia 全削除」を押す",
+      "API の応答 (原文)": {
+        "success": true,
+        "deleted_count": 5,
+        "message": "Deleted 5 Memopedia pages"
+      },
+      "そのあとの読み取り": {
+        "コア記憶の一覧 (list_core_memories)": [],
+        "コア記憶のごみ箱 (list_deleted_core_memories)": [],
+        "コア記憶の合計字数 (total_core_memory_chars)": 0,
+        "あらすじの一覧 (get_all_entries_ordered)": [
+          "あらすじ"
+        ]
+      },
+      "そのあとの頭のコア記憶の章": {
+        "capture": [],
+        "render": null
+      },
+      "そのあとに残った core の行": [
+        {
+          "title": "コア記憶",
+          "metadata": "metadata なし",
+          "is_deleted": 0
+        }
+      ]
+    }
+  ],
+  "壊れた行の中身": [
+    {
+      "id": "a6506db7-d071-4097-bb32-054d9173fd94",
+      "title": "コア記憶 c:1",
+      "content": "持ち出し元のコア記憶 A",
+      "metadata": null
+    },
+    {
+      "id": "8743977e-dcbd-4eda-99cd-7f993f482532",
+      "title": "コア記憶 c:2",
+      "content": "持ち出し元のコア記憶 B",
+      "metadata": null
+    }
+  ],
+  "壊れた直後の読み取り": {
+    "コア記憶の一覧 (list_core_memories)": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+    "コア記憶のごみ箱 (list_deleted_core_memories)": [],
+    "コア記憶の合計字数 (total_core_memory_chars)": 39,
+    "あらすじの一覧 (get_all_entries_ordered)": [
+      "あらすじ"
+    ]
+  },
+  "壊れた直後の頭のコア記憶の章": {
+    "capture": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+    "render": "(capture が落ちたので描画に至らない)"
+  }
+}
