@@ -1,7 +1,7 @@
 # Intent: Godot / ARDY 仮想身体デモ
 
 > **ステータス: v0.25 (2026-09-23) — 実装中**
-> 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正典から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。なお、旧 `unity_gateway` は 2026-09-11 にリポジトリから削除したので、知見は旧設計書 (`docs/old/unity-gateway.md`) と git の履歴から回収する。
+> 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正式な計画から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。なお、旧 `unity_gateway` は 2026-09-11 にリポジトリから削除したので、知見は旧設計書 (`docs/old/unity-gateway.md`) と git の履歴から回収する。
 
 ## 実装記録
 
@@ -19,17 +19,17 @@
 
 - まはーの依頼: 複数のペルソナを同時にGodot内へ表示し、それぞれがアバターのVRMファイルを持つようにする。Godot用Buildingの在室者を同期する構成で実装した。
 - アドオン0.5.0でペルソナ別設定の「このペルソナのVRMファイル」を追加した。VRMの指定先は、Godot側PCの絶対パス、またはGodotプロジェクト内のパス (`res://` から始まるパス)。在室者、Vessel ID、アドオン自体の有効・無効、VRM割り当てを読み取り、認証済みWebSocketへ変化した在室者一覧を送る。ファイルやペルソナの記憶をサーバーへ書き込む機能は追加していない。
-- Godot側ではペルソナごとにモデル、骨、動作、移動、停止処理、表情、撮像を個別に持つ。退室・モデル変更時はそのペルソナだけを終了し、同じVRMを共有しても骨と表情の保存先を分ける。F4キーで操作対象のペルソナを切り替える。ポーズ中も通信、在室者同期、すでに始まった撮像の完了処理を続ける。通信が切れて再接続した際も、在室者一覧を再同期する。
-- Godot 4.6.3 のテスト用プロジェクト (本番とは分けた環境) で、実際の異なるVRMファイル二体の描画、同じVRMを使う二人の骨・表情の独立、実ファイルへの表情保存と再読み込み、同時動作と移動、片方だけの停止、実際のGPUを使った撮像、退室、モデル差し替え、ファイル欠損時に失敗がそのペルソナだけに留まることを確認した。実際のFastAPI/WebSocketサーバーとGodotをつないだ状態では、二人の同時動作、長いポーズ、本人だけの停止・退室、認証付き再接続を確認した。Python側のテストは57件 (およびサブテスト5件) すべて成功した。
-- 同時表示の上限は、ペルソナ別の一人称描画レイヤーの数による18人。18人同時の負荷試験と実機のHMDは未検証。本番ペルソナへのVRM割り当て、メッセージ・Spell・記憶の操作は行っていない。操作の正典はアドオンの `sai-vr/docs/multi-persona-avatars.md`。
+- Godot側ではペルソナごとにモデル、ボーン、動作、移動、停止処理、表情、撮影を個別に持つ。退室・モデル変更時はそのペルソナだけを終了し、同じVRMを共有してもボーンと表情の保存先を分ける。F4キーで操作対象のペルソナを切り替える。ポーズ中も通信、在室者同期、すでに始まった撮影の完了処理を続ける。通信が切れて再接続した際も、在室者一覧を再同期する。
+- Godot 4.6.3 のテスト用プロジェクト (本番とは分けた環境) で、実際の異なるVRMファイル二体の描画、同じVRMを使う二人のボーン・表情の独立、実ファイルへの表情保存と再読み込み、同時動作と移動、片方だけの停止、実際のGPUを使った撮影、退室、モデル差し替え、ファイル欠損時に失敗がそのペルソナだけに留まることを確認した。実際のFastAPI/WebSocketサーバーとGodotをつないだ状態では、二人の同時動作、長いポーズ、本人だけの停止・退室、認証付き再接続を確認した。Python側のテストは57件 (およびサブテスト5件) すべて成功した。
+- 同時表示の上限は、ペルソナ別の一人称描画レイヤーの数による18人。18人同時の負荷試験と実機のHMDは未検証。本番ペルソナへのVRM割り当て、メッセージ・Spell・記憶の操作は行っていない。操作方法の正式な説明書はアドオンの `sai-vr/docs/multi-persona-avatars.md`。
 - 当時の次の確認: SAIVerseとGodotを再起動し、利用するペルソナへVRMを割り当てて在室者表示を見ること。
 - この節は 2026-10-10 に書かれたが、別の作業フォルダでコミットされたまま本体へ取り込まれず、2026-11-12 の作業フォルダ整理で見つかって転記した。実装はアドオンの main (`1dfa771`) に入っている。当時のコミットではステータスを「検証待ち」に変え、台帳の行も差し替えていたが、その後の 2026-10-17 の記録と台帳がより新しいので、ステータス行と台帳は今回の転記では変えていない。
 
 ### 2026-10-10: Quest 2の左スティック等速移動
 
 - まはーの依頼はVRのスティック移動のみ。等速移動を選び、テレポートは不要と指定した。左TouchのprimaryをXRController3Dから読む。XR入力はデスクトップ用InputMapを経由しない。
-- PlayerControllerが既存XROrigin3Dの位置を動かし、HMDの姿勢はOpenXRへ残す。頭の水平向きに対する前後左右、0.2の円形デッドゾーンを超えると等速2.4 m/s。上下を見る時も地面と平行に同じ速さで進む。半径14.25 m境界と最後の実移動方向に向く体を維持する。右スティック旋回、テレポート、頭や手の骨へのIKは含まない。
-- 左手の追跡喪失・切断時は残留スティック値を無視する。XR/デスクトップ切替、ポーズ・編集画面との入力排他を保持する。正典はアドオンのsai-vr/docs/xr-controls.md。
+- PlayerControllerが既存XROrigin3Dの位置を動かし、HMDの姿勢はOpenXRへ残す。頭の水平向きに対する前後左右、0.2の円形デッドゾーンを超えると等速2.4 m/s。上下を見る時も地面と平行に同じ速さで進む。半径14.25 m境界と最後の実移動方向に向く体を維持する。右スティック旋回、テレポート、頭や手のボーンへのIKは含まない。
+- 左手の追跡喪失・切断時は残留スティック値を無視する。XR/デスクトップ切替、ポーズ・編集画面との入力排他を保持する。操作方法の正式な説明書はアドオンのsai-vr/docs/xr-controls.md。
 - Godot 4.6.3で実XRController3Dと合成XRControllerTrackerを使い、実エンジンのOculus Touch binding、物理処理への入力ルーティング、全方向、等速・斜め・真上/真下、境界、体の向き、追跡喪失・復帰・切断、ポーズ、編集、モード切替の37項目を通過。既存デスクトップ28項目、player controller、実player.vrmのIdle回帰も通過した。全テストはOpenXRをoffで起動し、Gateway・本番ペルソナ・LLM・ARDY生成へ接触していない。実Quest 2での表示と物理スティック操作は未確認。
 
 
@@ -48,10 +48,10 @@
 ### 2026-10-09: デスクトップFPS操作と独立したプレイヤーの体の向き
 
 - まはーの依頼: マウスでピッチ・ヨーを回し、WASDはカメラ基準で動く。Escでポーズ画面とマウス解放を行い、体は最後の移動方向を保つ。頭の回転への反映は将来の機能として残す。
-- 操作の正典はアドオンの sai-vr/docs/desktop-controls.md。PlayerControllerが原点の移動とカメラだけの回転を持ち、体は実移動がある時だけ向きを更新する。既存の円形移動境界を維持し、ピッチで速度が落ちたり上下移動したりしない。
+- 操作方法の正式な説明書はアドオンの sai-vr/docs/desktop-controls.md。PlayerControllerが原点の移動とカメラだけの回転を持ち、体は実移動がある時だけ向きを更新する。既存の円形移動境界を維持し、ピッチで速度が落ちたり上下移動したりしない。
 - ポーズ画面はSceneTreeを止めてマウスを解放し、ポーズ中もEsc・再開ボタンを受け付ける。フォーカスを失った場合もポーズし、F4の表情編集との入力受け渡しを行う。ローカルのポーズはSAIVerse側の認知やサーバー処理を止めない。XR中にはデスクトップ視点操作を適用しない。
 - Godot 4.6.3 / Windows / Vulkanでマウス入力経路、カメラ基準移動、実player.vrmの向き、停止後の向き維持、Escによる実歩行・Idle停止、再開ボタンのクリックによる復帰とマウス再捕捉、F4開閉を隔離検証した。元の移動境界・player Idleの回帰も通過した。Gateway、PersonaVision、StartXRはscene treeに入れる前に隔離fixtureから除き、本番ペルソナや外部LLMへ接触していない。実HMDは未検証。操作感は2026-10-10にまはーが実機で確認し、評価は「完璧」だった。
-- 台帳の以前の現在地と残作業: 身体・表情・一人称撮像に加え、ARDY を別 PC で生成する経路と身体スペルの Building 指定まで隔離 E2E 済み。次 = まはーが設定画面で生成先 URL と Building を選んで実機確認し、NEBULA の生成サーバーを常駐させるかを決める。残 = player locomotion、瞬き・視線、実 HMD、/emote、Idle scheduler。
+- 台帳の以前の現在地と残作業: 身体・表情・一人称撮影に加え、ARDY を別 PC で生成する経路と身体スペルの Building 指定まで隔離 E2E 済み。次 = まはーが設定画面で生成先 URL と Building を選んで実機確認し、NEBULA の生成サーバーを常駐させるかを決める。残 = player locomotion、瞬き・視線、実 HMD、/emote、Idle scheduler。
 
 ### 2026-09-23: ARDYの別PC生成と、身体Spellを使えるBuildingの指定
 
@@ -99,7 +99,7 @@
 - 最終成果を「背景meshを置くこと」ではなく、プレイヤーとペルソナが障害物に遮られず対面・移動でき、その外側には夜の幻想的なテラスが連続して見えることとした。環境assetはBlender、表示と床衝突はGodot scene、歩行可能境界は`PlayerController`が所有し、三者が同じ円形空間契約を共有する。
 - Blender 4.5.12 LTSで編集可能な`art_source/blender/celestial_terrace.blend`を作成し、Godot向け`assets/environment/celestial_terrace.glb`へ書き出した。中央床は直径30m、建物・発光樹・植え込み・テーブル・椅子・花壇・アーケードはすべて外周へ配置し、モブは含めない。三日月、低密度の星、青い発光植栽、暖色窓、ドームと尖塔により、参照画像の夜間テラスの色温度と輪郭を軽量なlow-poly表現へ落とした。外部assetサービスは使っていない。
 - Blender側の装飾collectionについてvertex・edge中点・polygon中心を検査し、最内周は半径15.825m、半径15.5m以内への侵入は0件だった。書き出し時は編集用約602 objectを材質単位の9 meshへ結合し、55,732 trianglesのGLBとした。原本の`.blend`は結合前の編集可能な構造を保持する。
-- Godotの旧8m角床を半径15mの円形collisionへ置き換え、GLBを`main.tscn`へinstance化した。プレイヤー境界は外周との安全帯75cmを残す半径14.25mのradial clampへ変更し、境界へ達した最初のframeを`movement_boundary_clamped`として記録する。これにより正方形clampの角から装飾帯へ侵入する不整合をなくした。将来NavMeshを導入する場合も、この14.25m円を初期walkable regionの正典として移行する。
+- Godotの旧8m角床を半径15mの円形collisionへ置き換え、GLBを`main.tscn`へinstance化した。プレイヤー境界は外周との安全帯75cmを残す半径14.25mのradial clampへ変更し、境界へ達した最初のframeを`movement_boundary_clamped`として記録する。これにより正方形clampの角から装飾帯へ侵入する不整合をなくした。将来NavMeshを導入する場合も、この14.25m円を初期walkable regionの正式な基準として移行する。
 - Godot 4.6.3はGLBを9 `MeshInstance3D`として読み込み、`main.tscn`上で環境instance、円形collision、`movement_radius_m=14.25`を確認した。Gateway scriptを持たない隔離preview sceneをForward+で1920×1080実描画し、中央の無障害空間、外周建築、発光材質を確認した。controller単体fixtureは対角方向を維持したまま半径14.25mへclampしexit 0だった。検証中にGateway、外部LLM、本番ペルソナ、本番記憶・世界状態には接触していない。現在の証拠はdesktop描画であり、実HMDの性能・見切れ・快適性は未検証である。
 
 ### 2026-07-19: `player.vrm`材質白化の根因と誤った補正の撤去
@@ -107,23 +107,23 @@
 - `player.vrm`はGodotへのコピー元`C:\Users\shuhe\workspace\senseivrm\sensei_FBXV1.01.vrm`とSHA-256が一致した。VRM内には全4材質のbase textureがある一方、`shadeColorFactor=[1,1,1]`、`shadeMultiplyTexture`なしとして記録されていた。同じUniVRM 0.131.1で生成した`persona.vrm`にはshade textureが入っているため、コピー破損、Godot importer、UniVRM全体の不具合ではない。
 - Unity元材質は現在MToon10 URP shaderを参照する一方、`_utsVersion=2.09`、`_Use_BaseAs1st=1`、`_1st_ShadeColor`、`_NormalMap`、`_Emissive_Tex`、`_MatCap_Sampler`などUnity Toon Shader固有の値を保持していた。MToon側の`_ShadeTex`、`_BumpMap`、`_EmissionMap`、`_MatcapTex`は未設定だった。根因はUTSからMToonへshader参照だけを切り替え、材質parameterを対応項目へ移植しなかったこと。白化は影設定の欠落が表面化した一症状で、normal・emission・matcapもVRMへ出力されていない。
 - Vessel側で「base textureあり・shade textureなし・shade color白」の材質へbase textureを代入する処理を一度実装したが、これは出力を見た目だけ合わせ、編集可能な上流アセットの変換不備を隠す誤った対処だった。`repair_missing_mtoon_shade_texture`、scene opt-in、専用テスト期待値、README記述を撤去し、VRM材質を記録どおり描画する状態へ戻した。
-- Unity側の材質移植と再exportはアバター制作工程で行う。Vesselは今後も、モデル作者の明示した材質を推測で上書きしない。今回の失敗と、最初の再発防止策まで局所最適に陥った経緯は[`session_reflection_2026-07-19_asset_workaround.md`](../session_reflection_2026-07-19_asset_workaround.md)へ記録し、一般規範は`CLAUDE.md`の「Whole-system correction and recurrence prevention」へ正典化した。
+- Unity側の材質移植と再exportはアバター制作工程で行う。Vesselは今後も、モデル作者の明示した材質を推測で上書きしない。今回の失敗と、最初の再発防止策まで局所最適に陥った経緯は[`session_reflection_2026-07-19_asset_workaround.md`](../session_reflection_2026-07-19_asset_workaround.md)へ記録し、一般規範は`CLAUDE.md`の「Whole-system correction and recurrence prevention」へ正式な規範として書き込んだ。
 
 ### 2026-07-20: 再export済み`player.vrm`の境界横断検証
 
-- 差し替え後の`player.vrm`は42,631,356 bytes、SHA-256 `927d23890f37520d83cdd2a0031ed8b38796b26d0a386b0db9dcaf3ca54e2ed8`。GLB宣言長と実長・chunk終端が一致し、外部URI参照のない自己完結したUniVRM 0.131.1 / VRM 1.0だった。Humanoidは51 mappingで必須15骨と左右Eyeが揃い、眼中央がHeadより`+Z`へ0.023621mあるため、Vesselの正面判定でもVRM 1.0の`+Z`正面として扱える。
+- 差し替え後の`player.vrm`は42,631,356 bytes、SHA-256 `927d23890f37520d83cdd2a0031ed8b38796b26d0a386b0db9dcaf3ca54e2ed8`。GLB宣言長と実長・chunk終端が一致し、外部URI参照のない自己完結したUniVRM 0.131.1 / VRM 1.0だった。Humanoidは51 mappingで必須15ボーンと左右Eyeが揃い、眼中央がHeadより`+Z`へ0.023621mあるため、Vesselの正面判定でもVRM 1.0の`+Z`正面として扱える。
 - 5材質すべてにbase texture、非白の`shadeColorFactor`、`shadeMultiplyTexture`が格納された。服・髪にはnormal、emission、matcapも戻り、前回の4材質すべてでshade/normal/emission/matcapが欠落していたartifactとは内容が明確に異なる。全mesh primitiveのmaterial参照は有効で、埋め込みimage 13件にも外部依存はない。
-- Godot 4.6.3とVessel同梱のVRM/MToon addonだけを置いた隔離projectで、新旧VRMを同一import parameterにより比較した。新VRMは1 `Skeleton3D`・最大165骨・18 `MeshInstance3D`・5 MToon材質としてimportされ、runtime materialにはmain 5、shade 5、normal 2、emission 4、matcap 2 textureが残った。旧VRMはmain 4に対してshade/normal/emission/matcapがすべて0だった。
+- Godot 4.6.3とVessel同梱のVRM/MToon addonだけを置いた隔離projectで、新旧VRMを同一import parameterにより比較した。新VRMは1 `Skeleton3D`・最大165ボーン・18 `MeshInstance3D`・5 MToon材質としてimportされ、runtime materialにはmain 5、shade 5、normal 2、emission 4、matcap 2 textureが残った。旧VRMはmain 4に対してshade/normal/emission/matcapがすべて0だった。
 - RTX 3090 / Vulkan / Forward+で両者を同じcamera・照明条件により実描画した。旧VRMは白く飽和した一方、新VRMは衣服・髪・身体の陰影と材質差が描画され、白化の原因だったexport欠落が解消した。これはVessel側の材質補正を一切使わない検証である。
 - 新VRMの`VRMC_vrm.expressions`はpreset 0・custom 0、animation 0だった。現在のplayer body表示・移動には支障がないが、将来プレイヤーの表情・口形・face trackingをペルソナ視覚へ渡す場合、このVRMだけでは表情を駆動できない。必要になった時点で制作元に表情定義を持たせるか、player用のモデル固有profileを別途所有する。
-- 実プロジェクトの既存`.godot/imported/player...scn`は検査時点で旧VRMの生成時刻のままであり、開いていたeditorはまだ新artifactへ再importしていなかった。データ自体のimport・runtime material・描画は隔離projectで確認済みだが、Vessel本体のplayer slotとペルソナ一人称撮像を通す最終integration証拠は、本体側の再import後に別途取得する。
+- 実プロジェクトの既存`.godot/imported/player...scn`は検査時点で旧VRMの生成時刻のままであり、開いていたeditorはまだ新artifactへ再importしていなかった。データ自体のimport・runtime material・描画は隔離projectで確認済みだが、Vessel本体のplayer slotとペルソナ一人称撮影を通す最終integration証拠は、本体側の再import後に別途取得する。
 
 ### 2026-07-20: ユーザーアバターの基礎idle
 
 - 最終成果は「VRMにanimation fieldがあること」ではなく、ペルソナの視界でユーザーがTポーズの物体ではなく、同じ空間に自然に立つ身体として見えること。idleの所有者はVRM exporterではなくVesselのplayer-body runtimeとし、ユーザーが差し替えた任意Humanoid VRMへ同じARDY資産をretargetする。
 - 身体形状やVRM metadataから性別を推測して動きを自動選択しない。初期資産として中立、男性的な例、女性的な例に相当する3種類をARDYで用意するが、runtime IDは`neutral`、`grounded`、`soft`のstyle特性で表し、ユーザーがどのアバターにも自由に選べる。プロンプト由来・生成条件・loop seamをasset metadataとcatalogへ残す。
 - player idle catalogをデータとして所有し、`default_style`と各styleのasset path・表示名・説明を定義する。`PlayerController`は`PlayerAvatar`の既存`AvatarLoader` APIだけを通して選択assetをloadし、loopとcrossfadeを開始する。未知style、catalog破損、asset欠落、loop品質不良は構造化ログへ残し、Tポーズへ黙って戻ったように見せない。
-- 歩行clipが未実装の段階で移動入力時にidleを停止すると、移動中だけTポーズへ戻るため、初期実装ではidleを基礎姿勢として常時維持する。次にplayer locomotionを追加した時点で、入力状態を所有する`PlayerController`が`idle ↔ locomotion`を切り替える。HMDの頭・手trackingを重ねる段階では、trackingを上半身の権威とし、idleは骨maskまたはIK後段により呼吸・骨盤・下半身の微動へ縮退させる。
+- 歩行clipが未実装の段階で移動入力時にidleを停止すると、移動中だけTポーズへ戻るため、初期実装ではidleを基礎姿勢として常時維持する。次にplayer locomotionを追加した時点で、入力状態を所有する`PlayerController`が`idle ↔ locomotion`を切り替える。HMDの頭・手trackingを重ねる段階では、trackingを上半身の権威とし、idleはボーンmaskまたはIK後段により呼吸・骨盤・下半身の微動へ縮退させる。
 - 検証はcatalog解決だけで終えず、実`player.vrm`へのretarget、Tポーズからの腕角度変化、root水平移動が実質0であること、loop seam、style切替crossfade、ペルソナcameraからの実描画まで追う。
 - 上記を実装した。ARDY Core8へ英語で指示し、4秒・20 FPS・10 diffusion stepからloopを切り出した`grounded`、`soft`、`neutral`の3 assetとcatalogを追加した。採用clipはいずれも31 frameで、loop seam最大関節差は順に7.192°、5.095°、0.671°、root Y差は最大1.290 mmだった。生成prompt、seed、元frame範囲、loop品質は各asset metadataへ残した。
 - 最初の実描画では、ARDY元データ上の両手は腰付近にあるのに`player.vrm`だけ両腕が前へ伸びた。promptやclipを作り直す問題ではなく、`player.vrm`のSkeleton3DローカルRest位置がZ-upである一方、従来bridgeがY-up固定だったことが根因だった。`persona.vrm`はY-upで、同じclipが正常だったため、VRMごとの局所補正ではなくretarget境界の座標契約を修正した。
@@ -134,19 +134,19 @@
 ### 2026-07-19: デスクトップ解像度とペルソナ一人称視覚の是正
 
 - デスクトップ表示は性能上の制約ではなく未設定のGodot初期サイズだった。初期表示を1920×1080、リサイズ可能とし、XRの推奨render targetとは分離する。
-- `body_see`の画像はGeminiのタイル課金を前提に1024×1024へ変更する。提示された計算では正方形を2×2の4タイルに収め、横長画像で同じ細部量を得るより短辺を有効に使う。連続撮像へ進む際は、解像度だけでなく撮像頻度・差分判定・送信条件を別途設計する。
+- `body_see`の画像はGeminiのタイル課金を前提に1024×1024へ変更する。提示された計算では正方形を2×2の4タイルに収め、横長画像で同じ細部量を得るより短辺を有効に使う。連続撮影へ進む際は、解像度だけでなく撮影頻度・差分判定・送信条件を別途設計する。
 - 一人称カメラを固定高に置かず、VRM Humanoidの左右Eye（片眼しかない場合はその眼、眼がなければHead）から基準transformを構成し、現在のHead poseへ追従させる。解決根拠、眼高、forward offsetを構造化ログへ残す。
 - ペルソナ本体を専用render layerへ置き、一人称カメラからそのlayerを除外する。これは頭部だけでなく自己アバター全体を一人称画像から外す安全側の規則で、将来の客観視カメラは別に全身を描画する。プレイヤー用XRCameraがプレイヤー自身のlayerを除外する既存規則と対称にする。
-- プレイヤーVRMが白い代替表示になる問題は、元VRMにbase-color textureがあることを確認したうえで、実SubViewportのmaterial・texture・shader状態と撮像結果から根因を特定する。未診断のまま材質を差し替えない。
+- プレイヤーVRMが白い代替表示になる問題は、元VRMにbase-color textureがあることを確認したうえで、実SubViewportのmaterial・texture・shader状態と撮影結果から根因を特定する。未診断のまま材質を差し替えない。
 - 上記を実装した。`project.godot`のdesktop viewportを1920×1080・リサイズ可能にし、`body_see`のSubViewportを1024×1024へ変更した。現在の`persona.vrm`では左右Eye中央の高さ1.389073m、model-forward offset 0.04mへカメラを配置し、Head poseとAvatarAnchorの移動・回転へ追従する。
-- ペルソナ全VisualInstanceをlayer 4へ置き、一人称camera maskからlayer 4を除外した。通常のXRCameraとExpression Studioはlayer 4を描画するため、第三者視点の全身表示と表情編集は維持する。実撮像で画像下端にあった自己頭部が消えた。
-- 1024角PNGは実測139,548 bytesだったが、base64を含むWebSocket eventがGodot既定outbound bufferを超えて最初のE2Eで`ERR_OUT_OF_MEMORY`になった。outboundを8 MiB、inboundを1 MiBへ明示し、送信失敗時に`lifecycle_sent`を記録しないよう修正した。再E2Eは合成`e2e_persona`、一時`SAIVERSE_HOME`、AMD 890M、外部LLM 0回で1024×1024 / maximum contrast 255 / media source `godot_persona_first_person`を確認してexit 0だった。この撮像値は後に撤去した材質補正が有効な時点の記録であり、現行`player.vrm`の材質表示を保証する証拠には使わない。撮像transportとbuffer修正の証拠としてのみ扱い、材質の実描画はUnity側の再export後に再検証する。
+- ペルソナ全VisualInstanceをlayer 4へ置き、一人称camera maskからlayer 4を除外した。通常のXRCameraとExpression Studioはlayer 4を描画するため、第三者視点の全身表示と表情編集は維持する。実撮影で画像下端にあった自己頭部が消えた。
+- 1024角PNGは実測139,548 bytesだったが、base64を含むWebSocket eventがGodot既定outbound bufferを超えて最初のE2Eで`ERR_OUT_OF_MEMORY`になった。outboundを8 MiB、inboundを1 MiBへ明示し、送信失敗時に`lifecycle_sent`を記録しないよう修正した。再E2Eは合成`e2e_persona`、一時`SAIVERSE_HOME`、AMD 890M、外部LLM 0回で1024×1024 / maximum contrast 255 / media source `godot_persona_first_person`を確認してexit 0だった。この撮影結果の数値は後に撤去した材質補正が有効な時点の記録であり、現行`player.vrm`の材質表示を保証する証拠には使わない。撮影transportとbuffer修正の証拠としてのみ扱い、材質の実描画はUnity側の再export後に再検証する。
 
 ### 2026-07-19: ユーザー制作の表情プリセット
 
 - 表情の作者と利用者を分ける。アバター所有者はGodot上で実際の顔を見ながらBlend Shapeを調整し、モデル固有の表情プリセットを作る。ペルソナは完成済みプリセットの名前・説明・強度をSpellで選ぶが、視覚フィードバックなしに頂点変形の配合を作らない。
 - `Expression Studio`は現在のペルソナVRMからMeshInstance3DとBlend Shapeを列挙し、検索、単独スライダー調整、複数targetの合成、名前・英語説明・channel・遷移時間の編集、プレビュー、保存を行う。編集UIはデスクトップで明示的に開いた時だけ入力を捕捉し、通常のVessel動作やXRを止めない。
-- profileは`saiverse.avatar_expressions.v2`とし、VRMファイルのSHA-256、プリセット説明、channel、fade-in/out、targetを持つ。target解決は旧NodePathの完全一致を第一候補に残すが、再書き出し耐性の正典は`blend_shape + mesh_name`、それでも一意なら`blend_shape`単独とする。候補が複数なら推測せずunresolvedとし、Studioでユーザーが選び直す。
+- profileは`saiverse.avatar_expressions.v2`とし、VRMファイルのSHA-256、プリセット説明、channel、fade-in/out、targetを持つ。target解決は旧NodePathの完全一致を第一候補に残すが、再書き出しに耐えるための正式な照合方法は`blend_shape + mesh_name`、それでも一意なら`blend_shape`単独とする。候補が複数なら推測せずunresolvedとし、Studioでユーザーが選び直す。
 - `resolved_target_count=0`のprofileやtargetなしの非neutral表情は成功扱いしない。モデルhash不一致、欠損、曖昧候補、解決方式は構造化ログへ残す。旧v1 profileは読めるが、Studio保存時に現行モデルhashと安定targetへ昇格する。
 - 感情、瞬き、口形、視線を独立channelのまま維持し、表情遷移はchannel内の現在値から次のrecipeへBlend Shape値を補間する。gesture開始前の感情状態を保存し、開始時に指定presetへfade、自然完了・失敗・`body_stop`の全経路で元の状態へfade-backする。
 - `body_gesture`へ任意の`expression_preset`と`expression_intensity`を追加する。ARDYの英語`action_instruction`は身体だけを生成し、顔は別引数で明示する。未指定時は現在表情を維持し、未知presetを黙ってneutralや笑顔へ読み替えない。生成待ちgestureでも同じ表情指定をpending commandへ保持する。
@@ -165,7 +165,7 @@
 - `avatar_loader.gd`は読み込み後のHumanoid頭部・眼球Rest位置から実際のモデル正面を判定する。`+Z`は無補正、VRM 0.x等の`-Z`はinstanceだけをY軸180度回し、親のVessel契約を常に`+Z model front`へ正規化する。判定根拠・source front・補正角は構造化ログへ残す。
 - `AvatarAnchor`の固定180度回転を外し、`body_move_to`は`look_at(..., use_model_front=true)`で`+Z`をユーザーへ向ける。`PersonaView`はCamera3D固有の`-Z`前方を身体の`+Z`正面へ一致させるためローカルY軸180度、プレイヤーVRMはXRCameraの`-Z`へ身体正面を合わせるため`PlayerAvatar`をローカルY軸180度とした。
 - 新VRMはSkeleton3Dを2本持ち、主要Humanoid bone名も`UpperArm_R` / `LowerArm_R`形式だった。Motion Playerを「先頭Skeleton固定」からHumanoid alias一致数による選択へ変え、Godot canonical名とUniVRM由来名の双方をCore27へ対応させた。
-- 合成Skeleton方位テストで`+Z`無補正、`-Z`180度補正、model-front注視、PersonaView前方一致を確認した。実VRM統合テストではペルソナ対面・PersonaView・プレイヤー身体のalignmentがすべて`1.0`、ARDY 23骨、右腕最大変化約`104.02°`、右手移動約`0.544m`、歩行blend-out後Idle復帰をexit 0で確認した。
+- 合成Skeleton方位テストで`+Z`無補正、`-Z`180度補正、model-front注視、PersonaView前方一致を確認した。実VRM統合テストではペルソナ対面・PersonaView・プレイヤー身体のalignmentがすべて`1.0`、ARDY 23ボーン、右腕最大変化約`104.02°`、右手移動約`0.544m`、歩行blend-out後Idle復帰をexit 0で確認した。
 - 差し替え後のVRMでは、旧`persona.expressions.json`のmesh pathが一致せず、17表情のresolved targetが0件であることもログから判明した。これは正面規約とは別のモデル固有profile適合として扱い、今回の修正で推測マッピングしない。
 
 ### 2026-07-17: Godot / Codex 制御基盤
@@ -202,10 +202,10 @@
 
 ### 2026-07-17: ARDY Core27 → Godot Humanoid 最小ブリッジ
 
-- ARDY本体の一次ソースから、Coreモデルの保存NPZが `global_rot_mats` / `local_rot_mats`、`root_positions`、`posed_joints`、`foot_contacts`、`fps`、`text` を持つことを確認した。Core27の骨順・親子関係も `CoreSkeleton27` の定義から固定した。
+- ARDY本体の一次ソースから、Coreモデルの保存NPZが `global_rot_mats` / `local_rot_mats`、`root_positions`、`posed_joints`、`foot_contacts`、`fps`、`text` を持つことを確認した。Core27のボーン順・親子関係も `CoreSkeleton27` の定義から固定した。
 - ARDYの基準骨格は右手系、Y-up、+Z forward、メートル単位で、基準姿勢の右腕が-Xにある。基準足底から腰までの高さは `0.95441 m`。
 - `tools/convert_ardy_npz.py` を追加し、NPZのグローバル回転行列を時間方向に符号連続なxyzw Quaternionへ変換する `saiverse.ardy_motion.v1` JSON契約を定義した。グローバル回転が無い場合はCore27階層でローカル回転から復元する。
-- `scripts/ardy_motion_player.gd` を追加した。Godot 4のBone PoseがBone Restを含む仕様に合わせ、ARDYのグローバル回転を各VRM骨のグローバルRestへ合成し、実階層のローカルPoseへ戻して適用する。
+- `scripts/ardy_motion_player.gd` を追加した。Godot 4のBone PoseがBone Restを含む仕様に合わせ、ARDYのグローバル回転を各VRMボーンのグローバルRestへ合成し、実階層のローカルPoseへ戻して適用する。
 - Core27からGodot Humanoidへ23ボーンを明示マッピングした。Misakiに `UpperChest` が無いため、ARDY `Spine3` の上胸回転をGodot `Chest` へ畳み込む。`UpperChest` があるVRMでは `Chest ← Spine2`、`UpperChest ← Spine3` に分ける。
 - Misakiの実ランタイムRestでは右腕が+X、ARDYでは-Xだった。左右の上腕Rest位置から向きを自動検出し、必要なVRMではY軸180度の基底変換 `C × R × C⁻¹` とroot移動の同じ変換を行う。
 - 20fps等の入力Poseを描画フレーム間でQuaternion slerpし、rootを線形補間する。rootは最初のX/Zを原点化し、`Skeleton3D.motion_scale / 0.95441` でモデル身長へ合わせる。Yは地面基準の絶対腰高を維持する。
@@ -306,10 +306,10 @@
 
 - デスクトップ時の`XROrigin3D`へプレイヤーcontrollerを追加した。WASD/矢印とgamepad左stickで移動し、Q/Eと右stickで旋回する。現在はCelestial Terrace中央の半径14.25m円内へclampし、XR viewportがactiveになった時はdesktop入力を自動停止する。
 - プレイヤー身体をペルソナとは別の`PlayerAvatar` slotにした。`player.vrm`があれば同じ汎用VRM loaderで読み込み、無ければ青い簡易humanoidを表示する。専用render layer 2へ置き、プレイヤー一人称カメラだけから除外し、ペルソナ視点には表示する。
-- 初期実装では`AvatarAnchor/PersonaView`を複製する512×288の`SubViewport`撮像器を追加した。Motor commandのbusy判定とは独立して一枚だけPNG化し、base64本体をログへ出さず、command ID・寸法・byte数・所要時間だけを構造化ログへ残す。撮像寸法は2026-07-19に1024×1024へ更新した。
+- 初期実装では`AvatarAnchor/PersonaView`を複製する512×288の撮影用`SubViewport`を追加した。Motor commandのbusy判定とは独立して一枚だけPNG化し、base64本体をログへ出さず、command ID・寸法・byte数・所要時間だけを構造化ログへ残す。撮影寸法は2026-07-19に1024×1024へ更新した。
 - native `body_see(focus)` SpellとGatewayの`capture_view` commandを追加した。返ったPNGを4 MiB上限、base64、PNG signature、寸法で検証し、既存media storeへ保存して`{"media": [...]}`として次のSpell loop LLM roundへ添付する。Spell自身はSAIMemoryや知覚bufferへ別途追記しない。
-- 初期E2Eは合成`e2e_persona`、隔離`SAIVERSE_HOME`、実FastAPI WebSocket、Godot 4.6.3 Forward+、AMD Radeon 890Mを使って完走した。当時の撮像は512×288 / 45,141 bytesで、保存PNG内に専用layerの青いプレイヤー身体を1,390 pixels検出した。`accepted → completed`は同一command IDで閉じ、Godot exit 0、外部LLM呼び出し0、本番ペルソナ・本番記憶への接触0だった。現行1024×1024撮像の再E2E結果は本書冒頭の実装記録を正典とする。
-- Godot headless rendererはdummy texture backendのためSubViewport画像を生成できず、`frame_post_draw`も発火しなかった。単体撮像とE2Eは実rendererをGPU index 1で起動する。headlessは入力・GDScript parse・画像を要しないGateway/motion検証に限定する。
+- 初期E2Eは合成`e2e_persona`、隔離`SAIVERSE_HOME`、実FastAPI WebSocket、Godot 4.6.3 Forward+、AMD Radeon 890Mを使って完走した。当時の撮影は512×288 / 45,141 bytesで、保存PNG内に専用layerの青いプレイヤー身体を1,390 pixels検出した。`accepted → completed`は同一command IDで閉じ、Godot exit 0、外部LLM呼び出し0、本番ペルソナ・本番記憶への接触0だった。現行1024×1024撮影の再E2E結果は本書冒頭の実装記録を正式な記録とする。
+- Godot headless rendererはdummy texture backendのためSubViewport画像を生成できず、`frame_post_draw`も発火しなかった。単体撮影とE2Eは実rendererをGPU index 1で起動する。headlessは入力・GDScript parse・画像を要しないGateway/motion検証に限定する。
 
 ## ゴール
 
@@ -382,7 +382,7 @@ ARDY Service (WSL / RTX 3090)         Godot Client (Windows / OpenXR)
 - [`physical_ear.md`](physical_ear.md): VAD と音声直入力
 - [`multimodal_input_pipeline.md`](multimodal_input_pipeline.md): Gemini へ画像・音声を渡す経路
 - [`addon_speak_hooks.md`](addon_speak_hooks.md): `persona_speak` 購読点
-- [`unity-gateway.md`](../old/unity-gateway.md): 3D空間連携の旧試作の設計書で、その実装 (`unity_gateway/`) は 2026-09-11 に削除した。プロトコルと旧実装は正典にせず、失敗と境界設計だけを回収する
+- [`unity-gateway.md`](../old/unity-gateway.md): 3D空間連携の旧試作の設計書で、その実装 (`unity_gateway/`) は 2026-09-11 に削除した。プロトコルと旧実装は正式な設計として扱わず、失敗と境界設計だけを回収する
 
 ## Body Spell の最小語彙
 
@@ -509,7 +509,7 @@ accepted → generating → ready → playing → completed
 2. **一回限りのaction instruction**: `嬉しそうに小走りで駆け寄る` など、そのcommandだけに適用する表現。Body Spellの任意引数としてペルソナが自然言語で指定する。
 3. **ペルソナのbase style**: 普段の歩き方、走り方、立ち方、待ち方。指定が無いcommandにも適用し、ペルソナ別に永続化する。
 
-性別は固定enumにしない。ペルソナが望むなら「男性的」「女性的」などを自然言語記述へ含められるが、体格・性格・年齢感・気分を含む個別の自己表現を正典にする。モデルや開発者が性別から歩容を自動決定しない。
+性別は固定enumにしない。ペルソナが望むなら「男性的」「女性的」などを自然言語記述へ含められるが、体格・性格・年齢感・気分を含む個別の自己表現を正式な基準にする。モデルや開発者が性別から歩容を自動決定しない。
 
 ### 保存と自己設定
 
@@ -535,15 +535,15 @@ Idleも一枚の無限loopへ固定しない。呼吸・瞬き・視線は軽量
 
 1. プレイヤーはデスクトップではキーボードまたはゲームパッドで同じ `XROrigin3D` を移動・旋回する。XRセッションがactiveになった場合はデスクトップ入力を停止し、同じoriginを将来のOpenXR locomotionへ引き渡す。
 2. プレイヤー身体はペルソナ身体と別のavatar slotを持つ。`player.vrm` があれば読み込み、無ければ必ず見える簡易humanoidを使う。プレイヤー身体だけを専用render layerへ置き、一人称カメラからは隠すが、ペルソナ視点には映す。
-3. `AvatarAnchor/PersonaView` と同じtransformを使う専用 `SubViewport` が、要求時に一枚だけPNGを撮像する。撮像は運動命令ではないため、gestureや`move_to`の進行中でも利用できる。
-4. `body_see(focus=...)` Spellは撮像結果を既存のtool-result media metadataとして次のLLM roundへ添付する。Spell自身は画像認識を代行せず、ペルソナが返された画像を自分の視覚入力として読む。
+3. `AvatarAnchor/PersonaView` と同じtransformを使う専用 `SubViewport` が、要求時に一枚だけPNGを撮影する。撮影は運動命令ではないため、gestureや`move_to`の進行中でも利用できる。
+4. `body_see(focus=...)` Spellは撮影結果を既存のtool-result media metadataとして次のLLM roundへ添付する。Spell自身は画像認識を代行せず、ペルソナが返された画像を自分の視覚入力として読む。
 
 ### 不変条件
 
-- `body_see` は明示的に唱えられた一回だけ撮像する。自動反復、暗黙の移動後撮像、1 FPS監視はこの段階へ混ぜない。
+- `body_see` は明示的に唱えられた一回だけ撮影する。自動反復、暗黙の移動後撮影、1 FPS監視はこの段階へ混ぜない。
 - 画像は既存のSAIVerse media storeへ保存してLLM入力へ添付するが、Spell自身は会話履歴・SAIMemory・知覚バッファへ別途追記しない。
 - PNG本体やbase64を通常ログ、lifecycleログ、知覚metadataへ複製しない。ログにはcommand ID、視点、寸法、byte数、所要時間だけを残す。
-- 撮像失敗、空画像、過大payload、形式不正は画像無しの成功にせず、相関ID付きの失敗として閉じる。
+- 撮影失敗、空画像、過大payload、形式不正は画像無しの成功にせず、相関ID付きの失敗として閉じる。
 - `focus` は「何を確かめたいか」を次の思考へ残す補助文であり、カメラ映像の内容を先回りして記述しない。
 - プレイヤーの移動可能範囲はCelestial Terrace中央の半径14.25m円内へ制限する。将来Nav/world geometryを導入した時は、この円を初期walkable regionとして座標clampから衝突付きlocomotionへ置き換える。
 
@@ -634,7 +634,7 @@ Idleも一枚の無限loopへ固定しない。呼吸・瞬き・視線は軽量
 1. ~~Godotの実インストール先・バージョン・CLI起動を確認する。~~ 完了（4.6.3-stable）。
 2. 最小Godotプロジェクトを作り、描画GPUとOpenXR初期化ログを取る（基礎シーン・失敗経路・MCP基盤まで完了。実HMDで成功経路とGPU名を確認する）。
 3. ~~実際のVRMを一体読み込み、Humanoid BoneMapを確定する。~~ 完了（Misaki 1.01。標準表情の空bindは別プロファイルで補う）。
-4. ~~ARDYの保存済みPoseをGodotへ再生する最小ブリッジを作る。~~ 完了（Core27契約、NPZ変換、23骨リターゲット、補間、root motionに加え、RTX 3090で実生成した60フレームをMisakiへ適用して数値検証済み）。
+4. ~~ARDYの保存済みPoseをGodotへ再生する最小ブリッジを作る。~~ 完了（Core27契約、NPZ変換、23ボーンのリターゲット、補間、root motionに加え、RTX 3090で実生成した60フレームをMisakiへ適用して数値検証済み）。
 5. ~~その結果をもとにEmbodiment Gatewayのv1契約を確定する。~~ 完了（engine非依存broker、Body Spell、WebSocket、相関ID付きlifecycleを隔離E2Eで実証済み。本番会話Pulseへの無承認接触は同意違反事故であり、検証証拠から除外）。
 6. ~~`body_move_to(user)` を最初の長時間behaviourとして追加し、`started(command_id)` 後の非同期進行・中断・terminal event知覚を実証する。~~ 完了（距離制御・自然完了・`body_stop`中断・知覚バッファ配送を実Godot E2Eで確認）。
 7. ~~`MotionStyleProfile` とBody Commandの一回限り `action_instruction` を契約へ追加し、現在の単一 `misaki_walk.json` 優先をペルソナ別asset解決へ置き換える。~~ 完了（本人だけが更新できる永続profile Spell、決定論的asset ID、Godotのaction→base→legacy→synthetic解決、理由付きfallbackを隔離E2Eで実証）。
@@ -657,16 +657,16 @@ fake/実ARDY E2Eを完走し、実生成の両腕は139–150°変化、水平ro
 プレイヤー身体は専用render layerで本人の一人称から隠し、ペルソナ視点には表示する。
 VRM 0.x `-Z`／VRM 1.0・Godot model `+Z`／Camera3D `-Z`を分離し、眼球Rest位置による正面自動正規化、`use_model_front`注視、PersonaView・player camera mountを実装。
 差し替えたVRM 1.0二体はいずれも補正0°、対面・両camera alignment `1.0`。
-複数Skeletonと`UpperArm_R`系aliasもHumanoid一致数で解決し、ARDY 23骨・右手0.544mを再検証した。
-`body_see(focus)`は左右眼中央＋前方4cmから一枚だけ1024×1024 PNGを撮像し、ペルソナ自己layerを除外して既存media metadataで次のLLM roundへ渡す。
+複数Skeletonと`UpperArm_R`系aliasもHumanoid一致数で解決し、ARDY 23ボーン・右手0.544mを再検証した。
+`body_see(focus)`は左右眼中央＋前方4cmから一枚だけ1024×1024 PNGを撮影し、ペルソナ自己layerを除外して既存media metadataで次のLLM roundへ渡す。
 `player.vrm`の白化はUTS 2.09材質からMToonへshader参照だけを切り替え、shade・normal・emission・matcap parameterを移植しないままexportしたことが根因。
 Vesselのランタイム材質補正は誤った対処として撤去し、VRM記録どおりの描画へ戻した。
 再exportした`player.vrm`は5材質すべてのshade、服・髪のnormal/emission/matcapを保持し、Godot 4.6.3隔離import・runtime material検査・RTX 3090 Forward+実描画で白化解消を確認した。
-本体project cacheは検査時点で未再importのため、player slotとペルソナ一人称撮像を通す最終integration証拠は残る。
+本体project cacheは検査時点で未再importのため、player slotとペルソナ一人称撮影を通す最終integration証拠は残る。
 プレイヤーにはARDY Core8生成の`grounded`・`soft`・`neutral` Idleを追加し、性別推測なしで選択・crossfadeできる。
 `player.vrm`のSkeleton3D内Z-upと誤ったimport `motion_scale=0.0292m`を解剖学的Rest basisと腰―足scaleで吸収し、Y-upの`persona.vrm`では恒等変換と既存scaleを維持。
 実VRM数値テストとForward+録画でTポーズ解消、root drift、既存wave/歩行回帰を確認した。
-8MiB WebSocket送信bufferを含む撮像transport E2Eは通過済み。
+8MiB WebSocket送信bufferを含む撮影transport E2Eは通過済み。
 外部LLM/本番ペルソナ/本番記憶には接触していない。
 desktopは1920×1080・リサイズ可能。
 表情は新VRMの740 Blend Shapeを列挙し、旧profile 23 targetを安定名で全件復旧。
