@@ -17,6 +17,9 @@
       "input_tokens": "input_tokens",
       "output_tokens": "output_tokens"
     },
-    "supported_types": ["noul", "choice", "score"]
+    "supported_types": ["noul", "choice", "score"],
+    "image_request_headers": {
+      "TypeSafe-Danger-Zone-Images": "true"
+    }
   }
 }

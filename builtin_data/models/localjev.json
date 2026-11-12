@@ -4,5 +4,6 @@
   "provider_ref": "localjev",
   "group": "local",
   "context_length": 128000,
-  "supports_structured_output": false
+  "supports_structured_output": false,
+  "supports_images": false
 }

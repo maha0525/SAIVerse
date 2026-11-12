@@ -5,6 +5,7 @@
   "group": "openai",
   "context_length": 272000,
   "supports_structured_output": false,
+  "supports_images": true,
   "pricing": {
     "input_per_1m_tokens": 0.1,
     "cached_input_per_1m_tokens": 0.01,

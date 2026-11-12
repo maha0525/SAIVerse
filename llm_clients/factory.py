@@ -76,6 +76,19 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     return provider == "gemini"
 
 
+def supports_images(provider: str, config: Dict | None) -> bool:
+    """Public window onto the image-capability rule get_llm_client applies.
+
+    Same reason as :func:`resolve_protocol`: callers that decide in advance
+    whether a model config takes images (e.g. saiverse/reflex_judgment.py
+    deciding whether to send attached images to its answering side) must ask
+    this function instead of re-deriving the rule — when the config has no
+    ``supports_images`` field, the answer depends on the provider name, and a
+    second copy would drift away from what the conversation client does.
+    """
+    return _supports_images(provider, config)
+
+
 def _read_default_headers(config: Dict | None) -> Dict | None:
     """Read ``default_headers`` off a resolved model config.
 

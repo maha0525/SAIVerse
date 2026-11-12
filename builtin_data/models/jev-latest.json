@@ -5,6 +5,7 @@
   "group": "typesafe",
   "context_length": 128000,
   "supports_structured_output": false,
+  "supports_images": false,
   "pricing": {
     "input_per_1m_tokens": 0.042,
     "output_per_1m_tokens": 0.0,

@@ -257,7 +257,8 @@ Gemini の Decisions API は System One とほぼ同じ形で、基準 (`criteri
    断ることは、§3 の OpenAI Decisions の規則をそのまま使う (同じ関数を使い回す)。
    説明は criteria にあればそれを、無ければ空文字を入れる。criteria にあって選択肢に
    入らなかった基準は、§3 と同じく `input` の最後の節に書き足す。そのうえで、API の
-   仕様で受け付けられない選択肢の名前 (前後の空白・制御文字・129 文字以上) を持つ
+   仕様で受け付けられない選択肢の名前 (前後の空白・制御文字・ASCII 以外の空白・
+   129 文字以上・UTF-8 で 512 バイト超) を持つ
    choice は、Gemini Decisions へ送るときは「使えなかった」にする。score はそのまま
    送れる (段階が 2 未満なら §3 と同じく「使えなかった」)。
 
@@ -320,6 +321,8 @@ Gemini の Decisions API は System One とほぼ同じ形で、基準 (`criteri
   (`_latest_user_message`) の画像を渡す。新しいユーザー発言の無いターン (自律の
   ターンなど) では、前の発言の画像を送り直さない — 送り直すと、そのたびに画像の入力
   トークンが課金される。部屋の様子・通知に付いた画像と、過去の発言の画像は渡さない。
+  `_latest_user_message` はスケジュールの発火文などのシステム通知も返しうるので、
+  `role` が `user` の発言のときだけ渡す (通知の画像を渡さない裁定を守るため)。
 - **概要文はそのまま残す**。画像を送るときも `state["attachments"]` の概要は消さない。
   画像は足すだけ。
 - **記憶の候補を探す処理は変わらない**。記憶の検索 (`build_query` → EmbeddingGemma) は
@@ -335,8 +338,12 @@ Gemini の Decisions API は System One とほぼ同じ形で、基準 (`criteri
   判断はできるから。整えた画像を API が断った (HTTP 400 など) ときは、既存の非 200 と
   同じく「使えなかった」になり、自動想起はそのターンだけ従来方式へ戻る。文字だけで
   送り直すことはしない — 締切 (既定 5 秒) の中で二度送る余裕は無い。
-- **送り方は `request_shape` ごとに違う**。どの `request_shape` でも画像を送れるので、
-  `supports_images` を true にしても送れないモデルは残さない。
+- **送り方は `request_shape` ごとに違う**。jev 互換の三つの `request_shape` はどれも
+  画像を送れる。通常の LLM は LLM クライアントの画像の扱いに任せるので、クライアントが
+  添付の画像を埋め込まない provider では届かない — 実装時点 (2026-11-12) で、Ollama の
+  クライアント (`llm_clients/ollama.py`) はユーザーの発言の `metadata` の画像を埋め込まない
+  (会話でも同じ)。Ollama のモデルを `supports_images: true` にして反射判断に割り当てると、
+  画像は送られず文字だけで判断する (要約も課金も起きない)。
   - `gemini_decisions`: `input` を Content ブロックの配列にし、文字列化した状況の後ろに
     画像のブロックを置く。
   - `openai_decisions`: `input` を user のメッセージの配列にし、`input_text` の後ろに
