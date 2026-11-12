@@ -64,6 +64,10 @@ SAIVerse の `generate_image` ツールで Nano Banana 系を選ぶと、次の�
 - `nano_banana_2_1` と `nano_banana_2` では、ツール側の品質が `low` なら 1K、`medium` なら 2K、`high` 以上なら 4K で生成します。
 - 画像生成には有料版のキー（`GEMINI_API_KEY`）が必要です。
 
+### 反射判断（Gemini Decisions）の料金（2026年11月時点、[公式の料金ページ](https://aistudio.google.com/docs/pricing)で確認）
+
+反射判断用の Gemini Decision 1（`gemini-decision-1`）は、入力 100 万トークンあたり $0.10 です（文字・画像などの種類を問わず同じ値段）。答えは出力トークンを使わないので、出力の料金はかかりません。コンテキストキャッシュと Batch API は使えません。
+
 ### 特徴
 - **従量課金制**: 使った分だけ支払います（前払いの場合は、先に買ったクレジットから引かれます）。
 - **コンテキストキャッシュ**: 同じ長い入力を繰り返し送るとき、読み出しの値段が通常の入力の10分の1になります。
@@ -80,6 +84,10 @@ SAIVerse のモデル選択では、名前に「(有料Tier)」が付いてい�
 - **Gemini 3 Flash(有料Tier)**: 旧世代のプレビュー版モデルです。
 - **Gemini 3.1 Pro Preview(有料Tier, <200k)**: Pro 系のプレビュー版モデルです。無料枠では使えません。
 - **Gemini 2.5 Pro (有料Tier, <200k)** / **Gemini 2.5 Flash(有料Tier)** / **Gemini 2.5 Flash Lite(有料Tier)**: 旧世代のモデルです。2026年9月から、Google は Gemini 2.5 系を「過去に使っていた人」に限って提供しています。これから始める人は、3.5 Flash-Lite か 3.8 Flash を使うよう Google が案内しています。
+
+### 反射判断に使うモデル
+
+- **Gemini Decision 1(有料Tier)**: Gemini の Decisions API（`gemini-decision-1`）で答える反射判断用のモデルです。会話には使えず、グローバル設定の「モデルロール」の「反射判断」か、ペルソナ設定の「反射判断モデル（任意）」に選んで使います。添付した画像も判断に使います（画像の分も入力トークンとして課金されます）。料金は上の「反射判断（Gemini Decisions）の料金」のとおりです。
 
 ## 5. レート制限（有料版）
 

@@ -1,0 +1,9 @@
+{
+  "model": "gemini-decision-1",
+  "display_name": "Gemini Decision 1(無料枠)",
+  "provider_ref": "gemini_decisions_free",
+  "group": "gemini",
+  "context_length": 262144,
+  "supports_structured_output": false,
+  "supports_images": true
+}

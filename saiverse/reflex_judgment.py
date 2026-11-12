@@ -22,7 +22,7 @@ LLM 呼び出し) より速く・安く・形が保証される代わりに、�
 互換勢も中身は同じで、違うのは宛先の path・認証・応答の欄の名前・対応する型):
 
     POST <base_url><path>
-    Authorization: Bearer <api_key_env の値>
+    Authorization: Bearer <api_key_env の値>   (ヘッダ名と接頭辞は auth_header / auth_prefix の宣言)
 
     {"state": ..., "model": "<モデル設定の model 欄>",
      "questions": {"<qid>": {"type": "noul", "instructions": "...",
@@ -39,6 +39,20 @@ criteria の欄が無い。choice の選択肢の説明は ``choices`` へ、sco
 choice の基準) を ``input`` の最後に書き足す。答えも ``name`` 付きの配列で返るので、
 qid の辞書へ戻してから同じ検算に通す。System One の形が本流で、呼び出し側が組む質問の
 形はどちらの宛先でも変わらない。
+
+``request_shape: "gemini_decisions"`` (Gemini の Decisions API) は System One とほぼ同じ
+形で、送る直前の変換は 3 点だけ — 状況は文字列の ``input`` (OpenAI Decisions と同じ
+文字列化)、noul の基準の欄名は ``true_description`` / ``false_description``、choice は
+``options`` の欄が無く ``criteria`` の「選択肢 → 説明」の辞書だけで選択肢を決める。
+答えは System One と同じ qid の辞書で返るので、読み戻しは System One の道のまま。
+
+**画像** (intent §8): ``evaluate`` の ``images`` に渡された画像は、答える側のモデル設定が
+画像を受け付けるとき (:attr:`ReflexBackend.supports_images`、判定は会話用クライアントと
+同じ ``llm_clients.factory.supports_images``) だけ送る。受け付けないなら無視して、従来と
+まったく同じ要求を送る。送る画像はワーカーの中 (締切の計測の内側) で整え
+(:func:`_prepare_images`)、読めない・開けない画像はその画像だけを落として続ける。
+送り方は ``request_shape`` ごと (:func:`_attach_images`) と、通常の LLM の道の
+``metadata`` (:class:`_LLMCall`)。
 
 **リクエストの形 (通常の LLM)**: 状況と質問一覧を 1 通のプロンプトに畳み、答えは
 ``{"answers": [{"qid": ..., "noul"/"score"/"choice": ...}, ...]}`` の構造化出力で
@@ -67,15 +81,23 @@ qid の辞書へ戻してから同じ検算に通す。System One の形が本�
 
 from __future__ import annotations
 
+import base64
+import dataclasses
+import io
 import json
 import logging
 import math
+import mimetypes
 import os
+import tempfile
 import threading
 import time
+import unicodedata
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Mapping, Optional, Sequence, Tuple, Union
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import httpx
 
@@ -124,15 +146,25 @@ _DEFAULT_USAGE_FIELDS = {"input_tokens": "input_tokens", "output_tokens": "outpu
 #:   説明 → ``choices`` の ``description``)。居場所の無い基準 (noul のはい/いいえの
 #:   基準と、choices に入らなかった choice の基準) は ``input`` の最後の節に書き足す。
 #:   答えも ``name`` 付きの配列で返るので、qid の辞書へ戻してから既存の検算に渡す。
+#: - ``gemini_decisions``: Gemini の Decisions API の形へ、送る直前に変換する
+#:   (intent §7)。質問は System One と同じ qid の辞書で型名も同じ。状況は文字列の
+#:   ``input`` (``openai_decisions`` と同じ文字列化)、noul の基準は
+#:   ``true_description`` / ``false_description`` の欄へ写し、choice は ``options`` の
+#:   欄を送らず ``criteria`` の「選択肢 → 説明」の辞書で選択肢を決める。写せない基準は
+#:   ``openai_decisions`` と同じく ``input`` の最後の節に書き足す。答えは System One と
+#:   同じ qid の辞書で返る。
 #:
 #: 宣言に ``request_shape`` のキーが無いときだけ ``system_one``。キーがあって値が
-#: 上の二つ以外 (null を含む) なら設定ミスとして解決を断る。この「キーが無ければ既定、
+#: 上の三つ以外 (null を含む) なら設定ミスとして解決を断る。この「キーが無ければ既定、
 #: キーがあって null・型違いなら断る」は方言の宣言の全欄に共通の規則
 #: (:func:`_dialect_field`)。分岐はこの宣言値だけで行う (提供元の名前や URL では
 #: 分岐しない)。
 REQUEST_SHAPE_SYSTEM_ONE = "system_one"
 REQUEST_SHAPE_OPENAI_DECISIONS = "openai_decisions"
-REQUEST_SHAPES = (REQUEST_SHAPE_SYSTEM_ONE, REQUEST_SHAPE_OPENAI_DECISIONS)
+REQUEST_SHAPE_GEMINI_DECISIONS = "gemini_decisions"
+REQUEST_SHAPES = (
+    REQUEST_SHAPE_SYSTEM_ONE, REQUEST_SHAPE_OPENAI_DECISIONS, REQUEST_SHAPE_GEMINI_DECISIONS,
+)
 
 #: ``openai_decisions`` の形での質問の型名 (SAIVerse 側 → Decisions 側)。
 _DECISIONS_QUESTION_TYPES = {"noul": "predicate", "choice": "choice", "score": "score"}
@@ -144,6 +176,52 @@ _DECISIONS_REFUSAL = "refusal"
 #: 欄に載る。user_data で provider を上書きして answer_fields を書き忘れても、noul の
 #: 欄名を System One の既定 (``noul``) と取り違えないよう、形ごとに既定を持つ。
 _DECISIONS_DEFAULT_ANSWER_FIELDS = {"noul": "probability", "choice": "choice", "score": "score"}
+#: ``answer_fields`` の既定を ``request_shape`` ごとに引く表。``gemini_decisions`` の
+#: 答えの欄名は System One と同じ (``noul`` / ``choice`` / ``score``) だが、形ごとに
+#: 既定を持つ作法 (上の ``openai_decisions`` と同じ理由) に合わせて表に載せる。
+_DEFAULT_ANSWER_FIELDS_BY_SHAPE = {
+    REQUEST_SHAPE_SYSTEM_ONE: _DEFAULT_ANSWER_FIELDS,
+    REQUEST_SHAPE_OPENAI_DECISIONS: _DECISIONS_DEFAULT_ANSWER_FIELDS,
+    REQUEST_SHAPE_GEMINI_DECISIONS: _DEFAULT_ANSWER_FIELDS,
+}
+#: ``usage_fields`` の既定を ``request_shape`` ごとに引く表。Gemini Decisions の使用量は
+#: ``total_input_tokens`` / ``total_output_tokens`` の欄に載る。user_data で provider を
+#: 上書きして usage_fields を書き忘れても、使用量が黙って記帳されなくならないよう、
+#: answer_fields と同じく形ごとに既定を持つ。
+_DEFAULT_USAGE_FIELDS_BY_SHAPE = {
+    REQUEST_SHAPE_SYSTEM_ONE: _DEFAULT_USAGE_FIELDS,
+    REQUEST_SHAPE_OPENAI_DECISIONS: _DEFAULT_USAGE_FIELDS,
+    REQUEST_SHAPE_GEMINI_DECISIONS: {
+        "input_tokens": "total_input_tokens",
+        "output_tokens": "total_output_tokens",
+    },
+}
+#: ``gemini_decisions`` の choice の選択肢の名前 (``criteria`` のキー) の上限。公式資料
+#: (https://aistudio.google.com/docs/decisions-api) の規則: 1〜128 文字・UTF-8 で 512
+#: バイト以内、前後の空白・制御文字・ASCII 以外の空白は不可。
+_GEMINI_CHOICE_KEY_MAX_CHARS = 128
+_GEMINI_CHOICE_KEY_MAX_BYTES = 512
+
+#: 資格情報を載せるヘッダの既定 (方言の宣言の ``auth_header`` / ``auth_prefix``)。
+#: TypeSafe・OpenRouter・localjev・OpenAI Decisions はこの既定のまま。
+_DEFAULT_AUTH_HEADER = "Authorization"
+_DEFAULT_AUTH_PREFIX = "Bearer "
+#: 送る要求の本文の型を言うヘッダ。方言の宣言のヘッダはこれを上書きできない。
+_CONTENT_TYPE_HEADER = "Content-Type"
+#: 画像を含む要求にだけ付けるヘッダを宣言する欄 (文字列 → 文字列の辞書。既定は無し)。
+_IMAGE_HEADERS_FIELD = "image_request_headers"
+
+#: ``system_one`` の形で画像を送るとき、参照の文字列の一覧を置く ``state`` の欄。
+#: 呼び出し側の ``state`` は書き換えず、送る直前の複製に足す。
+SYSTEM_ONE_IMAGES_STATE_KEY = "attached_images"
+#: ``system_one`` の形で送る画像の各辺の範囲 (px、両端を含む)。TypeSafe の公式資料
+#: (https://docs.typesafe.ai/images) の規則で、範囲の外の辺は縮小・拡大して収める。
+_SYSTEM_ONE_IMAGE_MIN_EDGE = 280
+_SYSTEM_ONE_IMAGE_MAX_EDGE = 1568
+#: 整えた画像として送ってよい形式 (Pillow の format 名 → MIME)。これ以外は PNG に描き直す。
+_SENDABLE_IMAGE_FORMATS = {"PNG": "image/png", "JPEG": "image/jpeg"}
+#: 通常の LLM の道で、整えた画像を LLM クライアントへ渡す一時ファイルの接頭辞。
+_LLM_IMAGE_TEMP_PREFIX = "saiverse-reflex-image-"
 #: 構造に居場所の無い基準を ``input`` の最後に書き足すときの見出し (通常 LLM 向けの
 #: 前置きと揃えて英語)。OpenAI がモデルに ``name`` を見せるかは確かめられていないので、
 #: 各ブロックは名前だけでなく質問文 (instructions) でも質問を指す。「above」とは
@@ -240,6 +318,14 @@ class ReflexBackend:
         usage_fields: 記帳する使用量の名前 → 応答の欄の名前。jev 互換のみ。
         request_shape: リクエストの組み立て方 (:data:`REQUEST_SHAPES` のどれか)。
             jev 互換のみ。既定は System One の形のまま送る ``system_one``。
+        supports_images: この答える側へ画像を送るか。モデル設定の ``supports_images``
+            (provider の ``default_supports_images`` からの継承を含む) を、会話用の
+            クライアントと同じ規則 (``llm_clients.factory.supports_images``) で読んだ値。
+            False なら ``evaluate`` に渡された画像は無視する。
+        auth_header / auth_prefix: 資格情報を載せるヘッダの名前と、値の前に付ける
+            接頭辞。jev 互換のみ (既定は ``Authorization`` と ``Bearer ``)。
+        image_request_headers: 画像を含む要求にだけ付けるヘッダ。jev 互換のみ
+            (既定は無し)。
     """
 
     model_key: str
@@ -258,6 +344,10 @@ class ReflexBackend:
         default_factory=lambda: dict(_DEFAULT_USAGE_FIELDS)
     )
     request_shape: str = REQUEST_SHAPE_SYSTEM_ONE
+    supports_images: bool = False
+    auth_header: str = _DEFAULT_AUTH_HEADER
+    auth_prefix: str = _DEFAULT_AUTH_PREFIX
+    image_request_headers: Mapping[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +490,10 @@ def _resolve_jev_backend(
         )
 
     # 答えの欄の名前の既定は形ごとに違う (Decisions の noul は probability の欄)。
-    default_answer_fields = (
-        _DECISIONS_DEFAULT_ANSWER_FIELDS
-        if request_shape == REQUEST_SHAPE_OPENAI_DECISIONS
-        else _DEFAULT_ANSWER_FIELDS
-    )
+    default_answer_fields = _DEFAULT_ANSWER_FIELDS_BY_SHAPE[request_shape]
+
+    auth_header, auth_prefix = _auth_declaration(key, dialect)
+    image_headers = _image_request_headers(key, dialect, auth_header)
 
     return ReflexBackend(
         model_key=key,
@@ -417,9 +506,68 @@ def _resolve_jev_backend(
         answers_key=_dialect_field(key, dialect, "answers_key", str, _DEFAULT_ANSWERS_KEY),
         usage_key=_dialect_field(key, dialect, "usage_key", str, _DEFAULT_USAGE_KEY),
         answer_fields=_string_map(key, dialect, "answer_fields", default_answer_fields),
-        usage_fields=_string_map(key, dialect, "usage_fields", _DEFAULT_USAGE_FIELDS),
+        usage_fields=_string_map(
+            key, dialect, "usage_fields", _DEFAULT_USAGE_FIELDS_BY_SHAPE[request_shape],
+        ),
         request_shape=request_shape,
+        auth_header=auth_header,
+        auth_prefix=auth_prefix,
+        image_request_headers=image_headers,
     )
+
+
+def _auth_declaration(key: str, dialect: Mapping[str, Any]) -> Tuple[str, str]:
+    """資格情報を載せるヘッダの名前 (``auth_header``) と接頭辞 (``auth_prefix``) を読む。
+
+    ``auth_header`` は他の文字列の欄と同じ規則 (:func:`_dialect_field`)。``Content-Type``
+    (大小文字を区別しない) と重なる宣言は、本文の型を資格情報で上書きする設定ミスなので
+    断る。
+
+    ``auth_prefix`` は空文字を許し、前後の空白も落とさない — 既定の ``"Bearer "`` の
+    末尾の空白は値の一部で、Gemini の ``x-goog-api-key`` は接頭辞なし (``""``) で送る。
+    キーが無ければ既定、null・文字列でないなら設定ミスとして断る (全欄に共通の規則)。
+    """
+    header = _dialect_field(key, dialect, "auth_header", str, _DEFAULT_AUTH_HEADER)
+    if header.casefold() == _CONTENT_TYPE_HEADER.casefold():
+        raise _refuse_dialect(key, f"declares 'auth_header' as {header!r}")
+    if "auth_prefix" not in dialect:
+        return header, _DEFAULT_AUTH_PREFIX
+    prefix = dialect["auth_prefix"]
+    if not isinstance(prefix, str):
+        raise _refuse_dialect(key, f"has an unusable 'auth_prefix': {prefix!r}")
+    return header, prefix
+
+
+def _image_request_headers(
+    key: str, dialect: Mapping[str, Any], auth_header: str,
+) -> Dict[str, str]:
+    """画像を含む要求にだけ付けるヘッダの宣言 (``image_request_headers``) を読む。
+
+    文字列 → 文字列の辞書 (名前も値も空でない文字列、前後の空白は落とす)。欄そのものの
+    null・型違いは :func:`_dialect_field` の規則で断る。``Content-Type`` と資格情報の
+    ヘッダ (``auth_header`` の名前) は上書きできない (大小文字を区別せずに比べる)。
+    重なる宣言は、本文の型や資格情報を画像の有無で差し替える設定ミスなので断る。
+    """
+    raw = _dialect_field(key, dialect, _IMAGE_HEADERS_FIELD, Mapping, None)
+    if raw is None:
+        return {}
+    reserved = {_CONTENT_TYPE_HEADER.casefold(), auth_header.casefold()}
+    headers: Dict[str, str] = {}
+    for name, value in raw.items():
+        if (
+            not isinstance(name, str) or not name.strip()
+            or not isinstance(value, str) or not value.strip()
+        ):
+            raise _refuse_dialect(
+                key, f"has an unusable entry in {_IMAGE_HEADERS_FIELD!r}: {name!r}: {value!r}",
+            )
+        if name.strip().casefold() in reserved:
+            raise _refuse_dialect(
+                key, f"declares {name.strip()!r} in {_IMAGE_HEADERS_FIELD!r}, which is "
+                     "reserved for the content type or the credential",
+            )
+        headers[name.strip()] = value.strip()
+    return headers
 
 
 def _resolve_llm_backend(
@@ -533,6 +681,17 @@ def resolve_backend(
         backend = _resolve_jev_backend(key, config, api_model, api_key_env)
     else:
         backend = _resolve_llm_backend(key, config, api_model, api_key_env)
+
+    # 画像を受け付けるかは、会話用のクライアントと同じ規則で決める (intent §8)。欄が
+    # 無いときの答えは provider の名前で変わるので、規則を写し直さず工場の入口を呼ぶ —
+    # 同じモデル設定について、反射判断と会話用クライアントの答えが食い違わないように。
+    # provider の既定は _resolve_llm_backend と同じ (実行時の引き方と揃える)。
+    from llm_clients.factory import supports_images
+
+    backend = dataclasses.replace(
+        backend,
+        supports_images=supports_images(str(config.get("provider") or "ollama"), dict(config)),
+    )
 
     if required_type is not None and required_type not in backend.supported_types:
         LOGGER.warning(
@@ -1007,11 +1166,12 @@ def _record_usage(
 
 
 # ---------------------------------------------------------------------------
-# リクエストの形の変換 (request_shape が openai_decisions の宛先だけ)
+# リクエストの形の変換 (request_shape が openai_decisions / gemini_decisions の宛先だけ)
 #
 # 呼び出し側が組む質問と状況は System One の形のまま (本流)。OpenAI の Decisions
 # API へは、送る直前にここで組み替え、受け取った答えを qid の辞書へ戻してから
-# 既存の検算 (_read_all_answers) に渡す。
+# 既存の検算 (_read_all_answers) に渡す。Gemini の Decisions API へも送る直前に
+# 組み替えるが、答えは System One と同じ qid の辞書で返るので読み戻しは要らない。
 # ---------------------------------------------------------------------------
 
 
@@ -1074,26 +1234,37 @@ def _decisions_input(state: Any, criteria_blocks: Sequence[Sequence[str]]) -> st
     return "\n".join(lines)
 
 
-def _decisions_choices(
+def _refuse_choice(qid: str, backend: ReflexBackend, problem: str) -> ReflexJudgmentUnavailable:
+    """この宛先の形で表せない choice 質問の例外を作る。"""
+    return ReflexJudgmentUnavailable(
+        f"the destination for {backend.model_key!r} cannot express the choice "
+        f"question {qid!r}: {problem}"
+    )
+
+
+def _choice_options(
     qid: str, question: Mapping[str, Any], backend: ReflexBackend,
-) -> Tuple[list, list]:
-    """choice 質問の選択肢を Decisions の ``choices`` に写す。
+) -> Tuple[list, Dict[str, Any], list]:
+    """choice 質問の選択肢の値と、各値の説明と、末尾の節に回す行を決める。
+
+    ``openai_decisions`` (:func:`_decisions_choices`) と ``gemini_decisions``
+    (:func:`_gemini_choice_criteria`) が同じ規則を使い回す (intent §7 — 規則を形ごとに
+    写すと、片方だけ直したときに二つの宛先で同じ質問の選択肢が食い違う)。
 
     値は、``options`` が空でないリスト/タプルならその順 (要素が文字列でなければ
-    :func:`_as_text` で文字列にする — 文字列でない options を黙って捨てると、OpenAI の
+    :func:`_as_text` で文字列にする — 文字列でない options を黙って捨てると、Decisions の
     宛先だけが使えない形が残る)、無ければ ``criteria`` が辞書のときそのキーの順
     (System One の choice の criteria は「選択肢 → 説明」の辞書。キーも文字列にする)。
 
     説明は、``criteria`` の辞書のキーを文字列にしたものが値の文字列と一致すれば
-    (``{1: "one"}`` と options ``["1"]`` は対応する)、その値に中身があるとき
-    (:func:`_has_information`) それを文字列化したもの、それ以外は値と同じ文字列
-    (description を省略できるかは公式資料で確かめられていないので、空にはしない)。
+    (``{1: "one"}`` と options ``["1"]`` は対応する) その値。説明の無い値は説明の辞書に
+    載らない (説明が無いときに何を入れるかは形ごとに違うので、呼び出し側が決める)。
 
     Returns:
-        ``(choices, 末尾の節に回す行)``。``criteria`` が辞書でなければ全体を、辞書なら
-        文字列にしたキーが choices の値のどれとも一致しないキー (説明として choices に
-        入らなかったキー) だけを末尾へ回す。choices に入った説明は構造の側だけに入り、
-        節には重ねない。
+        ``(選択肢の値の並び, 値 → 説明, 末尾の節に回す行)``。``criteria`` が辞書でなければ
+        全体を、辞書なら文字列にしたキーが選択肢の値のどれとも一致しないキー (説明として
+        選択肢に入らなかったキー) だけを末尾へ回す。選択肢に入った説明は構造の側だけに
+        入り、節には重ねない。
 
     Raises:
         ReflexJudgmentUnavailable: この形で表せない choice — 選択肢を 1 つも作れない、
@@ -1103,10 +1274,7 @@ def _decisions_choices(
             いる (どの説明を使うか決められない)。
     """
     def refuse(problem: str) -> ReflexJudgmentUnavailable:
-        return ReflexJudgmentUnavailable(
-            f"the destination for {backend.model_key!r} cannot express the choice "
-            f"question {qid!r}: {problem}"
-        )
+        return _refuse_choice(qid, backend, problem)
 
     criteria = question.get("criteria")
     descriptions = criteria if isinstance(criteria, Mapping) else {}
@@ -1143,6 +1311,27 @@ def _decisions_choices(
             raise refuse(f"more than one criteria key describes the option {text!r}")
         described_by_text[text] = description
 
+    if isinstance(criteria, Mapping):
+        leftover = _criteria_lines(leftover_criteria)
+    else:
+        leftover = _criteria_lines(criteria)
+    return values, described_by_text, leftover
+
+
+def _decisions_choices(
+    qid: str, question: Mapping[str, Any], backend: ReflexBackend,
+) -> Tuple[list, list]:
+    """choice 質問の選択肢を OpenAI Decisions の ``choices`` に写す。
+
+    選択肢の値・説明の対応・末尾の節に回す行・断る条件は :func:`_choice_options`。
+    説明は、対応する説明に中身があるとき (:func:`_has_information`) それを文字列化した
+    もの、それ以外は値と同じ文字列 (description を省略できるかは公式資料で確かめられて
+    いないので、空にはしない)。
+
+    Returns:
+        ``(choices, 末尾の節に回す行)``。
+    """
+    values, described_by_text, leftover = _choice_options(qid, question, backend)
     choices = []
     for text in values:
         described = described_by_text.get(text)
@@ -1150,23 +1339,26 @@ def _decisions_choices(
             "value": text,
             "description": _as_text(described) if _has_information(described) else text,
         })
-    if isinstance(criteria, Mapping):
-        leftover = _criteria_lines(leftover_criteria)
-    else:
-        leftover = _criteria_lines(criteria)
     return choices, leftover
 
 
 def _decisions_levels(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
-    """score 質問の段階の説明 (System One の criteria の配列) を ``levels`` に写す。
+    """score 質問の段階の説明を OpenAI Decisions の ``levels`` に写す (:func:`_score_levels`)。"""
+    return [{"label": label, "description": label} for label in _score_levels(qid, question, backend)]
 
-    System One の score の criteria は順序付きの段階の説明の配列で、答えは段階の番号の
-    確率加重平均 — Decisions の score と同じ意味。2 個未満・配列でない criteria は
+
+def _score_levels(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
+    """score 質問の段階の説明 (System One の criteria の配列) を文字列の並びにする。
+
+    ``openai_decisions`` と ``gemini_decisions`` が同じ規則を使い回す。System One の
+    score の criteria は順序付きの段階の説明の配列で、答えは段階の番号の確率加重平均 —
+    どちらの Decisions の score とも同じ意味。2 個未満・配列でない criteria は
     段階にならないので不成立 (Jev でも受け付けない形)。
 
     中身の無い段階 (:func:`_has_information` — null・空白だけの文字列・空の入れ物) が
     1 つでもあれば不成立。黙って落とすと後ろの段階の番号が 1 つずつずれ、答えの
     score の意味が変わる (段階 2 の答えが、呼び出し側の段階 3 を指してしまう)。
+    文字列の段階はそのまま、それ以外は :func:`_as_text` で文字列にする。
     """
     criteria = question.get("criteria")
     if not isinstance(criteria, (list, tuple)) or len(criteria) < _DECISIONS_MIN_LEVELS:
@@ -1182,8 +1374,7 @@ def _decisions_levels(qid: str, question: Mapping[str, Any], backend: ReflexBack
                 f"the destination for {backend.model_key!r} cannot express the score "
                 f"question {qid!r}: level {index} has no content"
             )
-        label = _as_text(level)
-        levels.append({"label": label, "description": label})
+        levels.append(_as_text(level))
     return levels
 
 
@@ -1240,6 +1431,140 @@ def _decisions_request(
         else:
             tail = _criteria_lines(question.get("criteria"))
         converted.append(entry)
+        if tail:
+            criteria_blocks.append([f"[{qid}] {instructions}", *tail])
+    payload = {
+        "model": backend.api_model,
+        "input": _decisions_input(state, criteria_blocks),
+        "questions": converted,
+    }
+    return payload, offered
+
+
+#: noul の基準のキー (System One) → Gemini Decisions の欄名。
+_GEMINI_NOUL_CRITERIA_FIELDS = {"true": "true_description", "false": "false_description"}
+
+
+def _gemini_noul_criteria(criteria: Any) -> Tuple[Dict[str, str], list]:
+    """noul の基準を Gemini Decisions の ``criteria`` と、末尾の節に回す行に分ける。
+
+    呼び出し側の ``{"true": ..., "false": ...}`` を ``true_description`` /
+    ``false_description`` へ写す。片方だけあればその片方だけを写す。値に中身の無い
+    キー (:func:`_has_information`) は写さない。値が文字列でなければ :func:`_as_text`
+    で文字列にする (Gemini の欄は文字列)。
+
+    この形に写せない基準は、OpenAI Decisions と同じく ``input`` の最後の節へ回す —
+    辞書でない基準は全体を、辞書なら ``true`` / ``false`` 以外のキーだけを回す
+    (``true`` / ``false`` は構造の側に入るので節には重ねない。choice の基準で選択肢に
+    入らなかったキーだけを回すのと同じ扱い)。
+
+    Returns:
+        ``(Gemini の noul の criteria (写すものが無ければ空の辞書), 末尾の節に回す行)``。
+    """
+    if not isinstance(criteria, Mapping):
+        return {}, _criteria_lines(criteria)
+    mapped: Dict[str, str] = {}
+    leftover: Dict[Any, Any] = {}
+    for name, value in criteria.items():
+        target = _GEMINI_NOUL_CRITERIA_FIELDS.get(name) if isinstance(name, str) else None
+        if target is None:
+            leftover[name] = value
+        elif _has_information(value):
+            mapped[target] = _as_text(value)
+    return mapped, _criteria_lines(leftover)
+
+
+def _gemini_choice_key_problem(name: str) -> Optional[str]:
+    """Gemini Decisions が選択肢の名前として受け付けない理由 (受け付けるなら None)。
+
+    公式資料の規則: 1〜128 文字・UTF-8 で 512 バイト以内、前後の空白・制御文字・
+    ASCII 以外の空白は不可 (語の間の ASCII の空白は可)。
+    """
+    if name != name.strip():
+        return "it has leading or trailing whitespace"
+    if len(name) > _GEMINI_CHOICE_KEY_MAX_CHARS:
+        return f"it is longer than {_GEMINI_CHOICE_KEY_MAX_CHARS} characters"
+    if len(name.encode("utf-8")) > _GEMINI_CHOICE_KEY_MAX_BYTES:
+        return f"it is longer than {_GEMINI_CHOICE_KEY_MAX_BYTES} UTF-8 bytes"
+    for char in name:
+        category = unicodedata.category(char)
+        if category == "Cc":
+            return "it contains a control character"
+        if char != " " and (category == "Zs" or char.isspace()):
+            return "it contains a non-ASCII space"
+    return None
+
+
+def _gemini_choice_criteria(
+    qid: str, question: Mapping[str, Any], backend: ReflexBackend,
+) -> Tuple[Dict[str, str], list]:
+    """choice 質問の選択肢を Gemini Decisions の ``criteria`` (選択肢 → 説明) に写す。
+
+    選択肢の値・説明の対応・末尾の節に回す行・断る条件は OpenAI Decisions と同じ
+    (:func:`_choice_options`)。説明は、対応する説明に中身があればそれを文字列化した
+    もの、無ければ空文字 (Gemini は空文字の説明を受け付ける)。``options`` の欄は Gemini に
+    無いので送らない。
+
+    Raises:
+        ReflexJudgmentUnavailable: :func:`_choice_options` の条件に加え、Gemini が選択肢の
+            名前として受け付けない値 (:func:`_gemini_choice_key_problem`) がある。
+    """
+    values, described_by_text, leftover = _choice_options(qid, question, backend)
+    criteria: Dict[str, str] = {}
+    for text in values:
+        problem = _gemini_choice_key_problem(text)
+        if problem is not None:
+            # 理由を値より先に書く (例外文言は伏せ字のあと 200 文字で切られる)。
+            raise _refuse_choice(
+                qid, backend, f"an option is not accepted ({problem}): {text[:40]!r}",
+            )
+        described = described_by_text.get(text)
+        criteria[text] = _as_text(described) if _has_information(described) else ""
+    return criteria, leftover
+
+
+def _gemini_decisions_request(
+    state: Any,
+    request_questions: Mapping[str, Mapping[str, Any]],
+    backend: ReflexBackend,
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, ...]]]:
+    """System One の形の状況と質問を、Gemini Decisions のリクエストへ組み替える (intent §7)。
+
+    質問は System One と同じ qid の辞書で、型名もそのまま。変えるのは、状況を文字列の
+    ``input`` にすること (:func:`_decisions_input`、OpenAI Decisions と同じ文字列化と
+    末尾の節)、noul の基準の欄名 (:func:`_gemini_noul_criteria`)、choice の選択肢を
+    ``criteria`` の辞書だけで表すこと (:func:`_gemini_choice_criteria`)。score の段階は
+    文字列の配列のまま送る (:func:`_score_levels`)。
+
+    Returns:
+        ``(payload, qid → 実際に送った選択肢の名前の並び)``。後者は choice の答えの検算に
+        使う (criteria の辞書だけから組んだ choice でも検算が効くように)。
+
+    Raises:
+        ReflexJudgmentUnavailable: この形で表せない質問 (選択肢を作れない・受け付けられない
+            名前の選択肢がある choice、段階を作れない score)。
+        Exception: 状況や基準を JSON にできない。型を問わず呼び出し側の :func:`_evaluate`
+            が ``ReflexJudgmentUnavailable`` へ正規化する。
+    """
+    converted: Dict[str, Dict[str, Any]] = {}
+    criteria_blocks: list = []
+    offered: Dict[str, Tuple[str, ...]] = {}
+    for qid, question in request_questions.items():
+        qtype = question["type"]
+        instructions = question["instructions"]
+        entry: Dict[str, Any] = {"type": qtype, "instructions": instructions}
+        tail: list = []
+        if qtype == "choice":
+            criteria, tail = _gemini_choice_criteria(qid, question, backend)
+            entry["criteria"] = criteria
+            offered[qid] = tuple(criteria)
+        elif qtype == "score":
+            entry["criteria"] = _score_levels(qid, question, backend)
+        else:
+            criteria, tail = _gemini_noul_criteria(question.get("criteria"))
+            if criteria:
+                entry["criteria"] = criteria
+        converted[qid] = entry
         if tail:
             criteria_blocks.append([f"[{qid}] {instructions}", *tail])
     payload = {
@@ -1327,6 +1652,305 @@ def _answers_from_decisions(
 
 
 # ---------------------------------------------------------------------------
+# 画像 (intent §8)
+#
+# 送るかどうかは evaluate の入口で 1 回だけ決める (_images_to_send)。整えるのは
+# ワーカーの中 (_JevCall.perform / _LLMCall.perform) — 画像の読み込みと変換を
+# 締切の計測 (_evaluate の done.wait) の内側に入れるため。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _PreparedImage:
+    """送る前に整えた画像 1 枚 (PNG か JPEG のバイト列)。"""
+
+    data: bytes
+    mime_type: str
+
+    @property
+    def base64(self) -> str:
+        return base64.b64encode(self.data).decode("ascii")
+
+    @property
+    def format_name(self) -> str:
+        """``image/png`` → ``png``、``image/jpeg`` → ``jpeg``。"""
+        return self.mime_type.split("/", 1)[1]
+
+
+def _images_to_send(
+    images: Optional[Sequence[Any]], backend: ReflexBackend, state: Any,
+) -> List[Any]:
+    """``evaluate`` に渡された画像のうち、この答える側へ送るもの (整える前の記述子)。
+
+    答える側が画像を受け付けないなら空 — 送る中身は画像を渡さなかったときと同じになる。
+    ``system_one`` の形は参照の文字列を ``state`` の欄 (:data:`SYSTEM_ONE_IMAGES_STATE_KEY`)
+    に置くので、``state`` が辞書でない・その欄を呼び出し側が既に使っているときは
+    画像を送らずに文字の要求で続ける (状況の形を書き換えない。WARNING に出す)。
+    """
+    if not images:
+        return []
+    descriptors = list(images)
+    if not backend.supports_images:
+        LOGGER.debug(
+            "[reflex] %r does not take images; ignoring %d attached image(s)",
+            backend.model_key, len(descriptors),
+        )
+        return []
+    if backend.kind == REFLEX_KIND_JEV and backend.request_shape == REQUEST_SHAPE_SYSTEM_ONE:
+        if not isinstance(state, Mapping) or SYSTEM_ONE_IMAGES_STATE_KEY in state:
+            LOGGER.warning(
+                "[reflex] the state for %r has no room for the %r field; sending %d "
+                "attached image(s) is skipped and the judgment continues on text",
+                backend.model_key, SYSTEM_ONE_IMAGES_STATE_KEY, len(descriptors),
+            )
+            return []
+    return descriptors
+
+
+def _image_label(descriptor: Any, index: int, secret: _Secrets) -> str:
+    """WARNING に載せる画像の名前 (URI かパス。伏せ字を通して切り詰める)。"""
+    if isinstance(descriptor, Mapping):
+        name = descriptor.get("uri") or descriptor.get("path")
+        if name:
+            return _mask_secret(str(name), secret)[:_ERROR_BODY_PREVIEW]
+    return f"#{index}"
+
+
+def _flatten_to_png(img: Any) -> bytes:
+    """Pillow の画像の最初のフレームを PNG に描き直す (透明があれば保つ)。"""
+    if getattr(img, "is_animated", False):
+        img.seek(0)
+    has_alpha = img.mode in ("RGBA", "LA", "PA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    frame = img.convert("RGBA" if has_alpha else "RGB")
+    buf = io.BytesIO()
+    frame.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _fit_system_one_edges(data: bytes, format_name: str) -> Optional[bytes]:
+    """``system_one`` の形で送る画像の各辺を 280〜1568px に収める。
+
+    範囲の内なら元のバイト列のまま。外なら縦横比を保って縮小・拡大し、同じ形式
+    (PNG / JPEG) で描き直す。縦横比が 1568/280 を超えると両辺を同時に収められない
+    ので None (その画像は送らない)。
+    """
+    from PIL import Image, ImageOps
+
+    low, high = _SYSTEM_ONE_IMAGE_MIN_EDGE, _SYSTEM_ONE_IMAGE_MAX_EDGE
+    with Image.open(io.BytesIO(data)) as img:
+        width, height = img.size
+        if low <= width <= high and low <= height <= high:
+            return data
+        # 元の EXIF は描き直しで落ちるので、向きを画素に反映してから測り直す。
+        img = ImageOps.exif_transpose(img)
+        width, height = img.size
+        long_edge, short_edge = max(width, height), min(width, height)
+        if long_edge * low > short_edge * high:
+            return None
+        scale = high / long_edge if long_edge > high else low / short_edge
+        size = (
+            min(high, max(low, round(width * scale))),
+            min(high, max(low, round(height * scale))),
+        )
+        resized = img.resize(size, Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        if format_name == "JPEG":
+            if resized.mode not in ("RGB", "L", "CMYK"):
+                resized = resized.convert("RGB")
+            resized.save(buf, format="JPEG", quality=90)
+        else:
+            resized.save(buf, format="PNG")
+        return buf.getvalue()
+
+
+#: 整える前の画像の画素数の上限 (幅 × 高さ)。``load_image_bytes_for_llm`` は長辺の
+#: 縮小の前に画像を全部デコードするので、寸法の巨大な画像 (圧縮率の高い画像を含む) を
+#: そのまま渡すと、送る量の上限 (:data:`_MAX_REFLEX_IMAGE_BYTES`) に届く前に判断の
+#: ワーカーがメモリと CPU を使い切りうる。ヘッダだけを読んで寸法を確かめ、超える画像は
+#: デコードせずに落とす。4800 万画素級のスマートフォンの写真は通る値にしてある。
+_MAX_REFLEX_IMAGE_PIXELS = 64_000_000
+
+
+def _prepare_one_image(
+    descriptor: Any, backend: ReflexBackend,
+) -> Tuple[Optional[_PreparedImage], str]:
+    """画像 1 枚を送れる形に整える。送れないなら ``(None, 理由)``。
+
+    1. ``load_image_bytes_for_llm`` で読む (会話用と同じ長辺の縮小)。
+    2. Pillow で実際に開けることを確かめる — ``load_image_bytes_for_llm`` は変換に
+       失敗しても元のバイト列を返すので、開けない画像をそのまま送らないために要る。
+    3. PNG / JPEG 以外 (GIF・WebP など) と動く PNG は、最初のフレームを PNG に描き直す。
+    4. ``system_one`` の形なら各辺を範囲に収める (:func:`_fit_system_one_edges`)。
+
+    1 の前に、ヘッダだけを読んで画素数を :data:`_MAX_REFLEX_IMAGE_PIXELS` と比べる
+    (``Image.open`` は画素をデコードしない)。超える画像は、デコードせずに落とす。
+    """
+    if not isinstance(descriptor, Mapping):
+        return None, "it is not an image descriptor"
+    raw_path = descriptor.get("path")
+    if not raw_path:
+        return None, "it has no file path"
+    path = Path(raw_path)
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, "Pillow is not available"
+    # 警告のフィルター (warnings.catch_warnings) はプロセス全体の共有状態で、判断の
+    # ワーカーは並行して走るので触らない。上限 (6400 万画素) は Pillow の
+    # decompression bomb の警告の閾値 (Image.MAX_IMAGE_PIXELS、既定約 8900 万画素) より
+    # 小さいので、警告が出る画像は下の寸法の検査で必ず落ちる。その 2 倍を超える画像は
+    # Image.open が DecompressionBombError を投げ、ここで落ちる。
+    try:
+        with Image.open(path) as header:
+            width, height = header.size
+    except Exception as exc:
+        return None, f"its size could not be read ({type(exc).__name__})"
+    if width * height > _MAX_REFLEX_IMAGE_PIXELS:
+        return None, (
+            f"it has {width}x{height} pixels, more than {_MAX_REFLEX_IMAGE_PIXELS} "
+            "allowed before decoding"
+        )
+    from saiverse.media_utils import load_image_bytes_for_llm
+
+    mime_type = str(descriptor.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png")
+    data, _effective_mime = load_image_bytes_for_llm(path, mime_type)
+    if not data:
+        return None, "the file could not be read"
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+            format_name = img.format
+            if format_name in _SENDABLE_IMAGE_FORMATS and not getattr(img, "is_animated", False):
+                out_data = data
+            else:
+                out_data = _flatten_to_png(img)
+                format_name = "PNG"
+    except Exception as exc:
+        return None, f"it could not be opened as an image ({type(exc).__name__})"
+    if backend.kind == REFLEX_KIND_JEV and backend.request_shape == REQUEST_SHAPE_SYSTEM_ONE:
+        fitted = _fit_system_one_edges(out_data, format_name)
+        if fitted is None:
+            return None, (
+                f"its aspect ratio cannot fit {_SYSTEM_ONE_IMAGE_MIN_EDGE}-"
+                f"{_SYSTEM_ONE_IMAGE_MAX_EDGE} px on each side"
+            )
+        out_data = fitted
+    return _PreparedImage(out_data, _SENDABLE_IMAGE_FORMATS[format_name]), ""
+
+
+#: 1 回の判断に送る画像の枚数と、整えた後のバイト数の合計の上限 (intent §8)。
+#: 1 回の発言に画像が何枚・どれだけ大きく付いていても、判断 1 回の入力費用と送る
+#: 量が青天井にならないようにする。会話用クライアントの枚数上限・バイトの非常弁は
+#: ``__skip_image_summary__`` の画像を数えないので、ここで先に絞る (全
+#: ``request_shape`` と通常の LLM に同じ上限が掛かる)。
+_MAX_REFLEX_IMAGES = 4
+_MAX_REFLEX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _prepare_images(
+    images: Sequence[Any], backend: ReflexBackend, secret: _Secrets,
+) -> List[_PreparedImage]:
+    """送る画像を整える。整えられない画像はその 1 枚だけ落とし、WARNING に出す。
+
+    判断そのものを「使えなかった」にはしない (画像は判断の補助で、無くても従来の
+    判断はできる — intent §8)。全部落ちたら空の並び = 画像なしの要求 (従来と同じ中身)。
+
+    渡された順に整え、:data:`_MAX_REFLEX_IMAGES` 枚に達したら残りは整えずに落とす。
+    整えた後のバイト数の合計が :data:`_MAX_REFLEX_IMAGE_BYTES` を超える画像も落とす
+    (その 1 枚だけで、後ろの小さい画像は引き続き試す)。どちらも WARNING に出す。
+    """
+    prepared: List[_PreparedImage] = []
+    total_bytes = 0
+    for index, descriptor in enumerate(images):
+        if len(prepared) >= _MAX_REFLEX_IMAGES:
+            LOGGER.warning(
+                "[reflex] dropping %d attached image(s) for %r: at most %d image(s) are "
+                "sent to one judgment; the judgment continues without them",
+                len(images) - index, backend.model_key, _MAX_REFLEX_IMAGES,
+            )
+            break
+        try:
+            image, problem = _prepare_one_image(descriptor, backend)
+        except Exception as exc:  # noqa: BLE001 - 画像 1 枚の失敗で判断を止めない
+            image, problem = None, f"{type(exc).__name__}: {exc}"
+        if image is None:
+            LOGGER.warning(
+                "[reflex] dropping attached image %s for %r: %s; the judgment continues without it",
+                _image_label(descriptor, index, secret), backend.model_key,
+                _mask_secret(problem, secret)[:_ERROR_BODY_PREVIEW],
+            )
+            continue
+        if total_bytes + len(image.data) > _MAX_REFLEX_IMAGE_BYTES:
+            LOGGER.warning(
+                "[reflex] dropping attached image %s for %r: the images for one judgment "
+                "would exceed %d bytes; the judgment continues without it",
+                _image_label(descriptor, index, secret), backend.model_key,
+                _MAX_REFLEX_IMAGE_BYTES,
+            )
+            continue
+        total_bytes += len(image.data)
+        prepared.append(image)
+    if images and not prepared:
+        LOGGER.warning(
+            "[reflex] none of the %d attached image(s) could be prepared for %r; "
+            "sending the text-only request", len(images), backend.model_key,
+        )
+    return prepared
+
+
+def _attach_images(
+    payload: Mapping[str, Any],
+    headers: Mapping[str, str],
+    images: Sequence[_PreparedImage],
+    backend: ReflexBackend,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """jev 互換の要求に、整えた画像を ``request_shape`` ごとの送り方で足す。
+
+    元の ``payload`` / ``headers`` は書き換えず、複製を返す。画像を含む要求にだけ
+    ``image_request_headers`` の宣言を足す (提供元の名前では分岐しない)。
+
+    - ``system_one``: トップレベルの ``assets`` に画像を登録し、参照の文字列 (画像ごとの
+      UUID) の一覧を ``state`` の :data:`SYSTEM_ONE_IMAGES_STATE_KEY` の欄に置く。
+    - ``gemini_decisions``: ``input`` を Content ブロックの配列にし、文字列化した状況
+      (末尾の節を含む) の text ブロックの後ろに image ブロックを置く。
+    - ``openai_decisions``: ``input`` を user のメッセージの配列にし、``input_text``
+      (末尾の節を含む) の後ろに ``input_image`` (base64 の data URL) を置く。
+    """
+    new_payload = dict(payload)
+    if backend.request_shape == REQUEST_SHAPE_SYSTEM_ONE:
+        refs = [str(uuid.uuid4()) for _ in images]
+        new_payload["state"] = {**payload["state"], SYSTEM_ONE_IMAGES_STATE_KEY: refs}
+        new_payload["assets"] = {
+            ref: {"type": "image", "data_base64": image.base64, "format": image.format_name}
+            for ref, image in zip(refs, images)
+        }
+    elif backend.request_shape == REQUEST_SHAPE_GEMINI_DECISIONS:
+        new_payload["input"] = [
+            {"type": "text", "text": payload["input"]},
+            *({"type": "image", "data": image.base64, "mime_type": image.mime_type}
+              for image in images),
+        ]
+    elif backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
+        new_payload["input"] = [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": payload["input"]},
+                *({"type": "input_image",
+                   "image_url": f"data:{image.mime_type};base64,{image.base64}"}
+                  for image in images),
+            ],
+        }]
+    else:
+        # 解決 (_resolve_jev_backend) が知らない形を断っているので、ここへは来ない。
+        raise ValueError(f"unknown request_shape {backend.request_shape!r}")
+    new_headers = dict(headers)
+    new_headers.update(backend.image_request_headers)
+    return new_payload, new_headers
+
+
+# ---------------------------------------------------------------------------
 # 答える側ごとの往復 (器は evaluate が共有する)
 # ---------------------------------------------------------------------------
 
@@ -1340,6 +1964,10 @@ class _JevCall:
 
     ``evaluate`` の器 (同時実行の枠・ワーカースレッド・絶対締切・使用量の記帳の
     取り決め) はこのクラスの外にある。ここが持つのは「1 往復の中身」だけ。
+
+    ``images`` (送ると決めた画像の記述子) は :meth:`perform` の中で整えてから
+    :func:`_attach_images` で要求に足す。整えた画像が 1 枚も残らなければ、画像なしの
+    要求 (``payload`` / ``headers`` そのまま) を送る。
     """
 
     def __init__(
@@ -1349,12 +1977,16 @@ class _JevCall:
         headers: Mapping[str, str],
         timeout: float,
         transport: Optional[Any],
+        images: Sequence[Any] = (),
+        secret: _Secrets = (),
     ) -> None:
         self.backend = backend
         self.payload = payload
         self.headers = headers
         self.timeout = timeout
         self.transport = transport
+        self.images = list(images)
+        self.secret = secret
         self._client: Optional[httpx.Client] = None
         # 応答を受け取った時刻。料金はこの時刻で決める (記帳は後になりうる)。
         self._received_at: Optional[float] = None
@@ -1368,7 +2000,14 @@ class _JevCall:
         self._client = httpx.Client(timeout=self.timeout, transport=self.transport)
 
     def perform(self) -> Any:
-        response = self._client.post(self.backend.url, json=self.payload, headers=self.headers)
+        payload: Mapping[str, Any] = self.payload
+        headers: Mapping[str, str] = self.headers
+        if self.images:
+            # ワーカーの中で整える = 画像の読み込みと変換も締切の計測の内側。
+            prepared = _prepare_images(self.images, self.backend, self.secret)
+            if prepared:
+                payload, headers = _attach_images(payload, headers, prepared, self.backend)
+        response = self._client.post(self.backend.url, json=payload, headers=headers)
         self._received_at = time.time()
         return response
 
@@ -1549,10 +2188,14 @@ class _LLMCall:
         backend: ReflexBackend,
         state: Any,
         request_questions: Mapping[str, Mapping[str, Any]],
+        images: Sequence[Any] = (),
+        secret: _Secrets = (),
     ) -> None:
         self.backend = backend
         self.messages = [{"role": "user", "content": _build_llm_prompt(state, request_questions)}]
         self.schema = _llm_response_schema(request_questions)
+        self.images = list(images)
+        self.secret = secret
 
     def describe(self) -> str:
         return f"structured-output call to {self.backend.api_model}"
@@ -1560,22 +2203,71 @@ class _LLMCall:
     def start(self) -> None:
         """事前に用意するものは無い (クライアントはワーカーの中で作る)。"""
 
+    def _messages_with_images(self, paths: Sequence[Tuple[str, str]]) -> list:
+        """整えた画像の一時ファイルを、プロンプトのメッセージの ``metadata`` に載せる。
+
+        LLM クライアントは ``iter_image_media(metadata)`` でパスから読み直すので、
+        整えたバイト列は一時ファイルにして ``path`` で渡す (``uri`` は付けない —
+        ``iter_image_media`` は ``uri`` を先に解決するので、元の画像の URI を付けると
+        整える前の元のファイルが読まれる)。
+
+        ``__skip_image_summary__`` の印を必ず付ける。印が無いと、クライアントは埋め込め
+        なかった画像の代わりに ``ensure_image_summary`` で要約を作りに行き、課金のある
+        LLM 呼び出しが締切の中で黙って走る。この印のメッセージの画像は、クライアントの
+        枚数の上限とバイトの非常弁にも数えられず、常に埋め込まれる
+        (``llm_clients/utils.py`` の ``select_embedded_attachment_keys``)。
+        """
+        message = dict(self.messages[0])
+        message["metadata"] = {
+            "images": [
+                {"type": "image", "path": path, "mime_type": mime_type}
+                for path, mime_type in paths
+            ],
+            "__skip_image_summary__": True,
+        }
+        return [message]
+
     def perform(self) -> Any:
         from llm_clients import get_llm_client
         from saiverse.model_configs import get_context_length, get_model_provider
 
-        key = self.backend.model_key
-        client = get_llm_client(key, get_model_provider(key), get_context_length(key))
-        # 一撃の判定に長考は要らない (待ち時間と費用だけが増える)。モデル設定や画面で
-        # 思考の深さが決まっているときは、クライアント側がそれを尊重して何もしない
-        # (llm_clients/base.py の prefer_minimal_reasoning の契約)。
-        client.prefer_minimal_reasoning()
-        # temperature は指定しない (モデル設定の既定に従う)。
-        raw = client.generate(self.messages, response_schema=self.schema)
-        # クライアントは自分では記帳しない (記帳は呼び出し側の仕事) ので、ここで
-        # 受け取って運ぶ。記帳そのものは read / record_abandoned_usage のどちらか
-        # 一方だけが行う (evaluate の錠の取り決め)。
-        return (raw, client.consume_usage())
+        messages = self.messages
+        temp_paths: List[str] = []
+        try:
+            if self.images:
+                # ワーカーの中で整える = 画像の読み込みと変換も締切の計測の内側。
+                prepared = _prepare_images(self.images, self.backend, self.secret)
+                written: List[Tuple[str, str]] = []
+                for image in prepared:
+                    fd, path = tempfile.mkstemp(
+                        prefix=_LLM_IMAGE_TEMP_PREFIX, suffix=f".{image.format_name}",
+                    )
+                    temp_paths.append(path)
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(image.data)
+                    written.append((path, image.mime_type))
+                if written:
+                    messages = self._messages_with_images(written)
+
+            key = self.backend.model_key
+            client = get_llm_client(key, get_model_provider(key), get_context_length(key))
+            # 一撃の判定に長考は要らない (待ち時間と費用だけが増える)。モデル設定や画面で
+            # 思考の深さが決まっているときは、クライアント側がそれを尊重して何もしない
+            # (llm_clients/base.py の prefer_minimal_reasoning の契約)。
+            client.prefer_minimal_reasoning()
+            # temperature は指定しない (モデル設定の既定に従う)。
+            raw = client.generate(messages, response_schema=self.schema)
+            # クライアントは自分では記帳しない (記帳は呼び出し側の仕事) ので、ここで
+            # 受け取って運ぶ。記帳そのものは read / record_abandoned_usage のどちらか
+            # 一方だけが行う (evaluate の錠の取り決め)。
+            return (raw, client.consume_usage())
+        finally:
+            # generate は同期で走り切るので、ここで消してよい (クライアントは読み終えている)。
+            for path in temp_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    LOGGER.debug("[reflex] could not remove the temporary image %s", path)
 
     def abort(self) -> None:
         """``generate`` は途中で切れない。走らせたまま置き去りにする (枠は占有のまま)。"""
@@ -1715,6 +2407,7 @@ def evaluate(
     backend: Optional[ReflexBackend] = None,
     persona_id: Optional[str] = None,
     transport: Optional[Any] = None,
+    images: Optional[Sequence[Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """:func:`_evaluate` の入口。結果を直近の記録へ 1 件積んでから返す / 投げ直す。
 
@@ -1731,6 +2424,7 @@ def evaluate(
         result = _evaluate(
             state, questions,
             timeout=timeout, backend=backend, persona_id=persona_id, transport=transport,
+            images=images,
         )
     except ReflexJudgmentUnavailable as exc:
         if questions:
@@ -1753,6 +2447,7 @@ def _evaluate(
     backend: Optional[ReflexBackend] = None,
     persona_id: Optional[str] = None,
     transport: Optional[Any] = None,
+    images: Optional[Sequence[Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """全質問を 1 往復で評価し ``({qid: 答え}, usage情報)`` を返す。
 
@@ -1767,6 +2462,13 @@ def _evaluate(
         persona_id: 使用量の記帳に載せるペルソナ (分からなければ省略)。
         transport: テストからトランスポート (``httpx.MockTransport``) を差し込むための口
             (jev 互換の道だけが使う)。本番経路では常に None。
+        images: 判断に見せる画像の記述子 (``saiverse.media_utils.iter_image_media`` が
+            返す形)。省略すると従来どおり文字だけ。答える側が画像を受け付けない
+            (``backend.supports_images`` が False) なら無視して、渡さなかったときと同じ
+            要求を送る。受け付けるなら、ワーカーの中 (締切の計測の内側) で整えてから
+            ``request_shape`` ごとの送り方で足す。整えられない画像はその 1 枚だけ落として
+            続ける (判断を「使えなかった」にはしない)。整えた画像を API が断った (非 200)
+            ときは他の非 200 と同じく「使えなかった」で、文字だけで送り直しはしない。
 
     Returns:
         (qid -> 答え, usage dict)。**要求した全 qid が揃っている**ことを保証する —
@@ -1839,16 +2541,27 @@ def _evaluate(
         build_label = "structured-output prompt"
     elif backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
         build_label = "Decisions request"
+    elif backend.request_shape == REQUEST_SHAPE_GEMINI_DECISIONS:
+        build_label = "Gemini Decisions request"
     else:
         build_label = "request"
     try:
+        # 送る画像 (整える前の記述子)。答える側が受け付けないなら空 = 従来と同じ要求。
+        send_images = _images_to_send(images, backend, state)
         if backend.kind == REFLEX_KIND_JEV:
-            if backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
-                # 送る直前に OpenAI の Decisions の形へ組み替える (呼び出し側の質問と
-                # 状況は System One の形のまま)。表せない質問はここで不成立になり、
-                # 同時実行の枠を取る前に戻る。
-                payload, offered = _decisions_request(state, request_questions, backend)
-                # choice の答えの検算は、実際に送った choices の値で行う (criteria の
+            if backend.request_shape in (
+                REQUEST_SHAPE_OPENAI_DECISIONS, REQUEST_SHAPE_GEMINI_DECISIONS,
+            ):
+                # 送る直前に Decisions の形へ組み替える (呼び出し側の質問と状況は
+                # System One の形のまま)。表せない質問はここで不成立になり、同時実行の
+                # 枠を取る前に戻る。
+                build = (
+                    _decisions_request
+                    if backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS
+                    else _gemini_decisions_request
+                )
+                payload, offered = build(state, request_questions, backend)
+                # choice の答えの検算は、実際に送った選択肢の値で行う (criteria の
                 # 辞書だけから組んだ choice や、文字列でない options を文字列にして
                 # 送った choice でも、送っていない値を「判定できた」にしない)。
                 options_by_qid = {
@@ -1862,12 +2575,18 @@ def _evaluate(
                     "questions": request_questions,
                 }
             # API キーの値そのものはログに出さない (ヘッダごとダンプしない)。
-            headers = {"Content-Type": "application/json"}
+            # どのヘッダにどの接頭辞で載せるかは方言の宣言 (auth_header / auth_prefix)。
+            headers = {_CONTENT_TYPE_HEADER: "application/json"}
             if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            call = _JevCall(backend, payload, headers, timeout, transport)
+                headers[backend.auth_header] = f"{backend.auth_prefix}{api_key}"
+            call = _JevCall(
+                backend, payload, headers, timeout, transport,
+                images=send_images, secret=secrets,
+            )
         else:
-            call = _LLMCall(backend, state, request_questions)
+            call = _LLMCall(
+                backend, state, request_questions, images=send_images, secret=secrets,
+            )
     except ReflexJudgmentUnavailable as exc:
         # この宛先の形で表せない質問 (空の選択肢・段階が足りない score など) を、
         # 送る前に断った。設定や呼び出し方を直せば直る失敗なので、層のログにも残す。
@@ -2045,8 +2764,10 @@ __all__ = [
     "OUTCOME_WINDOW_SECONDS",
     "QUESTION_TYPES",
     "REQUEST_SHAPES",
+    "REQUEST_SHAPE_GEMINI_DECISIONS",
     "REQUEST_SHAPE_OPENAI_DECISIONS",
     "REQUEST_SHAPE_SYSTEM_ONE",
+    "SYSTEM_ONE_IMAGES_STATE_KEY",
     "REFLEX_KIND_JEV",
     "REFLEX_KIND_LLM",
     "UNAVAILABLE_DEADLINE",
