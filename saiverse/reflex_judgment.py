@@ -1814,6 +1814,15 @@ def _prepare_one_image(
     return _PreparedImage(out_data, _SENDABLE_IMAGE_FORMATS[format_name]), ""
 
 
+#: 1 回の判断に送る画像の枚数と、整えた後のバイト数の合計の上限 (intent §8)。
+#: 1 回の発言に画像が何枚・どれだけ大きく付いていても、判断 1 回の入力費用と送る
+#: 量が青天井にならないようにする。会話用クライアントの枚数上限・バイトの非常弁は
+#: ``__skip_image_summary__`` の画像を数えないので、ここで先に絞る (全
+#: ``request_shape`` と通常の LLM に同じ上限が掛かる)。
+_MAX_REFLEX_IMAGES = 4
+_MAX_REFLEX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
 def _prepare_images(
     images: Sequence[Any], backend: ReflexBackend, secret: _Secrets,
 ) -> List[_PreparedImage]:
@@ -1821,9 +1830,21 @@ def _prepare_images(
 
     判断そのものを「使えなかった」にはしない (画像は判断の補助で、無くても従来の
     判断はできる — intent §8)。全部落ちたら空の並び = 画像なしの要求 (従来と同じ中身)。
+
+    渡された順に整え、:data:`_MAX_REFLEX_IMAGES` 枚に達したら残りは整えずに落とす。
+    整えた後のバイト数の合計が :data:`_MAX_REFLEX_IMAGE_BYTES` を超える画像も落とす
+    (その 1 枚だけで、後ろの小さい画像は引き続き試す)。どちらも WARNING に出す。
     """
     prepared: List[_PreparedImage] = []
+    total_bytes = 0
     for index, descriptor in enumerate(images):
+        if len(prepared) >= _MAX_REFLEX_IMAGES:
+            LOGGER.warning(
+                "[reflex] dropping %d attached image(s) for %r: at most %d image(s) are "
+                "sent to one judgment; the judgment continues without them",
+                len(images) - index, backend.model_key, _MAX_REFLEX_IMAGES,
+            )
+            break
         try:
             image, problem = _prepare_one_image(descriptor, backend)
         except Exception as exc:  # noqa: BLE001 - 画像 1 枚の失敗で判断を止めない
@@ -1835,6 +1856,15 @@ def _prepare_images(
                 _mask_secret(problem, secret)[:_ERROR_BODY_PREVIEW],
             )
             continue
+        if total_bytes + len(image.data) > _MAX_REFLEX_IMAGE_BYTES:
+            LOGGER.warning(
+                "[reflex] dropping attached image %s for %r: the images for one judgment "
+                "would exceed %d bytes; the judgment continues without it",
+                _image_label(descriptor, index, secret), backend.model_key,
+                _MAX_REFLEX_IMAGE_BYTES,
+            )
+            continue
+        total_bytes += len(image.data)
         prepared.append(image)
     if images and not prepared:
         LOGGER.warning(

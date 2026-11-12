@@ -19,6 +19,7 @@
 import base64
 import io
 import json
+import os
 import threading
 from unittest.mock import patch
 
@@ -961,3 +962,33 @@ def test_auto_recall_hands_the_images_to_evaluate(monkeypatch, tmp_path):
         )
     assert [item["path"] for item in calls[0]["images"]] == [now]
     assert "images" not in calls[1]
+
+
+def test_at_most_four_images_are_sent_to_one_judgment(monkeypatch, tmp_path):
+    # 1 回の発言に画像が何枚付いていても、判断 1 回に送るのは渡された順の先頭 4 枚まで
+    # (intent §8。全 request_shape と通常の LLM に同じ上限)。
+    _use_shape(monkeypatch, "gemini_decisions", supports_images=True)
+    descriptors = [
+        _descriptor(_image_file(tmp_path, f"i{n}.png", size=(300 + n, 300)))
+        for n in range(6)
+    ]
+    blocks = _send("gemini_decisions", descriptors)["body"]["input"]
+    sizes = [_decoded_size(b["data"])[1] for b in blocks[1:]]
+    assert sizes == [(300, 300), (301, 300), (302, 300), (303, 300)]
+
+
+def test_images_beyond_the_total_byte_cap_are_dropped(monkeypatch, tmp_path):
+    # 整えた後の合計が上限を超える画像はその 1 枚だけ落とし、後ろの小さい画像は試す。
+    _use_shape(monkeypatch, "gemini_decisions", supports_images=True)
+    small = _descriptor(_image_file(tmp_path, "small.png", size=(300, 300)))
+    big_path = tmp_path / "big.png"
+    # 単色だと PNG が小さく圧縮されるので、乱数の画素で圧縮の効かない画像にする
+    Image.frombytes("RGB", (600, 600), os.urandom(600 * 600 * 3)).save(big_path, format="PNG")
+    big = _descriptor(big_path)
+    small_len = len(base64.b64decode(
+        _send("gemini_decisions", [small])["body"]["input"][1]["data"]
+    ))
+    monkeypatch.setattr(reflex_judgment, "_MAX_REFLEX_IMAGE_BYTES", small_len * 2 + 10)
+    blocks = _send("gemini_decisions", [small, big, small])["body"]["input"]
+    sizes = [_decoded_size(b["data"])[1] for b in blocks[1:]]
+    assert sizes == [(300, 300), (300, 300)]

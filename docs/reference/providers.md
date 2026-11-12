@@ -180,7 +180,7 @@ Gemini の [Decisions API](https://aistudio.google.com/docs/decisions-api)（`v1
 
 #### 画像を受け付けるモデルへの画像の送り方
 
-反射判断は、割り当てたモデル設定の `supports_images` が true のとき（欄が無ければ会話用クライアントと同じく provider が `gemini` のときだけ true）、呼び出し側が渡した画像を送る（[intent §8](../intent/reflex_judgment.md)）。false なら画像を無視して、渡さなかったときと同じ要求を送る。同梱の既定は、`gemini-decision-1` / `gemini-decision-1-paid` / `openai-decisions-gpt-6-luna` が true、`jev-latest` / `openrouter-jev-latest` / `localjev` が false。画像は送る前に整える（読めない・開けない画像はその 1 枚だけ送らず、PNG / JPEG 以外は PNG に描き直す）。送り方は `request_shape` ごとに違う。
+反射判断は、割り当てたモデル設定の `supports_images` が true のとき（欄が無ければ会話用クライアントと同じく provider が `gemini` のときだけ true）、呼び出し側が渡した画像を送る（[intent §8](../intent/reflex_judgment.md)）。false なら画像を無視して、渡さなかったときと同じ要求を送る。同梱の既定は、`gemini-decision-1` / `gemini-decision-1-paid` / `openai-decisions-gpt-6-luna` が true、`jev-latest` / `openrouter-jev-latest` / `localjev` が false。画像は送る前に整える（読めない・開けない画像はその 1 枚だけ送らず、PNG / JPEG 以外は PNG に描き直す）。1 回の判断に送るのは渡された順に 4 枚まで、整えた後の合計 8 MiB までで、超えた画像は落として WARNING に出す。送り方は `request_shape` ごとに違う。
 
 - `system_one`: トップレベルの `assets` に画像（`data_base64` + `format`）を登録し、参照の文字列（画像ごとの UUID）の一覧を `state` の `attached_images` の欄に置く。各辺は 280〜1568px に縮小・拡大して収め、縦横比が極端で収められない画像は送らない。画像を含む要求にだけ `image_request_headers` を付ける。
 - `gemini_decisions`: `input` を Content ブロックの配列にし、状況の `{"type": "text", ...}` の後ろに `{"type": "image", "data": <base64>, "mime_type": ...}` を置く。
