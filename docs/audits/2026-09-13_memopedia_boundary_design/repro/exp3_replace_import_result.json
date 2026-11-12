@@ -1,0 +1,392 @@
+{
+  "実験": "exp3_replace_import — 置き換え取り込みが何を先に消すか",
+  "隔離ホーム": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp3_replace_import_home",
+  "取り込み先の記憶 DB": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp3_replace_import_home\\personas\\probe_replace_target\\memory.db",
+  "取り込み先に用意したもの": {
+    "core_ids": [
+      1,
+      2
+    ],
+    "trashed_core_id": 3,
+    "knowledge_page_id": "0eb6250a-1c12-4724-8c0f-15c5b732cac5",
+    "knowledge_short_id": 6,
+    "fragment_id": "8f602d33-5ccc-47a9-86b1-d505a6f3f423",
+    "desk_ref": "memopedia:6",
+    "chronicle_entry_id": "6af1bedf-896b-4dc1-9c21-c2587c0fba3b",
+    "theme_page_id": "b285ae75-076b-4d37-a553-db618a92093c"
+  },
+  "取り込むファイルの中身": [
+    {
+      "title": "コア記憶 c:1",
+      "category": "core"
+    },
+    {
+      "title": "持ち出し元の知識ページ",
+      "category": "terms"
+    }
+  ],
+  "取り込み前": {
+    "保存表の行": [
+      {
+        "id": "6af1bedf-896b-4dc1-9c21-c2587c0fba3b",
+        "category": "chronicle",
+        "parent_id": "root_chronicle",
+        "title": "chronicle:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 7
+      },
+      {
+        "id": "root_chronicle",
+        "category": "chronicle",
+        "parent_id": null,
+        "title": "時間の地図",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 1
+      },
+      {
+        "id": "root_core",
+        "category": "core",
+        "parent_id": null,
+        "title": "コア記憶",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 2
+      },
+      {
+        "id": "3c1a1dfa-c6b8-41fa-aacf-32c7829c03d4",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 3
+      },
+      {
+        "id": "5207ea03-f7aa-40fc-a178-d9eaee56fa89",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:2",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 4
+      },
+      {
+        "id": "cd7b8904-db1e-41f5-b19e-b2b0e2d8dbbb",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:3",
+        "is_deleted": 1,
+        "metadata": "metadata あり",
+        "short_id": 5
+      },
+      {
+        "id": "root_events",
+        "category": "events",
+        "parent_id": null,
+        "title": "出来事",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_people",
+        "category": "people",
+        "parent_id": null,
+        "title": "人物",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_plans",
+        "category": "plans",
+        "parent_id": null,
+        "title": "計画",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_terms",
+        "category": "terms",
+        "parent_id": null,
+        "title": "用語",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "0eb6250a-1c12-4724-8c0f-15c5b732cac5",
+        "category": "terms",
+        "parent_id": null,
+        "title": "知識ページ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 6
+      },
+      {
+        "id": "root_theme",
+        "category": "theme",
+        "parent_id": null,
+        "title": "テーマ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 8
+      },
+      {
+        "id": "b285ae75-076b-4d37-a553-db618a92093c",
+        "category": "theme",
+        "parent_id": "root_theme",
+        "title": "テーマページ",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 9
+      }
+    ],
+    "付随データ": {
+      "生きているページ": 12,
+      "Fragment": 1,
+      "ページの埋め込み": 0,
+      "ページの編集来歴": 4,
+      "机に開いた参照": [
+        "memopedia:6"
+      ]
+    },
+    "正規の読み取り": {
+      "コア記憶の一覧 (list_core_memories)": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "コア記憶のごみ箱 (list_deleted_core_memories)": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "コア記憶の合計字数 (total_core_memory_chars)": 32,
+      "あらすじの一覧 (get_all_entries_ordered)": [
+        "あらすじ"
+      ]
+    },
+    "頭のコア記憶の章": {
+      "capture": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "render": "## コア記憶（自分で選んで刻んだ、常に携えている知識）\n- [core:1] まはーは野菜がほぼ食べられない\n- [core:2] 工房の棚は三段で、上段に定規を置く"
+    }
+  },
+  "呼んだもの": "api.routes.people.memopedia.import_memopedia(\"probe_replace_target\", body=<書き出しそのもの>, clear=True, manager=<偽 manager>)",
+  "取り込みの応答 (原文)": {
+    "success": true,
+    "imported_count": 2,
+    "message": "Imported 2 pages"
+  },
+  "取り込み後": {
+    "保存表の行": [
+      {
+        "id": "6af1bedf-896b-4dc1-9c21-c2587c0fba3b",
+        "category": "chronicle",
+        "parent_id": "root_chronicle",
+        "title": "chronicle:1",
+        "is_deleted": 0,
+        "metadata": "metadata あり",
+        "short_id": 7
+      },
+      {
+        "id": "root_chronicle",
+        "category": "chronicle",
+        "parent_id": null,
+        "title": "時間の地図",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 1
+      },
+      {
+        "id": "root_core",
+        "category": "core",
+        "parent_id": null,
+        "title": "コア記憶",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 2
+      },
+      {
+        "id": "d7660d54-97ee-4076-9373-299fa62bf4a6",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:1",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 9
+      },
+      {
+        "id": "cd7b8904-db1e-41f5-b19e-b2b0e2d8dbbb",
+        "category": "core",
+        "parent_id": "root_core",
+        "title": "コア記憶 c:3",
+        "is_deleted": 1,
+        "metadata": "metadata あり",
+        "short_id": 5
+      },
+      {
+        "id": "root_events",
+        "category": "events",
+        "parent_id": null,
+        "title": "出来事",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_people",
+        "category": "people",
+        "parent_id": null,
+        "title": "人物",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_plans",
+        "category": "plans",
+        "parent_id": null,
+        "title": "計画",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "f9aaec4e-4471-45e5-a42d-2cf00cfc3bac",
+        "category": "terms",
+        "parent_id": null,
+        "title": "持ち出し元の知識ページ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 10
+      },
+      {
+        "id": "root_terms",
+        "category": "terms",
+        "parent_id": null,
+        "title": "用語",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": null
+      },
+      {
+        "id": "root_theme",
+        "category": "theme",
+        "parent_id": null,
+        "title": "テーマ",
+        "is_deleted": 0,
+        "metadata": "metadata なし",
+        "short_id": 8
+      }
+    ],
+    "付随データ": {
+      "生きているページ": 10,
+      "Fragment": 0,
+      "ページの埋め込み": 0,
+      "ページの編集来歴": 4,
+      "机に開いた参照": [
+        "memopedia:6"
+      ]
+    },
+    "正規の読み取り": {
+      "コア記憶の一覧 (list_core_memories)": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+      "コア記憶のごみ箱 (list_deleted_core_memories)": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "コア記憶の合計字数 (total_core_memory_chars)": 10,
+      "あらすじの一覧 (get_all_entries_ordered)": [
+        "あらすじ"
+      ]
+    },
+    "頭のコア記憶の章": {
+      "capture": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+      "render": "(capture が落ちたので描画に至らない)"
+    }
+  },
+  "先行削除で消えたもの・残ったもの": {
+    "terms": {
+      "前": [
+        "用語",
+        "知識ページ"
+      ],
+      "後": [
+        "持ち出し元の知識ページ",
+        "用語"
+      ]
+    },
+    "theme": {
+      "前": [
+        "テーマ",
+        "テーマページ"
+      ],
+      "後": [
+        "テーマ"
+      ]
+    },
+    "core": {
+      "前": [
+        "コア記憶",
+        "コア記憶 c:1",
+        "コア記憶 c:2",
+        "コア記憶 c:3"
+      ],
+      "後": [
+        "コア記憶",
+        "コア記憶 c:1",
+        "コア記憶 c:3"
+      ]
+    },
+    "chronicle": {
+      "前": [
+        "chronicle:1",
+        "時間の地図"
+      ],
+      "後": [
+        "chronicle:1",
+        "時間の地図"
+      ]
+    }
+  },
+  "読み取りの前後": {
+    "コア記憶の一覧": {
+      "前": [
+        "c:1 まはーは野菜がほぼ食べられない",
+        "c:2 工房の棚は三段で、上段に定規を置く"
+      ],
+      "後": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
+    },
+    "コア記憶のごみ箱": {
+      "前": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ],
+      "後": [
+        "c:3 自分でごみ箱へ入れたコア記憶"
+      ]
+    },
+    "あらすじの一覧": {
+      "前": [
+        "あらすじ"
+      ],
+      "後": [
+        "あらすじ"
+      ]
+    },
+    "頭のコア記憶の章": {
+      "前": {
+        "capture": [
+          "c:1 まはーは野菜がほぼ食べられない",
+          "c:2 工房の棚は三段で、上段に定規を置く"
+        ],
+        "render": "## コア記憶（自分で選んで刻んだ、常に携えている知識）\n- [core:1] まはーは野菜がほぼ食べられない\n- [core:2] 工房の棚は三段で、上段に定規を置く"
+      },
+      "後": {
+        "capture": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+        "render": "(capture が落ちたので描画に至らない)"
+      }
+    }
+  }
+}
