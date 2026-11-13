@@ -2,8 +2,14 @@
 
 read_url_outline / read_url_section から共通利用する低レベル処理を集約する。
 
-- fetch_page: HTTP取得 + HTMLパース + clean + main検出 + Markdown化
-- extract_outline: clean済み main soup から h1-h4 をフラットに抽出
+- fetch_page: HTTP取得 + HTMLパース + clean + Markdown化（ページ全体）
+- extract_outline: clean済みページから h1-h4 をフラットに抽出
+
+本文の場所を推測して一部だけを残す処理は持たない。read_url_outline は
+ページの全体像（少なくとも全見出し）を渡すスペルなので、推測が外れると
+自分の最低限の約束より少ない情報を返してしまう（2026-11-13、saiverse.net で
+4 枚ある <article> のカードの 1 枚目だけが本文とされ、97 文字しか返らなかった）。
+長いページの分量は read_url_outline の閾値と見出し一覧で抑える。
 - extract_section_by_heading: 見出しマッチで節を切り出し
 - extract_section_by_keyword: 全文キーワード一致箇所周辺を切り出し
 """
@@ -54,12 +60,12 @@ class FetchError(Exception):
 class FetchedPage:
     url: str
     title: str
-    main_soup: Tag  # cleaned, scoped to main content area
-    markdown: str  # Markdownified main content
+    body_soup: Tag  # cleaned, whole page (<body>)
+    markdown: str  # Markdownified whole page
 
 
 def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
-    """URLを取得し、cleanup + main抽出 + Markdown化までを行って返す。
+    """URLを取得し、cleanup + Markdown化までを行って返す（ページ全体）。
 
     各段でログを出す（ファイルログは無制限ポリシー）。
     失敗時は FetchError を投げる。
@@ -113,10 +119,10 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
     title = title_tag.get_text(strip=True) if title_tag else ""
 
     soup = _clean_html(soup)
-    main = _find_main_content(soup)
+    body = soup.find("body") or soup
 
     try:
-        markdown = _html_to_markdown(main)
+        markdown = _html_to_markdown(body)
     except Exception as exc:
         LOGGER.exception("fetch_page markdown_conversion_failed url=%s", url)
         raise FetchError(f"HTMLの変換に失敗しました: {exc}") from exc
@@ -129,7 +135,7 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
         "fetch_page done url=%s title=%r markdown_chars=%d",
         url, title, len(markdown),
     )
-    return FetchedPage(url=url, title=title, main_soup=main, markdown=markdown)
+    return FetchedPage(url=url, title=title, body_soup=body, markdown=markdown)
 
 
 # ---------------------------------------------------------------------------
@@ -146,18 +152,6 @@ def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
     for tag in soup.find_all(style=re.compile(r"display:\s*none", re.I)):
         tag.decompose()
     return soup
-
-
-def _find_main_content(soup: BeautifulSoup) -> Tag:
-    """main / article / role=main / .content等を優先して返す。"""
-    return (
-        soup.find("main")
-        or soup.find("article")
-        or soup.find(attrs={"role": "main"})
-        or soup.find(class_=re.compile(r"(content|main|article)", re.I))
-        or soup.find("body")
-        or soup
-    )
 
 
 def _html_to_markdown(soup: Tag) -> str:
@@ -177,12 +171,12 @@ class OutlineEntry:
     text: str
 
 
-def extract_outline(main_soup: Tag) -> List[OutlineEntry]:
-    """main領域から h1〜h4 をフラットに抽出（文書順）。"""
+def extract_outline(body_soup: Tag) -> List[OutlineEntry]:
+    """ページから h1〜h4 をフラットに抽出（文書順）。"""
     entries: List[OutlineEntry] = []
-    if not isinstance(main_soup, Tag):
+    if not isinstance(body_soup, Tag):
         return entries
-    for h in main_soup.find_all(HEADING_TAGS):
+    for h in body_soup.find_all(HEADING_TAGS):
         level = int(h.name[1])
         text = h.get_text(strip=True)
         if text:
@@ -191,7 +185,7 @@ def extract_outline(main_soup: Tag) -> List[OutlineEntry]:
 
 
 def extract_section_by_heading(
-    main_soup: Tag,
+    body_soup: Tag,
     query: str,
     max_chars: int,
 ) -> Optional[Tuple[str, str]]:
@@ -205,7 +199,7 @@ def extract_section_by_heading(
         (matched_heading_text, section_markdown) or None。
         section_markdown は max_chars でtruncate される（自然な区切りで）。
     """
-    if not isinstance(main_soup, Tag):
+    if not isinstance(body_soup, Tag):
         return None
     if not query:
         return None
@@ -215,7 +209,7 @@ def extract_section_by_heading(
 
     # 全見出し候補をまず収集（後の fallback で再走しないため）
     candidates: List[Tuple[Tag, str, str]] = []  # (tag, raw_text, normalized)
-    for h in main_soup.find_all(HEADING_TAGS):
+    for h in body_soup.find_all(HEADING_TAGS):
         text = h.get_text(strip=True)
         if not text:
             continue
