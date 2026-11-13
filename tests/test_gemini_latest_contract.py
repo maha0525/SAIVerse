@@ -76,6 +76,49 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertIs(config["cache"]["explicit_supported"], False)
         self.assertEqual(config["timeout"], 900)
 
+    def test_carbon_definition_follows_argon(self):
+        """Gemini 4 Carbon: Argon と同じ契約 (thinking_level / 暗黙キャッシュのみ / 15 分)。"""
+        config = model_configs.get_model_config("gemini-4-carbon")
+        self.assertEqual(config["model"], "gemini-4-carbon")
+        self.assertTrue(config["prefer_paid"])
+        self.assertFalse(config["supports_sampling_parameters"])
+        self.assertEqual(
+            config["parameters"]["thinking_level"]["options"], ["low", "medium", "high"]
+        )
+        self.assertIs(config["cache"]["explicit_supported"], False)
+        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(_gemini_version("gemini-4-carbon"), (4, 0))
+
+    def test_hydrogen_definitions_match_the_official_contract(self):
+        """Gemini 4 Hydrogen: thinking_level は low/medium/high/xhigh (既定 high、
+        minimal はエラー)、sampling は無視、明示キャッシュ非対応、料金は全域一律。
+        無料枠は TPM 250k / RPD 20 なのでコンテキストを 250,000 で止める。"""
+        paid = model_configs.get_model_config("gemini-4-hydrogen-paid")
+        free = model_configs.get_model_config("gemini-4-hydrogen")
+        for key, config in (("paid", paid), ("free", free)):
+            with self.subTest(variant=key):
+                self.assertEqual(config["model"], "gemini-4-hydrogen")
+                self.assertFalse(config["supports_sampling_parameters"])
+                self.assertFalse(config["supports_model_prefill"])
+                for name in ("temperature", "top_p", "top_k"):
+                    self.assertNotIn(name, config["parameters"])
+                thinking_level = config["parameters"]["thinking_level"]
+                self.assertEqual(
+                    thinking_level["options"], ["low", "medium", "high", "xhigh"]
+                )
+                self.assertEqual(thinking_level["default"], "high")
+        self.assertTrue(paid["prefer_paid"])
+        self.assertEqual(paid["context_length"], 1_048_576)
+        self.assertIs(paid["cache"]["explicit_supported"], False)
+        self.assertEqual(paid["cache"]["min_tokens"], 4096)
+        self.assertAlmostEqual(
+            model_configs.calculate_cost("gemini-4-hydrogen-paid", 1_000_000, 1_000_000),
+            9.0,
+        )
+        self.assertFalse(free["prefer_paid"])
+        self.assertEqual(free["context_length"], 250_000)
+        self.assertEqual(free["rate_limit"]["rpd"], 20)
+
     def test_paid_model_pricing_matches_standard_tier(self):
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),

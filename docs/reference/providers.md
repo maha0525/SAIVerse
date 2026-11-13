@@ -24,8 +24,23 @@
 | `openrouter_systemone` | OpenRouter (System One) | `jev_compat` | `https://openrouter.ai` | `OPENROUTER_API_KEY` |
 | `localjev` | localjev (local) | `jev_compat` | `http://127.0.0.1:8080` | —（不要） |
 | `openai_decisions` | OpenAI Decisions | `jev_compat` | `https://api.openai.com` | `OPENAI_API_KEY` |
+| `gemini_decisions` | Gemini Decisions (有料Tier) | `jev_compat` | `https://generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
+| `gemini_decisions_free` | Gemini Decisions (無料枠) | `jev_compat` | `https://generativelanguage.googleapis.com` | `GEMINI_FREE_API_KEY` |
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
+
+### モデルを選ぶ欄での並べ方 (`current_models` / `picker_group`)
+
+モデルを選ぶ欄は、先にプロバイダのボタンを選び、次にそのプロバイダのモデルから選ぶ。並べ方を決めるのは `saiverse/model_picker.py` の一か所で、`GET /api/config/models` は行をこの並び順で返し、各行に `picker_group` / `picker_group_label` / `picker_group_order` / `picker_heading` / `is_current` を載せる。設計は [`docs/intent/model_picker.md`](../intent/model_picker.md)。
+
+プロバイダ定義には、そのための省略できる項目が 2 つある。
+
+- **`current_models`**: 最初から出すモデルを、モデル定義のファイル名 (拡張子なし = 設定キー) で、表示したい順に並べた配列。リストに無い標準のモデルは「他のモデル」に畳まれる (消えはしない)。利用者が自分で追加したモデルと拡張パックのモデルは、リストに無くても最初から出る。この項目を持たないプロバイダは全部を最初から出す。`builtin_data/providers/` では `gemini` / `anthropic` / `openai` / `openai_codex` / `xai` / `openrouter` が持つ。Gemini は 1 つのリストに有料と無料の設定キーを並べ、ボタンを分けるのはモデル定義の `prefer_paid`。新しい世代のモデルを足したときは、このリストを手で更新する。書いた名前が実在するモデルを指していることは `tests/test_model_picker.py` が検査する。
+- **`picker_group`**: どのボタンにまとめるかの名前 (安全な識別子)。`ollama` / `lmstudio` / `llama_cpp_server` は `"custom"` を書いており、利用者が自分で作ったプロバイダ (user_data の層のプロバイダ) と一緒に「カスタム」のボタンに入る。このボタンの中は、プロバイダの表示名を見出しにして分ける。
+
+反射判断専用のプロバイダ (`gemini_decisions` / `gemini_decisions_free` / `openai_decisions` / `openrouter_systemone` / `typesafe` / `localjev`) は `"picker_group": "reflex"` を書いており、「反射判断専用」の 1 つのボタンにまとまる。`picker_group` を書いたプロバイダと利用者が自分で作ったプロバイダのモデルには、行に `picker_heading` (プロバイダの表示名) が載り、画面はそれを見出しにして分ける。
+
+ボタンの並び順は「反射判断専用」が先頭で、続いて anthropic、openai、openai_codex、Gemini (有料)、Gemini (無料)、xai、openrouter、nvidia_nim の順で、それ以外は名前の順でその後ろ、「カスタム」が最後。画面から標準のプロバイダを上書き編集しても、どのボタンに入るかと最初から出すモデルは、配られている定義 (`builtin_data/` と拡張パック) のとおりのまま変わらない。上書きの中に写された `current_models` と `picker_group` は見ない。「カスタム」に入るのは、同じ id の配られている定義が無いプロバイダ (利用者が自分で作ったもの) と、`picker_group` に `custom` と書いてある標準のプロバイダだけ。
 
 ### OpenAI は推論中の温度を受け付けない
 
@@ -44,9 +59,12 @@ Meta・OpenRouter など同じクライアントを使う他社は推論と温�
 
 Meta は会話用の `meta-muse-spark-1.3` (`muse-spark-1.3`)、
 `meta-muse-spark-1.3-contributor` (`muse-spark-1.3-contributor`、送った内容を Meta が
-学習に使う代わりに安い版) と `meta-muse-wonder-1.0` (`muse-wonder-1.0`、プレビュー) を同梱する。
+学習に使う代わりに安い版)、`meta-muse-wonder-1.0` (`muse-wonder-1.0`、プレビュー) と、
+安い `muse-ember-1.0` を 2 つの定義で同梱する。Muse Ember は入力が 20 万トークンを超えた要求の全部が
+高い単価になるので、`meta-muse-ember-1.0` はコンテキストを 200,000 で止め、
+`meta-muse-ember-1.0-long` は 1,048,576 まで使って `pricing.long_context_*` で単価を切り替える。
 `default_supports_images` と `default_convert_system_to_user` を true にしており、
-3 モデルへ継承される。`openai_compat_options` は宣言しない (OpenAI の初期設定の動作のまま)。
+全モデルへ継承される。`openai_compat_options` は宣言しない (OpenAI の初期設定の動作のまま)。
 Muse は推論を止められないので、モデル定義の `reasoning_effort` に `none` は無い。
 Contributor 版は Meta が `max` も受け付けないので、選択肢は minimal〜xhigh。
 Meta が 400 を返す `stop` / `top_p` などはモデル定義の `parameters` に入れていない。
@@ -125,7 +143,7 @@ Sarashina では `supports_stream_options` / `supports_function_tool_choice` /
 | `xai_native` | xAI ネイティブ | ✗（builtin のみ） |
 | `nvidia_nim` | NVIDIA NIM | ✗（builtin のみ） |
 | `openai_codex` | OpenAI Codex（ChatGPT OAuth） | ✗（builtin のみ） |
-| `jev_compat` | 反射判断の宛先（System One 形式。`request_shape` の宣言で OpenAI Decisions の形にも変換する） | ✗（builtin のみ） |
+| `jev_compat` | 反射判断の宛先（System One 形式。`request_shape` の宣言で OpenAI Decisions・Gemini Decisions の形にも変換する） | ✗（builtin のみ） |
 
 `*_native` / `nvidia_nim` / `openai_codex` は `llm_clients/` にコード実装が必要なため builtin のみ。UI（モデル管理 > プロバイダ）から作れるのは `openai_compat` / `ollama_compat` の2種。
 
@@ -135,19 +153,22 @@ Sarashina では `supports_stream_options` / `supports_function_tool_choice` /
 
 「Jev 互換」を名乗る提供元は宛先の path・応答の欄の名前・対応する質問の型が揃っていないので、**その差は provider 設定の `reflex_judgment` 欄で宣言する**（コードに提供元ごとの分岐を置かない）。
 
-全項目に共通の規則: 既定になるのはキーそのものが無いときだけ。キーがあって値が `null`・型違い（`path` / `answers_key` / `usage_key` が空でない文字列でない、`answer_fields` / `usage_fields` が中の項目まで空でない文字列の辞書でない、`supported_types` が文字列のリストでない）なら設定ミスとして、その宛先は「使えなかった」になる（WARNING に理由が出る）。モデル側に `null` を書くと provider の宣言がキー単位で消えるので、それを既定で埋めると違う宛先・違う欄名で毎回失敗するため。`reflex_judgment` 欄そのものが辞書でない（`"reflex_judgment": "typo"` など）ときも、宣言なしとは読まずに同じく「使えなかった」になる。宣言できる項目:
+全項目に共通の規則: 既定になるのはキーそのものが無いときだけ。キーがあって値が `null`・型違い（`path` / `answers_key` / `usage_key` / `auth_header` が空でない文字列でない、`auth_prefix` が文字列でない、`answer_fields` / `usage_fields` / `image_request_headers` が中の項目まで空でない文字列の辞書でない、`supported_types` が文字列のリストでない）なら設定ミスとして、その宛先は「使えなかった」になる（WARNING に理由が出る）。モデル側に `null` を書くと provider の宣言がキー単位で消えるので、それを既定で埋めると違う宛先・違う欄名で毎回失敗するため。`reflex_judgment` 欄そのものが辞書でない（`"reflex_judgment": "typo"` など）ときも、宣言なしとは読まずに同じく「使えなかった」になる。宣言できる項目:
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
-| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ送る直前に変換し、答えも読み戻す（下の節）。既定の `system_one` になるのはキーそのものが無いときだけで、キーがあって値がこの 2 つ以外（`null` を含む）なら設定ミスとして、その宛先は「使えなかった」になる |
+| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ、`gemini_decisions` は Gemini の Decisions API の形へ送る直前に変換する（下の節）。既定の `system_one` になるのはキーそのものが無いときだけで、キーがあって値がこの 3 つ以外（`null` を含む）なら設定ミスとして、その宛先は「使えなかった」になる |
 | `path` | `/v1/systemone` | `base_url` の後ろに付ける宛先のパス |
-| `answers_key` | `answers` | 応答のどの欄に答えが載るか（`system_one` は qid の辞書、`openai_decisions` は name 付きの配列） |
+| `auth_header` | `Authorization` | API キーを載せるヘッダの名前。`Content-Type` と重なる宣言（大小文字を区別しない）は設定ミス。キーが無い宛先（`api_key_required: false` で env が空）にはヘッダ自体を付けない |
+| `auth_prefix` | `Bearer `（末尾の空白を含む） | ヘッダの値でキーの前に付ける接頭辞。空文字を書ける（Gemini は接頭辞なし）。前後の空白は落とさない |
+| `answers_key` | `answers` | 応答のどの欄に答えが載るか（`system_one` と `gemini_decisions` は qid の辞書、`openai_decisions` は name 付きの配列） |
 | `usage_key` | `usage` | 応答のどの欄に使用量が載るか |
 | `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}`（`request_shape` が `openai_decisions` なら `{"noul": "probability", "choice": "choice", "score": "score"}`） | 質問の型ごとに、答えの値が載る欄の名前。書いたキーだけが既定を上書きする |
 | `usage_fields` | `{"input_tokens": "input_tokens", "output_tokens": "output_tokens"}` | 記帳する使用量の名前 → 応答の欄の名前 |
 | `supported_types` | 3 型すべて | この宛先が答えられる質問の型。対応しない型が混ざった質問は、ひとまとまりごと「使えなかった」になる |
+| `image_request_headers` | 無し | 画像を含む要求にだけ付けるヘッダ（名前 → 値）。`Content-Type` と `auth_header` の名前（大小文字を区別しない）は書けない（設定ミス）。同梱の `typesafe` は `TypeSafe-Danger-Zone-Images: true` を書いている |
 
-モデル側は `provider_ref` でこれを受け継ぐので、同梱の 4 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev` / `openai-decisions-gpt-6-luna`）は宣言を持たない（モデル側に書いた場合は、書いたキーだけが provider の宣言を上書きする）。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+モデル側は `provider_ref` でこれを受け継ぐので、同梱の 6 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev` / `openai-decisions-gpt-6-luna` / `gemini-decision-1` / `gemini-decision-1-paid`）は宣言を持たない（モデル側に書いた場合は、書いたキーだけが provider の宣言を上書きする）。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
 
 #### `request_shape: "openai_decisions"` — OpenAI Decisions への変換
 
@@ -160,6 +181,27 @@ OpenAI の [Decisions API](https://developers.openai.com/api/docs/guides/decisio
 - **答え** は `name` 付きの配列で返るので、qid の辞書へ戻し、型名を SAIVerse 側へ写してから同じ検算に通す。型名が `predicate` / `choice` / `score` / `refusal` のどれでもない要素（型の欄が無い・`noul` のような System One の語彙・未知の語）、同じ `name` の重複、形の壊れた要素は不正応答にする。`type: "refusal"`（答えられなかった）はその質問の答えが無いものとして扱う。写した型と質問の型が食い違う答え（predicate を choice の質問へ返す等）も不成立。choice の答えは、実際に送った `choices` の値のどれかでなければ不成立（criteria の辞書だけから組んだ choice でも同じ）。
 
 次の質問は、この宛先では表せないので「使えなかった」になる: 選択肢を作れない choice、`options` がリストでない choice、中身の無い選択肢の値を持つ choice、文字列にした後で選択肢の値が重なる choice（`options` の重複、`{1: "a", "1": "b"}` のようなキー）、一つの選択肢に文字列にした後で同じになる criteria のキーが複数対応する choice、段階が 2 つ未満の score、中身の無い段階を持つ score（段階を黙って落とすと番号がずれて score の意味が変わる）。状況や基準を JSON にできない（文字列でないキーの辞書・循環参照など）ときも、送る前に「使えなかった」になる。送るものの組み立てで出た例外は、型を問わず「使えなかった」に正規化される（通常の LLM の道のプロンプトの組み立ても同じ）。同梱の `openai-decisions-gpt-6-luna`（API 上のモデル名は `gpt-6-luna`、単価は入力 $0.10/1M・出力は課金なし）は会話用の `gpt-6-luna` とは別のモデル定義で、protocol が `jev_compat` なので会話の選択欄には出ない。
+
+#### `request_shape: "gemini_decisions"` — Gemini Decisions への変換
+
+Gemini の [Decisions API](https://aistudio.google.com/docs/decisions-api)（`v1beta`、モデル `gemini-decision-1`）は System One とほぼ同じ形で、質問は qid の辞書・型名も同じ・答えも qid の辞書で返る。`saiverse/reflex_judgment.py` が送る直前に変えるのは次の点だけ（設計は [intent §7](../intent/reflex_judgment.md)）。
+
+- **キー** は `x-goog-api-key` ヘッダに接頭辞なしで載せる（provider の `auth_header` / `auth_prefix` の宣言）。
+- **状況** は OpenAI Decisions と同じく 1 本の文字列の `input` にする。
+- **noul の基準** は `{"true": ..., "false": ...}` を `{"true_description": ..., "false_description": ...}` に写す（片方だけならその片方だけ）。辞書でない基準は全体を、`true` / `false` 以外のキーはそのキーだけを、OpenAI Decisions と同じ `input` の最後の節に書き足す。
+- **choice** は `options` の欄が無いので、`criteria` を「選択肢の値 → 説明（無ければ空文字）」の辞書にして送る。選択肢の値の決め方・文字列化・criteria のキーとの対応・断る条件・選択肢に入らなかった基準を末尾の節へ回すことは OpenAI Decisions と同じ規則を使う。加えて、Gemini が選択肢の名前として受け付けない値（前後の空白、制御文字、ASCII 以外の空白、129 文字以上、UTF-8 で 512 バイト超）を持つ choice は「使えなかった」になる。
+- **score** の段階は文字列の配列のまま送る（段階が 2 つ未満・中身の無い段階は OpenAI Decisions と同じく「使えなかった」）。
+
+使用量は `usage.total_input_tokens` / `total_output_tokens` を `usage_fields` で読む（モダリティ別の内訳は記録しない）。安全フィルタに掛かった入力は HTTP 400 で断られ、他の非 200 と同じく「使えなかった」になる。同梱のモデル定義は `gemini-decision-1-paid`（provider `gemini_decisions`、`GEMINI_API_KEY`、入力 $0.10/1M・出力は課金なし）と `gemini-decision-1`（provider `gemini_decisions_free`、`GEMINI_FREE_API_KEY`、無料）。無料のモデルは無料のキーだけを読み、無料のキーが無ければ有料のキーへは落ちずに「使えなかった」になる（会話用の Gemini の無料枠のモデルとはここが違う）。
+
+#### 画像を受け付けるモデルへの画像の送り方
+
+反射判断は、割り当てたモデル設定の `supports_images` が true のとき（欄が無ければ会話用クライアントと同じく provider が `gemini` のときだけ true）、呼び出し側が渡した画像を送る（[intent §8](../intent/reflex_judgment.md)）。false なら画像を無視して、渡さなかったときと同じ要求を送る。同梱の既定は、`gemini-decision-1` / `gemini-decision-1-paid` / `openai-decisions-gpt-6-luna` が true、`jev-latest` / `openrouter-jev-latest` / `localjev` が false。画像は送る前に整える（読めない・開けない画像はその 1 枚だけ送らず、PNG / JPEG 以外は PNG に描き直す）。1 回の判断に送るのは渡された順に 4 枚まで、整えた後の合計 8 MiB までで、超えた画像は落として WARNING に出す。送り方は `request_shape` ごとに違う。
+
+- `system_one`: トップレベルの `assets` に画像（`data_base64` + `format`）を登録し、参照の文字列（画像ごとの UUID）の一覧を `state` の `attached_images` の欄に置く。各辺は 280〜1568px に縮小・拡大して収め、縦横比が極端で収められない画像は送らない。画像を含む要求にだけ `image_request_headers` を付ける。
+- `gemini_decisions`: `input` を Content ブロックの配列にし、状況の `{"type": "text", ...}` の後ろに `{"type": "image", "data": <base64>, "mime_type": ...}` を置く。
+- `openai_decisions`: `input` を user のメッセージ 1 通の配列にし、`input_text` の後ろに `input_image`（`image_url` に base64 の data URL）を置く。
+- 通常の LLM（`jev_compat` 以外のモデル設定）: 整えた画像を判断用のメッセージの `metadata` に `__skip_image_summary__` の印つきで載せ、LLM クライアントの画像の扱いに任せる（印があるので、埋め込めなかった画像の要約は作らない）。Ollama のクライアントはユーザーの発言の `metadata` の画像を埋め込まない（会話でも同じ）ので、Ollama のモデルでは `supports_images` が true でも画像は届かず、文字だけで判断する。
 
 `localjev` の既定の宛先は `http://127.0.0.1:8080` (localjev 本体の既定 `LOCALJEV_HOST` / `LOCALJEV_PORT` に合わせた値。llama.cpp Server の既定ポートと同じなので、両方をローカルで動かすならどちらかのポートをずらす)。別のポートで動かしているなら、`~/.saiverse/user_data/providers/localjev.json` に同じ id で `base_url` を書いた上書きを置く。
 
@@ -202,4 +244,4 @@ OpenAI の [Decisions API](https://developers.openai.com/api/docs/guides/decisio
 
 `GET /api/providers` は各行の `available`（設定の構造が有効か）と `config_error`（無ければ null）を返す。API キーの有無は従来の `api_key_configured` で別途確認する。モデルの2本の一覧 API も `available` と `config_error` を返し、壊れた provider を参照するモデルを黙って隠さない。
 
-`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。
+`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`current_models` は省略・null か、非空文字列だけのリスト。`picker_group` は省略・null か、安全な識別子の文字列。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。

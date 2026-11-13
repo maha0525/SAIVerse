@@ -3,5 +3,18 @@
   "display_name": "Google Gemini",
   "protocol": "gemini_native",
   "api_key_env": "GEMINI_API_KEY",
-  "api_key_env_alternates": ["GEMINI_FREE_API_KEY"]
+  "api_key_env_alternates": ["GEMINI_FREE_API_KEY"],
+  "current_models": [
+    "gemini-4-argon",
+    "gemini-4-carbon",
+    "gemini-4-hydrogen-paid",
+    "gemini-3.8-flash-paid",
+    "gemini-3.5-flash-lite-paid",
+    "gemini-3.1-pro-preview",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it"
+  ]
 }

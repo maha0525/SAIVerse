@@ -1815,6 +1815,24 @@
     border-color: rgba(168, 85, 247, 0.12);
 }
 
+/* The spell result body is rendered as a fenced block so it stays plain text
+   (frontend/src/lib/messageMarkdown.ts).  Strip the chat's code-block look so
+   it reads as the result box's own text.  `.cardBody` raises the specificity
+   above the light-theme `.cardBody pre` rule. */
+.cardBody :global(.spellResult) pre,
+.cardBody :global(.spellResult) pre code {
+    background: none;
+    padding: 0;
+    margin: 0;
+    border-radius: 0;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
 /* Failure (misfired spell) variant — red palette with the × icon picking up
    the red summary color via currentColor. */
 :global(.spellResult.spellResultError) {

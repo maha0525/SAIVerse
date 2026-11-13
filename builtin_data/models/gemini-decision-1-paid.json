@@ -1,0 +1,14 @@
+{
+  "model": "gemini-decision-1",
+  "display_name": "Gemini Decision 1(有料Tier)",
+  "provider_ref": "gemini_decisions",
+  "group": "gemini",
+  "context_length": 262144,
+  "supports_structured_output": false,
+  "supports_images": true,
+  "pricing": {
+    "input_per_1m_tokens": 0.1,
+    "output_per_1m_tokens": 0.0,
+    "currency": "USD"
+  }
+}

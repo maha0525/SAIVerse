@@ -1472,4 +1472,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.29 -> 0.3.30 (no schema or world-data changes).",
     ),
+    # ---- v0.3.31 ----
+    # モデルを選ぶ欄の作り直しと新しいモデルの追加、反射判断の Gemini Decisions と画像、
+    # Web ページを読むツールの直し、スペル結果の平文表示ほか。DB の形は変わらず、
+    # 起動時に世界のデータを書き換える処理も無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_31",
+        scope="city",
+        from_version="0.3.30",
+        to_version="0.3.31",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.30 -> 0.3.31 (no schema or world-data changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_31",
+        scope="ai",
+        from_version="0.3.30",
+        to_version="0.3.31",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.30 -> 0.3.31 (no schema or world-data changes).",
+    ),
 ]

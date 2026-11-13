@@ -1579,18 +1579,6 @@
     "ja": "（デフォルト）",
     "en": "(default)"
   },
-  "components.ChatOptions.text038": {
-    "ja": "★ お気に入り",
-    "en": "★ Favorites"
-  },
-  "components.ChatOptions.text039": {
-    "ja": "お気に入りから削除",
-    "en": "Remove from favorites"
-  },
-  "components.ChatOptions.text040": {
-    "ja": "お気に入りに追加",
-    "en": "Add to favorites"
-  },
   "components.ChatOptions.text041": {
     "ja": "入力: {p1}/1M tokens",
     "en": "Input: {p1}/1M tokens"
@@ -11342,6 +11330,86 @@
   "components.common.ImageUpload.label002": {
     "ja": "Edit",
     "en": "Edit"
+  },
+  "components.common.ModelPicker.groupAnthropic": {
+    "ja": "Anthropic",
+    "en": "Anthropic"
+  },
+  "components.common.ModelPicker.groupOpenai": {
+    "ja": "OpenAI",
+    "en": "OpenAI"
+  },
+  "components.common.ModelPicker.groupOpenaiCodex": {
+    "ja": "OpenAI (Codex)",
+    "en": "OpenAI (Codex)"
+  },
+  "components.common.ModelPicker.groupGeminiPaid": {
+    "ja": "Gemini (有料)",
+    "en": "Gemini (paid)"
+  },
+  "components.common.ModelPicker.groupGeminiFree": {
+    "ja": "Gemini (無料)",
+    "en": "Gemini (free)"
+  },
+  "components.common.ModelPicker.groupXai": {
+    "ja": "xAI",
+    "en": "xAI"
+  },
+  "components.common.ModelPicker.groupOpenrouter": {
+    "ja": "OpenRouter",
+    "en": "OpenRouter"
+  },
+  "components.common.ModelPicker.groupNvidiaNim": {
+    "ja": "NVIDIA NIM",
+    "en": "NVIDIA NIM"
+  },
+  "components.common.ModelPicker.groupCustom": {
+    "ja": "カスタム",
+    "en": "Custom"
+  },
+  "components.common.ModelPicker.groupMeta": {
+    "ja": "Meta",
+    "en": "Meta"
+  },
+  "components.common.ModelPicker.groupPlamo": {
+    "ja": "PLaMo",
+    "en": "PLaMo"
+  },
+  "components.common.ModelPicker.groupSarashina": {
+    "ja": "Sarashina",
+    "en": "Sarashina"
+  },
+  "components.common.ModelPicker.favoritesHeading": {
+    "ja": "お気に入り",
+    "en": "Favorites"
+  },
+  "components.common.ModelPicker.groupReflex": {
+    "ja": "反射判断専用",
+    "en": "Reflex judgment only"
+  },
+  "components.common.ModelPicker.otherModels": {
+    "ja": "他のモデル ({p1})",
+    "en": "Other models ({p1})"
+  },
+  "components.common.ModelPicker.notSelected": {
+    "ja": "(未選択)",
+    "en": "(not selected)"
+  },
+  "components.common.ModelPicker.noModels": {
+    "ja": "選べるモデルがありません",
+    "en": "No models available"
+  },
+  "components.common.ModelPicker.providerGroupsLabel": {
+    "ja": "プロバイダ",
+    "en": "Provider"
+  },
+  "components.common.ModelPicker.addFavorite": {
+    "ja": "お気に入りに追加",
+    "en": "Add to favorites"
+  },
+  "components.common.ModelPicker.removeFavorite": {
+    "ja": "お気に入りから外す",
+    "en": "Remove from favorites"
   },
   "components.ContentViewerModal.label001": {
     "ja": "Loading...",

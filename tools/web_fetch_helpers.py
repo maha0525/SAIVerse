@@ -2,10 +2,16 @@
 
 read_url_outline / read_url_section から共通利用する低レベル処理を集約する。
 
-- fetch_page: HTTP取得 + HTMLパース + clean + main検出 + Markdown化
-- extract_outline: clean済み main soup から h1-h4 をフラットに抽出
+- fetch_page: HTTP取得 + HTMLパース + clean + リンクの完全な URL 化 + Markdown化（ページ全体）
+- extract_outline: clean済みページから h1-h4 をフラットに抽出
 - extract_section_by_heading: 見出しマッチで節を切り出し
 - extract_section_by_keyword: 全文キーワード一致箇所周辺を切り出し
+
+本文の場所を推測して一部だけを残す処理は持たない。read_url_outline は
+ページの全体像（少なくとも全見出し）を渡すスペルなので、推測が外れると
+自分の最低限の約束より少ない情報を返してしまう（2026-11-13、saiverse.net で
+4 枚ある <article> のカードの 1 枚目だけが本文とされ、97 文字しか返らなかった）。
+長いページの分量は read_url_outline の閾値と見出し一覧で抑える。
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -52,14 +59,14 @@ class FetchError(Exception):
 
 @dataclass
 class FetchedPage:
-    url: str
+    url: str  # リダイレクト後の、実際に取得できたページの URL
     title: str
-    main_soup: Tag  # cleaned, scoped to main content area
-    markdown: str  # Markdownified main content
+    body_soup: Tag  # cleaned, whole page (<body>)
+    markdown: str  # Markdownified whole page
 
 
 def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
-    """URLを取得し、cleanup + main抽出 + Markdown化までを行って返す。
+    """URLを取得し、cleanup + Markdown化までを行って返す（ページ全体）。
 
     各段でログを出す（ファイルログは無制限ポリシー）。
     失敗時は FetchError を投げる。
@@ -108,15 +115,22 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
     html = response.text
     LOGGER.info("fetch_page got_html url=%s bytes=%d", url, len(html))
 
+    # リダイレクトされていたら、飛ばされた先がこのページの本当の URL。
+    # ページ内の相対リンクはこちらを基準に解決しないと、別の場所を指してしまう。
+    final_url = response.url or url
+    if final_url != url:
+        LOGGER.info("fetch_page redirected url=%s final_url=%s", url, final_url)
+
     soup = BeautifulSoup(html, "html.parser")
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else ""
 
     soup = _clean_html(soup)
-    main = _find_main_content(soup)
+    _absolutize_links(soup, final_url)
+    body = soup.find("body") or soup
 
     try:
-        markdown = _html_to_markdown(main)
+        markdown = _html_to_markdown(body)
     except Exception as exc:
         LOGGER.exception("fetch_page markdown_conversion_failed url=%s", url)
         raise FetchError(f"HTMLの変換に失敗しました: {exc}") from exc
@@ -127,9 +141,9 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
 
     LOGGER.info(
         "fetch_page done url=%s title=%r markdown_chars=%d",
-        url, title, len(markdown),
+        final_url, title, len(markdown),
     )
-    return FetchedPage(url=url, title=title, main_soup=main, markdown=markdown)
+    return FetchedPage(url=final_url, title=title, body_soup=body, markdown=markdown)
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +151,14 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
 # ---------------------------------------------------------------------------
 
 def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
-    """script / style / nav / footer 等の非本文要素を除去。"""
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside",
+    """script / style / nav / footer 等の非本文要素を除去。
+
+    <header> と <aside> は消さない。ブログ記事はタイトルの <h1> を <header> に、
+    注意書きや補足を <aside> に入れることが多く、タグの名前だけで消すと見出しの
+    一覧からタイトルが消える。サイト全体の上の帯の <header> を残して増えるのは
+    ロゴやサイト名程度 (メニュー本体は <nav> として消える。saiverse.net で +49 文字)。
+    """
+    for tag in soup(["script", "style", "nav", "footer",
                      "noscript", "iframe", "form", "button", "input"]):
         tag.decompose()
     for tag in soup.find_all(attrs={"hidden": True}):
@@ -148,16 +168,42 @@ def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
     return soup
 
 
-def _find_main_content(soup: BeautifulSoup) -> Tag:
-    """main / article / role=main / .content等を優先して返す。"""
-    return (
-        soup.find("main")
-        or soup.find("article")
-        or soup.find(attrs={"role": "main"})
-        or soup.find(class_=re.compile(r"(content|main|article)", re.I))
-        or soup.find("body")
-        or soup
-    )
+# 完全な URL にしないリンク: ページ内の位置 (#...) と、URL ではない参照。
+_NON_URL_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:")
+
+
+def _absolutize_links(soup: BeautifulSoup, page_url: str) -> None:
+    """<a href> と <img src> の相対参照を、ページの URL を基準に完全な URL へ直す。
+
+    ペルソナが本文中のリンクをそのまま read_url_outline に渡しても辿れるように
+    する (`/guide/x` のままだと「https:///guide/x」になって取得に失敗していた)。
+    ページが <base href> で基準を指定していれば、そちらを優先する (HTML の規則)。
+
+    外部ページには `https://[broken` のような壊れた URL が混ざりうる。urljoin は
+    それに ValueError を出すので、壊れたリンクは書かれたまま残して先へ進む —
+    リンク一つのせいでページ全体を読めなくしない。壊れた <base href> は無視して、
+    ページの URL を基準にする。
+    """
+    base_url = page_url
+    base_tag = soup.find("base", href=True)
+    if base_tag is not None:
+        try:
+            base_url = urljoin(page_url, base_tag["href"].strip())
+        except ValueError:
+            LOGGER.debug(
+                "fetch_page invalid_base_href url=%s href=%r", page_url, base_tag["href"]
+            )
+    for tag_name, attr in (("a", "href"), ("img", "src")):
+        for tag in soup.find_all(tag_name, attrs={attr: True}):
+            value = tag[attr].strip()
+            if not value or value.lower().startswith(_NON_URL_PREFIXES):
+                continue
+            try:
+                tag[attr] = urljoin(base_url, value)
+            except ValueError:
+                LOGGER.debug(
+                    "fetch_page invalid_link_kept url=%s %s=%r", page_url, attr, value
+                )
 
 
 def _html_to_markdown(soup: Tag) -> str:
@@ -177,12 +223,12 @@ class OutlineEntry:
     text: str
 
 
-def extract_outline(main_soup: Tag) -> List[OutlineEntry]:
-    """main領域から h1〜h4 をフラットに抽出（文書順）。"""
+def extract_outline(body_soup: Tag) -> List[OutlineEntry]:
+    """ページから h1〜h4 をフラットに抽出（文書順）。"""
     entries: List[OutlineEntry] = []
-    if not isinstance(main_soup, Tag):
+    if not isinstance(body_soup, Tag):
         return entries
-    for h in main_soup.find_all(HEADING_TAGS):
+    for h in body_soup.find_all(HEADING_TAGS):
         level = int(h.name[1])
         text = h.get_text(strip=True)
         if text:
@@ -191,7 +237,7 @@ def extract_outline(main_soup: Tag) -> List[OutlineEntry]:
 
 
 def extract_section_by_heading(
-    main_soup: Tag,
+    body_soup: Tag,
     query: str,
     max_chars: int,
 ) -> Optional[Tuple[str, str]]:
@@ -205,7 +251,7 @@ def extract_section_by_heading(
         (matched_heading_text, section_markdown) or None。
         section_markdown は max_chars でtruncate される（自然な区切りで）。
     """
-    if not isinstance(main_soup, Tag):
+    if not isinstance(body_soup, Tag):
         return None
     if not query:
         return None
@@ -215,7 +261,7 @@ def extract_section_by_heading(
 
     # 全見出し候補をまず収集（後の fallback で再走しないため）
     candidates: List[Tuple[Tag, str, str]] = []  # (tag, raw_text, normalized)
-    for h in main_soup.find_all(HEADING_TAGS):
+    for h in body_soup.find_all(HEADING_TAGS):
         text = h.get_text(strip=True)
         if not text:
             continue
@@ -280,7 +326,28 @@ def extract_section_by_heading(
     if len(section_md) > max_chars:
         section_md = _truncate_natural(section_md, max_chars)
 
+    # カード型のページでは、見出しを含むカード全体が一つの <a> で包まれ、
+    # 「詳しく見る」はただの文字になっている (saiverse.net のトップがこの形)。
+    # 上で集めるのは見出しの後ろの兄弟だけなので、外側の <a> の行き先が落ちる。
+    # 切り詰めの後に足して、行き先が切られないようにする。
+    link_target = _enclosing_link_target(matched)
+    if link_target:
+        section_md = (
+            f"{section_md}\n\n（この節は {link_target} へのリンクの中にあります）"
+        )
+
     return matched.get_text(strip=True), section_md
+
+
+def _enclosing_link_target(tag: Tag) -> Optional[str]:
+    """tag を包んでいる <a href> の行き先を返す。辿れる URL でなければ None。"""
+    anchor = tag.find_parent("a", href=True)
+    if anchor is None:
+        return None
+    href = anchor["href"].strip()
+    if not href.lower().startswith(("http://", "https://")):
+        return None
+    return href
 
 
 def extract_section_by_keyword(

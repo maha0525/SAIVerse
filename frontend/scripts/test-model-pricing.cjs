@@ -46,6 +46,7 @@ function loadPricingComponent(file, react, apiFetch = () => { throw new Error('N
             if (name === '@/i18n/api') return { apiFetch };
             if (name.endsWith('.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
             if (name.includes('ModelEditorModal') || name.includes('ContextVolumeBar')) return { __esModule: true, default: () => null };
+            if (name.endsWith('/ModelPicker')) return { __esModule: true, default: () => null };
             if (name.endsWith('ModalOverlay')) return { __esModule: true, default: ({ children }) => children };
             if (name.startsWith('@/lib/')) return load(path.join(sourceRoot, `${name.slice(2)}.ts`));
             return require(name);

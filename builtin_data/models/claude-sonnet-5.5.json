@@ -8,6 +8,7 @@
   "thinking_effort": "high",
   "thinking_display": "summarized",
   "supports_images": true,
+  "supports_sampling_parameters": false,
   "parameters": {
     "thinking_effort": {
       "type": "enum",

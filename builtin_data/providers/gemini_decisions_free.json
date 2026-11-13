@@ -1,0 +1,26 @@
+{
+  "id": "gemini_decisions_free",
+  "display_name": "Gemini Decisions (無料枠)",
+  "protocol": "jev_compat",
+  "base_url": "https://generativelanguage.googleapis.com",
+  "api_key_env": "GEMINI_FREE_API_KEY",
+  "reflex_judgment": {
+    "request_shape": "gemini_decisions",
+    "path": "/v1beta/decisions",
+    "auth_header": "x-goog-api-key",
+    "auth_prefix": "",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {
+      "noul": "noul",
+      "choice": "choice",
+      "score": "score"
+    },
+    "usage_fields": {
+      "input_tokens": "total_input_tokens",
+      "output_tokens": "total_output_tokens"
+    },
+    "supported_types": ["noul", "choice", "score"]
+  },
+  "picker_group": "reflex"
+}

@@ -1367,6 +1367,31 @@ def _build_reflex_request(
     return state, questions, key_by_qid
 
 
+def _reflex_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """反射判断に見せる画像 = このターンの新しいユーザー発言の添付画像だけ。
+
+    docs/intent/reflex_judgment.md §8 (まはーの裁定「ひとまず添付だけ」)。
+
+    - このターンに新しいユーザー発言が無い (``_seed_is_user_utterance`` が偽) ときは
+      渡さない。自律のターンなどで前の発言の画像を送り直すと、そのたびに画像の入力
+      トークンが課金される。
+    - 渡すのはその発言 (``_latest_user_message``) の ``iter_image_media(metadata)``
+      だけ。部屋の様子・通知 (知覚ブロック) の画像と過去の発言の画像は渡さない
+      (``_latest_user_message`` は知覚ブロックや合成メッセージを飛ばす)。
+    - ``_is_user_side`` は会話本文に数えるシステム通知 (スケジュールの発火文・建物の
+      出来事など) も「入力の側」に含めるので、``role`` が ``user`` のときだけ渡す —
+      通知に付いた画像は渡さない裁定のため。
+    """
+    if not _seed_is_user_utterance(messages):
+        return []
+    latest = _latest_user_message(messages)
+    if latest is None or latest.get("role") != "user":
+        return []
+    from saiverse.media_utils import iter_image_media
+
+    return iter_image_media(latest.get("metadata"))
+
+
 def _run_reflex_rerank(
     hits,
     messages: List[Dict[str, Any]],
@@ -1445,6 +1470,7 @@ def _run_reflex_rerank(
             context_messages=_REFLEX_CONTEXT_MESSAGES,
             observations=observations,
         )
+        images = _reflex_images(messages)
     except Exception:
         LOGGER.warning(
             "[auto_recall][reflex] could not prepare the request (import, backend or "
@@ -1459,10 +1485,13 @@ def _run_reflex_rerank(
     # 設定値をそのまま渡すと実際の見切りが約束より 0.5 秒遅くなる — 余裕ぶんを
     # 引いて渡し、見切りの時刻を設定値そのものに合わせる (2026-09-21 の敵対レビュー)。
     wait_seconds = max(0.5, get_reflex_timeout() - DEADLINE_MARGIN)
+    # 画像は渡すだけ。答える側が受け付けるか・どう送るかは反射判断の層が決める
+    # (docs/intent/reflex_judgment.md §8)。画像の無いターンは従来の呼び出しのまま。
+    extra: Dict[str, Any] = {"images": images} if images else {}
     try:
         nouls, usage = evaluate(
             state, questions,
-            timeout=wait_seconds, backend=backend, persona_id=persona_id,
+            timeout=wait_seconds, backend=backend, persona_id=persona_id, **extra,
         )
     except ReflexJudgmentUnavailable as exc:
         deadline = getattr(exc, "kind", None) == UNAVAILABLE_DEADLINE

@@ -66,7 +66,7 @@ def read_url_section(
 
     # 1. 見出しマッチを試す
     heading_result = extract_section_by_heading(
-        page.main_soup,
+        page.body_soup,
         section_query,
         max_chars=SECTION_HEADING_MAX,
     )

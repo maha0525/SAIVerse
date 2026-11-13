@@ -75,6 +75,21 @@ def _provider_shape_error(config: object, default_id: str) -> str | None:
             not isinstance(name, str) or not name.strip() for name in alternates
         ):
             return "api_key_env_alternates must be a list of non-empty strings"
+    # モデルを選ぶ欄の並べ方 (saiverse/model_picker.py、docs/intent/model_picker.md)。
+    # current_models は最初から出すモデルの設定キーを表示したい順に並べたもの、
+    # picker_group は選ぶ欄でまとめるボタンの名前。どちらも省略できる。
+    current_models = config.get("current_models")
+    if current_models is not None and (
+        not isinstance(current_models, list) or any(
+            not isinstance(name, str) or not name.strip() for name in current_models
+        )
+    ):
+        return "current_models must be a list of non-empty strings or null"
+    picker_group = config.get("picker_group")
+    if picker_group is not None and (
+        not isinstance(picker_group, str) or not _SAFE_ID_PATTERN.fullmatch(picker_group)
+    ):
+        return "picker_group must be a safe identifier or null"
     optional_types = {
         "openai_compat_options": dict,
         "base_url": str,

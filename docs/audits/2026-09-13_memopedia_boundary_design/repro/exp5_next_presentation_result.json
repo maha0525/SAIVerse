@@ -1,0 +1,103 @@
+{
+  "実験": "exp5_next_presentation — 操作後に次へ差し出されるもの",
+  "隔離ホーム": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\saiverse_probe\\exp5_next_presentation_home",
+  "呼んだもの": [
+    "sea.head_pipeline.sections.core_memory.CoreMemorySection.capture / render",
+    "sea.head_pipeline.sections.memopedia_index.MemopediaIndexSection.capture_changes_since / diff_to_notifications",
+    "api.routes.people.memopedia.delete_all_memopedia_pages / import_memopedia"
+  ],
+  "場面": [
+    {
+      "場面": "1. ペルソナがコア記憶を 1 件刻む",
+      "見たいこと": "コア記憶を刻んだことが「Memopedia が作成された」として通知されないか",
+      "ペルソナへ届く通知": [
+        {
+          "kind": "memopedia_created",
+          "ペルソナへ届く文": "Memopedia「コア記憶 c:4」が作成されました"
+        }
+      ],
+      "頭のコア記憶の章": {
+        "capture": [
+          "c:1 まはーは野菜がほぼ食べられない",
+          "c:2 工房の棚は三段で、上段に定規を置く",
+          "c:4 新しく刻んだコア記憶"
+        ],
+        "render": "## コア記憶（自分で選んで刻んだ、常に携えている知識）\n- [core:1] まはーは野菜がほぼ食べられない\n- [core:2] 工房の棚は三段で、上段に定規を置く\n- [core:4] 新しく刻んだコア記憶"
+      }
+    },
+    {
+      "場面": "2. あらすじが 1 件編まれる",
+      "見たいこと": "あらすじの確定が「Memopedia が作成された」として通知されないか",
+      "ペルソナへ届く通知": [
+        {
+          "kind": "memopedia_created",
+          "ペルソナへ届く文": "Memopedia「chronicle:2」が作成されました"
+        }
+      ]
+    },
+    {
+      "場面": "3. 手帳の通常ページを 1 枚作る (これは正当な通知)",
+      "見たいこと": "既存の正当な通知が出続けるか",
+      "ペルソナへ届く通知": [
+        {
+          "kind": "memopedia_created",
+          "ペルソナへ届く文": "Memopedia「新しい知識ページ」が作成されました"
+        }
+      ]
+    },
+    {
+      "場面": "4. 手帳の全削除",
+      "見たいこと": "消えたことがペルソナに届くか / 消えた後の頭は何を載せるか",
+      "API の応答 (原文)": {
+        "success": true,
+        "deleted_count": 4,
+        "message": "Deleted 4 Memopedia pages"
+      },
+      "ペルソナへ届く通知": [],
+      "頭のコア記憶の章": {
+        "capture": [],
+        "render": null
+      },
+      "正規の読み取り": {
+        "コア記憶の一覧 (list_core_memories)": [],
+        "コア記憶のごみ箱 (list_deleted_core_memories)": [
+          "c:3 自分でごみ箱へ入れたコア記憶"
+        ],
+        "コア記憶の合計字数 (total_core_memory_chars)": 0,
+        "あらすじの一覧 (get_all_entries_ordered)": [
+          "あらすじ"
+        ]
+      }
+    },
+    {
+      "場面": "5. 置き換え取り込み",
+      "見たいこと": "入れ直した分が「全部いま作られた」として一度に届かないか",
+      "API の応答 (原文)": {
+        "success": true,
+        "imported_count": 2,
+        "message": "Imported 2 pages"
+      },
+      "ペルソナへ届く通知": [
+        {
+          "kind": "memopedia_created",
+          "ペルソナへ届く文": "Memopedia「コア記憶 c:1」「持ち出し元の知識ページ」が作成されました"
+        }
+      ],
+      "頭のコア記憶の章": {
+        "capture": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+        "render": "(capture が落ちたので描画に至らない)"
+      },
+      "正規の読み取り": {
+        "コア記憶の一覧 (list_core_memories)": "EXCEPTION TypeError: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+        "コア記憶のごみ箱 (list_deleted_core_memories)": [
+          "c:3 自分でごみ箱へ入れたコア記憶"
+        ],
+        "コア記憶の合計字数 (total_core_memory_chars)": 10,
+        "あらすじの一覧 (get_all_entries_ordered)": [
+          "あらすじ"
+        ]
+      }
+    }
+  ],
+  "差分の基準時刻 (epoch 秒)": 1789312940.0
+}

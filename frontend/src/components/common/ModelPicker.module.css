@@ -1,0 +1,268 @@
+/* モデルを選ぶ欄。色は globals.css のセマンティックトークン (--background /
+   --border-color / --text-secondary など) を使い、ライト / ダーク両テーマに
+   追従する。トークンで書けない色 (選択中の背景、星) はダークの値を下で上書きする。
+   浮かぶメニューにはせず、その場で下に広がる (position は使わない)。
+   長いモデル名は折り返す — 欄の外へはみ出さないよう、各段で min-width: 0 と
+   折り返しの指定をそろえる。 */
+
+.root {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    padding: 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    background: var(--background);
+    color: var(--foreground);
+    font-size: 0.9rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.trigger:hover:not(:disabled),
+.triggerOpen {
+    border-color: var(--accent-primary);
+}
+
+.trigger:focus-visible,
+.option:focus-visible,
+.groupBtn:focus-visible,
+.othersToggle:focus-visible,
+.favoriteBtn:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 1px;
+}
+
+.trigger:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.triggerText {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.chevron {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    transition: transform 0.15s;
+}
+
+.chevronOpen {
+    transform: rotate(180deg);
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    box-sizing: border-box;
+    overflow-x: hidden;
+}
+
+.topSection {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.option {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid transparent;
+    border-radius: 0.4rem;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.option:hover:not(:disabled) {
+    background: var(--bg-hover);
+}
+
+.option:disabled {
+    color: var(--text-secondary);
+    cursor: not-allowed;
+}
+
+.optionSelected {
+    border-color: var(--accent-primary);
+    background: rgba(6, 182, 212, 0.12);
+    font-weight: 600;
+}
+
+.optionSelected:hover:not(:disabled) {
+    background: rgba(6, 182, 212, 0.2);
+}
+
+.favoriteBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 2rem;
+    border: 1px solid transparent;
+    border-radius: 0.4rem;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.favoriteBtn:hover:not(:disabled),
+.favoriteBtnActive {
+    color: #f59e0b;
+}
+
+.favoriteBtn:hover:not(:disabled) {
+    border-color: #f59e0b;
+}
+
+.groupButtons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.groupBtn {
+    padding: 0.3rem 0.65rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--background);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    max-width: 100%;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.groupBtn:hover:not(:disabled) {
+    border-color: var(--accent-primary);
+}
+
+.groupBtnActive,
+.groupBtnActive:hover:not(:disabled) {
+    border-color: var(--accent-primary);
+    background: var(--accent-primary);
+    color: #ffffff;
+}
+
+/* 「お気に入り」「プロバイダ」の見出し。プロバイダの中の見出し (.heading) より一段強くする。 */
+.sectionHeading {
+    padding: 0 0.6rem 0.15rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.heading {
+    margin-top: 0.35rem;
+    padding: 0 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.others {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding-top: 0.35rem;
+    border-top: 1px dashed var(--border-color);
+}
+
+.othersToggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.4rem;
+    border: none;
+    border-radius: 0.4rem;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.othersToggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.empty {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+/* ── Dark Mode ── */
+:global([data-theme="dark"]) .optionSelected {
+    background: rgba(6, 182, 212, 0.18);
+}
+
+:global([data-theme="dark"]) .optionSelected:hover:not(:disabled) {
+    background: rgba(6, 182, 212, 0.26);
+}
+
+:global([data-theme="dark"]) .favoriteBtn:hover:not(:disabled),
+:global([data-theme="dark"]) .favoriteBtnActive {
+    color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .favoriteBtn:hover:not(:disabled) {
+    border-color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .groupBtnActive,
+:global([data-theme="dark"]) .groupBtnActive:hover:not(:disabled) {
+    color: #0a0a0a;
+}
