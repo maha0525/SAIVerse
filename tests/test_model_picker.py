@@ -177,7 +177,7 @@ def test_利用者が自分で作ったプロバイダは_custom_に入りプロ
     model(layers["user_data"], "mine-1", "Mine 1", "mine")
     placements = load(monkeypatch)
     assert placements["mine-1"].picker_group == "custom"
-    assert placements["mine-1"].picker_group_label == "ローカル・カスタム"
+    assert placements["mine-1"].picker_group_label == "カスタム"
     assert placements["mine-1"].picker_heading == "My Server"
     # リストを持たないプロバイダは全部を最初から出す。
     assert placements["mine-1"].is_current is True

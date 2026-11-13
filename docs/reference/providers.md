@@ -36,11 +36,11 @@
 プロバイダ定義には、そのための省略できる項目が 2 つある。
 
 - **`current_models`**: 最初から出すモデルを、モデル定義のファイル名 (拡張子なし = 設定キー) で、表示したい順に並べた配列。リストに無い標準のモデルは「他のモデル」に畳まれる (消えはしない)。利用者が自分で追加したモデルと拡張パックのモデルは、リストに無くても最初から出る。この項目を持たないプロバイダは全部を最初から出す。`builtin_data/providers/` では `gemini` / `anthropic` / `openai` / `openai_codex` / `xai` / `openrouter` が持つ。Gemini は 1 つのリストに有料と無料の設定キーを並べ、ボタンを分けるのはモデル定義の `prefer_paid`。新しい世代のモデルを足したときは、このリストを手で更新する。書いた名前が実在するモデルを指していることは `tests/test_model_picker.py` が検査する。
-- **`picker_group`**: どのボタンにまとめるかの名前 (安全な識別子)。`ollama` / `lmstudio` / `llama_cpp_server` は `"custom"` を書いており、利用者が自分で作ったプロバイダ (user_data の層のプロバイダ) と一緒に「ローカル・カスタム」のボタンに入る。このボタンの中は、プロバイダの表示名を見出しにして分ける。
+- **`picker_group`**: どのボタンにまとめるかの名前 (安全な識別子)。`ollama` / `lmstudio` / `llama_cpp_server` は `"custom"` を書いており、利用者が自分で作ったプロバイダ (user_data の層のプロバイダ) と一緒に「カスタム」のボタンに入る。このボタンの中は、プロバイダの表示名を見出しにして分ける。
 
 反射判断専用のプロバイダ (`gemini_decisions` / `gemini_decisions_free` / `openai_decisions` / `openrouter_systemone` / `typesafe` / `localjev`) は `"picker_group": "reflex"` を書いており、「反射判断専用」の 1 つのボタンにまとまる。`picker_group` を書いたプロバイダと利用者が自分で作ったプロバイダのモデルには、行に `picker_heading` (プロバイダの表示名) が載り、画面はそれを見出しにして分ける。
 
-ボタンの並び順は「反射判断専用」が先頭で、続いて anthropic、openai、openai_codex、Gemini (有料)、Gemini (無料)、xai、openrouter、nvidia_nim の順で、それ以外は名前の順でその後ろ、「ローカル・カスタム」が最後。画面から標準のプロバイダを上書き編集しても、どのボタンに入るかと最初から出すモデルは、配られている定義 (`builtin_data/` と拡張パック) のとおりのまま変わらない。上書きの中に写された `current_models` と `picker_group` は見ない。「ローカル・カスタム」に入るのは、同じ id の配られている定義が無いプロバイダ (利用者が自分で作ったもの) と、`picker_group` に `custom` と書いてある標準のプロバイダだけ。
+ボタンの並び順は「反射判断専用」が先頭で、続いて anthropic、openai、openai_codex、Gemini (有料)、Gemini (無料)、xai、openrouter、nvidia_nim の順で、それ以外は名前の順でその後ろ、「カスタム」が最後。画面から標準のプロバイダを上書き編集しても、どのボタンに入るかと最初から出すモデルは、配られている定義 (`builtin_data/` と拡張パック) のとおりのまま変わらない。上書きの中に写された `current_models` と `picker_group` は見ない。「カスタム」に入るのは、同じ id の配られている定義が無いプロバイダ (利用者が自分で作ったもの) と、`picker_group` に `custom` と書いてある標準のプロバイダだけ。
 
 ### OpenAI は推論中の温度を受け付けない
 

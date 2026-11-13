@@ -11364,8 +11364,24 @@
     "en": "NVIDIA NIM"
   },
   "components.common.ModelPicker.groupCustom": {
-    "ja": "ローカル・カスタム",
-    "en": "Local & custom"
+    "ja": "カスタム",
+    "en": "Custom"
+  },
+  "components.common.ModelPicker.groupMeta": {
+    "ja": "Meta",
+    "en": "Meta"
+  },
+  "components.common.ModelPicker.groupPlamo": {
+    "ja": "PLaMo",
+    "en": "PLaMo"
+  },
+  "components.common.ModelPicker.groupSarashina": {
+    "ja": "Sarashina",
+    "en": "Sarashina"
+  },
+  "components.common.ModelPicker.favoritesHeading": {
+    "ja": "お気に入り",
+    "en": "Favorites"
   },
   "components.common.ModelPicker.groupReflex": {
     "ja": "反射判断専用",
