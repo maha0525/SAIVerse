@@ -178,17 +178,32 @@ def _absolutize_links(soup: BeautifulSoup, page_url: str) -> None:
     ペルソナが本文中のリンクをそのまま read_url_outline に渡しても辿れるように
     する (`/guide/x` のままだと「https:///guide/x」になって取得に失敗していた)。
     ページが <base href> で基準を指定していれば、そちらを優先する (HTML の規則)。
+
+    外部ページには `https://[broken` のような壊れた URL が混ざりうる。urljoin は
+    それに ValueError を出すので、壊れたリンクは書かれたまま残して先へ進む —
+    リンク一つのせいでページ全体を読めなくしない。壊れた <base href> は無視して、
+    ページの URL を基準にする。
     """
     base_url = page_url
     base_tag = soup.find("base", href=True)
     if base_tag is not None:
-        base_url = urljoin(page_url, base_tag["href"].strip())
+        try:
+            base_url = urljoin(page_url, base_tag["href"].strip())
+        except ValueError:
+            LOGGER.debug(
+                "fetch_page invalid_base_href url=%s href=%r", page_url, base_tag["href"]
+            )
     for tag_name, attr in (("a", "href"), ("img", "src")):
         for tag in soup.find_all(tag_name, attrs={attr: True}):
             value = tag[attr].strip()
             if not value or value.lower().startswith(_NON_URL_PREFIXES):
                 continue
-            tag[attr] = urljoin(base_url, value)
+            try:
+                tag[attr] = urljoin(base_url, value)
+            except ValueError:
+                LOGGER.debug(
+                    "fetch_page invalid_link_kept url=%s %s=%r", page_url, attr, value
+                )
 
 
 def _html_to_markdown(soup: Tag) -> str:

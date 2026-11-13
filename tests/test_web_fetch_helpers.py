@@ -116,3 +116,26 @@ def test_base_href_takes_priority_for_relative_links(monkeypatch):
     monkeypatch.setattr(wfh.requests, "get", lambda *a, **k: _FakeResponse(html))
     page = wfh.fetch_page("https://example.test/")
     assert "(https://cdn.example.test/root/a.html)" in page.markdown
+
+
+def test_broken_link_is_kept_and_does_not_stop_reading(monkeypatch):
+    """PR #480 のレビュー指摘: urljoin が ValueError を出す壊れた URL が一つあっても、
+    ページは読めて、他のリンクは完全な URL になる。"""
+    html = ('<html><body><p>本文はここ。<a href="https://[broken">壊れた</a> '
+            '<a href="/ok">正常</a> <img src="//[x/pic.png" alt="壊れた絵"></p></body></html>')
+    monkeypatch.setattr(wfh.requests, "get", lambda *a, **k: _FakeResponse(html))
+    page = wfh.fetch_page("https://example.test/")
+    assert "本文はここ。" in page.markdown
+    assert "(https://example.test/ok)" in page.markdown
+    assert "(https://[broken)" in page.markdown
+
+
+def test_broken_base_href_falls_back_to_the_page_url(monkeypatch):
+    html = '<html><head><base href="https://[broken/"></head>' \
+           '<body><a href="a.html">リンク</a></body></html>'
+    monkeypatch.setattr(
+        wfh.requests, "get",
+        lambda *a, **k: _FakeResponse(html, url="https://example.test/dir/page"),
+    )
+    page = wfh.fetch_page("https://example.test/dir/page")
+    assert "(https://example.test/dir/a.html)" in page.markdown
