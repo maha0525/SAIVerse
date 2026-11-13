@@ -51,7 +51,14 @@ function toPlainTextBody(body: string): string {
 export function prepareMessageMarkdown(text: string): string {
     if (!text) return text;
 
-    const withPlainSpellResults = text.replace(
+    // Strip the real <user_only> wrappers first, while the spell result bodies
+    // are still HTML-escaped: a result that itself contains the text
+    // "<user_only>" (e.g. a fetched page) must survive verbatim.
+    const withoutWrappers = text
+        .replace(/<user_only(?:\s[^>]*)?>/g, '')
+        .replace(/<\/user_only>/g, '');
+
+    return withoutWrappers.replace(
         SPELL_RESULT_BLOCK_RE,
         (block) => {
             const repaired = block
@@ -62,8 +69,4 @@ export function prepareMessageMarkdown(text: string): string {
             return `${match[1]}${toPlainTextBody(match[2])}${match[3]}`;
         },
     );
-
-    return withPlainSpellResults
-        .replace(/<user_only(?:\s[^>]*)?>/g, '')
-        .replace(/<\/user_only>/g, '');
 }

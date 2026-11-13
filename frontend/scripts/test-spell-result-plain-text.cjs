@@ -85,6 +85,13 @@ const spellBlock = (result, cls = 'spellResult') =>
   // Prose around the spell block is still Markdown.
   assert(html.includes('<p>前の本文</p>') && html.includes('<p>後の本文</p>'), html);
 
+  // PR #481 review: a result that itself contains user_only tags keeps them;
+  // only the real wrapper around the spell block is removed.
+  const tagged = render(spellBlock('前 <user_only alt="sample">visible</user_only> 後'));
+  const taggedPre = tagged.match(/<pre><code class="language-text">([\s\S]*?)<\/code><\/pre>/);
+  assert.equal(decodeHtml(taggedPre[1]).replace(/\n$/, ''), '前 <user_only alt="sample">visible</user_only> 後');
+  assert(!/<p>[^<]*user_only/.test(tagged.split('<details')[0]), `real wrapper is removed: ${tagged}`);
+
   // The misfire variant is shown the same way.
   const error = render(spellBlock('エラー: [詳細](https://x.test/)', 'spellResult spellResultError'));
   const errorBox = error.match(/<details class="spellResult spellResultError">[\s\S]*?<\/details>/)[0];
