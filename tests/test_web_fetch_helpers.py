@@ -118,6 +118,44 @@ def test_base_href_takes_priority_for_relative_links(monkeypatch):
     assert "(https://cdn.example.test/root/a.html)" in page.markdown
 
 
+_LINKED_CARD_PAGE = """<html><body>
+<a class="VPFeature" href="/features/memory"><article class="box">
+  <h2 class="title">長期記憶</h2><p class="details">記憶を継続し続けます。</p>
+  <div class="link-text"><p>詳しく見る</p></div>
+</article></a>
+<a href="/features/forever"><article><h2>永遠に使える</h2><p>サービス終了とは無縁。</p></article></a>
+<h2>普通の節</h2><p>リンクの外。</p>
+</body></html>"""
+
+
+def test_section_inside_a_link_card_carries_the_link_target(monkeypatch):
+    """カード全体が <a> で包まれた節では、行き先を節の最後に書き添える。"""
+    monkeypatch.setattr(wfh.requests, "get", lambda *a, **k: _FakeResponse(_LINKED_CARD_PAGE))
+    page = wfh.fetch_page("https://example.test/")
+    heading, section_md = wfh.extract_section_by_heading(page.body_soup, "長期記憶", 10000)
+    assert heading == "長期記憶"
+    assert "詳しく見る" in section_md
+    assert section_md.endswith(
+        "（この節は https://example.test/features/memory へのリンクの中にあります）"
+    )
+    # 隣のカードの行き先は混ざらない
+    assert "forever" not in section_md
+
+
+def test_section_outside_links_gets_no_link_note(monkeypatch):
+    monkeypatch.setattr(wfh.requests, "get", lambda *a, **k: _FakeResponse(_LINKED_CARD_PAGE))
+    page = wfh.fetch_page("https://example.test/")
+    _, section_md = wfh.extract_section_by_heading(page.body_soup, "普通の節", 10000)
+    assert "リンクの中" not in section_md
+
+
+def test_link_note_survives_truncation(monkeypatch):
+    monkeypatch.setattr(wfh.requests, "get", lambda *a, **k: _FakeResponse(_LINKED_CARD_PAGE))
+    page = wfh.fetch_page("https://example.test/")
+    _, section_md = wfh.extract_section_by_heading(page.body_soup, "長期記憶", 10)
+    assert section_md.endswith("https://example.test/features/memory へのリンクの中にあります）")
+
+
 def test_broken_link_is_kept_and_does_not_stop_reading(monkeypatch):
     """PR #480 のレビュー指摘: urljoin が ValueError を出す壊れた URL が一つあっても、
     ページは読めて、他のリンクは完全な URL になる。"""

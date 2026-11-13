@@ -326,7 +326,28 @@ def extract_section_by_heading(
     if len(section_md) > max_chars:
         section_md = _truncate_natural(section_md, max_chars)
 
+    # カード型のページでは、見出しを含むカード全体が一つの <a> で包まれ、
+    # 「詳しく見る」はただの文字になっている (saiverse.net のトップがこの形)。
+    # 上で集めるのは見出しの後ろの兄弟だけなので、外側の <a> の行き先が落ちる。
+    # 切り詰めの後に足して、行き先が切られないようにする。
+    link_target = _enclosing_link_target(matched)
+    if link_target:
+        section_md = (
+            f"{section_md}\n\n（この節は {link_target} へのリンクの中にあります）"
+        )
+
     return matched.get_text(strip=True), section_md
+
+
+def _enclosing_link_target(tag: Tag) -> Optional[str]:
+    """tag を包んでいる <a href> の行き先を返す。辿れる URL でなければ None。"""
+    anchor = tag.find_parent("a", href=True)
+    if anchor is None:
+        return None
+    href = anchor["href"].strip()
+    if not href.lower().startswith(("http://", "https://")):
+        return None
+    return href
 
 
 def extract_section_by_keyword(
