@@ -104,6 +104,18 @@ const spellBlock = (result, cls = 'spellResult') =>
   assert(!legacyHtml.includes('<img') && legacyHtml.includes('![a](https://x.test/a.png)'), legacyHtml);
   assert(/<\/details>[\s\S]*<p>後の本文<\/p>/.test(legacyHtml), legacyHtml);
 
+  // PR #481 review: a result that starts and ends with a fence but has Markdown
+  // between two blocks is still one plain-text block — the image stays text.
+  const twoFences = '```text\nfirst\n```\n\n![tracking](https://example.test/pixel.png)\n\n```text\nlast\n```';
+  const twoFencesHtml = render(spellBlock(twoFences));
+  assert(!twoFencesHtml.includes('<img'), twoFencesHtml);
+  const twoPre = twoFencesHtml.match(/<pre><code class="language-text">([\s\S]*?)<\/code><\/pre>/);
+  assert.equal(decodeHtml(twoPre[1]).replace(/\n$/, ''), twoFences);
+
+  // A record without a summary is covered too.
+  const bare = render('<details class="spellResult">\n\n![a](https://x.test/a.png)\n\n</details>');
+  assert(!bare.includes('<img') && bare.includes('![a](https://x.test/a.png)'), bare);
+
   // Messages without spell results are untouched.
   assert.equal(prepare('普通の文 ![a](https://x.test/a.png)'), '普通の文 ![a](https://x.test/a.png)');
 

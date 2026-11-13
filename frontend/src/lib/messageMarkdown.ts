@@ -1,9 +1,11 @@
 const SPELL_RESULT_BLOCK_RE =
     /<details\b[^>]*class="[^"]*\bspellResult\b[^"]*"[^>]*>[\s\S]*?<\/details>/g;
 
-// The result body sits between the summary and the closing tag.
-const SPELL_RESULT_BODY_RE = /^([\s\S]*?<\/summary>)([\s\S]*?)(<\/details>)$/;
-const FENCED_BODY_RE = /^([`~]{3,})[^\n]*\n[\s\S]*\n\1[`~]*$/;
+// The result body sits between the summary (or the opening tag, if a record
+// has no summary) and the closing tag.  This always matches a block found by
+// SPELL_RESULT_BLOCK_RE, so no result body reaches the renderer as Markdown.
+const SPELL_RESULT_BODY_RE =
+    /^(<details\b[^>]*>(?:[\s\S]*?<\/summary>)?)([\s\S]*?)(<\/details>)$/;
 
 /**
  * Turn one spell result body into a fenced block so it renders as plain text.
@@ -20,12 +22,16 @@ const FENCED_BODY_RE = /^([`~]{3,})[^\n]*\n[\s\S]*\n\1[`~]*$/;
  * The backend HTML-escapes ``& < >`` in the body (sea/runtime_llm.py
  * ``_build_spell_user_only_block``).  Code blocks show entities literally, so
  * those three are decoded first (``&amp;`` last, the inverse of the encoder).
+ *
+ * The whole body is always wrapped, with a fence longer than any backtick run
+ * inside it, so nothing in the body can close the block early.  A body that
+ * already looks fenced is wrapped too: telling one fenced block apart from
+ * several blocks with Markdown between them is exactly where an image could
+ * slip out (PR #481 review).
  */
 function toPlainTextBody(body: string): string {
     const trimmed = body.replace(/^\n+|\n+$/g, '');
     if (!trimmed) return body;
-    // Legacy records already hold a fenced result; it is plain text already.
-    if (FENCED_BODY_RE.test(trimmed)) return `\n\n${trimmed}\n\n`;
     const text = trimmed
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
@@ -38,15 +44,12 @@ function toPlainTextBody(body: string): string {
 /**
  * Prepare persisted chat content for the shared ReactMarkdown renderer.
  *
- * Spell results created before the Markdown-boundary fix could serialize a
- * fenced result as ``</summary>```...```</details>``.  Markdown treats the
- * final `````</details>`` line as a new opening fence whose info string is
- * ``</details>``, so all following persona prose is swallowed by the
- * disclosure.  Repair only that legacy spellResult shape at render time; the
- * persisted building message remains untouched.
- *
- * Every spell result body is then shown as plain text (see toPlainTextBody).
- * This is done at render time so past records are covered too.
+ * Every spell result body is shown as plain text (see toPlainTextBody).  This
+ * is done at render time so past records are covered too; the persisted
+ * building message remains untouched.  It also covers records from before the
+ * Markdown-boundary fix (``</summary>```...```</details>``, where the final
+ * fence line used to swallow the persona prose after the disclosure): their
+ * old fence lines simply become part of the plain text.
  */
 export function prepareMessageMarkdown(text: string): string {
     if (!text) return text;
@@ -61,11 +64,8 @@ export function prepareMessageMarkdown(text: string): string {
     return withoutWrappers.replace(
         SPELL_RESULT_BLOCK_RE,
         (block) => {
-            const repaired = block
-                .replace(/<\/summary>(?=[`~]{3,})/, '</summary>\n\n')
-                .replace(/([`~]{3,})<\/details>$/, '$1\n\n</details>');
-            const match = repaired.match(SPELL_RESULT_BODY_RE);
-            if (!match) return repaired;
+            const match = block.match(SPELL_RESULT_BODY_RE);
+            if (!match) return block;
             return `${match[1]}${toPlainTextBody(match[2])}${match[3]}`;
         },
     );
