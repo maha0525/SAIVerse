@@ -28,7 +28,7 @@ _PLACEMENT_FIELDS = ("picker_group", "current_models")
 #: 利用者が自分で作ったプロバイダと、手元で動かすサーバー用の標準プロバイダを
 #: まとめるボタンの名前 (決まったこと 8)。
 CUSTOM_GROUP = "custom"
-CUSTOM_GROUP_LABEL = "ローカル・カスタム"
+CUSTOM_GROUP_LABEL = "カスタム"
 
 #: 反射判断専用のプロバイダ (型付きの質問に確率で答えるだけで、文章を書けない) を
 #: まとめるボタンの名前。どれもモデルが 1 つずつなので、1 つのボタンに集める。

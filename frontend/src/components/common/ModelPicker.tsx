@@ -77,6 +77,12 @@ function groupLabel(key: string, fallback?: string): string {
             return uiText('components.common.ModelPicker.groupOpenrouter');
         case 'nvidia_nim':
             return uiText('components.common.ModelPicker.groupNvidiaNim');
+        case 'meta':
+            return uiText('components.common.ModelPicker.groupMeta');
+        case 'plamo':
+            return uiText('components.common.ModelPicker.groupPlamo');
+        case 'sarashina':
+            return uiText('components.common.ModelPicker.groupSarashina');
         case 'custom':
             return uiText('components.common.ModelPicker.groupCustom');
         case 'reflex':
@@ -140,15 +146,12 @@ export default function ModelPicker({
     const selectedIsFolded = !!selected && !isCurrent(selected) && groupKeyOf(selected) === shownGroup;
     const showOthers = othersOpen ?? selectedIsFolded;
 
-    // 一番上: いま選ばれているモデルとお気に入り (お気に入りは一覧の順番のまま)
+    // 「お気に入り」の見出しの下に並べるモデル (一覧の順番のまま)。いま選ばれている
+    // モデルはここに混ぜない — お気に入りでないモデルが「お気に入り」の下に出てしまうため。
+    // 選ばれているモデルは、開いた直後に押されているそのプロバイダの列で見える
+    // (畳まれる側なら「他のモデル」も開いた状態で始まる)。
     const favoriteSet = new Set(favorites ?? []);
-    const topModels: PickerModel[] = [];
-    if (selected && !favoriteSet.has(selected.id)) topModels.push(selected);
-    if (favorites) {
-        for (const m of models) {
-            if (favoriteSet.has(m.id)) topModels.push(m);
-        }
-    }
+    const favoriteModels: PickerModel[] = favorites ? models.filter(m => favoriteSet.has(m.id)) : [];
 
     const resetView = () => {
         setActiveGroup(null);
@@ -259,8 +262,21 @@ export default function ModelPicker({
                     role="group"
                     aria-label={ariaLabel}
                 >
-                    {(topModels.length > 0 || isUnknownValue) && (
+                    {(emptyLabel !== undefined || isUnknownValue) && (
                         <div className={styles.topSection}>
+                            {emptyLabel !== undefined && (
+                                <div className={styles.row}>
+                                    <button
+                                        type="button"
+                                        className={`${styles.option} ${!value ? styles.optionSelected : ''}`}
+                                        onClick={() => choose('')}
+                                        disabled={disabled}
+                                        aria-current={!value ? 'true' : undefined}
+                                    >
+                                        {emptyLabel}
+                                    </button>
+                                </div>
+                            )}
                             {isUnknownValue && (
                                 <div className={styles.row}>
                                     <button
@@ -274,21 +290,15 @@ export default function ModelPicker({
                                     </button>
                                 </div>
                             )}
-                            {topModels.map(m => renderRow(m, 'top'))}
                         </div>
                     )}
 
-                    {emptyLabel !== undefined && (
-                        <div className={styles.row}>
-                            <button
-                                type="button"
-                                className={`${styles.option} ${!value ? styles.optionSelected : ''}`}
-                                onClick={() => choose('')}
-                                disabled={disabled}
-                                aria-current={!value ? 'true' : undefined}
-                            >
-                                {emptyLabel}
-                            </button>
+                    {favoriteModels.length > 0 && (
+                        <div className={styles.topSection}>
+                            <div data-i18n="components.common.ModelPicker.favoritesHeading" className={styles.sectionHeading}>
+                                {uiText('components.common.ModelPicker.favoritesHeading')}
+                            </div>
+                            {favoriteModels.map(m => renderRow(m, 'fav'))}
                         </div>
                     )}
 
@@ -298,6 +308,9 @@ export default function ModelPicker({
                         </div>
                     ) : (
                         <>
+                            <div data-i18n="components.common.ModelPicker.providerGroupsLabel" className={styles.sectionHeading}>
+                                {uiText('components.common.ModelPicker.providerGroupsLabel')}
+                            </div>
                             <div
                                 className={styles.groupButtons}
                                 role="group"

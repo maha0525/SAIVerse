@@ -193,6 +193,14 @@
     color: #ffffff;
 }
 
+/* 「お気に入り」「プロバイダ」の見出し。プロバイダの中の見出し (.heading) より一段強くする。 */
+.sectionHeading {
+    padding: 0 0.6rem 0.15rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
 .heading {
     margin-top: 0.35rem;
     padding: 0 0.6rem;
