@@ -94,7 +94,9 @@ def read_url_outline(
     threshold = max(0, threshold)
     chunk = threshold or DEFAULT_FULL_THRESHOLD or 5000
 
-    start = 0
+    # 省略 (None / "") と明示の "0" を区別する。明示されたら 0 でも本文の部分取得に
+    # 進む — 見出しのある長いページで、最初の見出しより前の導入文を読む唯一の道だから。
+    start: Optional[int] = None
     if offset is not None and str(offset).strip() != "":
         try:
             start = int(str(offset).strip())
@@ -115,7 +117,7 @@ def read_url_outline(
 
     total_chars = len(page.markdown)
 
-    if start > 0:
+    if start is not None:
         return _page_slice_message(page, start, chunk)
 
     if total_chars <= threshold:

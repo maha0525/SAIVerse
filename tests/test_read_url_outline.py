@@ -97,6 +97,39 @@ def test_offset_must_be_a_non_negative_number(monkeypatch, bad):
     assert "0 以上の数字" in message
 
 
+_HEADED_LONG_PAGE = (
+    "<html><body><p>導入文。最初の見出しより前に書かれている。</p>"
+    + "".join(
+        f"<h2>節{i:02d}</h2><p>" + "い" * 300 + "</p>" for i in range(30)
+    )
+    + "</body></html>"
+)
+
+
+def test_explicit_zero_offset_reads_from_the_head_even_with_headings(monkeypatch):
+    """PR #479 のレビュー指摘: 明示の offset="0" で導入文を読めること。"""
+    _serve(monkeypatch, _HEADED_LONG_PAGE)
+    outline, _ = read_url_outline("https://example.test/", full_threshold=1000)
+    assert "見出し階層" in outline
+    assert "導入文" not in outline
+
+    head, _ = read_url_outline(
+        "https://example.test/", full_threshold=1000, offset="0"
+    )
+    assert "1〜1000 文字目" in head
+    assert "導入文" in head
+    assert "見出し階層" not in head
+
+
+@pytest.mark.parametrize("omitted", [None, "", "  "])
+def test_omitted_offset_keeps_the_outline(monkeypatch, omitted):
+    _serve(monkeypatch, _HEADED_LONG_PAGE)
+    message, _ = read_url_outline(
+        "https://example.test/", full_threshold=1000, offset=omitted
+    )
+    assert "見出し階層" in message
+
+
 def test_short_page_is_still_returned_whole(monkeypatch):
     _serve(monkeypatch, "<html><body><p>短いページ。</p></body></html>")
     message, _ = read_url_outline("https://example.test/")
