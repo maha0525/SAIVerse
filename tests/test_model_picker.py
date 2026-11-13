@@ -61,14 +61,14 @@ def test_current_models_は実在する自分のプロバイダのモデルだ�
     assert checked >= 6
 
 
-def test_gemini_の_current_models_は有料5つと無料4つ():
+def test_gemini_の_current_models_は有料6つと無料5つ():
     provider = _shipped_providers()["gemini"]
     models = _shipped_models()
     listed = provider["current_models"]
     paid = [key for key in listed if models[key].get("prefer_paid")]
     free = [key for key in listed if not models[key].get("prefer_paid")]
-    assert len(paid) == 5
-    assert len(free) == 4
+    assert len(paid) == 6
+    assert len(free) == 5
 
 
 def test_手元のサーバー用の標準プロバイダは_custom_にまとめる():

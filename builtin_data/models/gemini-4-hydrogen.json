@@ -1,0 +1,86 @@
+{
+  "model": "gemini-4-hydrogen",
+  "system_prompt": "",
+  "display_name": "Gemini 4 Hydrogen(無料枠)",
+  "provider_ref": "gemini",
+  "context_length": 250000,
+  "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
+  "supports_sampling_parameters": false,
+  "supports_model_prefill": false,
+  "prefer_paid": false,
+  "rate_limit": {
+    "rpd": 20,
+    "reset_timezone": "America/Los_Angeles"
+  },
+  "timeout": 900,
+  "parameters": {
+    "thinking_level": {
+      "type": "dropdown",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "label": "Thinking Level",
+      "description": "思考の深さ。highが公式既定。xhighでさらに深く推論、lowで応答速度を優先。minimalは送るとエラーになる。"
+    },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": [
+        "on",
+        "off"
+      ],
+      "default": "off",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率を優先。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
+}

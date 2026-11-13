@@ -435,5 +435,41 @@ class TestProviderRefInheritance(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+
+class TestMuseEmberCatalog(unittest.TestCase):
+    """Muse Ember は入力が 200k を超えた要求の全部が高い単価になる 2 段の料金。
+    200k で止める定義と、1M まで使って単価を切り替える定義の 2 つで同梱する。"""
+
+    def test_both_definitions_call_the_same_model(self):
+        short = model_configs.get_model_config("meta-muse-ember-1.0")
+        long = model_configs.get_model_config("meta-muse-ember-1.0-long")
+        for config in (short, long):
+            self.assertEqual(config["model"], "muse-ember-1.0")
+            self.assertEqual(config["provider_ref"], "meta")
+            self.assertNotIn("none", config["parameters"]["reasoning_effort"]["options"])
+            self.assertIn("max", config["parameters"]["reasoning_effort"]["options"])
+            self.assertEqual(config["parameters"]["max_completion_tokens"]["max"], 524_288)
+        self.assertEqual(short["context_length"], 200_000)
+        self.assertEqual(long["context_length"], 1_048_576)
+
+    def test_short_definition_is_always_billed_at_the_base_rate(self):
+        self.assertAlmostEqual(
+            model_configs.calculate_cost(
+                "meta-muse-ember-1.0", 200_000, 1_000_000, cached_tokens=100_000,
+            ),
+            0.1 * 0.1 + 0.004 * 0.1 + 0.5,
+        )
+
+    def test_long_definition_switches_the_whole_request_above_200k(self):
+        key = "meta-muse-ember-1.0-long"
+        self.assertAlmostEqual(
+            model_configs.calculate_cost(key, 200_000, 1_000_000), 0.02 + 0.5,
+        )
+        self.assertAlmostEqual(
+            model_configs.calculate_cost(key, 200_001, 1_000_000, cached_tokens=100_000),
+            0.100001 * 0.3 + 0.1 * 0.012 + 1.5,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
