@@ -71,7 +71,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `pocketbook_open` | 自分の手帳を開いて読みます。手帳には「やりたい・やった」のメモ欄と、「約束」の欄があります。記憶の地図帳（memory_read など）は知っていること・あったことを引く場所で、手帳は自分のやりたいこと・やったこと・約束を書きとめる場… | `activity`: string, `before`: string, `limit`: integer, `page`: string | 手帳を開く |
 | `pocketbook_write` | 自分の手帳に一行書きます。やりたいこと・やったことはメモ欄へ、誰かとの約束や引き受けた頼まれごとは約束の欄へ入ります（kind で選ぶと、どちらの欄に入るかは自動で決まります）。どちらか迷ったら、相手がいるなら約束です。記憶の地図帳（… | `kind*`: string, `text*`: string, `activity`: string, `counterpart`: string, `due`: string | 手帳に書く |
 | `read_url_content` | Fetch a web page URL and return its content as readable Markdown text. | `url*`: string, `max_chars`: integer | — |
-| `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。閾値はデフォルト 5000 文字、環境変… | `url*`: string, `full_threshold`: integer | ページ概要 |
+| `read_url_outline` | 指定したURLのページ内容を読み込み、短いページなら全文、長いページなら見出し階層（h1〜h4）を返します。長いページは続けて read_url_section で必要な節を深掘りしてください。見出しの無い長いページは先頭だけを返すの… | `url*`: string, `full_threshold`: integer, `offset`: string | ページ概要 |
 | `read_url_section` | URLのページ内から、見出し名やキーワードで指定した節だけを抽出して読み込みます。 read_url_outline で長文と判定されたページの深掘り用です。 まず見出し（h1〜h4）の部分一致を試み、見つからなければ本文キーワード一… | `url*`: string, `section_query*`: string, `around`: integer | ページ節読み込み |
 | `resolve_uri` | Resolve SAIVerse URIs to retrieve their content. Supports messagelog, memopedia, chronicle, item, building, web, and … | `uris*`: array, `max_total_chars`: integer | URI閲覧 |
 | `run_playbook` | Run a Playbook as a sub-line and receive its report_to_parent (a string summary written by the sub-line). Use this wh… | `name*`: string | Playbook 起動 |
