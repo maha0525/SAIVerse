@@ -30,6 +30,7 @@ read_url_outline = _load_spell()
 class _FakeResponse:
     def __init__(self, text: str):
         self.text = text
+        self.url = "https://example.test/"
         self.headers = {"Content-Type": "text/html; charset=utf-8"}
         self.apparent_encoding = "utf-8"
         self.encoding = "utf-8"

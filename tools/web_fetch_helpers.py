@@ -2,16 +2,16 @@
 
 read_url_outline / read_url_section から共通利用する低レベル処理を集約する。
 
-- fetch_page: HTTP取得 + HTMLパース + clean + Markdown化（ページ全体）
+- fetch_page: HTTP取得 + HTMLパース + clean + リンクの完全な URL 化 + Markdown化（ページ全体）
 - extract_outline: clean済みページから h1-h4 をフラットに抽出
+- extract_section_by_heading: 見出しマッチで節を切り出し
+- extract_section_by_keyword: 全文キーワード一致箇所周辺を切り出し
 
 本文の場所を推測して一部だけを残す処理は持たない。read_url_outline は
 ページの全体像（少なくとも全見出し）を渡すスペルなので、推測が外れると
 自分の最低限の約束より少ない情報を返してしまう（2026-11-13、saiverse.net で
 4 枚ある <article> のカードの 1 枚目だけが本文とされ、97 文字しか返らなかった）。
 長いページの分量は read_url_outline の閾値と見出し一覧で抑える。
-- extract_section_by_heading: 見出しマッチで節を切り出し
-- extract_section_by_keyword: 全文キーワード一致箇所周辺を切り出し
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -58,7 +59,7 @@ class FetchError(Exception):
 
 @dataclass
 class FetchedPage:
-    url: str
+    url: str  # リダイレクト後の、実際に取得できたページの URL
     title: str
     body_soup: Tag  # cleaned, whole page (<body>)
     markdown: str  # Markdownified whole page
@@ -114,11 +115,18 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
     html = response.text
     LOGGER.info("fetch_page got_html url=%s bytes=%d", url, len(html))
 
+    # リダイレクトされていたら、飛ばされた先がこのページの本当の URL。
+    # ページ内の相対リンクはこちらを基準に解決しないと、別の場所を指してしまう。
+    final_url = response.url or url
+    if final_url != url:
+        LOGGER.info("fetch_page redirected url=%s final_url=%s", url, final_url)
+
     soup = BeautifulSoup(html, "html.parser")
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else ""
 
     soup = _clean_html(soup)
+    _absolutize_links(soup, final_url)
     body = soup.find("body") or soup
 
     try:
@@ -133,9 +141,9 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
 
     LOGGER.info(
         "fetch_page done url=%s title=%r markdown_chars=%d",
-        url, title, len(markdown),
+        final_url, title, len(markdown),
     )
-    return FetchedPage(url=url, title=title, body_soup=body, markdown=markdown)
+    return FetchedPage(url=final_url, title=title, body_soup=body, markdown=markdown)
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +151,14 @@ def fetch_page(url: str, timeout: Optional[int] = None) -> FetchedPage:
 # ---------------------------------------------------------------------------
 
 def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
-    """script / style / nav / footer 等の非本文要素を除去。"""
-    for tag in soup(["script", "style", "nav", "footer", "header", "aside",
+    """script / style / nav / footer 等の非本文要素を除去。
+
+    <header> と <aside> は消さない。ブログ記事はタイトルの <h1> を <header> に、
+    注意書きや補足を <aside> に入れることが多く、タグの名前だけで消すと見出しの
+    一覧からタイトルが消える。サイト全体の上の帯の <header> を残して増えるのは
+    ロゴやサイト名程度 (メニュー本体は <nav> として消える。saiverse.net で +49 文字)。
+    """
+    for tag in soup(["script", "style", "nav", "footer",
                      "noscript", "iframe", "form", "button", "input"]):
         tag.decompose()
     for tag in soup.find_all(attrs={"hidden": True}):
@@ -152,6 +166,29 @@ def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
     for tag in soup.find_all(style=re.compile(r"display:\s*none", re.I)):
         tag.decompose()
     return soup
+
+
+# 完全な URL にしないリンク: ページ内の位置 (#...) と、URL ではない参照。
+_NON_URL_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:")
+
+
+def _absolutize_links(soup: BeautifulSoup, page_url: str) -> None:
+    """<a href> と <img src> の相対参照を、ページの URL を基準に完全な URL へ直す。
+
+    ペルソナが本文中のリンクをそのまま read_url_outline に渡しても辿れるように
+    する (`/guide/x` のままだと「https:///guide/x」になって取得に失敗していた)。
+    ページが <base href> で基準を指定していれば、そちらを優先する (HTML の規則)。
+    """
+    base_url = page_url
+    base_tag = soup.find("base", href=True)
+    if base_tag is not None:
+        base_url = urljoin(page_url, base_tag["href"].strip())
+    for tag_name, attr in (("a", "href"), ("img", "src")):
+        for tag in soup.find_all(tag_name, attrs={attr: True}):
+            value = tag[attr].strip()
+            if not value or value.lower().startswith(_NON_URL_PREFIXES):
+                continue
+            tag[attr] = urljoin(base_url, value)
 
 
 def _html_to_markdown(soup: Tag) -> str:
