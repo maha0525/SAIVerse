@@ -24,7 +24,7 @@ OpenAI SDK → Chat Completions (`POST https://api.meta.ai/v1/chat/completions`)
 - 接続先は `https://api.meta.ai/v1`、認証は `META_API_KEY`。Meta の文書の例示名
   `MODEL_API_KEY` は汎用的すぎて `.env` の中で何のキーか分からないため採らない。
 - 登録する会話用のモデルは `muse-spark-1.3`・`muse-spark-1.3-contributor`・`muse-wonder-1.0` の
-  3 本 (まはー指定)。Meta 直結では、Muse Spark 1.2 / 1.1 (と 1.2 の Contributor 版)・画像生成・
+  3 本 (まはー指定)。2026-11-13 に `muse-ember-1.0` を加えた (下の経緯)。Meta 直結では、Muse Spark 1.2 / 1.1 (と 1.2 の Contributor 版)・画像生成・
   音声認識・SAM は登録しない (既存の `openrouter-meta-muse-spark-1.2` はそのまま残す)。
 - Contributor 版は、Meta が送った内容 (プロンプト・ファイル・コンテキスト・モデルの応答) を
   将来のモデルの学習に使う代わりに、料金が大幅に安い版 (入力 $0.10 / キャッシュ入力 $0.002 /
@@ -135,3 +135,4 @@ Meta の実サーバーへの通信や、本番ペルソナの呼び出し・デ
   3 モデルとも通り、使用量とキャッシュの記録も返った (費用は合計 $0.035)。
 - 2026-10-28: 「会話の途中の system メッセージは user へ変換する」の決定は、PR #429 (2026-10-28 時点で未マージ) で撤回する。システム通知を role=system へ一本化する改修 ([system_notice_delivery.md](system_notice_delivery.md)) で、この撤回を全プロバイダへ一般化した — 途中の system を受け取れないモデルへは、クライアント層が送る直前に合言葉付きタグの user に変える。
 - 2026-11-10 (v0.3.30 のリリース準備で台帳を現況化): Contributor 版の PR #428 は develop に入って v0.3.27 として発行済みだった (台帳の更新が漏れていた)。台帳の旧文面 — 次アクション「3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通る。Contributor 版の追加はブランチ feature/meta-muse-contributor の PR にある。次 = まはーが PR を確認し、会話の途中の system メッセージを user に変換する設定をやめるかを決める。」/ 誰待ち「まはー (PR 確認と変換の判断)」。
+- 2026-11-13: まはーの依頼で Muse Ember (`muse-ember-1.0`) を加えた。Meta の料金は、1 回の要求の入力が 20 万トークンを超えると要求の全部が高い単価 ($0.30 / $0.012 / $1.50) になる 2 段の料金なので、まはーの指定どおり 2 つの定義に分けた — コンテキストを 200,000 で止める `meta-muse-ember-1.0` と、1,048,576 まで使って単価を入力の長さで切り替える `meta-muse-ember-1.0-long`。Contributor 版は無い。モデルの存在は Meta の `GET /v1/models/muse-ember-1.0` で確かめ、課金の出る生成は呼んでいない。Meta のプロバイダには `current_models` が無いので、Ember も最初から選ぶ欄に出る。
