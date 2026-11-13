@@ -69,7 +69,7 @@ def read_url_outline(
         )
         return message, ToolResult(history_snippet=snippet)
 
-    outline = extract_outline(page.main_soup)
+    outline = extract_outline(page.body_soup)
     if not outline:
         # 見出しが取れない → 仕方ないので全文返す
         LOGGER.warning(
