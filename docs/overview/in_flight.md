@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | モデルを選ぶ欄の作り直し (プロバイダを先に選ぶ・最初から出すモデルのリスト・全画面で同じ欄) | 実装済みで、メティスがテスト用の環境の画面で 4 つの画面を確かめた。次 = レビューを通して PR を出し、まはーが本番の画面で見て「ローカル・カスタム」のまとめ方を判断する。 | まはー (実機確認) | [intent](../intent/model_picker.md) | 2026-11-13 |
+| 🟣 検証待ち | モデルを選ぶ欄の作り直し (プロバイダを先に選ぶ・最初から出すモデルのリスト・全画面で同じ欄) | 作り直し (#476) と本番の画面で出た体裁の直し (#477) は develop に入り、v0.3.31 に載る。次 = 発行後、まはーが普段の操作で 4 つの画面を使い、選びにくい所が残っていないかを見る。 | まはー (実機確認) | [intent](../intent/model_picker.md) | 2026-11-13 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | develop に入り、v0.3.30 に載る。次 = 更新・再起動後の通常利用で、メティスが backend.log から送信完了と応答待ちを分けて確認する。 | 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-11-10 |
@@ -56,7 +56,7 @@
 | 🟣 検証待ち | 返事を待つ間の表示 (送った直後の名前・開発用の段階名の撤去・添付画像の即時表示) | v0.3.28 で発行済み。次 = まはーが実機で、送信から返事までの文言の移り変わりと、添付画像が送った瞬間に出ることを見る。 | まはー (実機確認) | [intent](../intent/chat_progress_display.md) | 2026-11-10 |
 | 🟣 検証待ち | Meta の Muse (Spark 1.3 / Spark 1.3 Contributor / Wonder) を公式プロバイダとして同梱 | 3 モデルとも実サービスで会話・画像・構造化出力・ツール呼び出しが通り、Contributor 版は v0.3.27 で発行済み。次 = まはーが、会話の途中の system メッセージを user に変換する設定をやめるかを決める。 | まはー (変換の判断) | [intent](../intent/meta_muse_provider.md) | 2026-11-10 |
 | 🟣 検証待ち | 停止ボタン — ツールが固まっても停止で抜け、走っている間は必ず出す (an nin さん報告) | v0.3.30 で発行済み。次 = an nin さんに更新を案内し、X 連携のツールが止まったときに停止ボタンで抜けられるかを聞く。 | まはー (報告者への連絡) → 報告者 | [intent](../intent/stop_button.md) | 2026-11-10 |
-| 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は develop に入った。報告者の再発時の観測から、重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 次のリリースに載せ、報告者の iPhone で入力が軽くなったかを聞いて issue を閉じる。 | リリース → 報告者 (実機確認) | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-10-26 |
+| 🟣 検証待ち | iPhone の PWA でチャット入力欄の文字入力がもたつく (an nin さん報告) | 修正は v0.3.27 で発行済み。重さの引き金はスペル結果 (Web 調査の本文) で膨らんだ発言の表示だと読んでいる。次 = 報告者に、iPhone で入力が軽くなったかを聞いて issue を閉じる。 | まはー (報告者への連絡) → 報告者 | [issue](../issues/chat_input_keystroke_rerenders_whole_page.md) | 2026-11-13 |
 | 🟣 検証待ち | macOS で setup/更新の別プロセスに証明書の救済が効かず、Homebrew のコマンドがビルドから見えない | 修正は v0.3.27 で発行済み。次 = Mac の利用者が更新したとき、証明書の手当て無しで SearXNG の再インストールと voice-tts の環境の再構築が通ることを確かめる。 | Mac 利用者 | [issue](../issues/mac_setup_processes_lack_tls_trust_and_homebrew_path.md) | 2026-11-10 |
 | 🟣 検証待ち | 画像の枚数上限の既定を廃止し、バイトの非常弁で要求サイズ上限を避ける | v0.3.27 で発行済み。次 = 画像の多い Gemini の会話で、全部の画像が画像のまま送られ、新しい画像の回もキャッシュが当たることをログで見る。 | まはー (実機確認) | [issue](../issues/image_attachment_limit_breaks_cache_prefix.md) | 2026-11-10 |
 | 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 再レビューで指摘された既読記録の蓄積を回収し、同秒の本文編集も通知する修正の確認待ち。次 = PR #406 の修正差分を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (修正差分の確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
@@ -123,7 +123,7 @@
 | 🟣 検証待ち | 旧 log.json 隔離・復元経路の撤去 | 撤去は develop に入った。次 = まはーの次の起動のあと、起動ログに例外が無いことと、アラート欄に余計な表示が出ないことをメティスがログで確かめる。 | まはーの次の起動 → 私 (ログ確認) | [issue](../issues/quarantine_path_dead_code_removal.md) | 2026-10-03 |
 | 🟣 検証待ち | 表示中の建物が削除されたとき、引っ越し先が無いと画面が詰む (建物ゼロ・取得失敗・移動失敗の三経路) | 修正は v0.3.16 として発行済み。次 = 実機で表示中の建物を消したときの案内と入力欄の無効化を見る。 | まはー (実機確認) | [issue](../issues/deleted_current_building_dead_end.md) | 2026-09-28 |
 | 🔵 設計中 | ワールドエディタと個別設定の同期棚卸し | City / Building / Persona の比較表は develop に入った。次 = まはーと、ワールドエディタに足す項目の範囲と順番を決め、選んだ項目だけ保存の約束を設計する。UI の追加は未着手。 | まはー (範囲・優先順位) | [issue](../issues/world_editor_settings_sync.md) | 2026-10-03 |
-| 🟣 検証待ち | 反射判断 — 型付き質問で確率を返す判断層と答える側の差し替え | Gemini Decisions を反射判断に使えるようにする変更と、画像を受け付けるモデルに添付の画像を見せる変更 (intent §7・§8) は feature/reflex-gemini-decisions-images にあり、レビューは収束している。次 = PR にしてまはーの確認を受け、Gemini Decisions と画像つきの判断を実機で評価する。それより前の部分も実機評価を待っている。 | まはー (PR の確認・実機評価) | [intent](../intent/reflex_judgment.md) | 2026-11-12 |
+| 🟣 検証待ち | 反射判断 — 型付き質問で確率を返す判断層と答える側の差し替え | Gemini Decisions と、画像を受け付けるモデルに添付の画像を見せる変更 (intent §7・§8) は develop に入り (#475)、v0.3.31 に載る。次 = まはーが実機で、Gemini Decisions と画像つきの判断を、それより前の部分と合わせて評価する。 | まはー (実機評価) | [intent](../intent/reflex_judgment.md) | 2026-11-13 |
 | 🟣 検証待ち | Stack-chan のファームウェアが一般ユーザーに届かない (導入した人が「ファームウェア書き込み」を使えない) | SAIVerse v0.3.21 とアドオン v0.5.1 を出し、公開カタログにも署名して載せた。次 = まはーの手元カタログの設定を外し、最初の報告者に更新を案内する。 | まはー (`.env` の行の削除・報告者への連絡) | [issue](../issues/stackchan_firmware_not_distributed.md) | 2026-10-04 |
 | 🟣 検証待ち | モデル編集の追加 JSON に書いた水位の引き取り | JSON の水位を専用欄へ引き取る修正は develop に入った。次 = モデル編集画面で追加設定の JSON に水位を書いて保存し、開き直すと専用欄に入っていることを実機で見る。 | まはー (実機確認) | [issue](../issues/model_editor_drops_watermark_keys_from_json.md) | 2026-10-03 |
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->
