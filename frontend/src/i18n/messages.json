@@ -13474,5 +13474,185 @@
   "components.memory.ChronicleOfferPanel.text022": {
     "ja": "進み具合を確認できなくなりました。作成が続いているかは、記憶画面の Chronicle タブで確かめてください。",
     "en": "Lost track of the job's progress. Check the Chronicle tab in the memory screen to see whether it is still running."
+  },
+  "api.systemUpdate.psutilRequired": {
+    "ja": "この環境には更新の安全確認に必要な部品 (psutil) がまだ入っていません。SAIVerse を終了してから update.bat (macOS / Linux は update.sh) を一度実行してください。それ以降はこのボタンから更新できます。",
+    "en": "A required safety component (psutil) is not installed in this environment yet. Stop SAIVerse and run update.bat (or update.sh on macOS / Linux) once. After that, updates can be started from this button."
+  },
+  "api.systemUpdate.alreadyInProgress": {
+    "ja": "更新またはバージョンの切り替えがすでに始まっています。再起動をお待ちください。",
+    "en": "An update or channel switch is already in progress; the backend is shutting down for it."
+  },
+  "api.systemUpdate.unknownChannel": {
+    "ja": "指定された配布ライン「{channel}」には対応していません。",
+    "en": "Unknown release channel '{channel}'."
+  },
+  "api.systemUpdate.consentRequired": {
+    "ja": "アーリーアクセス版へ切り替えるには、画面の確認に同意する必要があります。",
+    "en": "Joining the early-access channel requires your confirmation."
+  },
+  "api.systemUpdate.commandCouldNotRun": {
+    "ja": "処理 ({label}) を実行できませんでした: {error}",
+    "en": "{label} could not run: {error}"
+  },
+  "api.systemUpdate.commandTimedOut": {
+    "ja": "処理 ({label}) が {timeout} 秒以内に終わらず中断しました。",
+    "en": "{label} timed out after {timeout} s and was stopped."
+  },
+  "api.systemUpdate.commandFailed": {
+    "ja": "処理 ({label}) が失敗しました (終了コード {code}): {detail}",
+    "en": "{label} failed with exit {code}: {detail}"
+  },
+  "api.systemUpdate.switchRequiresGit": {
+    "ja": "バージョンの切り替えには、Git で管理された SAIVerse フォルダが必要です。",
+    "en": "Switching the release channel requires a Git checkout of SAIVerse."
+  },
+  "api.systemUpdate.updateRequiresGit": {
+    "ja": "自動更新には、Git で管理された SAIVerse フォルダが必要です。",
+    "en": "Automatic update requires a Git checkout of SAIVerse."
+  },
+  "api.systemUpdate.switchLocalChanges": {
+    "ja": "手元のファイルに変更があるため、バージョンの切り替えを開始しませんでした。\n変更されたファイル:\n{files}\n変更を戻してよい場合は SAIVerse フォルダで次を実行してから、もう一度切り替えてください:\n  {command}\n変更を残したい場合は先にコミットしてから切り替えてください。",
+    "en": "Working tree has local changes. The channel switch was not started.\nModified files:\n{files}\nIf you do not need these changes, discard them by running this command in the SAIVerse folder, then switch again:\n  {command}\nIf you want to keep the changes, commit them first, then switch again."
+  },
+  "api.systemUpdate.updateLocalChanges": {
+    "ja": "手元のファイルに変更があるため、更新を開始しませんでした。\n変更されたファイル:\n{files}\n変更を戻してよい場合は SAIVerse フォルダで次を実行してから、もう一度更新してください:\n  {command}\n変更を残したい場合は先にコミットしてから更新してください。",
+    "en": "Working tree has local changes. Update was not started.\nModified files:\n{files}\nIf you do not need these changes, discard them by running this command in the SAIVerse folder, then run the update again:\n  {command}\nIf you want to keep the changes, commit them first, then run the update again."
+  },
+  "api.systemUpdate.packagingUnavailable": {
+    "ja": "バージョン番号を比較するための部品が見つからないため、切り替えを開始しませんでした。",
+    "en": "The packaging library is unavailable, so versions cannot be compared; the channel switch was not started."
+  },
+  "api.systemUpdate.versionUnreadable": {
+    "ja": "{target} のバージョン番号を読み取れなかったため、切り替えを開始しませんでした。",
+    "en": "The version of {target} could not be read; the channel switch was not started."
+  },
+  "api.systemUpdate.versionInvalid": {
+    "ja": "{target} のバージョン番号 ({version}) の形式が正しくないため、切り替えを開始しませんでした。",
+    "en": "The version of {target} ({version}) is not valid; the channel switch was not started."
+  },
+  "api.systemUpdate.targetBranch": {
+    "ja": "{branch} ブランチ",
+    "en": "the {branch} branch"
+  },
+  "api.systemUpdate.targetCurrent": {
+    "ja": "現在の SAIVerse",
+    "en": "this SAIVerse"
+  },
+  "api.systemUpdate.alreadyOnBranch": {
+    "ja": "すでに {branch} を使用しているため、切り替える必要はありません。",
+    "en": "This SAIVerse is already on the {branch} branch; nothing to switch."
+  },
+  "api.systemUpdate.wrongSourceBranch": {
+    "ja": "{target} への切り替えは {source} からだけ行えますが、いまの環境は「{current}」になっているため切り替えを開始しませんでした。",
+    "en": "Switching to {target} is only possible from {source}, but this installation is on '{current}'. The channel switch was not started."
+  },
+  "api.systemUpdate.wrongSourceBranchDetached": {
+    "ja": "{target} への切り替えは {source} からだけ行えますが、いまの環境はどのブランチにも属していないため切り替えを開始しませんでした。",
+    "en": "Switching to {target} is only possible from {source}, but this installation is on a detached HEAD. The channel switch was not started."
+  },
+  "api.systemUpdate.branchNotPublished": {
+    "ja": "切り替え先の {branch} はまだ公開されていないため、切り替えを開始しませんでした。",
+    "en": "The {branch} branch has not been published yet, so there is nothing to switch to. The channel switch was not started."
+  },
+  "api.systemUpdate.targetVersionOlder": {
+    "ja": "切り替え先 ({branch}) のバージョン {target_version} は現在の {current_version} より古いため、そのままでは起動できなくなります。切り替え先のバージョンが {current_version} 以上になってから切り替えてください。",
+    "en": "The {branch} branch is at version {target_version}, older than this SAIVerse ({current_version}). Switching now would leave SAIVerse unable to start; wait until {branch} reaches {current_version} or later."
+  },
+  "api.reembed.starting": {
+    "ja": "準備しています…",
+    "en": "Starting..."
+  },
+  "api.reembed.dbNotFound": {
+    "ja": "記憶データベースが見つかりません。",
+    "en": "Database not found."
+  },
+  "api.reembed.dbNotFoundForPersona": {
+    "ja": "ペルソナ「{persona_id}」の記憶データベースが見つかりません。",
+    "en": "Memory database not found for {persona_id}."
+  },
+  "api.reembed.source.chronicle": {
+    "ja": "あらすじ",
+    "en": "Chronicle"
+  },
+  "api.reembed.source.memopedia": {
+    "ja": "Memopedia",
+    "en": "Memopedia"
+  },
+  "api.reembed.source.fragment": {
+    "ja": "記憶の断片",
+    "en": "Fragment"
+  },
+  "api.reembed.sourceProgress": {
+    "ja": "{source} を再計算しています ({done}/{total})…",
+    "en": "{source} {done}/{total}..."
+  },
+  "api.reembed.processing": {
+    "ja": "会話を再計算しています ({done}/{total})…",
+    "en": "Processing {done}/{total}..."
+  },
+  "api.reembed.completed": {
+    "ja": "会話 {embedded} 件とあらすじ・Memopedia・断片 {sources} 件の再計算が終わりました。",
+    "en": "Re-embedded {embedded} messages and {sources} Chronicle/Memopedia/Fragment entries."
+  },
+  "api.reembed.noteSourceSkipped": {
+    "ja": "実行中に編集された {count} 件は、次回の記憶整理で計算されます。",
+    "en": "{count} Chronicle/Memopedia/Fragment entries edited during the job were left for the next memory maintenance to embed."
+  },
+  "api.reembed.noteIncomplete": {
+    "ja": "未完了の項目が残っています ({reason})。もう一度実行するとすべて揃います。",
+    "en": "{reason} Run the re-embed again to finish."
+  },
+  "api.reembed.noteLiveEmbedderUnavailable": {
+    "ja": "起動中のペルソナの埋め込みモデルを読み込めなかったため、想起はまだ使えません（警告は維持されます）。",
+    "en": "The running persona's embedding model could not be loaded, so recall is still unavailable; the warning is kept."
+  },
+  "api.reembed.completedWithNote": {
+    "ja": "{base} {note}",
+    "en": "{base} {note}"
+  },
+  "api.reembed.completedWithTwoNotes": {
+    "ja": "{base} {note1} {note2}",
+    "en": "{base} {note1} {note2}"
+  },
+  "api.reembed.error": {
+    "ja": "エラー: {error}",
+    "en": "Error: {error}"
+  },
+  "api.reembed.alreadyInProgress": {
+    "ja": "再計算はすでに実行中です。",
+    "en": "Re-embed already in progress."
+  },
+  "api.reembed.started": {
+    "ja": "再計算を開始しました。",
+    "en": "Re-embed task started. Check status endpoint for progress."
+  },
+  "api.reembed.notRun": {
+    "ja": "再計算はまだ実行されていません。",
+    "en": "No task has been run."
+  },
+  "components.PersonaWizard.nameExists": {
+    "ja": "「{p1}」という名前のペルソナはこの街にすでに存在します。",
+    "en": "A persona named '{p1}' already exists in this city."
+  },
+  "components.PersonaWizard.idInvalidCharset": {
+    "ja": "ペルソナ ID「{p1}」は使えません。半角の英数字から始めて、英数字と _ または - だけを使ってください。",
+    "en": "Persona ID '{p1}' is invalid. Start with an ASCII letter or digit and use only ASCII letters, digits, '_' or '-'."
+  },
+  "components.PersonaWizard.idExists": {
+    "ja": "ペルソナ ID「{p1}」はすでに使われています（大文字・小文字の違いも同じ ID として扱います）。",
+    "en": "A persona with the ID '{p1}' already exists (IDs are compared case-insensitively)."
+  },
+  "app.page.updateConfirm": {
+    "ja": "v{p1} に更新しますか？\n\n更新後はアプリケーションが自動で再起動します。数分かかる場合があります。",
+    "en": "Update to v{p1}?\n\nThe application will restart automatically. This may take a few minutes."
+  },
+  "app.page.updateStartFailed": {
+    "ja": "更新を開始できませんでした。バックエンドのログを確認してください。",
+    "en": "Failed to start update. Check backend logs."
+  },
+  "app.page.updateBackendUnreachable": {
+    "ja": "更新を開始できませんでした。バックエンドに接続できない可能性があります。",
+    "en": "Failed to start update. Backend may be unreachable."
   }
 }

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -363,7 +363,7 @@ class ReembedStatusResponse(BaseModel):
     running: bool
     progress: Optional[int] = None  # messages
     total: Optional[int] = None  # messages
-    message: Optional[str] = None
+    message: Optional[Any] = None
     # Chronicle / Memopedia page / fragment progress, keyed by
     # "chronicle" / "memopedia" / "fragment".
     sources: Optional[Dict[str, ReembedSourceProgress]] = None

@@ -146,6 +146,17 @@ SWITCH_SNAPSHOT_PREFIX = {
 class UpdateError(RuntimeError):
     """A phase failed and no later mutating phase may run."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        ui_key: str | None = None,
+        ui_params: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.ui_key = ui_key
+        self.ui_params = dict(ui_params) if ui_params is not None else {}
+
 
 def setup_logging(project_dir: Path, *, to_file: bool = True) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
@@ -1135,7 +1146,11 @@ def _run(
             env=env,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise UpdateError(f"{label} could not run: {exc}") from exc
+        raise UpdateError(
+            f"{label} could not run: {exc}",
+            ui_key="api.systemUpdate.commandCouldNotRun",
+            ui_params={"label": label, "error": str(exc)},
+        ) from exc
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1146,7 +1161,9 @@ def _run(
             pass
         detail = f"; still running: {left}" if left else ""
         raise UpdateError(
-            f"{label} could not run: timed out after {timeout} s and was stopped{detail}"
+            f"{label} could not run: timed out after {timeout} s and was stopped{detail}",
+            ui_key="api.systemUpdate.commandTimedOut",
+            ui_params={"label": label, "timeout": timeout},
         ) from None
     except BaseException:
         # Ctrl+C, or the update process itself being stopped: do not leave
@@ -1156,7 +1173,11 @@ def _run(
     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
-        raise UpdateError(f"{label} failed with exit {result.returncode}: {detail}")
+        raise UpdateError(
+            f"{label} failed with exit {result.returncode}: {detail}",
+            ui_key="api.systemUpdate.commandFailed",
+            ui_params={"label": label, "code": result.returncode, "detail": detail},
+        )
     return result
 
 
@@ -1377,12 +1398,14 @@ def assert_git_update_ready(project_dir: Path, *, switching: bool = False) -> st
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
         if switching:
             raise UpdateError(
-                "Switching the release channel requires a Git checkout of SAIVerse."
+                "Switching the release channel requires a Git checkout of SAIVerse.",
+                ui_key="api.systemUpdate.switchRequiresGit",
             )
         raise UpdateError(
             "Automatic update requires a Git checkout. The former ZIP overlay path is "
             "disabled because it cannot safely remove retired files without deleting "
-            "unknown user files."
+            "unknown user files.",
+            ui_key="api.systemUpdate.updateRequiresGit",
         )
     status = _run(
         ["git", "status", "--porcelain", "-z", "--untracked-files=no"],
@@ -1392,27 +1415,33 @@ def assert_git_update_ready(project_dir: Path, *, switching: bool = False) -> st
         encoding="utf-8",
     ).stdout
     if status.strip("\0 \r\n"):
+        formatted_changes = _format_local_changes(status)
+        discard_cmd = _discard_command(status)
         if switching:
             raise UpdateError(
                 "Working tree has local changes. The channel switch was not started; "
                 "the updater never stashes or resets user work, and switching would "
                 "carry these changes onto the other release line.\n"
-                "Modified files:\n" + _format_local_changes(status) + "\n"
+                "Modified files:\n" + formatted_changes + "\n"
                 "If you do not need these changes, discard them by running this "
                 "command in the SAIVerse folder, then switch the channel again:\n"
-                "  " + _discard_command(status) + "\n"
+                "  " + discard_cmd + "\n"
                 "If you want to keep the changes, commit them first, then switch "
-                "the channel again."
+                "the channel again.",
+                ui_key="api.systemUpdate.switchLocalChanges",
+                ui_params={"files": formatted_changes, "command": discard_cmd},
             )
         raise UpdateError(
             "Working tree has local changes. Update was not started; the updater "
             "never stashes or resets user work.\n"
-            "Modified files:\n" + _format_local_changes(status) + "\n"
+            "Modified files:\n" + formatted_changes + "\n"
             "If you do not need these changes, discard them by running this "
             "command in the SAIVerse folder, then run the update again:\n"
-            "  " + _discard_command(status) + "\n"
+            "  " + discard_cmd + "\n"
             "If you want to keep the changes, commit them first, then run the "
-            "update again."
+            "update again.",
+            ui_key="api.systemUpdate.updateLocalChanges",
+            ui_params={"files": formatted_changes, "command": discard_cmd},
         )
     return _run(
         ["git", "rev-parse", "HEAD"],
@@ -1607,26 +1636,39 @@ def _git_ref_sha(project_dir: Path, ref: str) -> str | None:
     return result.stdout.strip() or None
 
 
-def _parse_version_text(text: str | None, what: str) -> Any:
+def _parse_version_text(
+    text: str | None,
+    what: str,
+    *,
+    ui_target: dict[str, Any] | None = None,
+) -> Any:
     """``packaging`` Version of ``text``; fail closed when it cannot be read.
 
     The switch refuses rather than guesses: moving a world onto code whose
     version cannot be compared is exactly the downgrade this check exists to
     stop.
     """
+    target_param: Any = ui_target if ui_target is not None else what
     if _Version is None:
         raise UpdateError(
             "The packaging library is unavailable, so the versions of the two release "
-            "lines cannot be compared; the channel switch was not started"
+            "lines cannot be compared; the channel switch was not started",
+            ui_key="api.systemUpdate.packagingUnavailable",
         )
     if not text:
-        raise UpdateError(f"The version of {what} could not be read; the channel switch was not started")
+        raise UpdateError(
+            f"The version of {what} could not be read; the channel switch was not started",
+            ui_key="api.systemUpdate.versionUnreadable",
+            ui_params={"target": target_param},
+        )
     try:
         return _Version(text.strip())
     except _InvalidVersion as exc:
         raise UpdateError(
             f"The version of {what} ({text.strip()!r}) is not a valid version; "
-            "the channel switch was not started"
+            "the channel switch was not started",
+            ui_key="api.systemUpdate.versionInvalid",
+            ui_params={"target": target_param, "version": text.strip()},
         ) from exc
 
 
@@ -1663,7 +1705,11 @@ def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
     Fetching updates remote-tracking refs only, never the working tree.
     """
     if channel not in CHANNEL_BRANCHES:
-        raise UpdateError(f"Unknown release channel {channel!r}")
+        raise UpdateError(
+            f"Unknown release channel {channel!r}",
+            ui_key="api.systemUpdate.unknownChannel",
+            ui_params={"channel": channel},
+        )
     old_revision = assert_git_update_ready(project_dir, switching=True)
     target_branch = CHANNEL_BRANCHES[channel]
     source_channel = CHANNEL_STABLE if channel == CHANNEL_EARLY_ACCESS else CHANNEL_EARLY_ACCESS
@@ -1671,12 +1717,30 @@ def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
 
     original_branch = _current_branch(project_dir)
     if original_branch == target_branch:
-        raise UpdateError(f"This SAIVerse is already on the {target_branch} branch; nothing to switch")
+        raise UpdateError(
+            f"This SAIVerse is already on the {target_branch} branch; nothing to switch",
+            ui_key="api.systemUpdate.alreadyOnBranch",
+            ui_params={"branch": target_branch},
+        )
     if original_branch != source_branch:
+        if original_branch:
+            raise UpdateError(
+                f"Switching to the {target_branch} branch is only possible from the "
+                f"{source_branch} branch, but this checkout is on "
+                f"{original_branch}. The channel switch was not started.",
+                ui_key="api.systemUpdate.wrongSourceBranch",
+                ui_params={
+                    "target": target_branch,
+                    "source": source_branch,
+                    "current": original_branch,
+                },
+            )
         raise UpdateError(
             f"Switching to the {target_branch} branch is only possible from the "
             f"{source_branch} branch, but this checkout is on "
-            f"{original_branch or 'a detached HEAD'}. The channel switch was not started."
+            "a detached HEAD. The channel switch was not started.",
+            ui_key="api.systemUpdate.wrongSourceBranchDetached",
+            ui_params={"target": target_branch, "source": source_branch},
         )
 
     _run(
@@ -1689,7 +1753,9 @@ def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
     if _git_ref_sha(project_dir, remote_ref) is None:
         raise UpdateError(
             f"The {target_branch} branch has not been published on {UPDATE_REMOTE} yet, so "
-            "there is nothing to switch to. The channel switch was not started."
+            "there is nothing to switch to. The channel switch was not started.",
+            ui_key="api.systemUpdate.branchNotPublished",
+            ui_params={"branch": target_branch, "remote": UPDATE_REMOTE},
         )
 
     target_version_text = _run(
@@ -1703,14 +1769,25 @@ def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
     target_version = _parse_version_text(
         target_version_text.stdout if target_version_text.returncode == 0 else None,
         f"the {target_branch} branch",
+        ui_target={"$ui": "api.systemUpdate.targetBranch", "params": {"branch": target_branch}},
     )
-    current_version = _parse_version_text(read_version(project_dir), "this SAIVerse")
+    current_version = _parse_version_text(
+        read_version(project_dir),
+        "this SAIVerse",
+        ui_target={"$ui": "api.systemUpdate.targetCurrent", "params": {}},
+    )
     if target_version < current_version:
         raise UpdateError(
             f"The {target_branch} branch is at version {target_version}, older than this "
             f"SAIVerse ({current_version}). The world data only moves forward, so switching "
             "now would leave SAIVerse unable to start. The channel switch was not started; "
-            f"it becomes possible once {target_branch} reaches {current_version} or later."
+            f"it becomes possible once {target_branch} reaches {current_version} or later.",
+            ui_key="api.systemUpdate.targetVersionOlder",
+            ui_params={
+                "branch": target_branch,
+                "target_version": str(target_version),
+                "current_version": str(current_version),
+            },
         )
     return SwitchPlan(channel, target_branch, original_branch, old_revision)
 

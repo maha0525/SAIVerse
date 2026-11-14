@@ -1807,7 +1807,7 @@ export default function Home() {
     const handleTriggerUpdate = async () => {
         if (!updateAvailable) return;
         const confirmed = window.confirm(
-            `Update to v${updateAvailable.version}?\n\nThe application will restart automatically. This may take a few minutes.`
+            uiText('app.page.updateConfirm', { p1: updateAvailable.version })
         );
         if (!confirmed) return;
 
@@ -1831,12 +1831,12 @@ export default function Home() {
                     // non-JSON body: fall back to the generic text
                 }
                 const toastId = `update-error-${Date.now()}`;
-                setToasts(prev => [...prev, { id: toastId, content: detail || 'Failed to start update. Check backend logs.' }]);
+                setToasts(prev => [...prev, { id: toastId, content: detail || uiText('app.page.updateStartFailed') }]);
                 setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), detail ? 15000 : 5000);
             }
         } catch {
             const toastId = `update-error-${Date.now()}`;
-            setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Backend may be unreachable.' }]);
+            setToasts(prev => [...prev, { id: toastId, content: uiText('app.page.updateBackendUnreachable') }]);
             setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
         }
     };
