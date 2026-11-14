@@ -117,13 +117,23 @@ def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> 
         "/api/items",
         headers={"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:8000"},
     ).status_code == 200
+    # MagicDNS origin through Next.js route proxy (Host rewritten to 127.0.0.1:8000)
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://my-pc.tailnet-abc.ts.net:3000",
+        },
+    ).status_code == 200
 
 
 def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer() -> None:
     client = TestClient(_local_app())
 
-    # Untrusted Origin / null Origin / empty Origin
+    # Untrusted Origin / null Origin / empty Origin / lookalike domain
     assert client.post("/api/items", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post("/api/items", headers={"Origin": "http://evil-ts.net:3000"}).status_code == 403
+    assert client.post("/api/items", headers={"Origin": "https://ts.net"}).status_code == 403
     assert client.delete("/api/items/1", headers={"Origin": "null"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": ""}).status_code == 403
 

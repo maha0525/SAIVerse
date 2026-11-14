@@ -110,16 +110,34 @@ def websocket_owner_authorized(websocket: object) -> bool:
     return bool(cookie and hmac.compare_digest(cookie, _session_value(token)))
 
 
+def _is_magicdns_origin(origin: str) -> bool:
+    """Tailscale MagicDNS (``*.ts.net``) 由来のブラウザ Origin か判定する。
+
+    Next.js の ``dev-origins.cjs`` と同じ信頼境界に揃え、``SAIVERSE_ALLOWED_ORIGINS``
+    未設定の既定ローカル起動でもスマホ等からの MagicDNS 接続を通す。
+    """
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    return len(host) > len(".ts.net") and host.endswith(".ts.net")
+
+
 def _browser_origin_allowed(origin: str, request: Request) -> bool:
     """ローカル起動時のブラウザ CSRF 防止用の Origin 照合。
 
-    ``allowed_browser_origins()`` に加え、リクエスト自身の ``Host`` と一致する
-    同一オリジン (例: FastAPI ``/docs`` や同一ホスト中継) を許可する。
+    ``allowed_browser_origins()`` と Tailscale MagicDNS (``*.ts.net``) に加え、
+    リクエスト自身の ``Host`` と一致する同一オリジン (例: FastAPI ``/docs``) を許可する。
     """
     normalized = origin.strip().rstrip("/")
     if not normalized:
         return False
     if normalized in allowed_browser_origins():
+        return True
+    if _is_magicdns_origin(normalized):
         return True
     host_header = request.headers.get("host", "").strip()
     if host_header:
