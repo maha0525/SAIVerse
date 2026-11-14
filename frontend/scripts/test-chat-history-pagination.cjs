@@ -34,6 +34,12 @@ new Function('require', 'module', 'exports', compiled)(name => {
     if (name.endsWith('.css')) return { __esModule: true, default: {} };
     return require(name);
 }, moduleResult, moduleResult.exports);
+const compiledPolling = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/lib/chatPolling.ts'), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
+}).outputText;
+const pollingModule = { exports: {} };
+new Function('require', 'module', 'exports', compiledPolling)(require, pollingModule, pollingModule.exports);
+const { resolveChatViewTarget } = pollingModule.exports;
 const HistoryContinuation = moduleResult.exports.default;
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -50,6 +56,7 @@ function harness() {
         activeGameRef: { current: null },
         serverCurrentBuildingIdRef: { current: 'new-room' },
         sessionLogPeekRef: { current: false },
+        latestMessageCursorRef: { current: null },
     };
     const render = () => renders.push(renderToStaticMarkup(React.createElement(HistoryContinuation, {
         oldestId: state.messages[0]?.id, hasMore: state.hasMore, ready: state.ready,
@@ -57,7 +64,7 @@ function harness() {
     })));
     const set = key => value => { state[key] = typeof value === 'function' ? value(state[key]) : value; render(); };
     const env = {
-        ...refs, URLSearchParams, encodeURIComponent,
+        ...refs, URLSearchParams, encodeURIComponent, resolveChatViewTarget,
         setHasMore: set('hasMore'), setIsHistoryLoaded: set('ready'),
         setIsLoadingMore: set('loading'), setMessages: set('messages'),
         setBackendConnected: () => {}, updateAddonMetadata: () => {},
