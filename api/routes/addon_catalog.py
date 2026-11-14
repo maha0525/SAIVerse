@@ -43,12 +43,16 @@ from saiverse.addon_installer import (
     cancel_update,
     execute_install_plan,
     execute_options_plan,
+    execute_repair_setup_plan,
     execute_update_plan,
     get_installed_options,
+    is_addon_setup_incomplete,
     plan_install_confirm,
     plan_options_apply,
+    plan_repair_setup,
     plan_update_confirm,
     prepare_install,
+    prepare_repair_setup,
     prepare_update,
     uninstall_addon,
 )
@@ -125,6 +129,7 @@ class InstalledAddonInfo(BaseModel):
     version: str
     manifest_version: int
     setup_version: int
+    setup_incomplete: bool = False
 
 
 class RegistryResponse(BaseModel):
@@ -330,6 +335,7 @@ def list_installed():
             version=manifest.version,
             manifest_version=manifest.manifest_version,
             setup_version=manifest.setup_version,
+            setup_incomplete=is_addon_setup_incomplete(manifest.name, manifest.setup_version),
         ))
     return result
 
@@ -738,6 +744,41 @@ async def post_installed_addon_options(
     # ここから先、鍵の解放は _run_with_progress_sse の責任 (失敗時も含む)
     return await _run_with_progress_sse(
         operation_label="options",
+        addon_id=addon_id,
+        runner=runner,
+        held_lock=lock,
+    )
+
+
+@router.get("/installed/{addon_id}/repair")
+def get_installed_addon_repair(addon_id: str):
+    """導入済みアドオンの現在の commit のまま、setup を再実行するための質問と
+    step 一覧を返す。"""
+    _check_addon_id(addon_id)
+    prepared = _plan_or_http_error(
+        lambda: prepare_repair_setup(addon_id, EXPANSION_DATA_DIR)
+    )
+    return prepared.to_dict()
+
+
+@router.post("/installed/{addon_id}/repair")
+async def post_installed_addon_repair(
+    addon_id: str, req: OptionsApplyRequest, manager=Depends(get_manager)
+):
+    """導入済みアドオンの現在の commit のまま、setup.steps を再実行する (SSE 進捗 stream)。"""
+    _check_addon_id(addon_id)
+    plan, lock = _plan_with_held_lock(
+        addon_id,
+        lambda: plan_repair_setup(addon_id, req.answers, EXPANSION_DATA_DIR),
+    )
+
+    def runner(progress_cb):
+        manifest = execute_repair_setup_plan(plan, progress_callback=progress_cb)
+        _try_register_addon(addon_id, manager)
+        return manifest
+
+    return await _run_with_progress_sse(
+        operation_label="repair",
         addon_id=addon_id,
         runner=runner,
         held_lock=lock,

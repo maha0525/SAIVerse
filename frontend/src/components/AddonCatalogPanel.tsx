@@ -6,7 +6,7 @@ import { useLocale } from '@/i18n/useLocale';
 import { resolveI18nText } from '@/i18n/resolve';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2, Loader2 } from 'lucide-react';
+import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2, Loader2, AlertTriangle, RotateCcw } from 'lucide-react';
 import styles from './AddonCatalogPanel.module.css';
 import AddonInstallProgressDialog, { CatalogOperation } from './AddonInstallProgressDialog';
 import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
@@ -89,8 +89,8 @@ interface AddonCatalogPanelProps {
 
 type RowState =
     | { kind: 'not_installed' }
-    | { kind: 'installed_latest'; current_version: string }
-    | { kind: 'update_available'; current_version: string; new_version: string };
+    | { kind: 'installed_latest'; current_version: string; setup_incomplete?: boolean }
+    | { kind: 'update_available'; current_version: string; new_version: string; setup_incomplete?: boolean };
 
 /**
  * セマンティックバージョンを数値タプルとして比較する。
@@ -116,7 +116,7 @@ function compareVersions(a: string, b: string): number {
 
 function deriveRowState(
     entry: RegistryAddonEntry,
-    installedManifestByName: Map<string, { version: string }>,
+    installedManifestByName: Map<string, { version: string; setup_incomplete?: boolean }>,
 ): RowState {
     const installed = installedManifestByName.get(entry.id);
     if (!installed) return { kind: 'not_installed' };
@@ -127,9 +127,14 @@ function deriveRowState(
             kind: 'update_available',
             current_version: installed.version,
             new_version: entry.latest,
+            setup_incomplete: installed.setup_incomplete,
         };
     }
-    return { kind: 'installed_latest', current_version: installed.version };
+    return {
+        kind: 'installed_latest',
+        current_version: installed.version,
+        setup_incomplete: installed.setup_incomplete,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +146,7 @@ export default function AddonCatalogPanel({
 }: AddonCatalogPanelProps) {
     const currentLocale = useLocale();
     const [registry, setRegistry] = useState<RegistryResponse | null>(null);
-    const [installedInfo, setInstalledInfo] = useState<Map<string, { version: string }>>(new Map());
+    const [installedInfo, setInstalledInfo] = useState<Map<string, { version: string; setup_incomplete?: boolean }>>(new Map());
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -202,18 +207,23 @@ export default function AddonCatalogPanel({
         if (pending) sendInstallCancel(pending);
     }, [sendInstallCancel]);
 
-    const startPrepare = async (entry: RegistryAddonEntry, operation: 'install' | 'update') => {
+    const startPrepare = async (entry: RegistryAddonEntry, operation: 'install' | 'update' | 'repair') => {
         const seq = ++prepareSeqRef.current;
+        const isRepair = operation === 'repair';
         const path = operation === 'install'
             ? '/api/addon-catalog/install/prepare'
-            : '/api/addon-catalog/update/prepare';
+            : operation === 'update'
+                ? '/api/addon-catalog/update/prepare'
+                : `/api/addon-catalog/installed/${encodeURIComponent(entry.id)}/repair`;
         let setup: SetupLoadState;
         try {
-            const res = await apiFetch(path, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ addon_id: entry.id }),
-            });
+            const res = isRepair
+                ? await apiFetch(path)
+                : await apiFetch(path, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ addon_id: entry.id }),
+                });
             if (!res.ok) throw new Error(await readErrorDetail(res));
             const data: PrepareResponse = await res.json();
             if (seq !== prepareSeqRef.current) {
@@ -230,8 +240,8 @@ export default function AddonCatalogPanel({
             setup = {
                 status: 'ready',
                 plan: { questions: data.questions ?? [], steps: data.steps ?? [] },
-                // install は常に setup が走る。update はサーバーの判定に従う
-                needsSetup: operation === 'install' ? true : data.needs_setup !== false,
+                // install / repair は常に setup が走る。update はサーバーの判定に従う
+                needsSetup: operation !== 'update' ? true : data.needs_setup !== false,
             };
         } catch (e) {
             if (seq !== prepareSeqRef.current) return;
@@ -270,10 +280,10 @@ export default function AddonCatalogPanel({
                 throw new Error(`installed fetch failed: ${instRes.status}`);
             }
             const reg: RegistryResponse = await regRes.json();
-            const inst: Array<{ addon_id: string; version: string }> = await instRes.json();
+            const inst: Array<{ addon_id: string; version: string; setup_incomplete?: boolean }> = await instRes.json();
             setRegistry(reg);
-            const m = new Map<string, { version: string }>();
-            for (const a of inst) m.set(a.addon_id, { version: a.version });
+            const m = new Map<string, { version: string; setup_incomplete?: boolean }>();
+            for (const a of inst) m.set(a.addon_id, { version: a.version, setup_incomplete: a.setup_incomplete });
             setInstalledInfo(m);
             try {
                 setRunningOps(await fetchRunningOps());
@@ -345,6 +355,13 @@ export default function AddonCatalogPanel({
         if (state.kind === 'not_installed') return;
         if (runningOps.has(entry.id)) return;
         setConfirmTarget({ entry, operation: 'uninstall', state });
+    };
+
+    const handleRepair = (entry: RegistryAddonEntry, state: RowState) => {
+        if (state.kind === 'not_installed') return;
+        if (runningOps.has(entry.id)) return;
+        setConfirmTarget({ entry, operation: 'repair', state, setup: { status: 'loading' } });
+        void startPrepare(entry, 'repair');
     };
 
     const handleConfirmProceed = ({ deleteData, answers }: ConfirmProceedResult) => {
@@ -420,6 +437,11 @@ export default function AddonCatalogPanel({
                                                 <ArrowUpCircle size={11} />{uiText("components.AddonCatalogPanel.text007")}{state.current_version} → v{state.new_version}
                                             </span>
                                         )}
+                                        {state.kind !== 'not_installed' && state.setup_incomplete && (
+                                            <span data-i18n="components.AddonCatalogPanel.text015" className={`${styles.badge} ${styles.badgeRequire}`}>
+                                                <AlertTriangle size={11} />{uiText("components.AddonCatalogPanel.text015")}
+                                            </span>
+                                        )}
                                         {busy && (
                                             <span data-i18n="components.AddonCatalogPanel.text014" className={styles.badge}>
                                                 <Loader2 size={11} />{uiText("components.AddonCatalogPanel.text014")}
@@ -467,12 +489,33 @@ export default function AddonCatalogPanel({
                                         </>
                                     )}
                                     {state.kind === 'installed_latest' && (
-                                        <button data-i18n="components.AddonCatalogPanel.text013"
-                                            className={`${styles.iconBtn} ${styles.deleteBtn}`}
-                                            onClick={() => handleUninstall(entry, state)}
-                                            disabled={busy}
-                                        >
-                                            <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text013")}</button>
+                                        <>
+                                            {state.setup_incomplete ? (
+                                                <button
+                                                    data-i18n="components.AddonCatalogPanel.text016"
+                                                    className={styles.btnPrimary}
+                                                    onClick={() => handleRepair(entry, state)}
+                                                    disabled={busy}
+                                                >
+                                                    <RotateCcw size={12} />{uiText("components.AddonCatalogPanel.text016")}
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    data-i18n="components.AddonCatalogPanel.text017"
+                                                    className={styles.iconBtn}
+                                                    onClick={() => handleRepair(entry, state)}
+                                                    disabled={busy}
+                                                >
+                                                    <RotateCcw size={12} />{uiText("components.AddonCatalogPanel.text017")}
+                                                </button>
+                                            )}
+                                            <button data-i18n="components.AddonCatalogPanel.text013"
+                                                className={`${styles.iconBtn} ${styles.deleteBtn}`}
+                                                onClick={() => handleUninstall(entry, state)}
+                                                disabled={busy}
+                                            >
+                                                <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text013")}</button>
+                                        </>
                                     )}
                                 </div>
                             </div>

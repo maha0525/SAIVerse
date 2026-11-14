@@ -1095,6 +1095,10 @@
     "ja": "閉じる (処理は続きます)",
     "en": "Close (keeps running)"
   },
+  "components.AddonInstallProgressDialog.text020": {
+    "ja": "セットアップ再実行",
+    "en": "Repair setup"
+  },
   "components.AddonManagerModal.text001": {
     "ja": "（未対応の型: {p1}）",
     "en": "(unsupported type: {p1})"
@@ -11287,6 +11291,14 @@
     "ja": "~/.saiverse/user_data/addon_data/",
     "en": "~/.saiverse/user_data/addon_data/"
   },
+  "components.AddonActionConfirmDialog.text029": {
+    "ja": "セットアップ再実行",
+    "en": "Repair setup"
+  },
+  "components.AddonActionConfirmDialog.text030": {
+    "ja": "現在のバージョンのまま setup.steps を再実行します。既に完了しているダウンロードはそのまま残り、欠けた工程だけを補います。",
+    "en": "Re-runs setup.steps on the current version. Already completed downloads are kept and only missing steps are completed."
+  },
   "components.AddonCatalogPanel.label001": {
     "ja": "updated: ",
     "en": "updated: "
@@ -11294,6 +11306,18 @@
   "components.AddonCatalogPanel.label002": {
     "ja": " GB",
     "en": " GB"
+  },
+  "components.AddonCatalogPanel.text015": {
+    "ja": "セットアップ未完了",
+    "en": "Setup incomplete"
+  },
+  "components.AddonCatalogPanel.text016": {
+    "ja": "セットアップ修復",
+    "en": "Repair setup"
+  },
+  "components.AddonCatalogPanel.text017": {
+    "ja": "セットアップ再実行",
+    "en": "Re-run setup"
   },
   "components.AddonManagerModal.label001": {
     "ja": "key",

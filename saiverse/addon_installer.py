@@ -78,7 +78,9 @@ LOGGER = logging.getLogger(__name__)
 Answers = Dict[str, List[str]]
 
 SETUP_ANSWERS_NAME = "setup_answers.json"
+SETUP_STATE_NAME = "setup_state.json"
 PENDING_NAME = "pending.json"
+UPDATE_SETUP_ENTRY = "update-setup"
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +500,91 @@ def load_saved_answers(addon_id: str) -> Optional[Answers]:
 def save_answers(addon_id: str, answers: Answers) -> None:
     path = get_addon_install_dir(addon_id) / SETUP_ANSWERS_NAME
     _write_json_atomic(path, {"answers": answers})
+
+
+def load_completed_setup_version(addon_id: str) -> Optional[int]:
+    """完了した最後の setup_version。記録が無いか壊れていれば None。"""
+    path = get_addon_install_dir(addon_id) / SETUP_STATE_NAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        LOGGER.warning("installer: unreadable setup state %s", path, exc_info=True)
+        return None
+    val = data.get("completed_setup_version") if isinstance(data, dict) else None
+    if isinstance(val, bool) or not isinstance(val, int):
+        return None
+    return val
+
+
+def save_completed_setup_version(addon_id: str, setup_version: int) -> None:
+    path = get_addon_install_dir(addon_id) / SETUP_STATE_NAME
+    _write_json_atomic(path, {"completed_setup_version": int(setup_version)})
+
+
+def _update_setup_pending(addon_id: str) -> bool:
+    """更新・修復の setup が途中で止まった (か失敗した) 記録が残っているか。"""
+    return setup_in_progress.read_entry(get_addon_install_dir(addon_id), UPDATE_SETUP_ENTRY) is not None
+
+
+def _mark_update_setup_started(
+    addon_id: str, setup_version: int, commit: Optional[str] = None
+) -> None:
+    base = get_addon_install_dir(addon_id)
+    base.mkdir(parents=True, exist_ok=True)
+    setup_in_progress.write_entry(
+        base,
+        UPDATE_SETUP_ENTRY,
+        {"setup_version": int(setup_version), "commit": commit},
+    )
+
+
+def _clear_update_setup_pending(addon_id: str) -> None:
+    base = get_addon_install_dir(addon_id)
+    try:
+        setup_in_progress.remove_entry(base, UPDATE_SETUP_ENTRY)
+    except OSError:
+        LOGGER.warning(
+            "installer: could not remove update setup record for %s", addon_id, exc_info=True
+        )
+
+
+def is_addon_setup_incomplete(
+    addon_id: str, current_setup_version: Optional[int] = None
+) -> bool:
+    """導入済みのアドオンで setup が未完了の確証があるか。
+
+    - ``.setup_in_progress/update-setup.json`` または ``env-*.json`` が残っている
+    - または ``setup_state.json`` があり、完了版が現在の ``setup_version`` 未満
+    ※ ``setup_state.json`` が無いだけの正常な既存環境は False のままにする。
+    """
+    if _update_setup_pending(addon_id):
+        return True
+    if _envs_with_rebuild_pending(addon_id):
+        return True
+    completed = load_completed_setup_version(addon_id)
+    if completed is not None and current_setup_version is not None:
+        return completed < current_setup_version
+    return False
+
+
+def _update_needs_setup(
+    addon_id: str, old_setup_version: Optional[int], new_setup_version: int
+) -> bool:
+    """更新時に setup.steps の実行が要るか。
+
+    ``setup_version`` が上がった場合に加え、前回の setup が途中で失敗・中断した
+    記録が残っている場合や完了版が追いついていない場合も True にする。
+    """
+    if new_setup_version > (old_setup_version or 0):
+        return True
+    if _update_setup_pending(addon_id) or _envs_with_rebuild_pending(addon_id):
+        return True
+    completed = load_completed_setup_version(addon_id)
+    if completed is not None and completed < new_setup_version:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1424,7 @@ def execute_install_plan(
         _git(["checkout", plan.commit], cwd=addon_dir, progress=progress, label="checkout")
         data_dir = get_addon_data_dir(addon_id)
         _run_selected_steps(plan, data_dir, progress)
+        save_completed_setup_version(addon_id, manifest.setup_version)
         if plan.answers is not None:
             save_answers(addon_id, plan.answers)
         _clear_pending(addon_id)
@@ -1450,7 +1538,9 @@ def prepare_update(
     _check_manifest_name(new_manifest, addon_id)
     _write_pending(addon_id, "update", new_commit, repo_url)
 
-    needs_setup = new_manifest.setup_version > old_manifest.setup_version
+    needs_setup = _update_needs_setup(
+        addon_id, old_manifest.setup_version, new_manifest.setup_version
+    )
     if not needs_setup:
         return PreparedSetup(addon_id=addon_id, manifest=new_manifest, needs_setup=False)
     saved_raw = load_saved_answers(addon_id)
@@ -1490,12 +1580,15 @@ def plan_update_confirm(
 
     saved_raw = load_saved_answers(addon_id)
     saved = prune_answers(new_manifest, saved_raw) if saved_raw is not None else None
-    needs_setup = new_manifest.setup_version > old_manifest.setup_version
+    needs_setup = _update_needs_setup(
+        addon_id, old_manifest.setup_version, new_manifest.setup_version
+    )
     if needs_setup:
         merged = dict(saved or {})
         merged.update(normalize_answers(new_manifest, answers))
         final: Optional[Answers] = fill_defaults(new_manifest, merged)
-        steps = select_steps(new_manifest.setup_steps, final)
+        selected = select_steps(new_manifest.setup_steps, final)
+        steps = _without_skip_for_rebuilt_envs(addon_id, selected)
     else:
         # setup は走らない。保存された答えがあれば、無くなった質問の分だけ捨てる
         final = saved
@@ -1526,12 +1619,20 @@ def execute_update_plan(
         _check_manifest_name(new_manifest, addon_id)
         data_dir = get_addon_data_dir(addon_id)
         old_v = plan.old_setup_version
-        if new_manifest.setup_version > (old_v or 0):
+        if _update_needs_setup(addon_id, old_v, new_manifest.setup_version):
+            reason = (
+                f"setup_version が {old_v} → {new_manifest.setup_version} に上がったため"
+                if new_manifest.setup_version > (old_v or 0)
+                else "前回の setup が未完了のため"
+            )
             progress(ProgressEvent(
                 phase="step",
-                message=f"setup_version が {old_v} → {new_manifest.setup_version} に上がったため setup をやり直します",
+                message=f"{reason} setup をやり直します",
             ))
+            _mark_update_setup_started(addon_id, new_manifest.setup_version, plan.commit)
             _run_selected_steps(plan, data_dir, progress)
+            _clear_update_setup_pending(addon_id)
+            save_completed_setup_version(addon_id, new_manifest.setup_version)
         else:
             progress(ProgressEvent(
                 phase="step",
@@ -1674,6 +1775,7 @@ def execute_options_plan(
     progress = progress_callback or _noop_progress
     data_dir = get_addon_data_dir(plan.addon_id)
     _run_selected_steps(plan, data_dir, progress)
+    save_completed_setup_version(plan.addon_id, plan.manifest.setup_version)
     if plan.answers is not None:
         save_answers(plan.addon_id, plan.answers)
     progress(ProgressEvent(
@@ -1691,6 +1793,98 @@ def apply_installed_options(
     return execute_options_plan(
         plan_options_apply(addon_id, answers, expansion_dir), progress_callback
     )
+
+
+# ---------------------------------------------------------------------------
+# 導入済みアドオンの setup 再実行 / 修復 (repair)
+# ---------------------------------------------------------------------------
+
+def prepare_repair_setup(
+    addon_id: str,
+    expansion_dir: Optional[Path] = None,
+) -> PreparedSetup:
+    """導入済みアドオンの現在の commit のまま、setup を再実行するための準備。
+
+    更新の step が途中で失敗した状態や、既に途中失敗したまま最新 commit に
+    なっている環境を、アンインストールせずに復旧させるための入口。
+    """
+    _, manifest = _installed_manifest(addon_id, expansion_dir)
+    saved_raw = load_saved_answers(addon_id)
+    saved = prune_answers(manifest, saved_raw) if saved_raw is not None else None
+    return PreparedSetup(
+        addon_id=addon_id,
+        manifest=manifest,
+        needs_setup=True,
+        questions=describe_questions(manifest, selected=saved, only=None),
+        steps=describe_steps(select_steps_for_os(manifest.setup_steps)),
+    )
+
+
+def _without_skip_for_rebuilt_envs(addon_id: str, steps: Iterable[SetupStep]) -> List[SetupStep]:
+    """新しく作り直される (欠損・使用不可・やりかけ) 専用環境を使う pip_install から
+    ``skip_if_exists`` を外す。アドオンフォルダ側にマーカーだけ残っていても、
+    空の venv に依存パッケージを復元させるため。
+    """
+    step_list = list(steps)
+    rebuilt_envs = {
+        env
+        for s in step_list
+        if (env := _step_env(s)) is not None and _env_needs_full_run(addon_id, env)
+    }
+    return [
+        s.model_copy(update={"skip_if_exists": None})
+        if s.type == "pip_install" and s.skip_if_exists and _step_env(s) in rebuilt_envs
+        else s
+        for s in step_list
+    ]
+
+
+def plan_repair_setup(
+    addon_id: str,
+    answers: Optional[dict] = None,
+    expansion_dir: Optional[Path] = None,
+) -> SetupPlan:
+    """現在の commit の setup.steps を再実行する計画 (副作用なし)。"""
+    addon_dir, manifest = _installed_manifest(addon_id, expansion_dir)
+    saved_raw = load_saved_answers(addon_id)
+    saved = prune_answers(manifest, saved_raw) if saved_raw is not None else {}
+    merged = dict(saved)
+    merged.update(normalize_answers(manifest, answers))
+    final = fill_defaults(manifest, merged)
+    selected = select_steps(manifest.setup_steps, final)
+    steps = _without_skip_for_rebuilt_envs(addon_id, selected)
+    return SetupPlan(
+        kind="repair",
+        addon_id=addon_id,
+        addon_dir=addon_dir,
+        manifest=manifest,
+        steps=steps,
+        answers=final,
+    )
+
+
+def execute_repair_setup_plan(
+    plan: SetupPlan, progress_callback: Optional[ProgressCallback] = None
+) -> AddonManifest:
+    """現在の commit のまま setup.steps を再実行し、完了版を記録する。"""
+    progress = progress_callback or _noop_progress
+    addon_id = plan.addon_id
+    data_dir = get_addon_data_dir(addon_id)
+    progress(ProgressEvent(
+        phase="step",
+        message=f"{addon_id} v{plan.manifest.version} の setup を再実行します",
+    ))
+    _mark_update_setup_started(addon_id, plan.manifest.setup_version, None)
+    _run_selected_steps(plan, data_dir, progress)
+    _clear_update_setup_pending(addon_id)
+    save_completed_setup_version(addon_id, plan.manifest.setup_version)
+    if plan.answers is not None:
+        save_answers(addon_id, plan.answers)
+    progress(ProgressEvent(
+        phase="done",
+        message=f"{addon_id} v{plan.manifest.version} のセットアップを完了しました",
+    ))
+    return plan.manifest
 
 
 # ---------------------------------------------------------------------------
@@ -2214,6 +2408,12 @@ __all__ = [
     "plan_options_apply",
     "execute_options_plan",
     "apply_installed_options",
+    "prepare_repair_setup",
+    "plan_repair_setup",
+    "execute_repair_setup_plan",
+    "is_addon_setup_incomplete",
+    "load_completed_setup_version",
+    "save_completed_setup_version",
     "ENV_REBUILD_FAILURES_PATH",
     "EnvRebuildResult",
     "find_unusable_addon_envs",
