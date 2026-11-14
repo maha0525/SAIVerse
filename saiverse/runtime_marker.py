@@ -63,6 +63,65 @@ def _read_marker(path: Path) -> tuple[dict | None, str | None]:
         return None, f"runtime marker {path.name} is unreadable: {exc}"
 
 
+def _windows_probe_process_alive(pid: int) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_invalid_parameter = 87
+    still_active = 259
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == error_invalid_parameter:
+            return "dead"
+        # ERROR_ACCESS_DENIED (5) を含む判定不能なエラーは安全側 (unknown) に倒す。
+        return "unknown"
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return "unknown"
+        if exit_code.value != still_active:
+            return "dead"
+        return "alive"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def probe_process_alive(pid: int) -> str:
+    """プロセスを終了させずに ``pid`` の生存状態を ``"alive"`` / ``"dead"`` / ``"unknown"`` で返す。
+
+    Windows では ``os.kill(pid, 0)`` が ``TerminateProcess`` を呼んで対象を
+    強制終了させるため絶対に使わず、``OpenProcess`` + ``GetExitCodeProcess`` で調べる。
+    """
+    if pid <= 0:
+        return "dead"
+
+    if sys.platform == "win32":
+        return _windows_probe_process_alive(pid)
+
+    try:
+        os.kill(pid, 0)
+        return "alive"
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "unknown"
+    except OSError:
+        return "unknown"
+
+
 def _marker_state(path: Path) -> tuple[str, str, dict | None]:
     data, error = _read_marker(path)
     if data is None:
@@ -72,11 +131,12 @@ def _marker_state(path: Path) -> tuple[str, str, dict | None]:
     expected_created = data.get("process_created_at")
     actual_created = _process_create_time(pid)
     if actual_created is None:
-        try:
-            os.kill(pid, 0)
-        except PermissionError:
+        probe = probe_process_alive(pid)
+        if probe == "dead":
+            return "stopped", f"stale runtime marker for pid {pid}", data
+        if probe == "unknown":
             # プロセスは存在するがアクセスできない (POSIX の EPERM / Windows の
-            # Access Denied)。"stopped" は acquire_runtime_marker がマーカーを
+            # Access Denied) 等。"stopped" は acquire_runtime_marker がマーカーを
             # 削除する判定に使われるため、生きているかもしれないものを
             # "stopped" に潰すと二重起動の関所そのものが消える — unknown に倒す。
             return (
@@ -84,8 +144,6 @@ def _marker_state(path: Path) -> tuple[str, str, dict | None]:
                 f"pid {pid} may be alive but cannot be probed (access denied)",
                 data,
             )
-        except OSError:
-            return "stopped", f"stale runtime marker for pid {pid}", data
         return (
             "unknown",
             f"pid {pid} exists but process identity cannot be verified",

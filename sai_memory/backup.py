@@ -152,17 +152,10 @@ def _backup_once(snapshot_dir: Path, repo_dir: Path, rdiff_exec: str) -> tuple[i
 
 
 def _is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        # Process exists but we cannot signal it (EPERM / Access Denied).
-        # Treating this as "dead" would let _check_stale_lock delete a live
-        # holder's lock file, so err on the side of "alive".
-        return True
-    except OSError:
-        return False
+    """Check if a process with the given PID is still running without terminating it."""
+    from saiverse.runtime_marker import probe_process_alive
+
+    return probe_process_alive(pid) != "dead"
 
 
 def _check_stale_lock() -> bool:
