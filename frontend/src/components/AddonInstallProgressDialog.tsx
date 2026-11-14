@@ -14,8 +14,9 @@ import styles from './AddonInstallProgressDialog.module.css';
  * - install / update: prepare で質問を受け取ったあとの confirm (答えを付ける)
  * - uninstall
  * - options: 導入済みのアドオンで、導入時の質問に選択肢を足す
+ * - repair: 現在の commit のまま setup.steps を再実行する
  */
-export type CatalogOperation = 'install' | 'update' | 'uninstall' | 'options';
+export type CatalogOperation = 'install' | 'update' | 'uninstall' | 'options' | 'repair';
 
 interface Props {
     addonId: string;
@@ -48,6 +49,11 @@ function buildRequest(
         case 'options':
             return {
                 path: `/api/addon-catalog/installed/${encodeURIComponent(addonId)}/options`,
+                body: { answers: answers ?? {} },
+            };
+        case 'repair':
+            return {
+                path: `/api/addon-catalog/installed/${encodeURIComponent(addonId)}/repair`,
                 body: { answers: answers ?? {} },
             };
         case 'uninstall': {
@@ -104,6 +110,7 @@ function opLabel(op: CatalogOperation): string {
         case 'update': return uiText("components.AddonInstallProgressDialog.text002");
         case 'uninstall': return uiText("components.AddonInstallProgressDialog.text003");
         case 'options': return uiText("components.AddonInstallProgressDialog.text014");
+        case 'repair': return uiText("components.AddonInstallProgressDialog.text020");
     }
 }
 
