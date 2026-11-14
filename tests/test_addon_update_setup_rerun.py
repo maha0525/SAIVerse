@@ -253,3 +253,35 @@ def test_api_installed_flag_and_repair_endpoints(tmp_path, home, expansion, monk
     res_list_after = client.get("/api/addon-catalog/installed")
     items_after = {item["addon_id"]: item for item in res_list_after.json()}
     assert items_after[ADDON_ID]["setup_incomplete"] is False
+
+
+def test_repair_setup_strips_skip_if_exists_when_dedicated_env_folder_missing(tmp_path, home, expansion):
+    pip_step = {
+        "name": "install-pkg",
+        "type": "pip_install",
+        "requirements": "requirements.txt",
+        "env": "eng",
+        "skip_if_exists": "marker.txt",
+    }
+    # 専用の環境フォルダや env-* 記録が存在せず、アドオン側に skip_if_exists マーカーだけ残っている状態
+    addon_dir = expansion / ADDON_ID
+    addon_dir.mkdir(exist_ok=True)
+    (addon_dir / "requirements.txt").write_text("dummy-pkg\n", encoding="utf-8")
+    (addon_dir / "addon.json").write_text(
+        json.dumps(
+            {
+                "name": ADDON_ID,
+                "display_name": "Sample Addon",
+                "version": "1.0.0",
+                "manifest_version": 2,
+                "setup_version": 1,
+                "setup": {"steps": [pip_step]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (addon_dir / "marker.txt").write_text("present", encoding="utf-8")
+
+    plan = plan_repair_setup(ADDON_ID, {}, expansion_dir=expansion)
+    assert len(plan.steps) == 1
+    assert plan.steps[0].skip_if_exists is None

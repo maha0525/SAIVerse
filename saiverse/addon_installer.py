@@ -1587,14 +1587,8 @@ def plan_update_confirm(
         merged = dict(saved or {})
         merged.update(normalize_answers(new_manifest, answers))
         final: Optional[Answers] = fill_defaults(new_manifest, merged)
-        unusable = set(_unusable_env_dirs(addon_id))
         selected = select_steps(new_manifest.setup_steps, final)
-        steps = [
-            s.model_copy(update={"skip_if_exists": None})
-            if s.type == "pip_install" and s.skip_if_exists and _step_env(s) in unusable
-            else s
-            for s in selected
-        ]
+        steps = _without_skip_for_rebuilt_envs(addon_id, selected)
     else:
         # setup は走らない。保存された答えがあれば、無くなった質問の分だけ捨てる
         final = saved
@@ -1826,6 +1820,25 @@ def prepare_repair_setup(
     )
 
 
+def _without_skip_for_rebuilt_envs(addon_id: str, steps: Iterable[SetupStep]) -> List[SetupStep]:
+    """新しく作り直される (欠損・使用不可・やりかけ) 専用環境を使う pip_install から
+    ``skip_if_exists`` を外す。アドオンフォルダ側にマーカーだけ残っていても、
+    空の venv に依存パッケージを復元させるため。
+    """
+    step_list = list(steps)
+    rebuilt_envs = {
+        env
+        for s in step_list
+        if (env := _step_env(s)) is not None and _env_needs_full_run(addon_id, env)
+    }
+    return [
+        s.model_copy(update={"skip_if_exists": None})
+        if s.type == "pip_install" and s.skip_if_exists and _step_env(s) in rebuilt_envs
+        else s
+        for s in step_list
+    ]
+
+
 def plan_repair_setup(
     addon_id: str,
     answers: Optional[dict] = None,
@@ -1839,13 +1852,7 @@ def plan_repair_setup(
     merged.update(normalize_answers(manifest, answers))
     final = fill_defaults(manifest, merged)
     selected = select_steps(manifest.setup_steps, final)
-    unusable = set(_unusable_env_dirs(addon_id))
-    steps = [
-        s.model_copy(update={"skip_if_exists": None})
-        if s.type == "pip_install" and s.skip_if_exists and _step_env(s) in unusable
-        else s
-        for s in selected
-    ]
+    steps = _without_skip_for_rebuilt_envs(addon_id, selected)
     return SetupPlan(
         kind="repair",
         addon_id=addon_id,
