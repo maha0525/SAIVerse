@@ -53,9 +53,7 @@ class UpdatePsutilPrecheckTest(unittest.TestCase):
 
         self.assertEqual(res.status_code, 409)
         detail = res.json()["detail"]
-        self.assertIn("psutil", detail)
-        self.assertIn("update.bat", detail)
-        self.assertIn("update.sh", detail)
+        self.assertEqual(detail, {"$ui": "api.systemUpdate.psutilRequired", "params": {}})
         # アップデータは spawn されず、シャットダウンも予約されない。
         self.assertFalse((self.project / ".update_config.json").exists())
 
@@ -71,8 +69,7 @@ class UpdatePsutilPrecheckTest(unittest.TestCase):
         probe.assert_called_once()
         self.assertEqual(res.status_code, 409)
         detail = res.json()["detail"]
-        self.assertNotIn("psutil", detail)
-        self.assertIn("Git", detail)  # 次の検証 (git 検査) に到達した証拠
+        self.assertEqual(detail, {"$ui": "api.systemUpdate.updateRequiresGit", "params": {}})
         self.assertFalse((self.project / ".update_config.json").exists())
 
 

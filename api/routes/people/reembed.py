@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from api.deps import get_manager
+from api.ui_messages import ui_message
 from saiverse.data_paths import get_persona_memory_db
 from .models import ReembedRequest, ReembedStatusResponse
 import threading
@@ -11,8 +12,6 @@ router = APIRouter()
 # Track re-embed status per persona
 _reembed_status: dict = {}
 _reembed_lock = threading.Lock()
-
-_SOURCE_LABELS = {"chronicle": "Chronicle", "memopedia": "Memopedia", "fragment": "Fragment"}
 
 
 def _live_embedder_ready(manager, persona_id: str) -> bool:
@@ -80,13 +79,13 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
         with _reembed_lock:
             _reembed_status[persona_id] = {**fields, "sources": {k: dict(v) for k, v in sources.items()}}
 
-    _set(running=True, progress=0, total=0, message="Starting...")
+    _set(running=True, progress=0, total=0, message=ui_message("api.reembed.starting"))
 
     try:
         db_path = get_persona_memory_db(persona_id)
         if not db_path.exists():
             with _reembed_lock:
-                _reembed_status[persona_id] = {"running": False, "message": "Database not found"}
+                _reembed_status[persona_id] = {"running": False, "message": ui_message("api.reembed.dbNotFound")}
             return
 
         settings = load_settings()
@@ -121,7 +120,12 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 sources[source] = {"total": total, "done": done}
                 _set(
                     running=True, progress=0, total=0,
-                    message=f"{_SOURCE_LABELS[source]} {done}/{total}...",
+                    message=ui_message(
+                        "api.reembed.sourceProgress",
+                        source=ui_message(f"api.reembed.source.{source}"),
+                        done=done,
+                        total=total,
+                    ),
                 )
 
             source_result = rebuild_recall_source_embeddings(
@@ -134,10 +138,20 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 conn, expected_dim, force=force, include_missing=True,
             )
             total = len(target_ids)
-            _set(running=True, progress=0, total=total, message=f"Processing 0/{total}...")
+            _set(
+                running=True,
+                progress=0,
+                total=total,
+                message=ui_message("api.reembed.processing", done=0, total=total),
+            )
 
             def _message_progress(done: int, total_: int) -> None:
-                _set(running=True, progress=done, total=total_, message=f"Processing {done}/{total_}...")
+                _set(
+                    running=True,
+                    progress=done,
+                    total=total_,
+                    message=ui_message("api.reembed.processing", done=done, total=total_),
+                )
 
             result = reembed_messages(
                 conn, embedder, target_ids,
@@ -162,15 +176,14 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             conn.close()
 
         source_done = sum(v["done"] for v in sources.values())
-        summary = (
-            f"Re-embedded {result['embedded']} messages and "
-            f"{source_done} Chronicle/Memopedia/Fragment entries."
+        summary: dict = ui_message(
+            "api.reembed.completed",
+            embedded=result["embedded"],
+            sources=source_done,
         )
+        notes: list[dict] = []
         if source_skipped:
-            summary += (
-                f" {source_skipped} Chronicle/Memopedia/Fragment entries edited during "
-                "the job were left for the next memory maintenance to embed."
-            )
+            notes.append(ui_message("api.reembed.noteSourceSkipped", count=source_skipped))
         if not outcome.complete:
             reason = outcome.describe()
             LOGGER.warning(
@@ -178,7 +191,7 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 "Running it again rebuilds every vector.",
                 persona_id, reason,
             )
-            summary += f" {reason} Run the re-embed again to finish."
+            notes.append(ui_message("api.reembed.noteIncomplete", reason=reason))
         elif manager is not None:
             if _live_embedder_ready(manager, persona_id):
                 manager.clear_embed_model_mismatch(persona_id)
@@ -189,17 +202,27 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                     "(recall stays unavailable until it loads).",
                     persona_id,
                 )
-                summary += (
-                    " The running persona's embedding model could not be loaded, "
-                    "so recall is still unavailable; the warning is kept."
-                )
+                notes.append(ui_message("api.reembed.noteLiveEmbedderUnavailable"))
+
+        if len(notes) == 1:
+            summary = ui_message("api.reembed.completedWithNote", base=summary, note=notes[0])
+        elif len(notes) >= 2:
+            summary = ui_message(
+                "api.reembed.completedWithTwoNotes",
+                base=summary,
+                note1=notes[0],
+                note2=notes[1],
+            )
 
         _set(running=False, progress=result["embedded"], total=total, message=summary)
 
     except Exception as e:
         logging.exception("Re-embed task failed for %s", persona_id)
         with _reembed_lock:
-            _reembed_status[persona_id] = {"running": False, "message": f"Error: {str(e)}"}
+            _reembed_status[persona_id] = {
+                "running": False,
+                "message": ui_message("api.reembed.error", error=str(e)),
+            }
 
 @router.post("/{persona_id}/reembed")
 def reembed_persona_memory(
@@ -212,16 +235,23 @@ def reembed_persona_memory(
     # Verify database exists
     db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
-        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=ui_message("api.reembed.dbNotFoundForPersona", persona_id=persona_id),
+        )
 
     # Check and reserve in one step: the "running" mark is written here, under
     # the lock, so a second request arriving before the background task has
     # started is refused instead of starting a second job.
-    reserved = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+    reserved = {"running": True, "progress": 0, "total": 0, "message": ui_message("api.reembed.starting")}
     with _reembed_lock:
         status = _reembed_status.get(persona_id, {})
         if status.get("running"):
-            return {"success": False, "message": "Re-embed already in progress.", "status": status}
+            return {
+                "success": False,
+                "message": ui_message("api.reembed.alreadyInProgress"),
+                "status": status,
+            }
         _reembed_status[persona_id] = dict(reserved)
 
     # Start background task
@@ -229,7 +259,7 @@ def reembed_persona_memory(
 
     return {
         "success": True,
-        "message": "Re-embed task started. Check status endpoint for progress.",
+        "message": ui_message("api.reembed.started"),
         "status": reserved,
     }
 
@@ -237,5 +267,8 @@ def reembed_persona_memory(
 def get_reembed_status(persona_id: str, manager = Depends(get_manager)):
     """Get the status of the re-embed task."""
     with _reembed_lock:
-        status = _reembed_status.get(persona_id, {"running": False, "message": "No task has been run."})
+        status = _reembed_status.get(
+            persona_id,
+            {"running": False, "message": ui_message("api.reembed.notRun")},
+        )
     return ReembedStatusResponse(**status)
