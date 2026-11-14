@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.owner_auth import OwnerAuthMiddleware, router
+from api.owner_auth import BrowserOriginMiddleware, OwnerAuthMiddleware, router
 
 
 def _app() -> FastAPI:
@@ -75,3 +75,70 @@ def test_oauth_callback_remains_available_for_state_validation(monkeypatch) -> N
     response = client.get("/api/oauth/callback/addon/flow")
 
     assert response.status_code == 200
+
+
+def _local_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/api/items")
+    def read_items():
+        return {"ok": True}
+
+    @app.post("/api/items")
+    def mutate_items():
+        return {"ok": True}
+
+    @app.delete("/api/items/1")
+    def delete_item():
+        return {"ok": True}
+
+    app.add_middleware(BrowserOriginMiddleware)
+    return app
+
+
+def test_browser_origin_allows_local_scripts_without_browser_headers() -> None:
+    client = TestClient(_local_app())
+
+    assert client.post("/api/items").status_code == 200
+    assert client.delete("/api/items/1").status_code == 200
+
+
+def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> None:
+    monkeypatch.setenv("SAIVERSE_ALLOWED_ORIGINS", "https://my-box.tailnet.ts.net:3000")
+    client = TestClient(_local_app())
+
+    assert client.post("/api/items", headers={"Origin": "http://localhost:3000"}).status_code == 200
+    assert client.post("/api/items", headers={"Origin": "http://127.0.0.1:3000"}).status_code == 200
+    assert client.post(
+        "/api/items",
+        headers={"Origin": "https://my-box.tailnet.ts.net:3000"},
+    ).status_code == 200
+    assert client.post(
+        "/api/items",
+        headers={"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:8000"},
+    ).status_code == 200
+
+
+def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer() -> None:
+    client = TestClient(_local_app())
+
+    # Untrusted Origin / null Origin / empty Origin
+    assert client.post("/api/items", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.delete("/api/items/1", headers={"Origin": "null"}).status_code == 403
+    assert client.post("/api/items", headers={"Origin": ""}).status_code == 403
+
+    # Cross-site Sec-Fetch-Site without Origin
+    assert client.post("/api/items", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+
+    # Untrusted Referer without Origin, while allowed Referer passes
+    assert client.post(
+        "/api/items",
+        headers={"Referer": "https://evil.example/attack.html"},
+    ).status_code == 403
+    assert client.post(
+        "/api/items",
+        headers={"Referer": "http://localhost:3000/chat"},
+    ).status_code == 200
+
+    # Safe GET requests remain unaffected
+    assert client.get("/api/items", headers={"Origin": "https://evil.example"}).status_code == 200

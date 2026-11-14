@@ -620,6 +620,10 @@ def main():
         from api.owner_auth import OwnerAuthMiddleware
 
         app.add_middleware(OwnerAuthMiddleware)
+    else:
+        from api.owner_auth import BrowserOriginMiddleware
+
+        app.add_middleware(BrowserOriginMiddleware)
 
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png

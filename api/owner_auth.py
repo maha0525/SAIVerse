@@ -110,6 +110,79 @@ def websocket_owner_authorized(websocket: object) -> bool:
     return bool(cookie and hmac.compare_digest(cookie, _session_value(token)))
 
 
+def _browser_origin_allowed(origin: str, request: Request) -> bool:
+    """ローカル起動時のブラウザ CSRF 防止用の Origin 照合。
+
+    ``allowed_browser_origins()`` に加え、リクエスト自身の ``Host`` と一致する
+    同一オリジン (例: FastAPI ``/docs`` や同一ホスト中継) を許可する。
+    """
+    normalized = origin.strip().rstrip("/")
+    if not normalized:
+        return False
+    if normalized in allowed_browser_origins():
+        return True
+    host_header = request.headers.get("host", "").strip()
+    if host_header:
+        self_origin = f"{request.url.scheme}://{host_header}".rstrip("/")
+        if normalized == self_origin:
+            return True
+    return False
+
+
+def _referer_origin(referer: str) -> str | None:
+    try:
+        parsed = urlsplit(referer.strip())
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+class BrowserOriginMiddleware(BaseHTTPMiddleware):
+    """Reject cross-site browser mutations even when running on localhost.
+
+    ローカル起動では合言葉 (``OwnerAuthMiddleware``) を求めないが、同じブラウザで
+    開いた別サイトからの状態変更リクエスト (POST/PUT/PATCH/DELETE 等) は防ぐ。
+    ``Origin`` / ``Sec-Fetch-Site`` / ``Referer`` を持たないローカルの CLI や
+    デバッグスクリプト・テスト・外部ツール連携は従来どおり通す。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method.upper() in SAFE_METHODS:
+            return await call_next(request)
+
+        path = request.url.path
+        if path == "/api/auth/login" or path.startswith("/api/oauth/callback/"):
+            return await call_next(request)
+
+        if "origin" in request.headers:
+            origin = request.headers.get("origin", "")
+            if not _browser_origin_allowed(origin, request):
+                return JSONResponse(
+                    {"detail": "Request origin is not allowed"},
+                    status_code=403,
+                )
+            return await call_next(request)
+
+        sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
+        if sec_fetch_site == "cross-site":
+            return JSONResponse(
+                {"detail": "Cross-site request is not allowed"},
+                status_code=403,
+            )
+
+        if "referer" in request.headers:
+            ref_origin = _referer_origin(request.headers.get("referer", ""))
+            if not ref_origin or not _browser_origin_allowed(ref_origin, request):
+                return JSONResponse(
+                    {"detail": "Request referer is not allowed"},
+                    status_code=403,
+                )
+
+        return await call_next(request)
+
+
 class OwnerAuthMiddleware(BaseHTTPMiddleware):
     """Protect the API when the backend is explicitly exposed beyond loopback."""
 
