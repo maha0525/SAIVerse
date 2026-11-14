@@ -21,6 +21,7 @@ import ChatInput, { type ChatInputHandle } from '@/components/ChatInput';
 import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelector';
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { describeChatProgress, progressTextForStatusEvent, type ChatProgressParams, type ChatProgressPhase } from '@/lib/chatProgress';
+import { buildPollUrl, buildPollingCursor, resolveChatViewTarget, type PollingCursor } from '@/lib/chatPolling';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
@@ -815,7 +816,10 @@ export default function Home() {
             && bid === currentBuildingIdRef.current;
         // Only the current view's completed response can offer older history.
         // A previous room (including A → B → A) must not restore its has_more.
-        if (!beforeId) setHasMore(false);
+        if (!beforeId) {
+            setHasMore(false);
+            latestMessageCursorRef.current = null;
+        }
         if (!bid) return; // /user/status will start the first room-specific request.
         try {
             if (!beforeId) {
@@ -834,19 +838,21 @@ export default function Home() {
             //   閲覧モードで他の建物を見ている間はその建物の通常ログ。
             // - Region 外 (入口含む): トグル ON のときだけ read-only で出す。
             //   閲覧場所は問わない (復帰前にどこからでも文脈を確認できる)
-            const game = activeGameRef.current;
-            const gameView = !!game && (game.inside
-                ? !!bid && bid === serverCurrentBuildingIdRef.current
-                : sessionLogPeekRef.current);
+            const viewTarget = resolveChatViewTarget(
+                bid,
+                activeGameRef.current,
+                serverCurrentBuildingIdRef.current,
+                sessionLogPeekRef.current,
+            );
             let url: string;
-            if (gameView) {
-                url = `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?${params.toString()}`;
+            if (viewTarget?.kind === 'game') {
+                url = `/api/world/regions/${encodeURIComponent(viewTarget.regionId)}/game/log?${params.toString()}`;
             } else {
                 if (bid) params.append('building_id', bid);
                 url = `/api/chat/history?${params.toString()}`;
             }
 
-            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}, gameView=${gameView ? game.region_id : 'none'}`);
+            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}, gameView=${viewTarget?.kind === 'game' ? viewTarget.regionId : 'none'}`);
 
             const res = await apiFetch(url);
             if (res.ok) {
@@ -1061,12 +1067,21 @@ export default function Home() {
                 return result;
             });
 
-            // Force latestMessageIdRef to the newest server-known message ID.
+            // Force latestMessageCursorRef to the newest server-known message ID for this view.
             // This prevents polling from using a stale ref and re-adding already-seen messages.
             const newestServerId = serverMessages[serverMessages.length - 1]?.id;
-            if (newestServerId) {
-                latestMessageIdRef.current = newestServerId;
-                console.log(`[syncAfterResponse] latestMessageIdRef forced to ${newestServerId}`);
+            const syncTarget = resolveChatViewTarget(
+                currentBuildingIdRef.current,
+                activeGameRef.current,
+                serverCurrentBuildingIdRef.current,
+                sessionLogPeekRef.current,
+            );
+            if (newestServerId && syncTarget?.kind === 'building' && syncTarget.buildingId === bid) {
+                latestMessageCursorRef.current = {
+                    viewKey: syncTarget.viewKey,
+                    messageId: newestServerId,
+                };
+                console.log(`[syncAfterResponse] latestMessageCursorRef forced to ${syncTarget.viewKey}:${newestServerId}`);
             }
         } catch (err) {
             console.error("syncAfterResponse failed", err);
@@ -1403,7 +1418,7 @@ export default function Home() {
                     setMessages([]);
                     // 新着ポーリングは building_id 無しだとサーバーの現在地へ
                     // 落ちるので、削除済みの建物の最新 ID を控えから外して止める
-                    latestMessageIdRef.current = undefined;
+                    latestMessageCursorRef.current = null;
                     setIsHistoryLoaded(true);
                     setLostBuildingNotice(kind);
                     setMoveTrigger(prev => prev + 1);
@@ -1482,14 +1497,19 @@ export default function Home() {
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)
-    const latestMessageIdRef = useRef<string | undefined>(undefined);
+    // Cursor is bound to the active viewKey so switching to an empty room
+    // never reuses the previous room's message ID.
+    const latestMessageCursorRef = useRef<PollingCursor | null>(null);
 
-    // Keep ref updated with latest message ID
+    // Keep ref updated with latest message ID for the active view
     useEffect(() => {
-        const newestId = messages[messages.length - 1]?.id;
-        if (newestId && !newestId.startsWith('temp-')) {
-            latestMessageIdRef.current = newestId;
-        }
+        const target = resolveChatViewTarget(
+            currentBuildingIdRef.current,
+            activeGameRef.current,
+            serverCurrentBuildingIdRef.current,
+            sessionLogPeekRef.current,
+        );
+        latestMessageCursorRef.current = buildPollingCursor(target, messages);
     }, [messages]);
 
     useEffect(() => {
@@ -1497,22 +1517,29 @@ export default function Home() {
 
         const pollInterval = setInterval(async () => {
             if (isProcessingRef.current) return; // Skip polling during active request
-            const newestId = latestMessageIdRef.current;
-            if (!newestId) return; // Skip if no real ID
+            const pollTarget = resolveChatViewTarget(
+                currentBuildingIdRef.current,
+                activeGameRef.current,
+                serverCurrentBuildingIdRef.current,
+                sessionLogPeekRef.current,
+            );
+            if (!pollTarget) return;
 
             try {
-                const pollBid = currentBuildingIdRef.current;
-                const bidParam = pollBid ? `&building_id=${pollBid}` : '';
-                const game = activeGameRef.current;
-                const gameView = !!game && (game.inside
-                    ? !!pollBid && pollBid === serverCurrentBuildingIdRef.current
-                    : sessionLogPeekRef.current);
-                const pollUrl = gameView
-                    ? `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?after=${encodeURIComponent(newestId)}&limit=50`
-                    : `/api/chat/history?after=${newestId}&limit=50${bidParam}`;
+                const cursor = latestMessageCursorRef.current;
+                const hasMatchingCursor = !!cursor && cursor.viewKey === pollTarget.viewKey;
+                const pollUrl = buildPollUrl(pollTarget, cursor, 50);
                 const res = await apiFetch(pollUrl);
                 if (res.ok) {
                     const data = await res.json();
+                    const currentTarget = resolveChatViewTarget(
+                        currentBuildingIdRef.current,
+                        activeGameRef.current,
+                        serverCurrentBuildingIdRef.current,
+                        sessionLogPeekRef.current,
+                    );
+                    if (!currentTarget || currentTarget.viewKey !== pollTarget.viewKey) return;
+
                     const newMessages: Message[] = data.history || [];
 
                     if (newMessages.length > 0) {
@@ -1524,6 +1551,9 @@ export default function Home() {
                             if (filtered.length === 0) return prev;
                             return [...prev, ...filtered];
                         });
+                        if (!hasMatchingCursor && data.has_more === true) {
+                            setHasMore(true);
+                        }
                         setMoveTrigger(prev => prev + 1);
                     }
                 }
