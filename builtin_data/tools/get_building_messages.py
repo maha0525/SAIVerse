@@ -183,37 +183,42 @@ def _append_and_mark(
             raise _TranscribeFailed(
                 f"provenance lookup failed (ref={ref})"
             ) from exc
-    if already_recorded:
-        LOGGER.info(
-            "[building_ingest] provenance repair: memory already has %s; "
-            "re-marking only (no duplicate append)", ref,
-        )
-    else:
-        try:
-            marked = _marked_in_building_db(m, persona_id, manager)
-        except Exception as exc:
-            # 確かめられないまま足すと、所有者が消した行を戻しかねない —
-            # 照会の失敗と同じくラウンドを停止して次ラウンドで再試行する。
-            LOGGER.warning(
-                "[building_ingest] ingested_by re-read failed (ref=%s)",
-                ref, exc_info=True,
-            )
-            raise _TranscribeFailed(
-                f"ingested_by re-read failed (ref={ref})"
-            ) from exc
-        if marked:
+    from database.building_messages import building_message_mutation_lock
+
+    building_id = m.get("_building_id") or m.get("building_id")
+    message_id = m.get("message_id")
+    with building_message_mutation_lock(building_id, message_id):
+        if already_recorded:
             LOGGER.info(
-                "[building_ingest] building row %s is already marked for %s "
-                "after this round read it; not appending", ref, persona_id,
+                "[building_ingest] provenance repair: memory already has %s; "
+                "re-marking only (no duplicate append)", ref,
             )
-            return False
-        status, _mid = history_manager.add_to_persona_only(
-            entry, memory_first=True
-        )
-        if status == "failed":
-            raise _TranscribeFailed(f"memory append failed (ref={ref})")
-    _mark_ingested(m, persona_id, manager)
-    return True
+        else:
+            try:
+                marked = _marked_in_building_db(m, persona_id, manager)
+            except Exception as exc:
+                # 確かめられないまま足すと、所有者が消した行を戻しかねない —
+                # 照会の失敗と同じくラウンドを停止して次ラウンドで再試行する。
+                LOGGER.warning(
+                    "[building_ingest] ingested_by re-read failed (ref=%s)",
+                    ref, exc_info=True,
+                )
+                raise _TranscribeFailed(
+                    f"ingested_by re-read failed (ref={ref})"
+                ) from exc
+            if marked:
+                LOGGER.info(
+                    "[building_ingest] building row %s is already marked for %s "
+                    "after this round read it; not appending", ref, persona_id,
+                )
+                return False
+            status, _mid = history_manager.add_to_persona_only(
+                entry, memory_first=True
+            )
+            if status == "failed":
+                raise _TranscribeFailed(f"memory append failed (ref={ref})")
+        _mark_ingested(m, persona_id, manager)
+        return True
 
 
 def _marked_in_building_db(m: Dict[str, Any], persona_id: str, manager: Any) -> bool:
