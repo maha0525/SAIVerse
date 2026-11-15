@@ -172,5 +172,106 @@ class TestFlush(unittest.TestCase):
         tracker._session_factory = None
 
 
+class TestDirectCostAndClientUsage(unittest.TestCase):
+    def setUp(self):
+        self.tracker = get_usage_tracker()
+        self._orig_flush = self.tracker._flush_to_db
+        self.tracker._flush_to_db = MagicMock()
+
+    def tearDown(self):
+        self.tracker._flush_to_db = self._orig_flush
+        with self.tracker._pending_lock:
+            self.tracker._pending_records.clear()
+
+    def test_record_direct_cost_adds_record(self):
+        self.tracker.record_direct_cost(
+            "grok-imagine-image-2.0",
+            0.08,
+            input_tokens=0,
+            output_tokens=0,
+            persona_id="p1",
+            node_type="tool",
+            category="image_generation",
+        )
+        self.assertEqual(len(self.tracker._pending_records), 1)
+        rec = self.tracker._pending_records[0]
+        self.assertEqual(rec["model_id"], "grok-imagine-image-2.0")
+        self.assertAlmostEqual(rec["cost_usd"], 0.08)
+        self.assertEqual(rec["category"], "image_generation")
+        self.assertEqual(rec["persona_id"], "p1")
+
+    def test_record_client_usage_consumes_and_handles_errors(self):
+        from llm_clients.base import UsageInfo
+
+        client = MagicMock()
+        client.consume_usage.return_value = UsageInfo(
+            model="gemini-3.8-flash",
+            input_tokens=120,
+            output_tokens=30,
+            timestamp=1700000000.0,
+            cached_tokens=20,
+        )
+        with patch("saiverse.usage_tracker.calculate_cost", return_value=0.001):
+            self.tracker.record_client_usage(
+                client,
+                persona_id="p1",
+                node_type="media_summary",
+                category="media_summary",
+            )
+        self.assertEqual(len(self.tracker._pending_records), 1)
+        rec = self.tracker._pending_records[0]
+        self.assertEqual(rec["model_id"], "gemini-3.8-flash")
+        self.assertEqual(rec["input_tokens"], 120)
+        self.assertEqual(rec["output_tokens"], 30)
+        self.assertEqual(rec["cached_tokens"], 20)
+        self.assertEqual(rec["category"], "media_summary")
+
+        # Empty or raising consume_usage must not raise
+        client.consume_usage.return_value = None
+        self.tracker.record_client_usage(client, category="media_summary")
+        client.consume_usage.side_effect = RuntimeError("boom")
+        self.tracker.record_client_usage(client, category="media_summary")
+        self.assertEqual(len(self.tracker._pending_records), 1)
+
+    def test_standalone_callers_record_usage_even_on_exception(self):
+        from pathlib import Path
+        from sai_memory.memory.entity_extractor import ExtractionFailed, extract_entities_and_involvement
+        from saiverse import media_summary
+
+        # 1. media_summary (_generate_document_summary)
+        fake_client = MagicMock()
+        fake_client.generate.side_effect = RuntimeError("api error")
+        fake_path = MagicMock(spec=Path)
+        fake_path.read_text.return_value = "doc"
+        with (
+            patch.object(media_summary, "_get_summary_client", return_value=fake_client),
+            patch.object(self.tracker, "record_client_usage") as mock_rec,
+        ):
+            self.assertIsNone(media_summary._generate_document_summary(fake_path))
+            mock_rec.assert_called_once_with(
+                fake_client, node_type="media_summary", category="media_summary"
+            )
+
+        # 2. entity_extractor (extract_entities_and_involvement)
+        msg = MagicMock()
+        msg.role = "user"
+        msg.speaker_name = "User"
+        msg.content = "hello"
+        msg.timestamp = None
+        ee_client = MagicMock()
+        ee_client.generate.side_effect = RuntimeError("timeout")
+        with (
+            patch.object(self.tracker, "record_client_usage") as mock_rec,
+            self.assertRaises(ExtractionFailed),
+        ):
+            extract_entities_and_involvement(ee_client, [msg], persona_id="p_ee")
+        mock_rec.assert_called_once_with(
+            ee_client,
+            persona_id="p_ee",
+            node_type="entity_extractor",
+            category="memory_weave_generate",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

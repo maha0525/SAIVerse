@@ -482,6 +482,15 @@ def extract_entities_and_involvement(
     except Exception as exc:
         LOGGER.error("Entity extraction LLM call failed: %s", exc)
         raise ExtractionFailed(f"entity extraction LLM call failed: {exc}") from exc
+    finally:
+        from saiverse.usage_tracker import get_usage_tracker
+
+        get_usage_tracker().record_client_usage(
+            client,
+            persona_id=persona_id,
+            node_type="entity_extractor",
+            category="memory_weave_generate",
+        )
 
     if not response:
         raise ExtractionFailed("entity extraction LLM returned an empty response")

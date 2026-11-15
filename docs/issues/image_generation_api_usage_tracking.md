@@ -1,6 +1,6 @@
 # Issue: 画像生成系 API 利用が「API 使用状況」にカウントされていない
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🚧 修正 PR 待ち
 **優先度**: medium
 **作成日**: 2026-05-09
 **関連**: `builtin_data/tools/defs/image_generator.py` (相当), API 使用状況集計
@@ -29,3 +29,4 @@
 ## ログ
 
 - 2026-05-09: issue 起票。
+- 2026-11-15: `builtin_data/tools/image_generator.py`（Gemini / OpenAI / xAI）で `UsageTracker.record_direct_cost` 経由の記録を実装（`usage_tracking_gaps.md` と同一 PR）。

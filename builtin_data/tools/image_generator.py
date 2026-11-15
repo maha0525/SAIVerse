@@ -168,6 +168,176 @@ def _quality_to_nano_banana_2_resolution(quality: str) -> str:
     return mapping.get(quality, "2K")
 
 
+_GEMINI_IMAGE_PRICING_PER_1M: dict[str, tuple[float, float, float]] = {
+    # (input_per_1m, output_text_per_1m, output_image_per_1m)
+    "gemini-nano-banana-2.1": (1.50, 7.50, 30.00),
+    "gemini-3.1-flash-image": (0.50, 3.00, 60.00),
+    "gemini-3-pro-image": (2.00, 12.00, 120.00),
+}
+
+_OPENAI_IMAGE_PRICING_PER_1M: dict[str, tuple[float, float, float, float]] = {
+    # (text_in_per_1m, image_in_per_1m, text_out_per_1m, image_out_per_1m)
+    "gpt-image-1.5": (5.00, 10.00, 10.00, 32.00),
+    "gpt-image-2": (5.00, 8.00, 10.00, 30.00),
+    "gpt-image-2.5-flare": (5.00, 8.00, 10.00, 30.00),
+    "gpt-image-2.5-sunburst": (5.00, 8.00, 10.00, 30.00),
+    "gpt-image-2.6-flare": (5.00, 8.00, 10.00, 30.00),
+    "gpt-image-2.6-sunburst": (5.00, 8.00, 10.00, 30.00),
+}
+
+_XAI_IMAGE_COST_BY_PARAMS: dict[tuple[str, str], float] = {
+    ("low", "1k"): 0.04,
+    ("medium", "1k"): 0.06,
+    ("low", "2k"): 0.06,
+    ("medium", "2k"): 0.08,
+}
+
+
+def _active_usage_context() -> dict[str, Optional[str]]:
+    try:
+        from tools.context import (
+            get_active_persona_id,
+            get_active_playbook_name,
+            get_active_pulse_context,
+        )
+        pulse_ctx = get_active_pulse_context()
+        building_id = getattr(pulse_ctx, "building_id", None) if pulse_ctx else None
+        return {
+            "persona_id": get_active_persona_id(),
+            "building_id": building_id,
+            "playbook_name": get_active_playbook_name(),
+        }
+    except Exception:
+        return {"persona_id": None, "building_id": None, "playbook_name": None}
+
+
+def _record_gemini_image_usage(model_id: str, resp) -> None:
+    """Record Gemini image generation token usage and modality-aware cost."""
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um is None:
+            return
+        input_tokens = int(getattr(um, "prompt_token_count", 0) or 0)
+        candidates_tokens = int(getattr(um, "candidates_token_count", 0) or 0)
+        thoughts_tokens = int(getattr(um, "thoughts_token_count", 0) or 0)
+        cached_tokens = int(getattr(um, "cached_content_token_count", 0) or 0)
+
+        image_out_tokens = 0
+        for detail in getattr(um, "candidates_tokens_details", None) or []:
+            modality = str(getattr(detail, "modality", "") or "").upper()
+            if "IMAGE" in modality:
+                image_out_tokens += int(getattr(detail, "token_count", 0) or 0)
+
+        if image_out_tokens == 0 and candidates_tokens > 0:
+            image_out_tokens = candidates_tokens
+
+        text_out_tokens = max(0, candidates_tokens - image_out_tokens) + thoughts_tokens
+        output_tokens = candidates_tokens + thoughts_tokens
+
+        in_rate, out_text_rate, out_img_rate = _GEMINI_IMAGE_PRICING_PER_1M.get(
+            model_id, (1.50, 7.50, 30.00)
+        )
+        cost = (
+            (input_tokens / 1_000_000) * in_rate
+            + (text_out_tokens / 1_000_000) * out_text_rate
+            + (image_out_tokens / 1_000_000) * out_img_rate
+        )
+
+        from saiverse.usage_tracker import get_usage_tracker
+
+        ctx = _active_usage_context()
+        get_usage_tracker().record_direct_cost(
+            model_id=model_id,
+            cost=cost,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            persona_id=ctx["persona_id"],
+            building_id=ctx["building_id"],
+            node_type="tool",
+            playbook_name=ctx["playbook_name"],
+            category="image_generation",
+        )
+    except Exception as exc:
+        logger.warning("[image_generator] Failed to record Gemini image usage: %s", exc)
+
+
+def _record_openai_image_usage(openai_model: str, result, effective_quality: str) -> None:
+    """Record OpenAI GPT Image token usage and cost."""
+    try:
+        usage = getattr(result, "usage", None)
+        rates = _OPENAI_IMAGE_PRICING_PER_1M.get(openai_model, (5.00, 8.00, 10.00, 30.00))
+        text_in_rate, image_in_rate, text_out_rate, image_out_rate = rates
+
+        if usage is not None:
+            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+            in_details = getattr(usage, "input_tokens_details", None)
+            out_details = getattr(usage, "output_tokens_details", None)
+
+            text_in = int(getattr(in_details, "text_tokens", 0) or 0) if in_details else input_tokens
+            image_in = int(getattr(in_details, "image_tokens", 0) or 0) if in_details else 0
+            text_out = int(getattr(out_details, "text_tokens", 0) or 0) if out_details else 0
+            image_out = int(getattr(out_details, "image_tokens", 0) or 0) if out_details else output_tokens
+
+            cost = (
+                (text_in / 1_000_000) * text_in_rate
+                + (image_in / 1_000_000) * image_in_rate
+                + (text_out / 1_000_000) * text_out_rate
+                + (image_out / 1_000_000) * image_out_rate
+            )
+        else:
+            input_tokens = 0
+            output_tokens = 0
+            fallback = {"low": 0.01, "medium": 0.04, "high": 0.17, "xhigh": 0.25, "max": 0.25}
+            cost = fallback.get(effective_quality, 0.05)
+
+        from saiverse.usage_tracker import get_usage_tracker
+
+        ctx = _active_usage_context()
+        get_usage_tracker().record_direct_cost(
+            model_id=openai_model,
+            cost=cost,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            persona_id=ctx["persona_id"],
+            building_id=ctx["building_id"],
+            node_type="tool",
+            playbook_name=ctx["playbook_name"],
+            category="image_generation",
+        )
+    except Exception as exc:
+        logger.warning("[image_generator] Failed to record OpenAI image usage: %s", exc)
+
+
+def _record_xai_image_usage(quality_params: dict, input_image_count: int) -> None:
+    """Record xAI Grok Imagine fixed per-image cost."""
+    try:
+        key = (
+            str(quality_params.get("quality", "medium")).lower(),
+            str(quality_params.get("resolution", "1k")).lower(),
+        )
+        base_cost = _XAI_IMAGE_COST_BY_PARAMS.get(key, 0.06)
+        cost = base_cost + (0.01 * max(0, input_image_count))
+
+        from saiverse.usage_tracker import get_usage_tracker
+
+        ctx = _active_usage_context()
+        get_usage_tracker().record_direct_cost(
+            model_id=_XAI_IMAGINE_MODEL,
+            cost=cost,
+            input_tokens=0,
+            output_tokens=0,
+            persona_id=ctx["persona_id"],
+            building_id=ctx["building_id"],
+            node_type="tool",
+            playbook_name=ctx["playbook_name"],
+            category="image_generation",
+        )
+    except Exception as exc:
+        logger.warning("[image_generator] Failed to record xAI image usage: %s", exc)
+
+
 def _generate_with_nano_banana_2(
     prompt: str,
     aspect_ratio: str = "1:1",
@@ -213,6 +383,7 @@ def _generate_with_nano_banana_2(
         )
     )
 
+    _record_gemini_image_usage(model_id, resp)
     _log_gemini_response(resp)
 
     if not resp.candidates:
@@ -270,6 +441,7 @@ def _generate_with_nano_banana_pro(
         )
     )
 
+    _record_gemini_image_usage("gemini-3-pro-image", resp)
     _log_gemini_response(resp)
 
     if not resp.candidates:
@@ -363,6 +535,8 @@ def _generate_with_gpt_image(
             quality=effective_quality,
             n=1,
         )
+
+    _record_openai_image_usage(openai_model, result, effective_quality)
 
     if not result.data or not result.data[0].b64_json:
         raise RuntimeError("No image data returned from OpenAI")
@@ -495,6 +669,7 @@ def _generate_with_grok_imagine(
     )
 
     response = client.image.sample(**kwargs)
+    _record_xai_image_usage(quality_params, len(input_image_paths or []))
 
     # Extract base64 image data from response
     image_data = getattr(response, "data", None)

@@ -289,6 +289,100 @@ class UsageTracker:
             model_id, cached_tokens, remaining_seconds, refund, persona_id,
         )
 
+    def record_direct_cost(
+        self,
+        model_id: str,
+        cost: float,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        *,
+        cached_tokens: int = 0,
+        currency: str = "USD",
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
+        node_type: Optional[str] = None,
+        playbook_name: Optional[str] = None,
+        category: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Record usage with a pre-calculated cost (e.g. image generation).
+
+        Used when billing depends on modality breakdowns or per-image rates
+        rather than ``calculate_cost()``'s standard text token rates.
+        """
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        record = {
+            "timestamp": timestamp,
+            "persona_id": persona_id,
+            "building_id": building_id,
+            "model_id": model_id,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": 0,
+            "cost_usd": cost if cost > 0 else None,
+            "currency": currency,
+            "node_type": node_type,
+            "playbook_name": playbook_name,
+            "category": category,
+        }
+
+        with self._pending_lock:
+            self._pending_records.append(record)
+            if len(self._pending_records) >= self._batch_size:
+                self._flush_to_db()
+
+        LOGGER.debug(
+            "Direct usage recorded: model=%s input=%d output=%d cost=%.6f %s category=%s persona=%s",
+            model_id,
+            input_tokens,
+            output_tokens,
+            cost,
+            currency,
+            category,
+            persona_id,
+        )
+
+    def record_client_usage(
+        self,
+        client: Any,
+        *,
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
+        node_type: Optional[str] = None,
+        playbook_name: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> None:
+        """Consume latest usage from an LLM client and record it safely."""
+        if client is None or not hasattr(client, "consume_usage"):
+            return
+        try:
+            usage = client.consume_usage()
+            if not usage:
+                return
+            from llm_clients.base import usage_event_time
+
+            self.record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
+                persona_id=persona_id,
+                building_id=building_id,
+                node_type=node_type,
+                playbook_name=playbook_name,
+                category=category,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to record client usage (%s): %s",
+                category or node_type or "unknown",
+                e,
+            )
+
     def flush(self) -> None:
         """Force flush all pending records to database."""
         with self._pending_lock:
