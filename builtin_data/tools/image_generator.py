@@ -196,14 +196,20 @@ _XAI_IMAGE_COST_BY_PARAMS: dict[tuple[str, str], float] = {
 def _active_usage_context() -> dict[str, Optional[str]]:
     try:
         from tools.context import (
+            get_active_manager,
             get_active_persona_id,
             get_active_playbook_name,
-            get_active_pulse_context,
         )
-        pulse_ctx = get_active_pulse_context()
-        building_id = getattr(pulse_ctx, "building_id", None) if pulse_ctx else None
+        persona_id = get_active_persona_id()
+        manager = get_active_manager()
+        building_id: Optional[str] = None
+        if persona_id and manager:
+            all_personas = getattr(manager, "all_personas", None) or {}
+            persona = all_personas.get(persona_id)
+            if persona:
+                building_id = getattr(persona, "current_building_id", None)
         return {
-            "persona_id": get_active_persona_id(),
+            "persona_id": persona_id,
             "building_id": building_id,
             "playbook_name": get_active_playbook_name(),
         }
@@ -222,13 +228,17 @@ def _record_gemini_image_usage(model_id: str, resp) -> None:
         thoughts_tokens = int(getattr(um, "thoughts_token_count", 0) or 0)
         cached_tokens = int(getattr(um, "cached_content_token_count", 0) or 0)
 
+        details = list(getattr(um, "candidates_tokens_details", None) or [])
         image_out_tokens = 0
-        for detail in getattr(um, "candidates_tokens_details", None) or []:
+        for detail in details:
             modality = str(getattr(detail, "modality", "") or "").upper()
             if "IMAGE" in modality:
                 image_out_tokens += int(getattr(detail, "token_count", 0) or 0)
 
-        if image_out_tokens == 0 and candidates_tokens > 0:
+        # Fallback to image rate only when modality breakdown is absent.
+        # If details are present with only TEXT tokens (e.g. text-only refusal),
+        # keep image_out_tokens = 0 so text tokens are billed at the text rate.
+        if not details and candidates_tokens > 0:
             image_out_tokens = candidates_tokens
 
         text_out_tokens = max(0, candidates_tokens - image_out_tokens) + thoughts_tokens
@@ -896,13 +906,9 @@ def generate_image(
         )
 
     # Get context for resolving URIs
-    persona_id = get_active_persona_id()
-    manager = get_active_manager()
-    building_id = None
-    if persona_id and manager:
-        persona = manager.all_personas.get(persona_id)
-        if persona:
-            building_id = getattr(persona, "current_building_id", None)
+    _ctx = _active_usage_context()
+    persona_id = _ctx["persona_id"]
+    building_id = _ctx["building_id"]
 
     # Resolve input image URIs
     input_image_paths = _resolve_input_images(input_images, persona_id, building_id)

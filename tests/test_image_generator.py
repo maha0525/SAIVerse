@@ -452,6 +452,52 @@ class TestImageGenerationUsage(unittest.TestCase):
         self.assertAlmostEqual(kw["cost"], 0.10, places=6)
         self.assertEqual(kw["category"], "image_generation")
 
+    def test_record_gemini_text_only_response_uses_text_rate_not_image_rate(self):
+        from types import SimpleNamespace
+
+        um = SimpleNamespace(
+            prompt_token_count=0,
+            candidates_token_count=100,
+            thoughts_token_count=0,
+            cached_content_token_count=0,
+            candidates_tokens_details=[
+                SimpleNamespace(modality="Modality.TEXT", token_count=100),
+            ],
+        )
+        resp = SimpleNamespace(usage_metadata=um)
+        tracker = MagicMock()
+        with (
+            patch("saiverse.usage_tracker.get_usage_tracker", return_value=tracker),
+            patch.object(
+                _mod,
+                "_active_usage_context",
+                return_value={"persona_id": "p1", "building_id": None, "playbook_name": None},
+            ),
+        ):
+            _mod._record_gemini_image_usage("gemini-nano-banana-2.1", resp)
+
+        kw = tracker.record_direct_cost.call_args.kwargs
+        # 100 * $7.50 / 1e6 = $0.00075 (not $0.003 image rate)
+        self.assertAlmostEqual(kw["cost"], 0.00075, places=6)
+
+    def test_active_usage_context_resolves_building_id_from_persona(self):
+        from types import SimpleNamespace
+
+        fake_manager = SimpleNamespace(
+            all_personas={"p1": SimpleNamespace(current_building_id="living_room")}
+        )
+        with (
+            patch("tools.context.get_active_persona_id", return_value="p1"),
+            patch("tools.context.get_active_manager", return_value=fake_manager),
+            patch("tools.context.get_active_playbook_name", return_value="img_pb"),
+        ):
+            ctx = _mod._active_usage_context()
+
+        self.assertEqual(
+            ctx,
+            {"persona_id": "p1", "building_id": "living_room", "playbook_name": "img_pb"},
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
