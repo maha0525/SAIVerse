@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -919,6 +921,60 @@ def withdraw_building_message_in_db(
     if session_factory is None:
         return (False, "unavailable", None)
 
+    with building_message_mutation_lock(building_id, message_id):
+        return _withdraw_building_message_in_db_locked(
+            session_factory,
+            building_id,
+            message_id,
+            expected_role=expected_role,
+            _max_retries=_max_retries,
+        )
+
+
+_MESSAGE_MUTATION_LOCKS_GUARD = threading.Lock()
+_MESSAGE_MUTATION_LOCKS: Dict[Tuple[str, str], Tuple[threading.Lock, int]] = {}
+
+
+@contextmanager
+def building_message_mutation_lock(
+    building_id: Optional[str],
+    message_id: Optional[str],
+) -> Iterator[None]:
+    """Serialize withdraw vs. memory transcription on the same building message."""
+    if not (building_id and message_id):
+        yield
+        return
+    key = (str(building_id), str(message_id))
+    with _MESSAGE_MUTATION_LOCKS_GUARD:
+        entry = _MESSAGE_MUTATION_LOCKS.get(key)
+        if entry is None:
+            lock = threading.Lock()
+            _MESSAGE_MUTATION_LOCKS[key] = (lock, 1)
+        else:
+            lock, waiters = entry
+            _MESSAGE_MUTATION_LOCKS[key] = (lock, waiters + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _MESSAGE_MUTATION_LOCKS_GUARD:
+            cur = _MESSAGE_MUTATION_LOCKS.get(key)
+            if cur is not None:
+                cur_lock, waiters = cur
+                if waiters <= 1:
+                    _MESSAGE_MUTATION_LOCKS.pop(key, None)
+                else:
+                    _MESSAGE_MUTATION_LOCKS[key] = (cur_lock, waiters - 1)
+
+
+def _withdraw_building_message_in_db_locked(
+    session_factory: Callable[[], "Session"],
+    building_id: str,
+    message_id: str,
+    *,
+    expected_role: str = "user",
+    _max_retries: int = 5,
+) -> Tuple[bool, str, Optional[str]]:
     from database.models import BuildingMessage
 
     for attempt in range(_max_retries):

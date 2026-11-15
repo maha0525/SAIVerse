@@ -1,6 +1,6 @@
 # Issue: 未読の発言の取り下げと、記憶への転記が競合すると、取り下げた発言が記憶に残る
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🚧 修正 PR 待ち
 **優先度**: low
 **作成日**: 2026-10-29
 **関連**: builtin_data/tools/get_building_messages.py (`_append_and_mark`)、database/building_messages.py (`withdraw_building_message`)、docs/intent/system_notice_delivery.md「確認待ちの行の確定」
@@ -23,3 +23,4 @@
 ## ログ
 
 - 2026-10-29: 作成。追補の作業の範囲の外として切り出した。
+- 2026-11-15: `database/building_messages.py` に `(building_id, message_id)` 単位の `building_message_mutation_lock` を追加し、`withdraw_building_message_in_db` と `builtin_data/tools/get_building_messages.py` の `_append_and_mark` を排他する PR を作成。
