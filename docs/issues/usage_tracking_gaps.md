@@ -1,6 +1,6 @@
 # Issue: usage 収集漏れの棚卸し(画像生成コスト + 全 LLM コール点検)
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🚧 修正 PR 待ち
 **優先度**: mid
 **作成日**: 2026-07-08
 **関連**: `saiverse/usage_tracker.py`, `builtin_data/tools/image_generator.py`, `saiverse/model_configs.py`(pricing), `frontend/src/app/usage/page.tsx`(表示)
@@ -40,3 +40,4 @@
 
 - 2026-07-08: 起票。ideas.md から昇格。画像生成が record_usage を呼んでいない点まで調査済み。
 - 2026-10-31: `GeminiClient` の使用量の記録が思考トークン (`thoughts_token_count`) を落としていたので、`candidates_token_count` との和を出力として記録するように直した。公式の料金表の出力の単価は思考を含む。本番ログの直近 44 回の呼び出しでは `total_token_count` が入力・本文・思考の和に全件一致し、思考は本文の 27% 分だった (少数の実測で、モデルと内容で変わる)。修正前の `LLMUsageLog` の行は直していないので、過去の Gemini の出力と費用は実際より少ないままになっている。
+- 2026-11-15: `UsageTracker.record_direct_cost` と `record_client_usage` を追加し、`image_generator.py`（Gemini / OpenAI / xAI の3系統）と standalone の `get_llm_client` 呼び出し漏れ（`media_summary.py`, `entity_extractor.py`, `curation_ops.py`, `day_plan.py`）を修正 PR として実装。

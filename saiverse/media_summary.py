@@ -109,6 +109,16 @@ def invalidate_summary_client() -> None:
     LOGGER.info("All media summary client caches invalidated")
 
 
+def _record_summary_usage(client: Any) -> None:
+    from .usage_tracker import get_usage_tracker
+
+    get_usage_tracker().record_client_usage(
+        client,
+        node_type="media_summary",
+        category="media_summary",
+    )
+
+
 def ensure_image_summary(path: Path, mime_type: str) -> Optional[str]:
     """Ensure an image summary exists; generate if missing.
 
@@ -200,6 +210,8 @@ def _generate_image_summary(path: Path, mime_type: str) -> Optional[str]:
         LOGGER.warning("Image summary generation returned empty result for %s", path)
     except Exception:
         LOGGER.exception("Image summary generation failed for %s", path)
+    finally:
+        _record_summary_usage(client)
     return None
 
 
@@ -275,6 +287,8 @@ def generate_contextual_image_description(
         LOGGER.warning("Contextual image description returned empty result for %s", path)
     except Exception:
         LOGGER.exception("Contextual image description generation failed for %s", path)
+    finally:
+        _record_summary_usage(client)
     return None
 
 
@@ -382,6 +396,8 @@ def _generate_audio_summary(path: Path, mime_type: str) -> Optional[str]:
         LOGGER.warning("Audio summary generation returned empty result for %s", path)
     except Exception:
         LOGGER.exception("Audio summary generation failed for %s", path)
+    finally:
+        _record_summary_usage(client)
     return None
 
 
@@ -428,6 +444,8 @@ def _generate_video_summary(path: Path, mime_type: str) -> Optional[str]:
         LOGGER.warning("Video summary generation returned empty result for %s", path)
     except Exception:
         LOGGER.exception("Video summary generation failed for %s", path)
+    finally:
+        _record_summary_usage(client)
     return None
 
 
@@ -458,4 +476,6 @@ def _generate_document_summary(path: Path) -> Optional[str]:
         LOGGER.warning("Document summary generation returned empty result for %s", path)
     except Exception:
         LOGGER.exception("Document summary generation failed for %s", path)
+    finally:
+        _record_summary_usage(client)
     return None

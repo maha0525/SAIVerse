@@ -770,6 +770,14 @@ def plan_split(
             raise ValueError(f"LLM の応答が不正な型: {type(raw_response)}")
     except Exception as exc:
         raise ValueError(f"execute_split: LLM 呼び出しに失敗: {exc}") from exc
+    finally:
+        from saiverse.usage_tracker import get_usage_tracker
+
+        get_usage_tracker().record_client_usage(
+            llm_client,
+            node_type="curation_ops",
+            category="memory_weave_generate",
+        )
 
     sections = parsed.get("sections") or []
 
