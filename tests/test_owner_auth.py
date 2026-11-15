@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import subprocess
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import api.owner_auth as owner_auth
 from api.owner_auth import BrowserOriginMiddleware, OwnerAuthMiddleware, router
 
 
@@ -105,6 +108,7 @@ def test_browser_origin_allows_local_scripts_without_browser_headers() -> None:
 
 def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> None:
     monkeypatch.setenv("SAIVERSE_ALLOWED_ORIGINS", "https://my-box.tailnet.ts.net:3000")
+    monkeypatch.setattr(owner_auth, "_self_magicdns_hostname", lambda: "my-pc.tailnet-abc.ts.net")
     client = TestClient(_local_app())
 
     assert client.post("/api/items", headers={"Origin": "http://localhost:3000"}).status_code == 200
@@ -117,7 +121,7 @@ def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> 
         "/api/items",
         headers={"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:8000"},
     ).status_code == 200
-    # MagicDNS origin through Next.js route proxy (Host rewritten to 127.0.0.1:8000)
+    # Own MagicDNS origin through Next.js route proxy (Host rewritten to 127.0.0.1:8000)
     assert client.post(
         "/api/items",
         headers={
@@ -125,15 +129,31 @@ def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> 
             "Origin": "http://my-pc.tailnet-abc.ts.net:3000",
         },
     ).status_code == 200
+    # Different tailnet MagicDNS host must still be rejected
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "https://attacker.unrelated-tailnet.ts.net",
+        },
+    ).status_code == 403
 
 
-def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer() -> None:
+def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer(monkeypatch) -> None:
+    monkeypatch.setattr(owner_auth, "_self_magicdns_hostname", lambda: None)
     client = TestClient(_local_app())
 
-    # Untrusted Origin / null Origin / empty Origin / lookalike domain
+    # Untrusted Origin / null Origin / empty Origin / lookalike domain / unrelated MagicDNS
     assert client.post("/api/items", headers={"Origin": "https://evil.example"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": "http://evil-ts.net:3000"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": "https://ts.net"}).status_code == 403
+    assert (
+        client.post(
+            "/api/items",
+            headers={"Origin": "https://attacker.unrelated-tailnet.ts.net"},
+        ).status_code
+        == 403
+    )
     assert client.delete("/api/items/1", headers={"Origin": "null"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": ""}).status_code == 403
 
@@ -152,3 +172,26 @@ def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer() -> None:
 
     # Safe GET requests remain unaffected
     assert client.get("/api/items", headers={"Origin": "https://evil.example"}).status_code == 200
+
+
+def test_self_magicdns_hostname_reads_tailscale_status_json(monkeypatch) -> None:
+    monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout='{"Self": {"DNSName": "My-PC.Tail1234.ts.net."}}',
+            stderr="",
+        ),
+    )
+    assert owner_auth._self_magicdns_hostname() == "my-pc.tail1234.ts.net"
+
+    monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
+
+    def _raise_missing(*args, **kwargs):
+        raise FileNotFoundError("tailscale not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise_missing)
+    assert owner_auth._self_magicdns_hostname() is None

@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import json
 import os
+import subprocess
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, Request
@@ -110,11 +113,45 @@ def websocket_owner_authorized(websocket: object) -> bool:
     return bool(cookie and hmac.compare_digest(cookie, _session_value(token)))
 
 
-def _is_magicdns_origin(origin: str) -> bool:
-    """Tailscale MagicDNS (``*.ts.net``) 由来のブラウザ Origin か判定する。
+_MAGICDNS_CACHE_TTL_SECONDS = 60.0
+_magicdns_cache: tuple[float, str | None] | None = None
 
-    Next.js の ``dev-origins.cjs`` と同じ信頼境界に揃え、``SAIVERSE_ALLOWED_ORIGINS``
-    未設定の既定ローカル起動でもスマホ等からの MagicDNS 接続を通す。
+
+def _self_magicdns_hostname() -> str | None:
+    """この端末自身の Tailscale MagicDNS ホスト名を ``tailscale status --json`` から取得する。"""
+    global _magicdns_cache
+    now = time.monotonic()
+    if _magicdns_cache is not None and (now - _magicdns_cache[0]) < _MAGICDNS_CACHE_TTL_SECONDS:
+        return _magicdns_cache[1]
+
+    hostname: str | None = None
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout:
+            data = json.loads(result.stdout)
+            self_info = data.get("Self")
+            if isinstance(self_info, dict):
+                dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".").lower()
+                if dns_name.endswith(".ts.net") and len(dns_name) > len(".ts.net"):
+                    hostname = dns_name
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        hostname = None
+
+    _magicdns_cache = (now, hostname)
+    return hostname
+
+
+def _is_magicdns_origin(origin: str) -> bool:
+    """この端末自身の Tailscale MagicDNS (``*.ts.net``) 由来のブラウザ Origin か判定する。
+
+    ``SAIVERSE_ALLOWED_ORIGINS`` 未設定の既定ローカル起動でも、端末自身の
+    MagicDNS ホスト経由のアクセスだけを通し、他 tailnet の ``*.ts.net`` は拒否する。
     """
     try:
         parsed = urlsplit(origin)
@@ -123,7 +160,10 @@ def _is_magicdns_origin(origin: str) -> bool:
     if parsed.scheme not in ("http", "https"):
         return False
     host = (parsed.hostname or "").lower()
-    return len(host) > len(".ts.net") and host.endswith(".ts.net")
+    if not (len(host) > len(".ts.net") and host.endswith(".ts.net")):
+        return False
+    self_host = _self_magicdns_hostname()
+    return bool(self_host and host == self_host)
 
 
 def _browser_origin_allowed(origin: str, request: Request) -> bool:
