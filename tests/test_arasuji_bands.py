@@ -1144,6 +1144,33 @@ class TestFragmentCallback(BandTestBase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][0], 1)
 
+    def test_dry_detail_counts_the_same_identity_extractions_as_the_run(self):
+        """見積もり用の dry 計画 (plan_band_overflow_detail) が、実行で抽出が
+        走る恒等圧縮の子と同じ数を言う (見積もりと実行が同じ計画から数える)。"""
+        from sai_memory.arasuji.bands import plan_band_overflow_detail
+        from sai_memory.memory.storage import add_message
+        mid = add_message(self.conn, "main", "user", "生ログ本文", created_at=900)
+        _entry(self.conn, start=1000, coverage=900, origin="identity",
+               source_ids=[mid])
+        for i in range(9):
+            _entry(self.conn, start=2000 + i * 100, coverage=10_000)
+        folds, identity = plan_band_overflow_detail(self.conn)
+        self.assertEqual(folds, 1)
+        # 字数は被覆字数 (900) ではなく、抽出が実際に送る元メッセージの字数
+        from sai_memory.memory.entity_extractor import extraction_input_chars
+        from sai_memory.memory.storage import get_messages_by_ids
+        self.assertEqual(
+            identity,
+            [extraction_input_chars(get_messages_by_ids(self.conn, [mid]))],
+        )
+
+        seen = []
+        run_band_overflow(
+            self.conn, _Client(),
+            batch_callback=lambda msgs, eid: seen.append(eid),
+        )
+        self.assertEqual(len(seen), len(identity))
+
     def test_missing_source_messages_are_a_failure_not_a_partial_success(self):
         """⭐ 元メッセージが欠けていたら、残った分だけ抽出して成功にしない。
 

@@ -120,6 +120,8 @@ export interface ClaudePreviewData {
   memory_items: ClaudeMemoryItemSummary[];
   cache_key: string;
   total_count: number;
+  /** 同じファイルに入っていた、ほかの取り込める種類 (古い形の 1 つの ZIP) */
+  also_contains?: string[];
 }
 
 /** preview が 400 で返す構造化エラー (カテゴリ違い・対象外カテゴリの案内) */

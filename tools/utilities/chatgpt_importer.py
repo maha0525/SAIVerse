@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import textwrap
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,7 +16,32 @@ LOGGER = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
-_CONVERSATIONS_RE = re.compile(r"conversations(?:-\d+)?\.json$")
+# ファイル名の先頭を固定する (ZIP の中のフォルダ区切りの直後か、名前の頭)。
+# 固定しないと、エクスポートに同梱される共有リンクの一覧
+# shared_conversations.json まで会話として読み、発言 0 件の「会話」が
+# 一覧に並ぶ (同じ conversation_id を持つので、id で選ぶと本物と一緒に
+# 選ばれる)。
+_CONVERSATIONS_RE = re.compile(r"(?:^|/)conversations(?:-\d+)?\.json$")
+
+
+def shorten_text(text: str, width: int, placeholder: str = "…") -> str:
+    """一覧・題・概要用に、空白をまとめて ``width`` 文字以内へ縮める。
+
+    ``textwrap.shorten`` は空白でしか切らないので、空白の無い長い日本語を
+    「…」だけにしてしまう (途中に空白があっても、長い一続きの部分ごと落ちる)。
+    ここでは文字数で切る。英語などで単語の途中になるときだけ、残す部分の
+    後ろ半分に空白があればそこで切る。結果は必ず ``width`` 文字以内。
+    """
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) <= width:
+        return collapsed
+    room = max(width - len(placeholder), 1)
+    head = collapsed[:room]
+    if collapsed[room] != " " and not head.endswith(" "):
+        space = head.rfind(" ")
+        if space >= room // 2:
+            head = head[:space]
+    return head.rstrip() + placeholder
 
 
 def _load_conversations_payload(source: Path) -> list[dict[str, Any]]:
@@ -230,7 +254,7 @@ class ConversationRecord:
             candidate = next((m.content for m in self.messages if m.content), "")
         if not candidate:
             return ""
-        return textwrap.shorten(candidate.replace("\n", " ").strip(), width=max(10, limit), placeholder="…")
+        return shorten_text(candidate, max(10, limit))
 
     def to_summary_dict(self, *, preview_chars: int = 120) -> dict[str, Any]:
         return {

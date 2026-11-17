@@ -747,6 +747,51 @@ def plan_band_overflow(
     Returns:
         予測される LLM コール回数。
     """
+    return len(_plan_folds(_dry_rows(conn, extra_leaves)))
+
+
+def plan_band_overflow_detail(
+    conn: sqlite3.Connection,
+    *,
+    extra_leaves: Optional[Sequence[Sequence]] = None,
+) -> Tuple[int, List[int]]:
+    """:func:`plan_band_overflow` に、束ねに伴う Fragment 抽出の見込みを添える。
+
+    実行 (:func:`run_band_overflow`) は束ねを確定した直後、子のうち旧設計の
+    恒等圧縮 (digest_origin="identity") の entry にだけ Fragment 抽出を
+    走らせる (:func:`_fire_identity_fragment_callbacks`)。抽出は 1 子につき
+    LLM 1 回なので、見積もりも同じ計画から「どの子が畳まれるか」を数える
+    (見積もりと実行が同じ計画から数える — import_chronicle_offer.md 不変条件 1)。
+
+    Returns:
+        ``(束ねの LLM コール回数, 抽出が送る会話の字数の列 (恒等圧縮の子ごと))``。
+        列の長さが抽出の LLM コール回数。字数は実行と同じく子の元メッセージを
+        読み、抽出のプロンプトと同じ組み立てで数える
+        (entity_extractor.extraction_input_chars — 被覆字数は長い機構名義の
+        行を縮めた後の字数なので使わない)。dry の模擬ノード (これから確定する
+        新チャンク) は恒等圧縮ではないので数えない。
+    """
+    from sai_memory.memory.entity_extractor import extraction_input_chars
+
+    folds = _plan_folds(_dry_rows(conn, extra_leaves))
+    children = [
+        item.entry for fold in folds for item in fold.items
+        if item.entry is not None and item.entry.source_ids
+    ]
+    origins = _digest_origins(conn, [entry.id for entry in children])
+    identity_chars = [
+        extraction_input_chars(_load_messages_by_ids(conn, entry.source_ids))
+        for entry in children
+        if origins.get(entry.id) == "identity"
+    ]
+    return len(folds), identity_chars
+
+
+def _dry_rows(
+    conn: sqlite3.Connection,
+    extra_leaves: Optional[Sequence[Sequence]],
+) -> Dict[int, List[_RowItem]]:
+    """dry 予測用の並び — 既存の並び + これから確定する新チャンク。"""
     rows = _load_rows(conn)
     if extra_leaves:
         row1 = rows.setdefault(1, [])
@@ -763,7 +808,7 @@ def plan_band_overflow(
             i.end_time if i.end_time is not None else 0,
             i.start_time if i.start_time is not None else 0,
         ))
-    return len(_plan_folds(rows))
+    return rows
 
 
 # ---------------------------------------------------------------------------

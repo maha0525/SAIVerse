@@ -128,3 +128,22 @@ def test_failed_instruction_append_releases_reservation(client, monkeypatch, tmp
     res = client.post(f"/api/people/{PERSONA_ID}/import/claude", json=body)
     assert res.status_code == 200, res.text
     assert len(started) == 1
+
+
+def test_preview_of_a_legacy_bundle_reads_the_slot_and_lists_the_rest(
+    client, tmp_path,
+):
+    """古い形の 1 つの ZIP を記憶の枠に落とすと記憶を読み、同じファイルに
+    入っているほかの種類を also_contains で返す (画面が知らせる)。"""
+    from tests.test_claude_importer import _legacy_bundle
+    src = _legacy_bundle(tmp_path)
+    res = client.post(
+        f"/api/people/{PERSONA_ID}/import/claude/preview",
+        files={"file": ("data-legacy.zip", src.read_bytes(), "application/zip")},
+        data={"expected_category": "memories"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["category"] == "memories"
+    assert body["memory_items"]
+    assert set(body["also_contains"]) == {"conversations", "projects"}

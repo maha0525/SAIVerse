@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -148,7 +147,8 @@ def handle_list(export: MuseExport, *, preview: int, output: str) -> None:
 def _truncate(value: str, width: int) -> str:
     if len(value) <= width:
         return value
-    return textwrap.shorten(value, width=width, placeholder="…")
+    from tools.utilities.chatgpt_importer import shorten_text
+    return shorten_text(value, width)
 
 
 def _workspace_cell(summary: dict) -> str:

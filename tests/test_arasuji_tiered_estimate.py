@@ -26,10 +26,10 @@ def test_estimate_uses_each_request_not_total_or_average(monkeypatch, caplog, mo
     monkeypatch.setattr(storage, 'count_entries_by_level', lambda conn: {})
     monkeypatch.setattr(alignment, 'plan_alignment', lambda *args, **kwargs: plan)
     monkeypatch.setattr(absorption, 'split_plan_for_absorption', lambda *args, **kwargs: (plan, []))
-    monkeypatch.setattr(absorption, 'uncovered_tail_zone', lambda *args: ([], None, None))
+    monkeypatch.setattr(absorption, 'uncovered_tail_zone', lambda *args, **kwargs: ([], None, None))
     monkeypatch.setattr(absorption, 'list_stale_upper_ids', lambda conn: [])
     monkeypatch.setattr(absorption, 'list_sweep_regen_ids', lambda conn: [])
-    monkeypatch.setattr(bands, 'plan_band_overflow', lambda *args, **kwargs: 0)
+    monkeypatch.setattr(bands, 'plan_band_overflow_detail', lambda *args, **kwargs: (0, []))
     monkeypatch.setattr(memopedia, 'Memopedia', lambda *args, **kwargs: SimpleNamespace(get_tree_markdown=lambda **kwargs: ''))
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = []
@@ -37,9 +37,19 @@ def test_estimate_uses_each_request_not_total_or_average(monkeypatch, caplog, mo
     with caplog.at_level(10, logger="saiverse.model_configs"):
         estimate = estimate_chronicle_generation_cost(conn, model_name=model, messages_override=[])
     assert not [r for r in caplog.records if r.name == "saiverse.model_configs" and "Cost calculated:" in r.message]
-    expected = round(sum(calculate_cost(model, tokens, 400) for tokens in inputs), 6)
+    # 一次あらすじ 1 回と、それに相乗りする Fragment 抽出 1 回 (出力見込み
+    # EXTRACTION_OUTPUT_TOKENS) の両方に、一回ずつ tier を当てる。抽出の
+    # 入力は抽出が実際に送る会話の字数 (この見本のチャンクは発言が空なので
+    # 会話 0 字 + 指示の 500 トークン) — あらすじの材料字数は使わない。
+    from sai_memory.arasuji.estimate import EXTRACTION_OUTPUT_TOKENS
+    expected = round(sum(
+        calculate_cost(model, tokens, 400)
+        + calculate_cost(model, 500, EXTRACTION_OUTPUT_TOKENS)
+        for tokens in inputs
+    ), 6)
     assert estimate.estimated_cost_usd == pytest.approx(expected)
     assert estimate.level1_calls == len(inputs)
+    assert estimate.extraction_calls == len(inputs)
 
 
 @pytest.mark.parametrize('model', ['claude-haiku-5.5', 'no-pricing-probe'])

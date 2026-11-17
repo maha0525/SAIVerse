@@ -185,6 +185,7 @@ def estimate_chronicle_cost(
         # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が吸収を見送るのと同形。
         # 束ねの見積もりはこの集合を使わない — 実行と同じく除外なし
         # (chronicle_consolidation_veto_removal 機構 A、2026-09-27)。
+        from sea.coverage_repair import window_thread_id
         from sea.session_lifecycle import collect_folded_chronicle_entry_ids
         try:
             folded_entry_ids = collect_folded_chronicle_entry_ids(manager, persona_id)
@@ -216,6 +217,10 @@ def estimate_chronicle_cost(
             db_lock=_adapter._db_lock if _adapter is not None else None,
             compile_before=compile_before,
             tail_fold_estimator=tail_fold_estimator,
+            # 末尾の帯の判定は生成経路と同じく、窓が読むスレッドの行だけ
+            window_thread_id=(
+                window_thread_id(persona) if persona is not None else None
+            ),
         )
 
         # 前回の吸収ジョブの未完了 (裁定 6): 再起動を跨いで残る印
@@ -245,6 +250,7 @@ def estimate_chronicle_cost(
             currency=estimate.currency,
             repair_incomplete=repair_incomplete,
             consolidation_calls=estimate.consolidation_calls,
+            extraction_calls=estimate.extraction_calls,
         )
     finally:
         conn.close()

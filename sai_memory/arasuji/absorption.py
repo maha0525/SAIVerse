@@ -191,6 +191,34 @@ def _load_messages(conn: sqlite3.Connection, message_ids: Sequence[str]):
     return get_messages_by_ids(conn, [str(m) for m in message_ids])
 
 
+def item_material_message_ids(
+    item: "AbsorptionItem", neighbors: Sequence[ArasujiEntry],
+) -> List[str]:
+    """吸収 1 件の材料のメッセージ id = run の生ログ + 開き直す隣人の source。
+
+    実行 (:func:`run_absorption`) が再生成と Fragment 抽出に渡す範囲。見積もり
+    (estimate.py) も同じ関数で範囲を決め、抽出が実際に送る字数を数える。
+    """
+    ids = [str(m) for m in item.run_message_ids]
+    for entry in neighbors:
+        ids.extend(str(s) for s in entry.source_ids)
+    return ids
+
+
+def estimate_item_extraction_chars(
+    conn: sqlite3.Connection, item: "AbsorptionItem",
+) -> int:
+    """吸収 1 件の Fragment 抽出が送る会話の字数 (見積もり用、読むだけ)。"""
+    from sai_memory.memory.entity_extractor import extraction_input_chars
+    neighbors = [
+        e for e in (get_entry(conn, eid) for eid in item.absorbed_entry_ids)
+        if e is not None
+    ]
+    return extraction_input_chars(
+        _load_messages(conn, item_material_message_ids(item, neighbors)),
+    )
+
+
 def list_stale_upper_ids(conn: sqlite3.Connection) -> List[str]:
     """content_stale の印を持つ上位エントリ id (level 昇順 → end_time 昇順)。
 
@@ -215,6 +243,8 @@ def list_stale_upper_ids(conn: sqlite3.Connection) -> List[str]:
 def uncovered_tail_zone(
     tiny_chunks: Sequence[PlannedChunk],
     ordered_messages: Sequence,
+    *,
+    window_thread_id: Optional[str] = None,
 ) -> tuple:
     """末尾の未被覆帯 = anchor 引き戻しの対象、の検出 (純関数)。
 
@@ -227,6 +257,15 @@ def uncovered_tail_zone(
     続く末尾の端数で、隣は提示窓 — anchor を帯の最古まで引き戻せば帯は窓の
     中に入り、§16-1 の不変条件が LLM ゼロで満たされる。
 
+    **帯は提示窓が読むスレッドの行だけから作る** (``window_thread_id``)。窓
+    (get_messages_from_id) は anchor の位置以降を**そのスレッドの行だけ**読む
+    ので、別スレッドの行へ anchor を戻しても、その行は窓に入らない — 吸収
+    からも外され、どこにも入らないまま「直すものなし」に見える (2026-11-17、
+    取り込んだ別スレッドの極小 run が時刻の新しい側に来る形で隔離テストで
+    確認)。別スレッドの極小 run は帯に入れず、通常どおり同じスレッドの隣人へ
+    吸収される。None = スレッドを区別しない (窓を持たない CLI 用 — CLI は
+    引き戻しを実行しない)。
+
     Returns:
         ``(zone_run_ids, first_message_id, zone_chunk_indices)``。帯が無ければ
         ``([], None, set())``。zone_run_ids は正典順。
@@ -237,7 +276,12 @@ def uncovered_tail_zone(
             membership[m.id] = idx
     zone_ids: List[str] = []
     zone_indices: Set[int] = set()
-    for m in reversed(list(ordered_messages)):
+    candidates = [
+        m for m in ordered_messages
+        if window_thread_id is None
+        or getattr(m, "thread_id", None) == window_thread_id
+    ]
+    for m in reversed(candidates):
         idx = membership.get(m.id)
         if idx is None:
             break
@@ -257,6 +301,7 @@ def plan_absorption(
     *,
     target_chars: int,
     excluded_entry_ids: FrozenSet[str] = frozenset(),
+    window_thread_id: Optional[str] = None,
 ) -> AbsorptionPlan:
     """極小 run の吸収を「開く隣人ごと」に計画する。決定論・LLM なし。
 
@@ -297,7 +342,9 @@ def plan_absorption(
       再生成する。欠けは WARNING で可視化)。「処理済みメッセージに被覆 Lv1 が
       引けない」停止は別の防御で、従来どおり残す。
     - **末尾の未被覆帯 (uncovered_tail_zone) は吸収の対象外** — anchor 引き
-      戻しの対象として ``rewind_run_ids`` に載せる (裁定 5 改訂)。
+      戻しの対象として ``rewind_run_ids`` に載せる (裁定 5 改訂)。帯は
+      ``window_thread_id`` (提示窓が読むスレッド) の行だけから作る —
+      :func:`uncovered_tail_zone` 参照。
     """
     from sai_memory.arasuji.generator import material_chars
     from sai_memory.memory.storage import filter_real_conversation_ids
@@ -322,7 +369,7 @@ def plan_absorption(
     consumed: Set[int] = set()
     # 末尾の未被覆帯は吸収の walk に入れない — anchor 引き戻しの対象 (LLM ゼロ)。
     zone_ids, zone_first, zone_indices = uncovered_tail_zone(
-        tiny_chunks, ordered,
+        tiny_chunks, ordered, window_thread_id=window_thread_id,
     )
     if zone_first is not None:
         plan.rewind_run_ids = zone_ids
@@ -1412,9 +1459,9 @@ def run_absorption(
                 snapshots.append(entry)
             if not missing:
                 # 材料 = run の生ログ + 開き直す隣人の source 生ログ (連続範囲)。
-                material_ids = list(item.run_message_ids)
-                for entry in snapshots:
-                    material_ids.extend(str(s) for s in entry.source_ids)
+                # この messages は Fragment 抽出 (batch_callback) にも渡る —
+                # 見積もりは同じ関数で同じ範囲を数える。
+                material_ids = item_material_message_ids(item, snapshots)
                 messages = _load_messages(conn, material_ids)
                 # 旧隣人の材料だった知覚バッチも材料として渡す
                 # (regenerate_entry と同型)。

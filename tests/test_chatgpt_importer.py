@@ -302,5 +302,99 @@ class ChatGPTImporterFailureTest(unittest.TestCase):
         self.assertIn("バックフィルに失敗", err)
 
 
+class ShortenTextTest(unittest.TestCase):
+    """一覧・題・概要の短縮 (shorten_text)。
+
+    2026-11-17 まで textwrap.shorten を使っていて、空白の無い長い日本語が
+    「…」1 文字になっていた。
+    """
+
+    def test_long_japanese_without_spaces_keeps_its_head(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        text = "空白の無い長い日本語の文章です" * 10
+        out = shorten_text(text, 50)
+        self.assertEqual(len(out), 50)
+        self.assertEqual(out, text[:49] + "…")
+
+    def test_a_long_run_after_a_space_is_not_dropped(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        out = shorten_text("前置き " + "続きの長い日本語" * 20, 30)
+        self.assertTrue(out.startswith("前置き 続きの長い日本語"))
+        self.assertLessEqual(len(out), 30)
+
+    def test_english_cuts_at_a_word_boundary_and_collapses_spaces(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        self.assertEqual(
+            shorten_text("Hello   from\nthe  user who writes a lot", 20),
+            "Hello from the user…",
+        )
+        self.assertEqual(shorten_text("short  text", 20), "short text")
+
+    def test_preview_title_and_memory_summary_use_it(self) -> None:
+        from tools.utilities.claude_importer import ClaudeMemoryItem, _shorten
+        text = "空白の無い長い日本語の文章です" * 10
+        conv = _sample_conversation()
+        conv["mapping"]["user-msg"]["message"]["content"]["parts"] = [text]
+        from tools.utilities.chatgpt_importer import _build_record
+        preview = _build_record(conv).first_user_preview(limit=120)
+        self.assertEqual(preview, text[:119] + "…")
+        self.assertEqual(_shorten(text, 50), text[:49] + "…")  # Claude Code の題
+        item = ClaudeMemoryItem(
+            item_id="project_memory:p", kind="project_memory",
+            title="p", content=text,
+        )
+        # プロジェクト記憶の Memopedia 概要 (import_claude.py が 100 字で使う)
+        self.assertEqual(
+            item.to_summary_dict(preview_chars=100)["preview"], text[:99] + "…",
+        )
+
+
+class ChatGPTExportZipFileSelectionTest(unittest.TestCase):
+    """ZIP の中から会話のファイルだけを読む。"""
+
+    def _zip(self, files: Dict[str, Any]) -> Path:
+        import zipfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "export.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, payload in files.items():
+                zf.writestr(name, json.dumps(payload))
+        return path
+
+    def test_shared_conversations_list_is_not_read_as_conversations(self) -> None:
+        """共有リンクの一覧 (shared_conversations.json) は会話ではない。
+
+        2026-11-17 まで、名前の途中で一致して読み込み、発言 0 件の「会話」が
+        本物と同じ conversation_id で一覧に並んでいた。
+        """
+        conv = _sample_conversation()
+        path = self._zip({
+            "conversations.json": [conv],
+            "shared_conversations.json": [{
+                "id": "share-abc",
+                "conversation_id": conv["conversation_id"],
+                "title": conv["title"],
+                "is_anonymous": True,
+            }],
+        })
+        records = ChatGPTExport(path).conversations
+        self.assertEqual([r.identifier for r in records], ["conversation-1"])
+
+    def test_numbered_and_nested_conversation_files_are_read(self) -> None:
+        first = _sample_conversation()
+        second = dict(_sample_conversation(), id="conversation-2",
+                      conversation_id="chatgpt-uuid-5678")
+        path = self._zip({
+            "conversations-000.json": [first],
+            "export/conversations-001.json": [second],
+        })
+        records = ChatGPTExport(path).conversations
+        self.assertEqual(
+            sorted(r.identifier for r in records),
+            ["conversation-1", "conversation-2"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -608,6 +608,109 @@ class TestEstimateGenerationParity:
         assert len(compiled) == est.unprocessed_messages
 
 
+class _CountingClient:
+    """LLM の代わり — 呼ばれたプロンプトを数えるだけ (本物の LLM は呼ばない)。"""
+
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, messages=None, tools=None, **kwargs):
+        self.prompts.append(str(messages[-1]["content"]) if messages else "")
+        return "あらすじの本文です。"
+
+
+class TestEstimateCountsFragmentExtraction:
+    """見積もりは一次あらすじに相乗りする Fragment 抽出の LLM 呼び出しも数える。
+
+    2026-11-17: 抽出を数えておらず、見積もり 6 回に対し実走 12 回だった
+    (import_chronicle_offer.md 不変条件 1 の破れ)。既存の一致テストは抽出を
+    止めて実走していたので、この差が映らなかった — ここでは抽出を生かしたまま、
+    本物の executor と entity_extractor が LLM を呼んだ回数を数える。
+    """
+
+    def test_estimated_calls_match_actual_calls_with_extraction(
+        self, adapter, session_factory,
+    ):
+        ids = _add_messages(adapter, 8)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", ids[6])
+        persona = _model_persona(adapter, "model-a")
+        est = _estimate(lc, adapter, persona)
+        assert est.level1_calls == 6
+        assert est.extraction_calls == 6
+
+        client = _CountingClient()
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=("mock-model", {"provider": "mock", "context_length": 1000}),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=client,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ):
+            assert lc.generate_chronicle(persona, force=True) == "ok"
+
+        extraction_prompts = [
+            p for p in client.prompts if p.startswith("あなたは知識ベースの整理係です")
+        ]
+        assert len(extraction_prompts) == est.extraction_calls
+        assert len(client.prompts) == est.estimated_llm_calls
+
+    def test_extraction_input_counts_full_text_not_condensed_material(
+        self, adapter, session_factory,
+    ):
+        """抽出の入力字数は、抽出が実際に送る全文で数える。
+
+        あらすじの材料 (coverage_chars) は 500 字を超える機構名義の行 (Spell
+        結果など) を一行に縮めるが、抽出は本文を全文送る。材料字数を流用すると
+        10 万字の Spell 結果が数十字として数えられ、費用を大きく少なく見せる
+        (Codex レビュー PR #492)。
+        """
+        from sai_memory.memory.entity_extractor import extraction_input_chars
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        big = "結" * 100_000
+        ids = _add_messages(adapter, 2)
+        spell_id = adapter.append_persona_message({
+            "role": "assistant", "content": big,
+            "timestamp": (BASE_TIME + timedelta(minutes=2)).isoformat(),
+            "metadata": {"tags": ["spell"]},
+        })
+        tail = _add_messages(adapter, 2, start_minute=3)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", tail[1])
+        persona = _model_persona(adapter, "model-a")
+
+        est = _estimate(lc, adapter, persona)
+        assert est.extraction_calls >= 1
+        targets = [
+            m for m in get_messages_for_chronicle(adapter.conn)
+            if m.id in {*ids, spell_id, tail[0]}
+        ]
+        # 見積もりは抽出が送る全文の字数と一致する (縮めた材料ではない)。
+        # 抽出はチャンクごとに組み立てるので、通しで組み立てた字数から
+        # チャンクの境目の区切り ("\n\n") の分だけ少ない。
+        separators = (est.extraction_calls - 1) * len("\n\n")
+        assert est.extraction_input_chars == (
+            extraction_input_chars(targets) - separators
+        )
+        assert est.extraction_input_chars > 100_000
+
+    def test_without_extraction_counts_none(self, adapter, session_factory):
+        """CLI で --with-memopedia を付けない実行と同形 — 抽出は 0。"""
+        from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+        from sai_memory.arasuji.storage import init_arasuji_tables
+        _add_messages(adapter, 4)
+        init_arasuji_tables(adapter.conn)
+        est = estimate_chronicle_generation_cost(
+            adapter.conn, model_name="mock-model", with_extraction=False,
+        )
+        assert est.level1_calls >= 1
+        assert est.extraction_calls == 0
+        assert est.estimated_llm_calls == (
+            est.level1_calls + est.consolidation_calls + est.upper_regen_calls
+        )
+
+
 # ---------------------------------------------------------------------------
 # 冷えた anchor 行への印 (§15 の presented_raw の追記)
 # ---------------------------------------------------------------------------
@@ -998,17 +1101,19 @@ class TestSilentOnlyRunEndToEnd:
         from api.routes.people import arasuji as arasuji_api
         from sea.cancellation import CancellationToken
 
-        # 発話ゼロの極小 run (機構の記録だけ)。隣は別スレッドのみ = 吸収されず、
-        # 後ろに編纂済みが居るので末尾の引き戻し帯にもならない。
+        # 発話ゼロの極小 run (機構の記録だけ) を、窓が読まないスレッド (t2) に
+        # 置く。同じスレッドに隣が居ない = 吸収されず、窓のスレッドの行では
+        # ないので末尾の引き戻し帯にもならない (帯は窓が読むスレッドの行だけで
+        # 判定する — 2026-11-17)。
         adapter.append_persona_message({
             "role": "user", "content": "入室の記録",
             "timestamp": BASE_TIME.isoformat(),
             "metadata": {"tags": ["event_message"]},
-        })
+        }, thread_suffix="t2")
         n1 = adapter.append_persona_message({
             "role": "user", "content": "会話 " + "あ" * 300,
             "timestamp": (BASE_TIME + timedelta(minutes=10)).isoformat(),
-        }, thread_suffix="t2")
+        })
         assert n1 is not None
         _create_entry(adapter.conn, [n1])
 

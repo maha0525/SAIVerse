@@ -486,3 +486,80 @@ def test_separate_core_memory_import_notices_are_not_folded(tmp_path: Path) -> N
         assert "core:2: Top of mind: 二回目" in contents
     finally:
         conn.close()
+
+
+# --- 古い形の 1 つの ZIP (2026-07 頃まで) -----------------------------------
+# 最上位に conversations.json・memories.json・projects.json・users.json が並ぶ。
+# memories.json の形は SAIVerse Lite の記録 (2026-07-15、実物で確認) に倣う:
+# 最上位が [{conversations_memory, project_memories, account_uuid}] の配列。
+# projects.json の形は記録が無いので、今の projects/<uuid>.json と同じ要素の
+# 配列として扱う (形が違えば 0 件になるだけで、壊れはしない)。
+
+def _legacy_bundle(tmp_path: Path) -> Path:
+    return _zip_with(tmp_path / "data-legacy.zip", {
+        "users.json": [{"uuid": "acc-1", "full_name": "x"}],
+        "conversations.json": _sample_conversations(),
+        "memories.json": [{
+            "conversations_memory": "**Work context**\n全体の記憶",
+            "project_memories": {"proj-uuid-1": "プロジェクトの記憶"},
+            "account_uuid": "acc-1",
+        }],
+        "projects.json": [{
+            "uuid": "proj-1", "name": "アイフィ",
+            "prompt_template": "あなたは「アイフィ」です。", "docs": [],
+        }],
+    })
+
+
+def test_legacy_bundle_reads_the_category_of_the_slot(tmp_path: Path) -> None:
+    """2026-11-17 まで、最初に当たった会話だけを読み、同じ ZIP の記憶と
+    プロジェクトは黙って取り残していた (記憶の枠に落とすと「会話の枠へ」と
+    断られ、どの枠からも辿り着けなかった)。"""
+    from tools.utilities.claude_importer import detect_categories
+    src = _legacy_bundle(tmp_path)
+    assert set(detect_categories(src)) >= {
+        CATEGORY_CONVERSATIONS, CATEGORY_MEMORIES, CATEGORY_PROJECTS,
+    }
+
+    conv = load_claude_export(src, expected_category=CATEGORY_CONVERSATIONS)
+    assert conv.category == CATEGORY_CONVERSATIONS
+    assert conv.conversations
+    assert set(conv.also_contains) == {CATEGORY_MEMORIES, CATEGORY_PROJECTS}
+
+    mem = load_claude_export(src, expected_category=CATEGORY_MEMORIES)
+    assert mem.category == CATEGORY_MEMORIES
+    ids = [i.item_id for i in mem.memory_items]
+    assert any(i.is_core for i in mem.memory_items)
+    assert "project_memory:proj-uuid-1" in ids
+    assert set(mem.also_contains) == {CATEGORY_CONVERSATIONS, CATEGORY_PROJECTS}
+
+    # 枠の指定が無い / 枠の種類が入っていない: 先頭の users.json (取り込み
+    # 対象外) で ZIP ごと断らず、取り込める種類を読む (2026-11-17 まで断っていた)
+    assert load_claude_export(src).category == CATEGORY_CONVERSATIONS
+
+    proj = load_claude_export(src, expected_category=CATEGORY_PROJECTS)
+    assert proj.category == CATEGORY_PROJECTS
+    assert [r.identifier for r in proj.conversations] == ["proj-1"]
+    assert proj.project_instructions == {"proj-1": "あなたは「アイフィ」です。"}
+
+
+def test_legacy_memories_json_alone_is_recognised(tmp_path: Path) -> None:
+    """展開した古い memories.json (最上位が配列) を単体で投げ込んでも読める。"""
+    src = tmp_path / "upload.tmp"
+    src.write_text(json.dumps([{
+        "conversations_memory": "全体の記憶", "project_memories": {},
+        "account_uuid": "acc-1",
+    }], ensure_ascii=False), encoding="utf-8")
+    assert detect_category(src) == CATEGORY_MEMORIES
+    export = load_claude_export(src)
+    assert [i.content for i in export.memory_items if i.is_core] == ["全体の記憶"]
+
+
+def test_current_single_category_zip_reports_nothing_else(tmp_path: Path) -> None:
+    src = _zip_with(tmp_path / "conversations-000.zip", {
+        "conversations.json": _sample_conversations(),
+    })
+    export = load_claude_export(src, expected_category=CATEGORY_MEMORIES)
+    # 枠と中身が食い違う形は従来どおり (呼び出し側が「会話の枠へ」と案内する)
+    assert export.category == CATEGORY_CONVERSATIONS
+    assert export.also_contains == []
