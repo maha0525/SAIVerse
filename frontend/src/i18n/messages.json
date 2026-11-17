@@ -13235,6 +13235,10 @@
     "ja": "{p1} 件をインポート",
     "en": "Import {p1} item(s)"
   },
+  "components.memory.ClaudeImportPanel.text071": {
+    "ja": "このファイルには「{p1}」も入っています。同じファイルをその枠にも入れると取り込めます。",
+    "en": "This file also contains \"{p1}\". Put the same file in that slot to import it too."
+  },
   "components.memory.ClaudeImportPanel.text039": {
     "ja": "コア記憶に {p1} 件を追加しました（既存のためスキップ: {p2} 件）。",
     "en": "Added {p1} item(s) to core memory ({p2} skipped as already present)."

@@ -720,6 +720,19 @@
     border-color: #fca5a5;
     color: #991b1b;
 }
+
+/* 知らせ (成功でも失敗でもない) — 同じファイルにほかの種類も入っている等 */
+.result.notice {
+    background-color: rgba(51, 154, 240, 0.1);
+    border: 1px solid #339af0;
+    color: #d0ebff;
+}
+
+:global([data-theme="light"]) .result.notice {
+    background-color: #eff6ff;
+    border-color: #93c5fd;
+    color: #1e3a8a;
+}
 /* ---- Claude 公式エクスポート タブ (ClaudeImportPanel) ---- */
 
 .claudeContainer {

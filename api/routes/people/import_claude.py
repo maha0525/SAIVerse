@@ -312,7 +312,11 @@ async def preview_claude_export(
     try:
         from tools.utilities.claude_importer import ClaudeImportError, load_claude_export
         try:
-            export_file = load_claude_export(tmp_path)
+            # 落とされた枠の種類がファイルに入っていればそれを読む (古い形の
+            # 1 つの ZIP に会話・記憶・プロジェクトが並ぶ場合)
+            export_file = load_claude_export(
+                tmp_path, expected_category=expected_category,
+            )
         except ClaudeImportError as e:
             _cleanup()
             raise HTTPException(status_code=400, detail={
@@ -362,6 +366,7 @@ async def preview_claude_export(
             _cleanup()
             return ClaudePreviewResponse(
                 category=export_file.category, cache_key="", total_count=0,
+                also_contains=export_file.also_contains,
             )
 
         cache_key = str(uuid.uuid4())
@@ -376,6 +381,7 @@ async def preview_claude_export(
             memory_items=memory_summaries,
             cache_key=cache_key,
             total_count=total,
+            also_contains=export_file.also_contains,
         )
     except HTTPException:
         raise

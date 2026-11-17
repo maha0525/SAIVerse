@@ -295,6 +295,9 @@ class ClaudePreviewResponse(BaseModel):
     memory_items: List[ClaudeMemoryItemSummary] = []
     cache_key: str
     total_count: int
+    # 同じファイルに入っていた、ほかの取り込める種類 (古い形の 1 つの ZIP)。
+    # 画面は「同じファイルをその枠にも入れてください」と知らせる。
+    also_contains: List[str] = []
 
 class ClaudeImportRequest(BaseModel):
     cache_key: str

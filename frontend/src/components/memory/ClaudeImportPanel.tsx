@@ -256,6 +256,16 @@ export default function ClaudeImportPanel({ personaId, onStart, onDirectDone }: 
     </div>
   );
 
+  // 古い形の 1 つの ZIP には会話・記憶・プロジェクトが並ぶ。この枠で読んだ
+  // 種類のほかに入っていたものを知らせる (黙って取り残さない)。
+  const otherKinds = (preview?.also_contains ?? []).map(categoryName).join(' / ');
+  const alsoContainsNotice = otherKinds && (
+    <div className={`${styles.result} ${styles.notice}`}>
+      <AlertCircle size={16} />
+      <span data-i18n="components.memory.ClaudeImportPanel.text071">{uiText('components.memory.ClaudeImportPanel.text071', { p1: otherKinds })}</span>
+    </div>
+  );
+
   if (phase === 'select' && preview) {
     const allSelected = selectedIds.size === preview.conversations.length;
     return (
@@ -265,6 +275,7 @@ export default function ClaudeImportPanel({ personaId, onStart, onDirectDone }: 
           <span data-i18n="components.memory.ClaudeImportPanel.text061" className={styles.selectionCount}>{uiText('components.memory.ClaudeImportPanel.text061', { p1: preview.total_count, p2: selectedIds.size })}</span>
         </div>
         {resultBanner}
+        {alsoContainsNotice}
         <div className={styles.tableContainer}><table className={styles.table}>
           <thead><tr>
             <th className={styles.checkboxCell} onClick={() => toggleSelectAll(preview.conversations.length)}>{allSelected ? <CheckSquare size={18} /> : <Square size={18} />}</th>
@@ -309,6 +320,7 @@ export default function ClaudeImportPanel({ personaId, onStart, onDirectDone }: 
           <span data-i18n="components.memory.ClaudeImportPanel.text061" className={styles.selectionCount}>{uiText('components.memory.ClaudeImportPanel.text061', { p1: preview.memory_items.length, p2: selectedIds.size })}</span>
         </div>
         {resultBanner}
+        {alsoContainsNotice}
         <p data-i18n="components.memory.ClaudeImportPanel.text035" className={styles.claudeNote}>{uiText('components.memory.ClaudeImportPanel.text035')}</p>
         <div className={styles.tableContainer}><table className={styles.table}>
           <thead><tr>
