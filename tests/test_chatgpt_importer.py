@@ -302,6 +302,53 @@ class ChatGPTImporterFailureTest(unittest.TestCase):
         self.assertIn("バックフィルに失敗", err)
 
 
+class ShortenTextTest(unittest.TestCase):
+    """一覧・題・概要の短縮 (shorten_text)。
+
+    2026-11-17 まで textwrap.shorten を使っていて、空白の無い長い日本語が
+    「…」1 文字になっていた。
+    """
+
+    def test_long_japanese_without_spaces_keeps_its_head(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        text = "空白の無い長い日本語の文章です" * 10
+        out = shorten_text(text, 50)
+        self.assertEqual(len(out), 50)
+        self.assertEqual(out, text[:49] + "…")
+
+    def test_a_long_run_after_a_space_is_not_dropped(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        out = shorten_text("前置き " + "続きの長い日本語" * 20, 30)
+        self.assertTrue(out.startswith("前置き 続きの長い日本語"))
+        self.assertLessEqual(len(out), 30)
+
+    def test_english_cuts_at_a_word_boundary_and_collapses_spaces(self) -> None:
+        from tools.utilities.chatgpt_importer import shorten_text
+        self.assertEqual(
+            shorten_text("Hello   from\nthe  user who writes a lot", 20),
+            "Hello from the user…",
+        )
+        self.assertEqual(shorten_text("short  text", 20), "short text")
+
+    def test_preview_title_and_memory_summary_use_it(self) -> None:
+        from tools.utilities.claude_importer import ClaudeMemoryItem, _shorten
+        text = "空白の無い長い日本語の文章です" * 10
+        conv = _sample_conversation()
+        conv["mapping"]["user-msg"]["message"]["content"]["parts"] = [text]
+        from tools.utilities.chatgpt_importer import _build_record
+        preview = _build_record(conv).first_user_preview(limit=120)
+        self.assertEqual(preview, text[:119] + "…")
+        self.assertEqual(_shorten(text, 50), text[:49] + "…")  # Claude Code の題
+        item = ClaudeMemoryItem(
+            item_id="project_memory:p", kind="project_memory",
+            title="p", content=text,
+        )
+        # プロジェクト記憶の Memopedia 概要 (import_claude.py が 100 字で使う)
+        self.assertEqual(
+            item.to_summary_dict(preview_chars=100)["preview"], text[:99] + "…",
+        )
+
+
 class ChatGPTExportZipFileSelectionTest(unittest.TestCase):
     """ZIP の中から会話のファイルだけを読む。"""
 

@@ -22,14 +22,17 @@ from __future__ import annotations
 import json
 import logging
 import re
-import textwrap
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from tools.utilities.chatgpt_importer import ConversationMessage, ConversationRecord
+from tools.utilities.chatgpt_importer import (
+    ConversationMessage,
+    ConversationRecord,
+    shorten_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,10 +83,7 @@ def _parse_iso(value: Any) -> Optional[datetime]:
 
 
 def _shorten(text: str, width: int = 60) -> str:
-    cleaned = " ".join(str(text).split())
-    if not cleaned:
-        return ""
-    return textwrap.shorten(cleaned, width=max(10, width), placeholder="…")
+    return shorten_text(text, max(10, width))
 
 
 #: 記憶アイテムの種類。``core_memory`` だけがコア記憶へ、他は Memopedia へ転記する。
