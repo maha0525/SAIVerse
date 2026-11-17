@@ -497,6 +497,10 @@ class TailRewindPlan:
     est_fold_calls: int = 0
     #: 畳みの材料字数見込み (費用概算の入力字数用)。
     est_fold_material_chars: int = 0
+    #: 畳んだあらすじに相乗りする Fragment 抽出が送る会話の字数見込み。
+    #: 抽出は本文を全文送るので、材料字数 (長い機構名義の行を一行に縮めた
+    #: 後) とは別に数える (Codex レビュー PR #492)。
+    est_fold_extraction_chars: int = 0
     #: 引き戻す行の圧縮区間記録 (計画時点の生 payload)。実行はこれを持ち越す —
     #: 書き込み直前の行再読みは「読めない」を「fold 無し」と同一視して既存
     #: 記録を空で上書きしうる (Codex 七巡 K2 — データ喪失級)。
@@ -639,6 +643,7 @@ def plan_tail_rewind(
 
     est_calls = 0
     est_material = 0
+    est_extraction = 0
     if fold_needed and target is not None:
         # 畳み見込み: 既存の範囲規則「残す量より古い側」を落とすとして、
         # 退場候補の材料字数を U で割った切り上げ (束ねの連鎖は数えない概算)。
@@ -659,6 +664,7 @@ def plan_tail_rewind(
         # 隙間ブロックを除くが、この概算はそこまで写さない — 誤差は縮約後の
         # 一行ぶん × 数個で、方向は費用を多めに見せる安全側 (概算の器の内。
         # Codex 指摘 2026-09-02 四巡目、却下の記録は issue)。
+        from sai_memory.memory.entity_extractor import extraction_line_chars
         from sea.eviction_plan import is_injected_perception, is_mechanism_row
         remaining = rows_after
         for msg in presented_after:
@@ -672,6 +678,12 @@ def plan_tail_rewind(
             est_material += material_len(
                 content, tags if isinstance(tags, (list, tuple)) else (), meta,
             )
+            # 抽出に渡るのは保存行 (チャンクのメッセージ) の全文。送信直前に
+            # 差し込まれる知覚ブロックはメッセージではないので抽出に入らない。
+            if not is_injected_perception(msg):
+                est_extraction += extraction_line_chars(
+                    str(msg.get("role") or ""), content,
+                )
         # 材料ゼロ (退場候補に編纂対象が無い等) なら畳みの LLM は走らない —
         # 見込み 1 を置くと実走 0 と食い違う (ローカルレビュー 2026-08-31 L5)。
         est_calls = -(-est_material // budget) if est_material else 0
@@ -686,6 +698,7 @@ def plan_tail_rewind(
         target_chars=target,
         est_fold_calls=est_calls,
         est_fold_material_chars=est_material,
+        est_fold_extraction_chars=est_extraction if est_calls else 0,
         # 圧縮区間の記録は計画時点で持ち越す (K2) — 書き込み直前に行を読み
         # 直さない。CAS (expected_anchor_id) が「計画から書き込みまでに行が
         # 動いていない」を保証するので、この payload はその時点の正本。
@@ -695,8 +708,9 @@ def plan_tail_rewind(
 
 def estimate_tail_rewind_fold(
     lifecycle, persona, conn, first_message_id: str,
-) -> Tuple[int, int]:
-    """cost-estimate 用: 引き戻しに伴う即時畳みの (LLM コール, 材料字数) 見込み。
+) -> Tuple[int, int, int]:
+    """cost-estimate 用: 引き戻しに伴う即時畳みの
+    (LLM コール, 材料字数, Fragment 抽出が送る字数) 見込み。
 
     引き戻し自体は 0 LLM コール。畳みが要らない / 引き戻し自体が起きない
     計画なら (0, 0)。判定は実行と同じ :func:`plan_tail_rewind` を通す。
@@ -708,8 +722,12 @@ def estimate_tail_rewind_fold(
     """
     plan = plan_tail_rewind(lifecycle, persona, conn, first_message_id)
     if plan is None or not plan.fold_needed:
-        return (0, 0)
-    return (plan.est_fold_calls, plan.est_fold_material_chars)
+        return (0, 0, 0)
+    return (
+        plan.est_fold_calls,
+        plan.est_fold_material_chars,
+        plan.est_fold_extraction_chars,
+    )
 
 
 def window_thread_id(persona) -> Optional[str]:

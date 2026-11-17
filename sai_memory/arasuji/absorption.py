@@ -191,6 +191,34 @@ def _load_messages(conn: sqlite3.Connection, message_ids: Sequence[str]):
     return get_messages_by_ids(conn, [str(m) for m in message_ids])
 
 
+def item_material_message_ids(
+    item: "AbsorptionItem", neighbors: Sequence[ArasujiEntry],
+) -> List[str]:
+    """吸収 1 件の材料のメッセージ id = run の生ログ + 開き直す隣人の source。
+
+    実行 (:func:`run_absorption`) が再生成と Fragment 抽出に渡す範囲。見積もり
+    (estimate.py) も同じ関数で範囲を決め、抽出が実際に送る字数を数える。
+    """
+    ids = [str(m) for m in item.run_message_ids]
+    for entry in neighbors:
+        ids.extend(str(s) for s in entry.source_ids)
+    return ids
+
+
+def estimate_item_extraction_chars(
+    conn: sqlite3.Connection, item: "AbsorptionItem",
+) -> int:
+    """吸収 1 件の Fragment 抽出が送る会話の字数 (見積もり用、読むだけ)。"""
+    from sai_memory.memory.entity_extractor import extraction_input_chars
+    neighbors = [
+        e for e in (get_entry(conn, eid) for eid in item.absorbed_entry_ids)
+        if e is not None
+    ]
+    return extraction_input_chars(
+        _load_messages(conn, item_material_message_ids(item, neighbors)),
+    )
+
+
 def list_stale_upper_ids(conn: sqlite3.Connection) -> List[str]:
     """content_stale の印を持つ上位エントリ id (level 昇順 → end_time 昇順)。
 
@@ -1431,9 +1459,9 @@ def run_absorption(
                 snapshots.append(entry)
             if not missing:
                 # 材料 = run の生ログ + 開き直す隣人の source 生ログ (連続範囲)。
-                material_ids = list(item.run_message_ids)
-                for entry in snapshots:
-                    material_ids.extend(str(s) for s in entry.source_ids)
+                # この messages は Fragment 抽出 (batch_callback) にも渡る —
+                # 見積もりは同じ関数で同じ範囲を数える。
+                material_ids = item_material_message_ids(item, snapshots)
                 messages = _load_messages(conn, material_ids)
                 # 旧隣人の材料だった知覚バッチも材料として渡す
                 # (regenerate_entry と同型)。

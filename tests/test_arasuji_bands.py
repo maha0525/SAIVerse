@@ -1156,7 +1156,13 @@ class TestFragmentCallback(BandTestBase):
             _entry(self.conn, start=2000 + i * 100, coverage=10_000)
         folds, identity = plan_band_overflow_detail(self.conn)
         self.assertEqual(folds, 1)
-        self.assertEqual(identity, [900])
+        # 字数は被覆字数 (900) ではなく、抽出が実際に送る元メッセージの字数
+        from sai_memory.memory.entity_extractor import extraction_input_chars
+        from sai_memory.memory.storage import get_messages_by_ids
+        self.assertEqual(
+            identity,
+            [extraction_input_chars(get_messages_by_ids(self.conn, [mid]))],
+        )
 
         seen = []
         run_band_overflow(

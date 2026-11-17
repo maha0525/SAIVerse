@@ -764,21 +764,27 @@ def plan_band_overflow_detail(
     (見積もりと実行が同じ計画から数える — import_chronicle_offer.md 不変条件 1)。
 
     Returns:
-        ``(束ねの LLM コール回数, 抽出が走る恒等圧縮の子の被覆字数の列)``。
-        列の長さが抽出の LLM コール回数。dry の模擬ノード (これから確定する
+        ``(束ねの LLM コール回数, 抽出が送る会話の字数の列 (恒等圧縮の子ごと))``。
+        列の長さが抽出の LLM コール回数。字数は実行と同じく子の元メッセージを
+        読み、抽出のプロンプトと同じ組み立てで数える
+        (entity_extractor.extraction_input_chars — 被覆字数は長い機構名義の
+        行を縮めた後の字数なので使わない)。dry の模擬ノード (これから確定する
         新チャンク) は恒等圧縮ではないので数えない。
     """
+    from sai_memory.memory.entity_extractor import extraction_input_chars
+
     folds = _plan_folds(_dry_rows(conn, extra_leaves))
     children = [
-        item for fold in folds for item in fold.items
+        item.entry for fold in folds for item in fold.items
         if item.entry is not None and item.entry.source_ids
     ]
-    origins = _digest_origins(conn, [item.entry.id for item in children])
-    identity_coverage = [
-        int(item.coverage) for item in children
-        if origins.get(item.entry.id) == "identity"
+    origins = _digest_origins(conn, [entry.id for entry in children])
+    identity_chars = [
+        extraction_input_chars(_load_messages_by_ids(conn, entry.source_ids))
+        for entry in children
+        if origins.get(entry.id) == "identity"
     ]
-    return len(folds), identity_coverage
+    return len(folds), identity_chars
 
 
 def _dry_rows(

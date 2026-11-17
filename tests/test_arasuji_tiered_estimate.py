@@ -38,11 +38,13 @@ def test_estimate_uses_each_request_not_total_or_average(monkeypatch, caplog, mo
         estimate = estimate_chronicle_generation_cost(conn, model_name=model, messages_override=[])
     assert not [r for r in caplog.records if r.name == "saiverse.model_configs" and "Cost calculated:" in r.message]
     # 一次あらすじ 1 回と、それに相乗りする Fragment 抽出 1 回 (出力見込み
-    # EXTRACTION_OUTPUT_TOKENS) の両方に、一回ずつ tier を当てる。
+    # EXTRACTION_OUTPUT_TOKENS) の両方に、一回ずつ tier を当てる。抽出の
+    # 入力は抽出が実際に送る会話の字数 (この見本のチャンクは発言が空なので
+    # 会話 0 字 + 指示の 500 トークン) — あらすじの材料字数は使わない。
     from sai_memory.arasuji.estimate import EXTRACTION_OUTPUT_TOKENS
     expected = round(sum(
         calculate_cost(model, tokens, 400)
-        + calculate_cost(model, tokens, EXTRACTION_OUTPUT_TOKENS)
+        + calculate_cost(model, 500, EXTRACTION_OUTPUT_TOKENS)
         for tokens in inputs
     ), 6)
     assert estimate.estimated_cost_usd == pytest.approx(expected)

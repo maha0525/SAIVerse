@@ -3299,6 +3299,15 @@ class TestTailRewind:
         # (記憶の整理も generate_chronicle を通り、抽出が相乗りする)
         assert with_fold.extraction_calls == base.extraction_calls + 3
         assert with_fold.estimated_llm_calls == base.estimated_llm_calls + 6
+        # 抽出の入力字数は 3 つ目の値 (抽出が送る全文の字数) を使う —
+        # 材料字数 (長い機構名義の行を縮めた後) で代用しない (Codex PR #492)
+        with_full = estimate_chronicle_generation_cost(
+            adapter.conn, model_name="mock-model",
+            tail_fold_estimator=lambda first_id, run_ids: (3, 3000, 90_000),
+        )
+        assert with_full.extraction_input_chars == (
+            base.extraction_input_chars + 90_000
+        )
 
     def test_position_lookup_failure_propagates_from_plan(
         self, adapter, session_factory, monkeypatch,

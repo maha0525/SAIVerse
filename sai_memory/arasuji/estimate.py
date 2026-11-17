@@ -45,6 +45,8 @@ class ChronicleCostEstimate:
     # 一次あらすじの確定ごとに相乗りする Fragment 抽出 (entity_extractor)。
     # 独立に数え、consolidation_calls (CLI の束ね上限に使う) へは混ぜない。
     extraction_calls: int = 0
+    # 抽出が送る会話の字数の合計 (内訳。費用には既に含まれている)。
+    extraction_input_chars: int = 0
 
 
 #: Fragment 抽出 1 回の出力トークンの見込み。抽出はエンティティごとの
@@ -97,7 +99,9 @@ def estimate_chronicle_generation_cost(
             引き戻し自体は 0 LLM コールだが、戻した窓が上限を超えると補修
             ジョブ内で畳みが走るため、その分を見積もりに含める。API 経路が
             sea/coverage_repair.estimate_tail_rewind_fold を包んで渡す
-            (実行と同じ判定関数)。None = 数えない (CLI / オフライン —
+            (実行と同じ判定関数)。3 つ目の値 (あれば) は、畳んだあらすじに
+            相乗りする Fragment 抽出が送る字数。無い (2 値) ときは材料字数で
+            代用する。None = 数えない (CLI / オフライン —
             スクリプトは引き戻しを実行しないので 0 が実態と一致する)
         messages_override: 編纂候補列を呼び出し側の実物で差し替える (CLI の
             --thread 絞り込み等 — Codex 三巡 F4: 見積もりと実行が同じ入力から
@@ -178,17 +182,21 @@ def estimate_chronicle_generation_cost(
     # 上限を超えると補修ジョブ内で畳みが走る — その分を callback で数える。
     tail_fold_calls = 0
     tail_fold_material = 0
+    tail_fold_extraction = 0
     zone_run_ids, zone_first_id, _zone_idx = uncovered_tail_zone(
         tiny_chunks, all_messages, window_thread_id=window_thread_id,
     )
     if zone_first_id is not None and tail_fold_estimator is not None:
         # 見込みの計算失敗は伝播 (Codex 四巡 G2 — 「表示 ≥ 実走」。0 で
         # ごまかすと引き戻し後の即時畳みが表示なしで課金される)。
-        tail_fold_calls, tail_fold_material = tail_fold_estimator(
-            zone_first_id, zone_run_ids,
+        fold_estimate = tuple(tail_fold_estimator(zone_first_id, zone_run_ids))
+        tail_fold_calls, tail_fold_material = fold_estimate[0], fold_estimate[1]
+        tail_fold_extraction = (
+            fold_estimate[2] if len(fold_estimate) > 2 else tail_fold_material
         )
     absorption_calls = 0
     absorption_material_chars: list[int] = []
+    absorption_extraction_chars: list[int] = []
     counted_upper_ids: list = []
     if skip_absorption:
         # CLI の --limit>0 実行と同形: 吸収は見送り。前回の未完了 (content_
@@ -218,6 +226,14 @@ def estimate_chronicle_generation_cost(
         else:
             absorption_calls = len(absorption_plan.items)
             absorption_material_chars = [item.material_chars for item in absorption_plan.items]
+            if with_extraction:
+                from sai_memory.arasuji.absorption import (
+                    estimate_item_extraction_chars,
+                )
+                absorption_extraction_chars = [
+                    estimate_item_extraction_chars(conn, item)
+                    for item in absorption_plan.items
+                ]
             counted_upper_ids = list(absorption_plan.stale_upper_ids)
             # 吸収できない発話あり run (機構 E) は通常チャンクとして計画へ
             # 合流する — 実行 (generate_chronicle) と同じ関数で合流させ、
@@ -246,9 +262,9 @@ def estimate_chronicle_generation_cost(
     # 実行と同じく提示中の圧縮区間による除外は無い (機構 A) — fold 照会の
     # 成否にも依存しない (照会失敗で見送るのは吸収だけ)。
     from sai_memory.arasuji.bands import EST_PARENT_CHARS, plan_band_overflow_detail
-    identity_extraction_coverage: list[int] = []
+    identity_extraction_chars: list[int] = []
     try:
-        consolidation_calls, identity_extraction_coverage = plan_band_overflow_detail(
+        consolidation_calls, identity_extraction_chars = plan_band_overflow_detail(
             conn,
             extra_leaves=[
                 (
@@ -262,21 +278,26 @@ def estimate_chronicle_generation_cost(
         )
     except Exception:
         consolidation_calls = 0
-        identity_extraction_coverage = []
+        identity_extraction_chars = []
 
     # Fragment 抽出: 一次あらすじが確定するたびに 1 回 (executor / 吸収 /
     # 末尾の畳み = 記憶の整理も同じ generate_chronicle を通る)、加えて束ねで
-    # 初めて要約に変わる旧設計の恒等圧縮の子 1 つにつき 1 回。材料は確定した
-    # あらすじの元メッセージなので、一次あらすじの材料字数をそのまま使う。
+    # 初めて要約に変わる旧設計の恒等圧縮の子 1 つにつき 1 回。入力字数は
+    # 抽出が実際に送る会話の字数 (entity_extractor.extraction_input_chars) —
+    # あらすじの材料字数 (coverage_chars) は長い Spell 結果などを一行に縮めた
+    # 後の字数なので、抽出の費用を大きく少なく見せる (Codex レビュー PR #492)。
     extraction_material: list[float] = []
     if with_extraction:
-        extraction_material.extend(c.coverage_chars for c in plan.chunks)
-        extraction_material.extend(absorption_material_chars)
+        from sai_memory.memory.entity_extractor import extraction_input_chars
+        extraction_material.extend(
+            extraction_input_chars(c.messages) for c in plan.chunks
+        )
+        extraction_material.extend(absorption_extraction_chars)
         if tail_fold_calls:
             extraction_material.extend(
-                [tail_fold_material / tail_fold_calls] * tail_fold_calls,
+                [tail_fold_extraction / tail_fold_calls] * tail_fold_calls,
             )
-        extraction_material.extend(identity_extraction_coverage)
+        extraction_material.extend(identity_extraction_chars)
     extraction_calls = len(extraction_material)
 
     # 上位あらすじの連鎖再生成 (吸収の裁定 3) は独立に数える —
@@ -358,6 +379,7 @@ def estimate_chronicle_generation_cost(
         consolidation_calls=consolidation_calls,
         upper_regen_calls=upper_regen_calls,
         extraction_calls=extraction_calls,
+        extraction_input_chars=int(sum(extraction_material)),
         estimated_cost_usd=round(estimated_cost, 6),
         model_name=model_name,
         is_free_tier=is_free_tier,

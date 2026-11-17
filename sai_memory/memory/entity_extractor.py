@@ -28,7 +28,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from sai_memory.memory.recall_edges import (
     add_chunk_page_edge,
@@ -238,19 +238,58 @@ def _build_extraction_prompt(
     return "\n".join(parts)
 
 
+_LINE_SEPARATOR = "\n\n"
+#: 時刻の表記の字数 ("%Y-%m-%d %H:%M")。Message を持たない見積もり用。
+_TIMESTAMP_CHARS = len("2026-01-01 00:00")
+
+
+def _format_line(role: str, ts_str: str, content: str) -> str:
+    if role == "model":
+        role = "assistant"
+    return f"[{ts_str}] [{role}]: {content}"
+
+
 def _format_messages(messages: List[Message]) -> str:
-    """Format messages for the extraction prompt."""
+    """Format messages for the extraction prompt.
+
+    本文は**全文**を送る — あらすじの材料 (generator.material_text_for) のように
+    長い機構名義の行を一行に縮めることはしない。費用の見積もりはこの組み立てと
+    同じ字数を数える (:func:`extraction_input_chars`)。
+    """
     lines: List[str] = []
     for msg in messages:
-        role = msg.role
-        if role == "model":
-            role = "assistant"
         content = (msg.content or "").strip()
         if not content:
             continue
         ts_str = datetime.fromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M") if msg.created_at else "?"
-        lines.append(f"[{ts_str}] [{role}]: {content}")
-    return "\n\n".join(lines)
+        lines.append(_format_line(msg.role, ts_str, content))
+    return _LINE_SEPARATOR.join(lines)
+
+
+def extraction_input_chars(messages: Sequence[Message]) -> int:
+    """抽出 1 回が実際に送る会話の字数 (費用の見積もり用)。
+
+    :func:`_format_messages` の結果そのものを数える。あらすじの材料字数
+    (coverage_chars / material_chars) は長い Spell 結果などを一行に縮めた後の
+    字数なので、抽出の入力字数には使えない (10 万字の Spell 結果が材料では
+    数十字、抽出では 10 万字になる — Codex レビュー PR #492)。
+    """
+    return len(_format_messages(list(messages)))
+
+
+def extraction_line_chars(role: str, content: str) -> int:
+    """Message を持たない見積もり (提示 payload から数える末尾の畳み) 用の 1 行分。
+
+    :func:`_format_messages` と同じ組み立てで、時刻は実表記の字数、行の区切りを
+    含めて数える。空の本文は送られないので 0。
+    """
+    content = (content or "").strip()
+    if not content:
+        return 0
+    return (
+        len(_format_line(role or "", "x" * _TIMESTAMP_CHARS, content))
+        + len(_LINE_SEPARATOR)
+    )
 
 
 def _parse_extraction_response(response: str) -> ExtractionOutput:

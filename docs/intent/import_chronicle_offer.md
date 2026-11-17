@@ -47,7 +47,11 @@
    Fragment 抽出 (1 件につき 1 回) を含む (`extraction_calls`)。2026-11-17 まで
    抽出を数えておらず、表示は実走のおよそ半分の回数と費用を言っていた (隔離
    テストで見積もり 6 回・実走 12 回。tests/test_coverage_repair.py
-   TestEstimateCountsFragmentExtraction)。
+   TestEstimateCountsFragmentExtraction)。抽出の費用の入力字数は、抽出が実際に
+   送る会話の全文で数える (`entity_extractor.extraction_input_chars`)。あらすじの
+   材料字数は 500 字を超える機構名義の行 (Spell 結果など) を一行に縮めた後の字数
+   なので、流用すると 10 万字の Spell 結果を数十字として数えてしまう (Codex
+   レビュー PR #492)。
 2. **同じ案内は一度の流れで一回だけ（2026-11-07 まはー条件「二重にならなければ」）。**
    当初はチュートリアル内でこの案内を出さないようにしていた（StepChronicle の
    画面で件数・費用の案内を出していたため）。一本道化（2026-11-08）で向きを

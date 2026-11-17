@@ -656,6 +656,45 @@ class TestEstimateCountsFragmentExtraction:
         assert len(extraction_prompts) == est.extraction_calls
         assert len(client.prompts) == est.estimated_llm_calls
 
+    def test_extraction_input_counts_full_text_not_condensed_material(
+        self, adapter, session_factory,
+    ):
+        """抽出の入力字数は、抽出が実際に送る全文で数える。
+
+        あらすじの材料 (coverage_chars) は 500 字を超える機構名義の行 (Spell
+        結果など) を一行に縮めるが、抽出は本文を全文送る。材料字数を流用すると
+        10 万字の Spell 結果が数十字として数えられ、費用を大きく少なく見せる
+        (Codex レビュー PR #492)。
+        """
+        from sai_memory.memory.entity_extractor import extraction_input_chars
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        big = "結" * 100_000
+        ids = _add_messages(adapter, 2)
+        spell_id = adapter.append_persona_message({
+            "role": "assistant", "content": big,
+            "timestamp": (BASE_TIME + timedelta(minutes=2)).isoformat(),
+            "metadata": {"tags": ["spell"]},
+        })
+        tail = _add_messages(adapter, 2, start_minute=3)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", tail[1])
+        persona = _model_persona(adapter, "model-a")
+
+        est = _estimate(lc, adapter, persona)
+        assert est.extraction_calls >= 1
+        targets = [
+            m for m in get_messages_for_chronicle(adapter.conn)
+            if m.id in {*ids, spell_id, tail[0]}
+        ]
+        # 見積もりは抽出が送る全文の字数と一致する (縮めた材料ではない)。
+        # 抽出はチャンクごとに組み立てるので、通しで組み立てた字数から
+        # チャンクの境目の区切り ("\n\n") の分だけ少ない。
+        separators = (est.extraction_calls - 1) * len("\n\n")
+        assert est.extraction_input_chars == (
+            extraction_input_chars(targets) - separators
+        )
+        assert est.extraction_input_chars > 100_000
+
     def test_without_extraction_counts_none(self, adapter, session_factory):
         """CLI で --with-memopedia を付けない実行と同形 — 抽出は 0。"""
         from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
