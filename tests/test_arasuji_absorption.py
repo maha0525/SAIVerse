@@ -1705,6 +1705,7 @@ class TestReviewFixes:
         assert after.upper_regen_calls == 2
         assert after.estimated_llm_calls == (
             after.level1_calls + after.consolidation_calls + 2
+            + after.extraction_calls
         )
 
         # 実走 (run_absorption) の再生成回数と一致する
@@ -1845,7 +1846,9 @@ class TestReviewFixes:
         est = estimate_chronicle_generation_cost(conn, model_name="mock-model")
         assert est.upper_regen_calls == 1
         assert est.consolidation_calls == 0
-        assert est.estimated_llm_calls == est.level1_calls + 1
+        # 一次あらすじ 1 件ごとに Fragment 抽出が 1 回相乗りする
+        assert est.extraction_calls == est.level1_calls
+        assert est.estimated_llm_calls == est.level1_calls + 1 + est.extraction_calls
 
     def test_upper_regen_retries_empty_llm_response(self, adapter):
         """上位再生成の LLM が空応答を 2 回返しても 3 回目の本文で語り直しが
@@ -3203,7 +3206,10 @@ class TestTailRewind:
             adapter.conn, model_name="mock-model",
             tail_fold_estimator=lambda first_id, run_ids: (3, 3000),
         )
-        assert with_fold.estimated_llm_calls == base.estimated_llm_calls + 3
+        # 畳み 3 回 + 畳んだあらすじ 3 件それぞれの Fragment 抽出 3 回
+        # (記憶の整理も generate_chronicle を通り、抽出が相乗りする)
+        assert with_fold.extraction_calls == base.extraction_calls + 3
+        assert with_fold.estimated_llm_calls == base.estimated_llm_calls + 6
 
     def test_position_lookup_failure_propagates_from_plan(
         self, adapter, session_factory, monkeypatch,

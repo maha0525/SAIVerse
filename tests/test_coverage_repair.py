@@ -608,6 +608,70 @@ class TestEstimateGenerationParity:
         assert len(compiled) == est.unprocessed_messages
 
 
+class _CountingClient:
+    """LLM の代わり — 呼ばれたプロンプトを数えるだけ (本物の LLM は呼ばない)。"""
+
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, messages=None, tools=None, **kwargs):
+        self.prompts.append(str(messages[-1]["content"]) if messages else "")
+        return "あらすじの本文です。"
+
+
+class TestEstimateCountsFragmentExtraction:
+    """見積もりは一次あらすじに相乗りする Fragment 抽出の LLM 呼び出しも数える。
+
+    2026-11-17: 抽出を数えておらず、見積もり 6 回に対し実走 12 回だった
+    (import_chronicle_offer.md 不変条件 1 の破れ)。既存の一致テストは抽出を
+    止めて実走していたので、この差が映らなかった — ここでは抽出を生かしたまま、
+    本物の executor と entity_extractor が LLM を呼んだ回数を数える。
+    """
+
+    def test_estimated_calls_match_actual_calls_with_extraction(
+        self, adapter, session_factory,
+    ):
+        ids = _add_messages(adapter, 8)
+        lc = _make_lifecycle(session_factory)
+        _warm_row(lc, "model-a", ids[6])
+        persona = _model_persona(adapter, "model-a")
+        est = _estimate(lc, adapter, persona)
+        assert est.level1_calls == 6
+        assert est.extraction_calls == 6
+
+        client = _CountingClient()
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=("mock-model", {"provider": "mock", "context_length": 1000}),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=client,
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ):
+            assert lc.generate_chronicle(persona, force=True) == "ok"
+
+        extraction_prompts = [
+            p for p in client.prompts if p.startswith("あなたは知識ベースの整理係です")
+        ]
+        assert len(extraction_prompts) == est.extraction_calls
+        assert len(client.prompts) == est.estimated_llm_calls
+
+    def test_without_extraction_counts_none(self, adapter, session_factory):
+        """CLI で --with-memopedia を付けない実行と同形 — 抽出は 0。"""
+        from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+        from sai_memory.arasuji.storage import init_arasuji_tables
+        _add_messages(adapter, 4)
+        init_arasuji_tables(adapter.conn)
+        est = estimate_chronicle_generation_cost(
+            adapter.conn, model_name="mock-model", with_extraction=False,
+        )
+        assert est.level1_calls >= 1
+        assert est.extraction_calls == 0
+        assert est.estimated_llm_calls == (
+            est.level1_calls + est.consolidation_calls + est.upper_regen_calls
+        )
+
+
 # ---------------------------------------------------------------------------
 # 冷えた anchor 行への印 (§15 の presented_raw の追記)
 # ---------------------------------------------------------------------------

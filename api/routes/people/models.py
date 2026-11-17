@@ -593,6 +593,9 @@ class ChronicleCostEstimate(BaseModel):
     # 未編纂ゼロでもこれが 1 以上なら補修入口 (帯 + 確認モーダル) を出す —
     # 畳みだけが残った状態の正常化経路が会話 (Metabolism) しか無い穴を塞ぐ。
     consolidation_calls: int = 0
+    # 一次あらすじの確定ごとに相乗りする Fragment 抽出の回数 (内訳。合計の
+    # estimated_llm_calls と費用には既に含まれている)。
+    extraction_calls: int = 0
 
 
 class GenerationJobStatus(BaseModel):

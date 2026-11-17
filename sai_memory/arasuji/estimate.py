@@ -7,6 +7,12 @@ scripts/arasuji/build_arasuji_core.py の --estimate (CLI 用) の両方が
 見積もりは生成経路と同じ計画 (sai_memory/arasuji/alignment.plan_alignment /
 sai_memory/arasuji/bands.plan_band_overflow) を dry で呼び、**同じ計画**から
 LLM コール数を数える (一点管理)。
+
+数える LLM コールは実行が呼ぶもの全部: 一次あらすじ (通常チャンク・吸収・
+末尾の畳み)、束ね、上位の語り直し、そして一次あらすじが確定するたびに相乗り
+する Fragment 抽出 (entity_extractor の batch_callback — 1 回の確定につき
+LLM 1 回)。抽出を数え漏らすと、表示が実走のおよそ半分の回数を言う
+(2026-11-17 に隔離テストで確認: 見積もり 6 回に対し実走 12 回)。
 """
 
 from __future__ import annotations
@@ -36,6 +42,15 @@ class ChronicleCostEstimate:
     # consolidation_calls を run_band_overflow の max_folds (承認済み束ね回数の
     # 上限) にそのまま渡すため、ここに再生成を混ぜると束ねの上限が膨らむ。
     upper_regen_calls: int = 0
+    # 一次あらすじの確定ごとに相乗りする Fragment 抽出 (entity_extractor)。
+    # 独立に数え、consolidation_calls (CLI の束ね上限に使う) へは混ぜない。
+    extraction_calls: int = 0
+
+
+#: Fragment 抽出 1 回の出力トークンの見込み。抽出はエンティティごとの
+#: 追記ノートを JSON で返すので、あらすじ (約 400) より多めに置く —
+#: 見積もりは「表示 ≥ 実走」の側に倒す。
+EXTRACTION_OUTPUT_TOKENS = 600
 
 
 def estimate_chronicle_generation_cost(
@@ -49,6 +64,7 @@ def estimate_chronicle_generation_cost(
     messages_override=None,
     truncate_limit: int = 0,
     skip_absorption: bool = False,
+    with_extraction: bool = True,
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
@@ -89,6 +105,10 @@ def estimate_chronicle_generation_cost(
             見積もり側でも適用する)。0 = 切り詰めなし。
         skip_absorption: CLI の --limit>0 実行と同形 — 吸収を数えない (上位
             再生成は前回の未完了の flush 分だけ数える)。
+        with_extraction: 一次あらすじの確定ごとの Fragment 抽出を数えるか。
+            アプリの編纂 (generate_chronicle — repair・記憶の整理・自動の
+            Metabolism) は常に抽出を相乗りさせるので既定は True。CLI は
+            ``--with-memopedia`` を付けたときだけ抽出するので、その値を渡す。
     """
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
@@ -219,9 +239,10 @@ def estimate_chronicle_generation_cost(
     # dry 実行 — 既存のレベル別の並び + 新規チャンク (レベル1 到着) で判定する。
     # 実行と同じく提示中の圧縮区間による除外は無い (機構 A) — fold 照会の
     # 成否にも依存しない (照会失敗で見送るのは吸収だけ)。
-    from sai_memory.arasuji.bands import EST_PARENT_CHARS, plan_band_overflow
+    from sai_memory.arasuji.bands import EST_PARENT_CHARS, plan_band_overflow_detail
+    identity_extraction_coverage: list[int] = []
     try:
-        consolidation_calls = plan_band_overflow(
+        consolidation_calls, identity_extraction_coverage = plan_band_overflow_detail(
             conn,
             extra_leaves=[
                 (
@@ -235,10 +256,28 @@ def estimate_chronicle_generation_cost(
         )
     except Exception:
         consolidation_calls = 0
+        identity_extraction_coverage = []
+
+    # Fragment 抽出: 一次あらすじが確定するたびに 1 回 (executor / 吸収 /
+    # 末尾の畳み = 記憶の整理も同じ generate_chronicle を通る)、加えて束ねで
+    # 初めて要約に変わる旧設計の恒等圧縮の子 1 つにつき 1 回。材料は確定した
+    # あらすじの元メッセージなので、一次あらすじの材料字数をそのまま使う。
+    extraction_material: list[float] = []
+    if with_extraction:
+        extraction_material.extend(c.coverage_chars for c in plan.chunks)
+        extraction_material.extend(absorption_material_chars)
+        if tail_fold_calls:
+            extraction_material.extend(
+                [tail_fold_material / tail_fold_calls] * tail_fold_calls,
+            )
+        extraction_material.extend(identity_extraction_coverage)
+    extraction_calls = len(extraction_material)
 
     # 上位あらすじの連鎖再生成 (吸収の裁定 3) は独立に数える —
     # consolidation_calls へ混ぜると CLI の max_folds (束ねの上限) が膨らむ。
-    total_calls = level1_calls + consolidation_calls + upper_regen_calls
+    total_calls = (
+        level1_calls + consolidation_calls + upper_regen_calls + extraction_calls
+    )
 
     # --- 文脈トークンの概算 (プロンプトに入る既存 Chronicle 文脈) ---
     entries_by_level = count_entries_by_level(conn)
@@ -293,6 +332,16 @@ def estimate_chronicle_generation_cost(
         estimated_cost += (consolidation_calls + upper_regen_calls) * calculate_cost(
             model_name, avg_input_cons, avg_output_per_call, log_details=False, at=pricing_at,
         )
+        # 抽出のプロンプト = 指示 + 会話 (材料) + 周辺のあらすじ 10 件 +
+        # 既存の Memopedia ページ一覧。
+        extraction_overhead = 500 + context_tokens_cons + memopedia_tokens
+        estimated_cost += sum(
+            calculate_cost(
+                model_name, material / 3.5 + extraction_overhead,
+                EXTRACTION_OUTPUT_TOKENS, log_details=False, at=pricing_at,
+            )
+            for material in extraction_material
+        )
 
     return ChronicleCostEstimate(
         total_messages=total_messages,
@@ -302,6 +351,7 @@ def estimate_chronicle_generation_cost(
         level1_calls=level1_calls,
         consolidation_calls=consolidation_calls,
         upper_regen_calls=upper_regen_calls,
+        extraction_calls=extraction_calls,
         estimated_cost_usd=round(estimated_cost, 6),
         model_name=model_name,
         is_free_tier=is_free_tier,

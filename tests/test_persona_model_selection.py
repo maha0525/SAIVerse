@@ -1792,6 +1792,7 @@ def test_the_chronicle_cost_estimate_uses_the_builtin_model_when_the_global_sett
             total_messages=0, processed_messages=0, unprocessed_messages=0,
             estimated_llm_calls=0, estimated_cost_usd=0.0, model_name=model_name,
             is_free_tier=False, currency="USD", consolidation_calls=0,
+            extraction_calls=0,
         )
 
     monkeypatch.setattr("sai_memory.arasuji.estimate.estimate_chronicle_generation_cost", _estimate)

@@ -245,6 +245,7 @@ def estimate_chronicle_cost(
             currency=estimate.currency,
             repair_incomplete=repair_incomplete,
             consolidation_calls=estimate.consolidation_calls,
+            extraction_calls=estimate.extraction_calls,
         )
     finally:
         conn.close()
