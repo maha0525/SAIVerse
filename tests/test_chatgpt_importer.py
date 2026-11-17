@@ -302,5 +302,52 @@ class ChatGPTImporterFailureTest(unittest.TestCase):
         self.assertIn("バックフィルに失敗", err)
 
 
+class ChatGPTExportZipFileSelectionTest(unittest.TestCase):
+    """ZIP の中から会話のファイルだけを読む。"""
+
+    def _zip(self, files: Dict[str, Any]) -> Path:
+        import zipfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "export.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, payload in files.items():
+                zf.writestr(name, json.dumps(payload))
+        return path
+
+    def test_shared_conversations_list_is_not_read_as_conversations(self) -> None:
+        """共有リンクの一覧 (shared_conversations.json) は会話ではない。
+
+        2026-11-17 まで、名前の途中で一致して読み込み、発言 0 件の「会話」が
+        本物と同じ conversation_id で一覧に並んでいた。
+        """
+        conv = _sample_conversation()
+        path = self._zip({
+            "conversations.json": [conv],
+            "shared_conversations.json": [{
+                "id": "share-abc",
+                "conversation_id": conv["conversation_id"],
+                "title": conv["title"],
+                "is_anonymous": True,
+            }],
+        })
+        records = ChatGPTExport(path).conversations
+        self.assertEqual([r.identifier for r in records], ["conversation-1"])
+
+    def test_numbered_and_nested_conversation_files_are_read(self) -> None:
+        first = _sample_conversation()
+        second = dict(_sample_conversation(), id="conversation-2",
+                      conversation_id="chatgpt-uuid-5678")
+        path = self._zip({
+            "conversations-000.json": [first],
+            "export/conversations-001.json": [second],
+        })
+        records = ChatGPTExport(path).conversations
+        self.assertEqual(
+            sorted(r.identifier for r in records),
+            ["conversation-1", "conversation-2"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

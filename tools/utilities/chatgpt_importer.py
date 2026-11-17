@@ -17,7 +17,12 @@ LOGGER = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
-_CONVERSATIONS_RE = re.compile(r"conversations(?:-\d+)?\.json$")
+# ファイル名の先頭を固定する (ZIP の中のフォルダ区切りの直後か、名前の頭)。
+# 固定しないと、エクスポートに同梱される共有リンクの一覧
+# shared_conversations.json まで会話として読み、発言 0 件の「会話」が
+# 一覧に並ぶ (同じ conversation_id を持つので、id で選ぶと本物と一緒に
+# 選ばれる)。
+_CONVERSATIONS_RE = re.compile(r"(?:^|/)conversations(?:-\d+)?\.json$")
 
 
 def _load_conversations_payload(source: Path) -> list[dict[str, Any]]:
