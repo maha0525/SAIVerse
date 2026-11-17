@@ -65,6 +65,7 @@ def estimate_chronicle_generation_cost(
     truncate_limit: int = 0,
     skip_absorption: bool = False,
     with_extraction: bool = True,
+    window_thread_id: Optional[str] = None,
 ) -> ChronicleCostEstimate:
     """未処理メッセージから Chronicle を生成した場合の費用を見積もる。
 
@@ -109,6 +110,10 @@ def estimate_chronicle_generation_cost(
             アプリの編纂 (generate_chronicle — repair・記憶の整理・自動の
             Metabolism) は常に抽出を相乗りさせるので既定は True。CLI は
             ``--with-memopedia`` を付けたときだけ抽出するので、その値を渡す。
+        window_thread_id: 提示窓が読むスレッド (末尾の未被覆帯の判定に使う —
+            absorption.uncovered_tail_zone)。生成経路と同じ値を渡す
+            (sea.coverage_repair.window_thread_id)。None = スレッドを区別
+            しない (CLI)。
     """
     from sai_memory.arasuji.alignment import (
         chronicle_band_budget,
@@ -174,7 +179,7 @@ def estimate_chronicle_generation_cost(
     tail_fold_calls = 0
     tail_fold_material = 0
     zone_run_ids, zone_first_id, _zone_idx = uncovered_tail_zone(
-        tiny_chunks, all_messages,
+        tiny_chunks, all_messages, window_thread_id=window_thread_id,
     )
     if zone_first_id is not None and tail_fold_estimator is not None:
         # 見込みの計算失敗は伝播 (Codex 四巡 G2 — 「表示 ≥ 実走」。0 で
@@ -203,6 +208,7 @@ def estimate_chronicle_generation_cost(
                 conn, tiny_chunks, all_messages, processed_ids,
                 target_chars=chronicle_band_budget(),
                 excluded_entry_ids=frozenset(absorption_excluded_entry_ids),
+                window_thread_id=window_thread_id,
             )
         except sqlite3.OperationalError as exc:
             from sai_memory.arasuji.storage import is_missing_table_error

@@ -26,7 +26,7 @@ def test_estimate_uses_each_request_not_total_or_average(monkeypatch, caplog, mo
     monkeypatch.setattr(storage, 'count_entries_by_level', lambda conn: {})
     monkeypatch.setattr(alignment, 'plan_alignment', lambda *args, **kwargs: plan)
     monkeypatch.setattr(absorption, 'split_plan_for_absorption', lambda *args, **kwargs: (plan, []))
-    monkeypatch.setattr(absorption, 'uncovered_tail_zone', lambda *args: ([], None, None))
+    monkeypatch.setattr(absorption, 'uncovered_tail_zone', lambda *args, **kwargs: ([], None, None))
     monkeypatch.setattr(absorption, 'list_stale_upper_ids', lambda conn: [])
     monkeypatch.setattr(absorption, 'list_sweep_regen_ids', lambda conn: [])
     monkeypatch.setattr(bands, 'plan_band_overflow_detail', lambda *args, **kwargs: (0, []))

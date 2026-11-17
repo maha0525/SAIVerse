@@ -6303,11 +6303,15 @@ class SessionLifecycle:
                 # fold 不明 (上の分岐) は設計上の見送りであって失敗ではない —
                 # 従来どおり ok 側。
                 try:
+                    from sea.coverage_repair import window_thread_id
                     absorption_plan = plan_absorption(
                         adapter.conn, _tiny_chunks, all_messages,
                         _processed_ids,
                         target_chars=chronicle_band_budget(),
                         excluded_entry_ids=frozenset(folded_entry_ids),
+                        # 末尾の帯は窓が読むスレッドの行だけ (引き戻しで
+                        # 窓に入れられるのはそこだけ)
+                        window_thread_id=window_thread_id(persona),
                     )
                 except Exception as exc:
                     LOGGER.exception(

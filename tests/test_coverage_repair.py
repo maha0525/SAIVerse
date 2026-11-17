@@ -1062,17 +1062,19 @@ class TestSilentOnlyRunEndToEnd:
         from api.routes.people import arasuji as arasuji_api
         from sea.cancellation import CancellationToken
 
-        # 発話ゼロの極小 run (機構の記録だけ)。隣は別スレッドのみ = 吸収されず、
-        # 後ろに編纂済みが居るので末尾の引き戻し帯にもならない。
+        # 発話ゼロの極小 run (機構の記録だけ) を、窓が読まないスレッド (t2) に
+        # 置く。同じスレッドに隣が居ない = 吸収されず、窓のスレッドの行では
+        # ないので末尾の引き戻し帯にもならない (帯は窓が読むスレッドの行だけで
+        # 判定する — 2026-11-17)。
         adapter.append_persona_message({
             "role": "user", "content": "入室の記録",
             "timestamp": BASE_TIME.isoformat(),
             "metadata": {"tags": ["event_message"]},
-        })
+        }, thread_suffix="t2")
         n1 = adapter.append_persona_message({
             "role": "user", "content": "会話 " + "あ" * 300,
             "timestamp": (BASE_TIME + timedelta(minutes=10)).isoformat(),
-        }, thread_suffix="t2")
+        })
         assert n1 is not None
         _create_entry(adapter.conn, [n1])
 

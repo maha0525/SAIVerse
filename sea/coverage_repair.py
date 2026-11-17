@@ -712,6 +712,29 @@ def estimate_tail_rewind_fold(
     return (plan.est_fold_calls, plan.est_fold_material_chars)
 
 
+def window_thread_id(persona) -> Optional[str]:
+    """提示窓が読むスレッドの id (末尾の未被覆帯の判定に使う)。
+
+    窓 (get_presented_window → persona_messages_from_anchor) は adapter の
+    現在のスレッド (``_thread_id(None)`` — 有効なスレッド、無ければ既定の
+    ``__persona__``) の行だけを読む。帯をこのスレッドの行だけで作らないと、
+    anchor を別スレッドの行へ戻して何も窓に入らない (absorption.
+    uncovered_tail_zone)。adapter が無い・読めないときは None (スレッドを
+    区別しない従来の判定)。
+    """
+    adapter = getattr(persona, "sai_memory", None)
+    if adapter is None:
+        return None
+    try:
+        return adapter._thread_id(None)
+    except Exception:
+        LOGGER.warning(
+            "[tail-rewind] could not resolve the window thread; the uncovered "
+            "tail is judged across all threads", exc_info=True,
+        )
+        return None
+
+
 def _resolve_uncovered_tail(lifecycle, persona, conn) -> Optional[str]:
     """帯の最古メッセージ id を現況から引き直す (実行直前の再計算)。
 
@@ -753,7 +776,9 @@ def _resolve_uncovered_tail(lifecycle, persona, conn) -> Optional[str]:
     _normal, tiny = split_plan_for_absorption(
         plan, target_chars=chronicle_band_budget(),
     )
-    _ids, first_id, _idx = uncovered_tail_zone(tiny, messages)
+    _ids, first_id, _idx = uncovered_tail_zone(
+        tiny, messages, window_thread_id=window_thread_id(persona),
+    )
     return first_id
 
 
