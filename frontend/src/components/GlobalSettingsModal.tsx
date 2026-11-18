@@ -166,6 +166,15 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // 「保存中に打ち直された」ので、応答の値で入力欄を上書きしない。
     const reflexTimeoutEditGenRef = useRef(0);
 
+    // 1 回のパルスでスペルを連続実行できる回数上限 (GET/POST /api/config/spell-max-rounds)。
+    const [spellMaxRounds, setSpellMaxRounds] = useState(5);
+    const [spellMaxRoundsInput, setSpellMaxRoundsInput] = useState('5');
+    const [spellMaxRoundsDefault, setSpellMaxRoundsDefault] = useState(5);
+    const [spellMaxRoundsMin, setSpellMaxRoundsMin] = useState(1);
+    const [spellMaxRoundsMax, setSpellMaxRoundsMax] = useState(20);
+    const spellMaxRoundsEditedRef = useRef(false);
+    const spellMaxRoundsEditGenRef = useRef(0);
+
     // Model Roles
     const [modelRoles, setModelRoles] = useState<Record<string, ModelRoleInfo>>({});
     const [modelPresets, setModelPresets] = useState<PresetInfo[]>([]);
@@ -228,6 +237,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadUpdateCheckState();
             loadAnnouncementsState();
             loadImageDefaultQuality();
+            loadSpellMaxRounds();
             loadMediaRecallState();
             loadGeminiAutoCacheState();
             loadMetabolismDefaults();
@@ -414,6 +424,60 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             console.error("Failed to save the reflex judgment wait time", e);
             if (reflexTimeoutEditGenRef.current === generation) {
                 setReflexTimeoutInput(String(reflexTimeout));
+            }
+        }
+    };
+
+    const loadSpellMaxRounds = async () => {
+        const generation = spellMaxRoundsEditGenRef.current;
+        try {
+            const res = await apiFetch('/api/config/spell-max-rounds');
+            if (res.ok) {
+                const data = await res.json();
+                if (typeof data.rounds === 'number') {
+                    setSpellMaxRounds(data.rounds);
+                    if (spellMaxRoundsEditGenRef.current === generation) {
+                        setSpellMaxRoundsInput(String(data.rounds));
+                        spellMaxRoundsEditedRef.current = false;
+                    }
+                }
+                if (typeof data.default === 'number') setSpellMaxRoundsDefault(data.default);
+                if (typeof data.min === 'number') setSpellMaxRoundsMin(data.min);
+                if (typeof data.max === 'number') setSpellMaxRoundsMax(data.max);
+            }
+        } catch (e) {
+            console.error("Failed to load spell max rounds", e);
+        }
+    };
+
+    const commitSpellMaxRounds = async () => {
+        if (!spellMaxRoundsEditedRef.current) return;
+        spellMaxRoundsEditedRef.current = false;
+        const generation = spellMaxRoundsEditGenRef.current;
+        const parsed = Number.parseInt(spellMaxRoundsInput, 10);
+        const next = Number.isFinite(parsed)
+            ? Math.min(Math.max(parsed, spellMaxRoundsMin), spellMaxRoundsMax)
+            : spellMaxRounds;
+        try {
+            const res = await apiFetch('/api/config/spell-max-rounds', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rounds: next })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const saved = typeof data.rounds === 'number' ? data.rounds : next;
+                setSpellMaxRounds(saved);
+                if (spellMaxRoundsEditGenRef.current === generation) {
+                    setSpellMaxRoundsInput(String(saved));
+                }
+            } else if (spellMaxRoundsEditGenRef.current === generation) {
+                setSpellMaxRoundsInput(String(spellMaxRounds));
+            }
+        } catch (e) {
+            console.error("Failed to save spell max rounds", e);
+            if (spellMaxRoundsEditGenRef.current === generation) {
+                setSpellMaxRoundsInput(String(spellMaxRounds));
             }
         }
     };
@@ -1029,6 +1093,36 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             onClick={() => changeImageDefaultQuality('high')}
                                         >
                                             {uiText("components.GlobalSettingsModal.label006")}</button>
+                                    </div>
+                                </div>
+
+                                {/* Spell Max Rounds per Pulse */}
+                                <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
+                                    <div>
+                                        <div data-i18n="components.GlobalSettingsModal.text123" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text123")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text124" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text124")}</div>
+                                    </div>
+                                    <div className={styles.subSetting}>
+                                        <label data-i18n="components.GlobalSettingsModal.text125" className={styles.subSettingLabel} htmlFor="spell-max-rounds">{uiText("components.GlobalSettingsModal.text125")}</label>
+                                        <input
+                                            id="spell-max-rounds"
+                                            type="number"
+                                            min={spellMaxRoundsMin}
+                                            max={spellMaxRoundsMax}
+                                            step={1}
+                                            className={styles.subSettingInput}
+                                            value={spellMaxRoundsInput}
+                                            onChange={e => { spellMaxRoundsEditedRef.current = true; spellMaxRoundsEditGenRef.current += 1; setSpellMaxRoundsInput(e.target.value); }}
+                                            onBlur={commitSpellMaxRounds}
+                                            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                        />
+                                        <div data-i18n="components.GlobalSettingsModal.text126" className={styles.subSettingHint}>
+                                            {uiText("components.GlobalSettingsModal.text126", {
+                                                p1: String(spellMaxRoundsMin),
+                                                p2: String(spellMaxRoundsMax),
+                                                p3: String(spellMaxRoundsDefault),
+                                            })}
+                                        </div>
                                     </div>
                                 </div>
 

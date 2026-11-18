@@ -580,6 +580,20 @@ def run_work_session(
                     node_id="work_session_final",
                     playbook_name=WORK_SESSION_PLAYBOOK_NAME,
                 ))
+            if _spell_result.limit_exceeded_notice:
+                runtime._store_memory(
+                    persona, _spell_result.limit_exceeded_notice,
+                    role="system",
+                    tags=[RAW_LOG_TAG, "spell"],
+                    pulse_id=pulse_id,
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                    pulse_context=pulse_ctx,
+                )
+                pulse_ctx.append(PulseLogEntry(
+                    role="system", content=_spell_result.limit_exceeded_notice,
+                    node_id="work_session_final",
+                    playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                ))
 
             # ---- artifacts: 終了時点との差分 ----
             artifacts = _collect_new_item_ids(manager, persona_id, items_before)
