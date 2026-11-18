@@ -1492,4 +1492,26 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.30 -> 0.3.31 (no schema or world-data changes).",
     ),
+    # ---- v0.3.32 ----
+    # セキュリティ更新 (Next.js 16.4.6 + agentUpgrade 無効化、同梱 Node.js 24.22.3、
+    # Python 6 系統・npm lodash 更新、ローカル起動時の Origin 検査、毎日の脆弱性自動点検)、
+    # GPT-6.2 Astra / Sol 追加、取り込み・あらすじ・使用量記録・未読取り下げ競合・
+    # 空の部屋のポーリング・断り文面の日英化・アドオン更新修復・Windows 生存確認の修正。
+    # DB の形は変わらず、起動時に世界のデータを書き換える処理も無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_32",
+        scope="city",
+        from_version="0.3.31",
+        to_version="0.3.32",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.31 -> 0.3.32 (no schema or world-data changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_32",
+        scope="ai",
+        from_version="0.3.31",
+        to_version="0.3.32",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.31 -> 0.3.32 (no schema or world-data changes).",
+    ),
 ]
