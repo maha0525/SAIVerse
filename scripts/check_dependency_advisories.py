@@ -62,28 +62,54 @@ class AcceptedAdvisory:
     package: str
     advisory_id: str
     reason: str
+    version: str | None = None
 
 
 # 「なんとなく除外」は禁止。docs/intent/dependency_management.md に理由と解除条件が
-# 記録されているものだけをここに置く。
+# 記録されているものだけをここに置く。version を指定して対象版だけに限定し、
+# 新しい版へ上げた後の別の勧告を誤って隠さないようにする。
 ACCEPTED_ADVISORIES: tuple[AcceptedAdvisory, ...] = (
     AcceptedAdvisory(
         ecosystem="PyPI",
         package="cryptography",
+        version="48.0.1",
         advisory_id="CVE-2026-69247",
         reason="cryptography>=49 に macOS x86_64 wheel が無く、該当機能 (PKCS#7 復号) を SAIVerse は未使用 (dependency_management.md §3-2)",
     ),
     AcceptedAdvisory(
         ecosystem="PyPI",
         package="cryptography",
+        version="48.0.1",
         advisory_id="CVE-2026-69248",
         reason="cryptography>=49 に macOS x86_64 wheel が無く、該当機能 (x509 経路検証器) を SAIVerse は未使用 (dependency_management.md §3-2)",
     ),
     AcceptedAdvisory(
         ecosystem="PyPI",
         package="cryptography",
+        version="48.0.1",
         advisory_id="CVE-2026-69249",
         reason="cryptography>=49 に macOS x86_64 wheel が無く、該当機能 (x509 経路検証器) を SAIVerse は未使用 (dependency_management.md §3-2)",
+    ),
+    AcceptedAdvisory(
+        ecosystem="PyPI",
+        package="soupsieve",
+        version="2.10",
+        advisory_id="CVE-2026-126190",
+        reason="python_full_version < '3.11.5' 専用の分岐 (3.11.5 以降と推奨 3.13 系は soupsieve 4.1.1 を使用。soupsieve 3+ は <3.11.5 非対応で 2.x は 2.10 が最終版、dependency_management.md §3-2)",
+    ),
+    AcceptedAdvisory(
+        ecosystem="PyPI",
+        package="soupsieve",
+        version="2.10",
+        advisory_id="CVE-2026-126191",
+        reason="python_full_version < '3.11.5' 専用の分岐 (3.11.5 以降と推奨 3.13 系は soupsieve 4.1.1 を使用。soupsieve 3+ は <3.11.5 非対応で 2.x は 2.10 が最終版、dependency_management.md §3-2)",
+    ),
+    AcceptedAdvisory(
+        ecosystem="PyPI",
+        package="soupsieve",
+        version="2.10",
+        advisory_id="CVE-2026-126193",
+        reason="python_full_version < '3.11.5' 専用の分岐 (3.11.5 以降と推奨 3.13 系は soupsieve 4.1.1 を使用。soupsieve 3+ は <3.11.5 非対応で 2.x は 2.10 が最終版、dependency_management.md §3-2)",
     ),
 )
 
@@ -415,7 +441,11 @@ def _group_overlapping_vulns(
             if rule.ecosystem == "PyPI"
             else rule.package.lower()
         )
-        if rule.ecosystem == ecosystem and rule_pkg == norm_pkg:
+        if (
+            rule.ecosystem == ecosystem
+            and rule_pkg == norm_pkg
+            and (rule.version is None or rule.version == version)
+        ):
             accepted_lookup[rule.advisory_id] = rule.reason
 
     actionable: list[PackageAdvisoryFinding] = []
