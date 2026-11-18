@@ -236,6 +236,30 @@ def test_query_osv_fails_closed_on_mismatched_batch_results(tmp_path: Path) -> N
         cda.run_advisory_check(repo, fetcher=broken_fetcher)
 
 
+def test_version_scoped_accepted_advisory_does_not_mask_newer_version() -> None:
+    docs = [
+        {
+            "id": "GHSA-mmhr-3c5m-f64f",
+            "aliases": ["CVE-2026-126190"],
+            "summary": "soupsieve ReDoS",
+            "affected": [],
+        }
+    ]
+    # Exact version match (2.10 for <3.11.5) is accepted.
+    act_old, acc_old = cda._group_overlapping_vulns(
+        docs, "PyPI", "soupsieve", "2.10", cda.ACCEPTED_ADVISORIES
+    )
+    assert act_old == []
+    assert len(acc_old) == 1
+
+    # A different version (4.1.1) is NOT masked by the 2.10 rule.
+    act_new, acc_new = cda._group_overlapping_vulns(
+        docs, "PyPI", "soupsieve", "4.1.1", cda.ACCEPTED_ADVISORIES
+    )
+    assert len(act_new) == 1
+    assert acc_new == []
+
+
 def test_real_repository_files_parse_cleanly() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     node_ver = cda.parse_portable_node_version(

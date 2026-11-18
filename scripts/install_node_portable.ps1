@@ -22,9 +22,9 @@
 param(
     [string]$ProjectRoot = "",
     [string]$ArchivePath = "",
-    [string]$NodeVersion = "24.22.1",
-    # sha256 of node-v24.22.1-win-x64.zip from https://nodejs.org/dist/v24.22.1/SHASUMS256.txt
-    [string]$ExpectedSha256 = "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5"
+    [string]$NodeVersion = "24.22.3",
+    # sha256 of node-v24.22.3-win-x64.zip from https://nodejs.org/dist/v24.22.3/SHASUMS256.txt
+    [string]$ExpectedSha256 = "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f"
 )
 
 $ErrorActionPreference = "Stop"
