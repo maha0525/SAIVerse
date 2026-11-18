@@ -174,6 +174,23 @@ SAIVerse ではフロントエンドの部品の版も `frontend/package-lock.js
 |---|---|
 | `next build` / `next dev` が Next.js 自身の対話型の更新メニューで利用者の起動を止めず、`frontend/package.json` や `frontend/package-lock.json` を書き換える導線を出さない | `frontend/next.config.ts` (`experimental.agentUpgrade: false`) と `frontend/scripts/test-next-agent-upgrade-disabled.cjs` |
 
+### 2-10. 公開の脆弱性情報の毎日の自動点検 (2026-11-18 追加)
+
+SAIVerse は固定した版を配るため、配布後に上流でセキュリティ勧告が出たときは、私たち自身がそれに気づいて lock ファイルや固定版を更新する必要がある。GitHub 標準の Dependabot だけでは `requirements.lock` というファイル名や `scripts/install_node_portable.ps1` の Node.js バージョンを見張れず、開発者専用の lint パッケージの警告も混ざるため、自前の定時検査を置く。
+
+- `scripts/check_dependency_advisories.py` (標準ライブラリのみ) が三つの配布物をまとめて照合する:
+  1. `scripts/install_node_portable.ps1` の `$NodeVersion` — `https://nodejs.org/dist/index.json` で同じメジャー系列により新しい `security: true` のリリースが出ていないかを確かめる。
+  2. `frontend/package.json` と `frontend/package-lock.json` — 開発者の `npm run lint` でしか使わない `eslint` / `eslint-config-next` だけから到達するパッケージを除き、本番ビルド・本番サーバーで動く全パッケージ (`optionalDependencies` の `sharp` や `@next/swc-*` を含む) を OSV に問う。
+  3. `requirements.lock` の全 pin — 環境マーカー行も含めて OSV に問う。
+- §3-2 に理由と解除条件を書いて止めている既知の勧告 (`cryptography<49` の 3 件など) だけを `ACCEPTED_ADVISORIES` に登録し、結果の末尾に「承知済み・理由付き除外」として分けて出す。「なんとなく除外」は禁止。OSV で取り下げ済み (`withdrawn`) の勧告は無視し、同一 CVE の重複レコード (`GHSA-*` と `PYSEC-*`) は一つに束ねる。
+- ファイルの読み取り失敗や OSV / nodejs.org への照会失敗 (一時エラーの再試行後も失敗した場合) は「問題なし」とせず exit 2 で失敗させる (fail-closed)。
+- `.github/workflows/security_advisories.yml` が毎日 00:00 UTC (日本時間 09:00) に `develop` ブランチを点検し、未対応の勧告があれば exit 1 で失敗して GitHub 標準の失敗通知メールを送り、実行画面の最上部 (`GITHUB_STEP_SUMMARY`) に日本語の要約表を出す (`workflow_dispatch` で手動実行もできる。なお GitHub Actions の仕様により、定時実行が回り始めるのはこのワークフローが既定ブランチ `main` に載った時点から)。
+
+| 不変条件 | 持ち主 |
+|---|---|
+| 配布する三系統 (同梱 Node.js・フロントエンド本番 npm・Python `requirements.lock`) に新しいセキュリティ勧告が出たら毎日自動で検知し、照会失敗を合格扱いしない | `scripts/check_dependency_advisories.py` と `.github/workflows/security_advisories.yml` |
+| 除外する勧告には §3-2 に対応する理由があり、出力上も「承知済み」として可視化される | `scripts/check_dependency_advisories.py` の `ACCEPTED_ADVISORIES` |
+
 ---
 
 ## 3. 部品の仕分け (2026-09-02 時点の現物)
@@ -276,3 +293,4 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 - 2026-10-23 ([update_completes_with_new_code.md](update_completes_with_new_code.md)): `refresh_portable_node` を `update_dependencies` の中 (子プロセスで新しいコードの手順として走る場所) へ移し、巻き戻しでは子に `--keep-portable-node` を渡すようにした。start.bat / start-dev.bat の起動のたびの `install_node_portable.ps1` の呼び出しは、`--check-complete` の一度だけのやり直しに置き換えて取り除き、`.node.old` だけが残った状態を戻す処理だけを残した (まはー「全部まとめるべき。特別扱いすることで今後の更新でいつか影響が出る可能性を恐れてる」)。
 - 2026-10-23 (PR #417 の Codex 敵対レビュー五巡目で、途中で止まったときの扱いの作りを変えた): 四巡目と五巡目の指摘の多くは、同じ問いの別の瞬間だった — 「setup が途中で止まったとき、次の回は何をやり直せばいいかを知っているか」。四巡目はそれを瞬間ごとに手当てした (残った `.venv.old-*` を見て続きと読む、失敗の記録の `envs` から消えた環境を探す、失敗した環境の記録を消す、退避した SearXNG の venv を例外の処理の中で戻す)。五巡目はその手当て自体が新しい瞬間を作ったことを示した: `finish` が消している途中の `.venv.old-*` を続きの印と読んで戻し先に選ぶ、環境を消した直後に止まると失敗の記録が書かれる前なので次の回が環境を見失う、create で始まった回には `.venv.old-*` が無いので続きと読めない、窓を閉じると例外の処理が走らないので SearXNG の退避先が失われる。どれも「次の回が、前の回のやりかけをフォルダの様子から推し量る」作りの欠陥で、推し量り方を細かくするほど推し量れない形が増える。そこで、壊す操作の前に「やりかけている」ことを記録に書き、全部終わってから消し、記録が残っていれば書かれたものを全部やり直す、という一つの作りに置き換えた (§2-7 の「やりかけの記録」)。同じ巡で、psutil が使えずに画面のサーバーと SearXNG のサーバーを確かめられないときに警告だけで進んでいた setup を、利用者の確認 (Enter) を待つ形に変え、start.bat の起動前の入れ直しはその場合に延ばすようにした。`.env` の探し方も、main.py の `load_dotenv()` と同じく上のフォルダへ探す形に揃えた。
 - 2026-11-18: 利用者の `start.bat` (`next build`) に Next.js 16.4.1 → 16.4.6 の `Upgrade now / Skip` メニューが出た報告を受け、`frontend/next.config.ts` に `experimental.agentUpgrade: false` を設定して開発者向けの更新メニューを無効化し (§2-9)、あわせて `next` と `eslint-config-next` を 16.4.1 から 16.4.6 へ上げた (`use cache` 関連の GHSA-mfr8-8qww-v76h・GHSA-vc7v-qv4w-wrv8 の修正版。SAIVerse は `use cache` を使っていない)。`test-next-agent-upgrade-disabled.cjs` と `tests/test_frontend_agent_upgrade_disabled.py` で `loadConfig` と `nudgeUpgrade` の両方向を固定した。
+- 2026-11-18: 上流で公開された脆弱性に私たち側で気づく仕組みとして、`scripts/check_dependency_advisories.py` と `.github/workflows/security_advisories.yml` (毎日日本時間 09:00 に `develop` を自動点検し、引っかかった日だけ失敗終了して GitHub メール通知を飛ばす) を新設した (§2-10)。初回実行で 2026-10-22 以降に公開されていた 8 対象 (同梱 Node.js `v24.22.3`、npm `lodash`、PyPI `filelock`・`langgraph`/`langgraph-sdk`・`opentelemetry-api`・`pyasn1`・`pypdf`・`soupsieve`) を検知し、[dependency_advisories_20261118.md](../issues/dependency_advisories_20261118.md) に切り出した。
