@@ -119,6 +119,41 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertEqual(free["context_length"], 250_000)
         self.assertEqual(free["rate_limit"]["rpd"], 20)
 
+    def test_neon_definition_matches_the_official_contract(self):
+        """Gemini 4 Neon: 有料 Tier のみ。thinking_level は low/medium/high/xhigh (既定 high、
+        minimal はエラー)、sampling は無視、明示キャッシュ非対応、1M 統一・全域一律料金。"""
+        config = model_configs.get_model_config("gemini-4-neon")
+        self.assertEqual(config["model"], "gemini-4-neon")
+        self.assertTrue(config["prefer_paid"])
+        self.assertEqual(config["context_length"], 1_048_576)
+        self.assertFalse(config["supports_sampling_parameters"])
+        self.assertFalse(config["supports_model_prefill"])
+        for name in ("temperature", "top_p", "top_k"):
+            self.assertNotIn(name, config["parameters"])
+        thinking_level = config["parameters"]["thinking_level"]
+        self.assertEqual(
+            thinking_level["options"], ["low", "medium", "high", "xhigh"]
+        )
+        self.assertEqual(thinking_level["default"], "high")
+        self.assertIs(config["cache"]["explicit_supported"], False)
+        self.assertIs(config["cache"]["persist_realtime_and_recall"], True)
+        self.assertEqual(config["cache"]["min_tokens"], 4096)
+        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(_gemini_version("gemini-4-neon"), (4, 0))
+        self.assertAlmostEqual(
+            model_configs.calculate_cost("gemini-4-neon", 1_000_000, 1_000_000),
+            18.0,
+        )
+        self.assertAlmostEqual(
+            model_configs.calculate_cost(
+                "gemini-4-neon",
+                1_000_000,
+                0,
+                cached_tokens=1_000_000,
+            ),
+            0.15,
+        )
+
     def test_paid_model_pricing_matches_standard_tier(self):
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),
