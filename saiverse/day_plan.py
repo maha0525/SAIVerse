@@ -5101,6 +5101,15 @@ def _choose_free_time_kind(
             persona_id, model, exc_info=True,
         )
         return None
+    finally:
+        from saiverse.usage_tracker import get_usage_tracker
+
+        get_usage_tracker().record_client_usage(
+            client,
+            persona_id=persona_id,
+            node_type="day_plan_free_choice",
+            category="day_plan",
+        )
     data: Any = raw
     if isinstance(raw, str):
         try:

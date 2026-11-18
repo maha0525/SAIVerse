@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -295,6 +295,9 @@ class ClaudePreviewResponse(BaseModel):
     memory_items: List[ClaudeMemoryItemSummary] = []
     cache_key: str
     total_count: int
+    # 同じファイルに入っていた、ほかの取り込める種類 (古い形の 1 つの ZIP)。
+    # 画面は「同じファイルをその枠にも入れてください」と知らせる。
+    also_contains: List[str] = []
 
 class ClaudeImportRequest(BaseModel):
     cache_key: str
@@ -363,7 +366,7 @@ class ReembedStatusResponse(BaseModel):
     running: bool
     progress: Optional[int] = None  # messages
     total: Optional[int] = None  # messages
-    message: Optional[str] = None
+    message: Optional[Any] = None
     # Chronicle / Memopedia page / fragment progress, keyed by
     # "chronicle" / "memopedia" / "fragment".
     sources: Optional[Dict[str, ReembedSourceProgress]] = None
@@ -593,6 +596,9 @@ class ChronicleCostEstimate(BaseModel):
     # 未編纂ゼロでもこれが 1 以上なら補修入口 (帯 + 確認モーダル) を出す —
     # 畳みだけが残った状態の正常化経路が会話 (Metabolism) しか無い穴を塞ぐ。
     consolidation_calls: int = 0
+    # 一次あらすじの確定ごとに相乗りする Fragment 抽出の回数 (内訳。合計の
+    # estimated_llm_calls と費用には既に含まれている)。
+    extraction_calls: int = 0
 
 
 class GenerationJobStatus(BaseModel):

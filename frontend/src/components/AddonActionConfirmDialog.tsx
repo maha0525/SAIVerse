@@ -38,8 +38,8 @@ interface RegistryAddonEntry {
 
 type RowState =
     | { kind: 'not_installed' }
-    | { kind: 'installed_latest'; current_version: string }
-    | { kind: 'update_available'; current_version: string; new_version: string };
+    | { kind: 'installed_latest'; current_version: string; setup_incomplete?: boolean }
+    | { kind: 'update_available'; current_version: string; new_version: string; setup_incomplete?: boolean };
 
 /**
  * 導入時の質問 (prepare / options の API の答え) の読み込み状態。
@@ -80,6 +80,7 @@ function getOperationLabel(op: CatalogOperation): string {
         case 'update': return uiText("components.AddonActionConfirmDialog.text002");
         case 'uninstall': return uiText("components.AddonActionConfirmDialog.text003");
         case 'options': return uiText("components.AddonActionConfirmDialog.text024");
+        case 'repair': return uiText("components.AddonActionConfirmDialog.text029");
     }
 }
 
@@ -240,6 +241,13 @@ export default function AddonActionConfirmDialog({
                         <div className={styles.note}>
                             <AlertTriangle size={14} />
                             <span data-i18n="components.AddonActionConfirmDialog.text028">{uiText("components.AddonActionConfirmDialog.text028")}</span>
+                        </div>
+                    )}
+
+                    {operation === 'repair' && (
+                        <div className={styles.note}>
+                            <AlertTriangle size={14} />
+                            <span data-i18n="components.AddonActionConfirmDialog.text030">{uiText("components.AddonActionConfirmDialog.text030")}</span>
                         </div>
                     )}
 

@@ -1,7 +1,7 @@
 # アドオンの更新で step が途中で失敗すると、次の更新で setup が再実行されない
 
 **起票**: 2026-10-05 (導入時の質問と専用の Python 環境の実装の検収で言葉になった。穴そのものは旧実装からある)
-**状態**: 未着手
+**状態**: 修正 PR 待ち (2026-11-15 `.setup_in_progress/update-setup.json`・`setup_state.json` による再実行保証と、既存失敗環境向けの `repair` 経路を実装)
 **優先度**: medium (メティスの判断。最初に踏みうるのは voice-tts の更新 — 数 GB のダウンロードを含む setup が途中で失敗する確率は小さくない)
 **関連**: [addon_catalog_management.md](../intent/addon_catalog_management.md)、`saiverse/addon_installer.py` の `execute_update_plan`
 

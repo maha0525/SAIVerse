@@ -234,6 +234,12 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                 // (api/routes/world.py の create_ai)。無い・知らない識別子は英語の detail を出す
                 if (data.error_code === PERSONA_MEMORY_FOLDER_EXISTS && data.error_params?.folder) {
                     setError(uiText("components.PersonaWizard.memoryFolderExists", { p1: data.error_params.folder }));
+                } else if (data.error_code === 'persona_name_exists' && data.error_params?.name) {
+                    setError(uiText("components.PersonaWizard.nameExists", { p1: data.error_params.name }));
+                } else if (data.error_code === 'persona_id_invalid_charset' && data.error_params?.id) {
+                    setError(uiText("components.PersonaWizard.idInvalidCharset", { p1: data.error_params.id }));
+                } else if (data.error_code === 'persona_id_exists' && data.error_params?.id) {
+                    setError(uiText("components.PersonaWizard.idExists", { p1: data.error_params.id }));
                 } else {
                     setError(data.detail || uiText("components.PersonaWizard.text004"));
                 }

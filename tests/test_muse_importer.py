@@ -11,7 +11,7 @@ import unittest
 import uuid
 import zipfile
 import zlib
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -498,7 +498,7 @@ class MuseImporterEndToEndTest(unittest.TestCase):
 
             db_path = home / "personas" / "muse-test" / "memory.db"
             self.assertTrue(db_path.is_file())
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 rows = conn.execute(
                     "SELECT role, content, created_at, metadata FROM messages ORDER BY rowid"
                 ).fetchall()

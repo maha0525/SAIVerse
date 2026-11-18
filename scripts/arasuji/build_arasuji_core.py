@@ -184,6 +184,8 @@ def print_cost_estimate(
     print(f"統合コール数 (概算):    {estimate.consolidation_calls}")
     if estimate.upper_regen_calls:
         print(f"上位あらすじ再生成:     {estimate.upper_regen_calls}")
+    if estimate.extraction_calls:
+        print(f"Memopedia 抽出:         {estimate.extraction_calls}")
     print(f"LLM コール数合計:       {estimate.estimated_llm_calls}")
     print(f"使用モデル:             {estimate.model_name}")
     if estimate.is_free_tier:
@@ -617,6 +619,8 @@ def run_cli() -> None:
             messages_override=est_messages,
             truncate_limit=est_limit,
             skip_absorption=est_limit > 0,
+            # 抽出は --with-memopedia のときだけ走る (実行と同じ条件で数える)
+            with_extraction=bool(args.with_memopedia),
         )
         conn.close()
         sys.exit(0)
@@ -791,6 +795,8 @@ def run_cli() -> None:
         messages_override=messages,
         truncate_limit=limit,
         skip_absorption=limit > 0,
+        # 抽出は --with-memopedia のときだけ走る (実行と同じ条件で数える)
+        with_extraction=bool(args.with_memopedia),
     )
     if not args.dry_run and not args.yes:
         answer = input("\nこの内容で Chronicle 生成を実行しますか？ [y/N]: ").strip().lower()
@@ -921,6 +927,9 @@ def run_cli() -> None:
                 conn, client, persona_id=args.persona_id,
                 # 承認済みの残り予算だけを渡す
                 max_folds=estimate.consolidation_calls - consolidated_count,
+                # アプリの編纂 (generate_chronicle) と同じく、束ねで初めて
+                # 要約に変わる恒等圧縮の子から抽出する (見積もりも数えている)
+                batch_callback=batch_callback,
             )
             if not folded:
                 break

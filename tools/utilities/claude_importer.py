@@ -22,14 +22,17 @@ from __future__ import annotations
 import json
 import logging
 import re
-import textwrap
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from tools.utilities.chatgpt_importer import ConversationMessage, ConversationRecord
+from tools.utilities.chatgpt_importer import (
+    ConversationMessage,
+    ConversationRecord,
+    shorten_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,10 +83,7 @@ def _parse_iso(value: Any) -> Optional[datetime]:
 
 
 def _shorten(text: str, width: int = 60) -> str:
-    cleaned = " ".join(str(text).split())
-    if not cleaned:
-        return ""
-    return textwrap.shorten(cleaned, width=max(10, width), placeholder="…")
+    return shorten_text(text, max(10, width))
 
 
 #: 記憶アイテムの種類。``core_memory`` だけがコア記憶へ、他は Memopedia へ転記する。
@@ -130,6 +130,10 @@ class ClaudeExportFile:
     memory_items: list[ClaudeMemoryItem] = field(default_factory=list)
     # projects のみ: record.identifier → prompt_template (空は含めない)
     project_instructions: dict[str, str] = field(default_factory=dict)
+    # 同じファイルに入っていた、ほかの取り込める種類 (古い形の 1 つの ZIP に
+    # 会話・記憶・プロジェクトが並ぶ場合)。画面が「同じファイルをその枠にも
+    # 入れてください」と知らせるために使う — 黙って取り残さない。
+    also_contains: list[str] = field(default_factory=list)
 
     def get_record(self, selector: str) -> Optional[ConversationRecord]:
         try:
@@ -164,12 +168,28 @@ def detect_category(path: Path) -> str:
     """ファイルがエクスポートのどのカテゴリかを中身から判定する。
 
     ZIP はエントリ名、JSON は構造で見る。判定できなければ
-    ``ClaudeImportError(code="not_claude_export")``。
+    ``ClaudeImportError(code="not_claude_export")``。ZIP に複数の種類が
+    入っているときは最初に見つかった種類 (:func:`detect_categories` の先頭)。
+    """
+    return detect_categories(path)[0]
+
+
+def detect_categories(path: Path) -> list[str]:
+    """ファイルに入っている種類を全部、見つかった順に返す。
+
+    今の Claude は種類ごとに別の ZIP を配るが、古い形 (2026-07 頃まで) は
+    1 つの ZIP の最上位に conversations.json・memories.json・projects.json
+    (と users.json) が並んでいた。1 つに決め打ちすると、同じ ZIP の記憶と
+    プロジェクトが読まれないまま取り残される。単体 JSON は 1 種類。
     """
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
-        return _category_from_names(names)
+        return _categories_from_names(names)
+    return [_category_of_json(path)]
+
+
+def _category_of_json(path: Path) -> str:
 
     # 単体 JSON (ZIP を展開して中身だけ投げ込んだ場合も受ける)
     try:
@@ -191,42 +211,80 @@ def detect_category(path: Path) -> str:
     if isinstance(data, list) and data and isinstance(data[0], dict):
         if "chat_messages" in data[0]:
             return CATEGORY_CONVERSATIONS
+        # 古い形の memories.json / projects.json は最上位が配列
+        if "conversations_memory" in data[0] or "project_memories" in data[0]:
+            return CATEGORY_MEMORIES
+        if "prompt_template" in data[0] or "docs" in data[0]:
+            return CATEGORY_PROJECTS
     raise ClaudeImportError(
         "not_claude_export", "Could not recognize the file as a Claude export"
     )
 
 
-def _category_from_names(names: list[str]) -> str:
+def _category_of_name(name: str) -> Optional[str]:
+    if _CONVERSATIONS_JSON_RE.search(name):
+        return CATEGORY_CONVERSATIONS
+    if "claude_code_cloud/" in name or name.startswith("claude_code_cloud"):
+        return CATEGORY_CLAUDE_CODE
+    if name.startswith("projects/") or "/projects/" in name or _PROJECT_JSON_RE.search(name):
+        return CATEGORY_PROJECTS
+    if name.startswith("memories/") or "/memories/" in name or _MEMORIES_JSON_RE.search(name):
+        return CATEGORY_MEMORIES
+    if name.startswith("frames/") or "/frames/" in name or name.startswith("frames"):
+        return CATEGORY_FRAMES
+    if name in ("users.json", "login_history.json"):
+        return CATEGORY_LIGHT_METADATA
+    return None
+
+
+def _categories_from_names(names: list[str]) -> list[str]:
+    found: list[str] = []
     for name in names:
-        if _CONVERSATIONS_JSON_RE.search(name):
-            return CATEGORY_CONVERSATIONS
-        if "claude_code_cloud/" in name or name.startswith("claude_code_cloud"):
-            return CATEGORY_CLAUDE_CODE
-        if name.startswith("projects/") or "/projects/" in name:
-            return CATEGORY_PROJECTS
-        if name.startswith("memories/") or "/memories/" in name:
-            return CATEGORY_MEMORIES
-        if name.startswith("frames/") or "/frames/" in name or name.startswith("frames"):
-            return CATEGORY_FRAMES
-        if name in ("users.json", "login_history.json"):
-            return CATEGORY_LIGHT_METADATA
-    raise ClaudeImportError(
-        "not_claude_export", "ZIP does not contain any known Claude export entries"
-    )
+        category = _category_of_name(name)
+        if category is not None and category not in found:
+            found.append(category)
+    if not found:
+        raise ClaudeImportError(
+            "not_claude_export", "ZIP does not contain any known Claude export entries"
+        )
+    return found
 
 
 # ---------------------------------------------------------------------------
 # 読み込み
 # ---------------------------------------------------------------------------
 
-def load_claude_export(path: Path) -> ClaudeExportFile:
+def load_claude_export(
+    path: Path, expected_category: Optional[str] = None,
+) -> ClaudeExportFile:
     """アップロードされたファイルを解析する。
 
     取り込み対象外のカテゴリ (frames / manifest / light_metadata) は
     ``ClaudeImportError`` (code = ``"<category>_not_supported"``) を上げ、
     呼び出し側が案内を出せるよう ``detected_category`` を添える。
+
+    ``expected_category`` (画面のどの枠に落とされたか) がファイルに入って
+    いれば、その種類を読む — 古い形の 1 つの ZIP を記憶の枠に落とせば記憶が
+    読める。入っていなければ最初に見つかった**取り込める**種類を読む
+    (呼び出し側が枠との食い違いを案内する)。古い形の ZIP は最上位に
+    users.json (アカウント情報 = 取り込み対象外) も並ぶので、それが先頭に
+    来ても ZIP ごと断らない。読まなかったほかの取り込める種類は
+    ``also_contains``。
     """
-    category = detect_category(path)
+    categories = detect_categories(path)
+    importable = [c for c in categories if c in IMPORTABLE_CATEGORIES]
+    if expected_category in importable:
+        category = expected_category
+    else:
+        category = (importable or categories)[0]
+    export_file = _load_category(path, category)
+    export_file.also_contains = [
+        c for c in categories if c != category and c in IMPORTABLE_CATEGORIES
+    ]
+    return export_file
+
+
+def _load_category(path: Path, category: str) -> ClaudeExportFile:
     if category not in IMPORTABLE_CATEGORIES:
         raise ClaudeImportError(
             f"{category}_not_supported",
@@ -508,16 +566,27 @@ def _channel_records(
 
 # --- projects --------------------------------------------------------------
 
-_PROJECT_JSON_RE = re.compile(r"(^|/)projects/[^/]+\.json$")
+# 今の形は projects/<uuid>.json (1 件 1 ファイル)、古い形は最上位の
+# projects.json (全件の配列)。
+_PROJECT_JSON_RE = re.compile(r"(^|/)projects(?:/[^/]+)?\.json$")
+
+
+def _each_dict(entries: list[tuple[str, Any]]) -> list[dict[str, Any]]:
+    """読み出したエントリの中身を dict の並びにする (古い形は最上位が配列)。"""
+    out: list[dict[str, Any]] = []
+    for _, data in entries:
+        if isinstance(data, dict):
+            out.append(data)
+        elif isinstance(data, list):
+            out.extend(d for d in data if isinstance(d, dict))
+    return out
 
 
 def _load_projects(path: Path) -> ClaudeExportFile:
     entries = _read_json_entries(path, _PROJECT_JSON_RE)
     records: list[ConversationRecord] = []
     instructions: dict[str, str] = {}
-    for _, data in entries:
-        if not isinstance(data, dict):
-            continue
+    for data in _each_dict(entries):
         record = _project_record(data)
         if record is None:
             continue
@@ -582,7 +651,9 @@ def _project_record(data: dict[str, Any]) -> Optional[ConversationRecord]:
 
 # --- memories --------------------------------------------------------------
 
-_MEMORIES_JSON_RE = re.compile(r"(^|/)memories/[^/]+\.json$")
+# 今の形は memories/<account>.json、古い形は最上位の memories.json
+# (``[{conversations_memory, project_memories, account_uuid}]`` の配列)。
+_MEMORIES_JSON_RE = re.compile(r"(^|/)memories(?:/[^/]+)?\.json$")
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _FRONTMATTER_LINE_RE = re.compile(r"^([A-Za-z_][\w-]*):[ \t]*(.*)$")
 # 全体記憶の見出し (**Work context**) と小見出し (*Recent months*)。行全体が強調のときだけ見出しとみなす。
@@ -734,9 +805,7 @@ def _load_memories(path: Path) -> ClaudeExportFile:
     if not entries and not zipfile.is_zipfile(path):
         entries = [(path.name, json.loads(path.read_text(encoding="utf-8")))]
     items: list[ClaudeMemoryItem] = []
-    for _, data in entries:
-        if not isinstance(data, dict):
-            continue
+    for data in _each_dict(entries):
         items.extend(_memory_items(data))
     return ClaudeExportFile(category=CATEGORY_MEMORIES, memory_items=items)
 

@@ -70,7 +70,7 @@ async function main() {
         calls.push(call);
         return respond(call);
     };
-    const configModule = await transpileConfig({ nextConfigPath: path.join(frontendDir, "next.config.ts"), configFileName: "next.config.ts", cwd: frontendDir });
+    const configModule = await transpileConfig({ nextConfigPath: path.join(frontendDir, "next.config.ts"), configFileName: "next.config.ts", cwd: frontendDir, dir: frontendDir });
     const config = configModule.default || configModule;
     const cases = [
         ["unset", undefined, undefined, "http://127.0.0.1:8000", false],

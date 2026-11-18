@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel
 
+from api.ui_messages import ui_message
 from saiverse import app_state
 from saiverse.legacy_log_import import legacy_log_path
 
@@ -618,11 +619,7 @@ def _refuse_without_updater_psutil(venv_python: str) -> None:
     if probe_failed:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "この環境には更新の安全確認に必要な部品 (psutil) がまだ入っていません。"
-                "SAIVerse を終了してから update.bat (macOS / Linux は update.sh) を"
-                "一度実行してください。それ以降はこのボタンから更新できます。"
-            ),
+            detail=ui_message("api.systemUpdate.psutilRequired"),
         )
 
 
@@ -642,7 +639,7 @@ def _claim_updater_launch() -> None:
         if _updater_launched:
             raise HTTPException(
                 status_code=409,
-                detail="An update or channel switch is already in progress; the backend is shutting down for it.",
+                detail=ui_message("api.systemUpdate.alreadyInProgress"),
             )
         _updater_launched = True
 
@@ -791,6 +788,13 @@ def _launch_detached_updater(
     timer.start()
 
 
+def _update_error_detail(exc: Exception):
+    ui_key = getattr(exc, "ui_key", None)
+    if ui_key:
+        return ui_message(ui_key, **(getattr(exc, "ui_params", None) or {}))
+    return str(exc)
+
+
 @router.post("/update")
 async def trigger_update():
     """Trigger a self-update: spawn detached updater, then shutdown."""
@@ -804,7 +808,7 @@ async def trigger_update():
 
         assert_git_update_ready(project_path)
     except UpdateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_update_error_detail(exc)) from exc
 
     # Claimed after every refusal above: a refused request must stay retryable.
     _claim_updater_launch()
@@ -845,12 +849,12 @@ def switch_release_channel(body: _ChannelSwitchBody):
     if body.channel not in CHANNEL_BRANCHES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown release channel {body.channel!r}; expected one of {sorted(CHANNEL_BRANCHES)}",
+            detail=ui_message("api.systemUpdate.unknownChannel", channel=body.channel),
         )
     if body.channel == CHANNEL_EARLY_ACCESS and not body.consent:
         raise HTTPException(
             status_code=400,
-            detail="Joining the early-access channel requires the user's consent",
+            detail=ui_message("api.systemUpdate.consentRequired"),
         )
 
     project_path, updater_script, venv_python = _resolve_updater()
@@ -863,7 +867,7 @@ def switch_release_channel(body: _ChannelSwitchBody):
     try:
         plan = preflight_switch(project_path, body.channel)
     except UpdateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_update_error_detail(exc)) from exc
 
     # Claimed after every refusal above: a refused request must stay retryable.
     _claim_updater_launch()

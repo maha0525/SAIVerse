@@ -209,7 +209,10 @@ class ChannelSwitchRouteTest(_AppStateCase):
     def test_joining_without_consent_is_refused(self) -> None:
         res = self.client.post("/api/system/channel", json={"channel": "early_access"})
         self.assertEqual(res.status_code, 400)
-        self.assertIn("consent", res.json()["detail"])
+        self.assertEqual(
+            res.json()["detail"],
+            {"$ui": "api.systemUpdate.consentRequired", "params": {}},
+        )
         self.assertFalse(self.config_path.exists())
 
     def test_engine_precheck_refusal_happens_before_shutdown(self) -> None:
@@ -258,7 +261,10 @@ class ChannelSwitchRouteTest(_AppStateCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 409)
-        self.assertIn("already in progress", second.json()["detail"])
+        self.assertEqual(
+            second.json()["detail"],
+            {"$ui": "api.systemUpdate.alreadyInProgress", "params": {}},
+        )
         popen.assert_called_once()
 
     def test_refused_preflight_keeps_the_launch_retryable(self) -> None:

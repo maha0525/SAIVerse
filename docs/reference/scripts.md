@@ -22,6 +22,7 @@
 | スクリプト | 用途 |
 |---|---|
 | `check_lock_platforms.py` | `requirements.lock` の各 pin が Windows / Linux / macOS arm64 / macOS x86_64 × Python 3.11〜3.13 で入るか (wheel か sdist があるか) を PyPI に問う。uv は wheel の有無を見ずに解決するので、lock を作り直したら一度回す。入らない組合せがあれば exit 1。背景は [`docs/intent/dependency_management.md`](../intent/dependency_management.md) §3-2 |
+| `check_dependency_advisories.py` | 同梱 Node.js (`scripts/install_node_portable.ps1`)・フロントエンド本番 npm (`frontend/package-lock.json` から開発専用の `eslint` / `eslint-config-next` 固有の部分木を除いたもの)・Python (`requirements.lock`) の固定版を nodejs.org と OSV に照合し、未対応のセキュリティ勧告があれば一覧を出して exit 1 を返す (照会・解析の失敗は exit 2)。理由付きで止めている既知の勧告 (`ACCEPTED_ADVISORIES`) は除外欄に分けて表示する。GitHub Actions (`.github/workflows/security_advisories.yml`) が毎日定時実行し、失敗通知メールで知らせる ([intent §2-10](../intent/dependency_management.md)) |
 
 ## SAIMemory / 記憶
 

@@ -672,7 +672,13 @@ class PersonaMixin:
                 .first()
             )
             if existing_ai:
-                return False, f"A persona named '{name}' already exists in this city.", None, None, None
+                return (
+                    False,
+                    f"A persona named '{name}' already exists in this city.",
+                    CreationErrorDetail(code="persona_name_exists", params={"name": name}),
+                    None,
+                    None,
+                )
 
             # AIID は ~/.saiverse/personas/<id>/ のフォルダ名・API パス引数に
             # なる永続キーなので、Building / Region と同じ文字種契約に従う
@@ -683,7 +689,16 @@ class PersonaMixin:
             building_ids = BuildingIdAvailability(db, self.saiverse_home)
             if custom_ai_id:
                 if not is_valid_identifier(custom_ai_id):
-                    return (False, charset_error("Persona ID", custom_ai_id), None, None, None)
+                    return (
+                        False,
+                        charset_error("Persona ID", custom_ai_id),
+                        CreationErrorDetail(
+                            code="persona_id_invalid_charset",
+                            params={"id": custom_ai_id},
+                        ),
+                        None,
+                        None,
+                    )
                 ai_stem = custom_ai_id
             else:
                 # 日本語名など slug が残らない名前は persona_<連番> へ落ちる。
@@ -716,7 +731,7 @@ class PersonaMixin:
                     f"A persona with the ID '{new_ai_id}' already exists "
                     "(IDs are compared case-insensitively because they become "
                     "folder names).",
-                    None,
+                    CreationErrorDetail(code="persona_id_exists", params={"id": new_ai_id}),
                     None,
                     None,
                 )

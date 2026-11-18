@@ -347,7 +347,10 @@ def test_api_job_keeps_warning_when_stale_vectors_remain(tmp_path):
                return_value=["message_embeddings"]):
         status = _run_api_job(db_path, force=False, manager=mgr)
 
-    assert "Stale vectors remain" in status["message"]
+    assert status["message"]["$ui"] == "api.reembed.completedWithNote"
+    note = status["message"]["params"]["note"]
+    assert note["$ui"] == "api.reembed.noteIncomplete"
+    assert "Stale vectors remain" in note["params"]["reason"]
     assert mgr.personas["p"].sai_memory.embed_model_changed is True
     assert [w["persona_ids"] for w in mgr.startup_warnings] == [["p"]]
     reembed._reembed_status.pop("p", None)
@@ -989,7 +992,11 @@ def test_api_job_keeps_warning_when_live_embedder_cannot_load(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="api.routes.people.reembed"):
         status = _run_api_job(db_path, force=False, manager=mgr)
 
-    assert "could not be loaded" in status["message"]
+    assert status["message"]["$ui"] == "api.reembed.completedWithNote"
+    assert status["message"]["params"]["note"] == {
+        "$ui": "api.reembed.noteLiveEmbedderUnavailable",
+        "params": {},
+    }
     assert mgr.personas["p"].sai_memory.embed_model_changed is True
     assert [w["persona_ids"] for w in mgr.startup_warnings] == [["p"]]
     assert any("could not be loaded" in r.getMessage() for r in caplog.records)
@@ -1340,7 +1347,10 @@ def test_api_job_with_skipped_row_stays_incomplete_then_converges(tmp_path):
         status = reembed._reembed_status["p"]
     finally:
         _EditOnceEmbedder.edit = None
-    assert "Skipped 1" in status["message"] and "Run the re-embed again" in status["message"]
+    assert status["message"]["$ui"] == "api.reembed.completedWithNote"
+    note = status["message"]["params"]["note"]
+    assert note["$ui"] == "api.reembed.noteIncomplete"
+    assert "Skipped 1" in note["params"]["reason"]
     assert mgr.personas["p"].sai_memory.embed_model_changed is True
     conn = _open(db_path)
     try:
@@ -1353,7 +1363,7 @@ def test_api_job_with_skipped_row_stays_incomplete_then_converges(tmp_path):
         conn.close()
 
     status = _run_api_job(db_path, force=False, manager=mgr)
-    assert "Run the re-embed again" not in status["message"]
+    assert status["message"]["$ui"] == "api.reembed.completed"
     conn = _open(db_path)
     try:
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
@@ -1384,7 +1394,10 @@ def test_api_job_that_dies_half_way_leaves_the_mark(tmp_path):
         status = _run_api_job(db_path, force=False, manager=None)
 
     assert status["running"] is False
-    assert "process died" in status["message"]
+    assert status["message"] == {
+        "$ui": "api.reembed.error",
+        "params": {"error": "process died"},
+    }
     conn = _open(db_path)
     try:
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None

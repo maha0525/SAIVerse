@@ -62,6 +62,7 @@ def test_unknown_marker_with_matching_db_refuses_without_psutil(monkeypatch, tmp
             },
         )
         owned, reason = runtime_marker.another_running_process_owns_db(db_path)
+        assert child.poll() is None
     finally:
         child.terminate()
         child.wait(timeout=10)
@@ -140,6 +141,7 @@ def test_live_pid_without_identity_record_refuses_with_psutil(monkeypatch, tmp_p
             },
         )
         owned, reason = runtime_marker.another_running_process_owns_db(db_path)
+        assert child.poll() is None
     finally:
         child.terminate()
         child.wait(timeout=10)
@@ -206,6 +208,7 @@ def test_live_pid_with_corrupt_identity_record_refuses(monkeypatch, tmp_path, co
             },
         )
         owned, reason = runtime_marker.another_running_process_owns_db(db_path)
+        assert child.poll() is None
     finally:
         child.terminate()
         child.wait(timeout=10)
@@ -269,6 +272,7 @@ def test_live_pid_with_mismatched_identity_is_still_stopped(monkeypatch, tmp_pat
             },
         )
         owned, reason = runtime_marker.another_running_process_owns_db(db_path)
+        assert child.poll() is None
     finally:
         child.terminate()
         child.wait(timeout=10)
@@ -278,15 +282,11 @@ def test_live_pid_with_mismatched_identity_is_still_stopped(monkeypatch, tmp_pat
 
 
 def test_permission_error_marker_refuses_as_unknown(monkeypatch, tmp_path):  # type: ignore[no-untyped-def]
-    """os.kill(pid, 0) が PermissionError を返すプロセス (存在するがアクセス
-    できない) は「生きているかもしれない」ので、"stopped" に潰さず拒否する。"""
+    """アクセスできないプロセス (probe が "unknown") は「生きているかもしれない」
+    ので、"stopped" に潰さず拒否する。"""
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
     monkeypatch.setitem(sys.modules, "psutil", None)
-
-    def _kill_denied(pid, sig):  # type: ignore[no-untyped-def]
-        raise PermissionError("access denied")
-
-    monkeypatch.setattr(runtime_marker.os, "kill", _kill_denied)
+    monkeypatch.setattr(runtime_marker, "probe_process_alive", lambda _pid: "unknown")
 
     db_path = tmp_path / "saiverse.db"
     _write_marker(
@@ -309,13 +309,61 @@ def test_permission_error_marker_refuses_as_unknown(monkeypatch, tmp_path):  # t
 
 
 def test_backup_is_process_alive_treats_permission_error_as_alive(monkeypatch):  # type: ignore[no-untyped-def]
-    """sai_memory.backup._is_process_alive も同族: PermissionError を死亡扱いに
+    """sai_memory.backup._is_process_alive も同族: 判定不能 ("unknown") を死亡扱いに
     潰すと、生きているロック保持者のロックファイルを誤削除しうる。"""
     from sai_memory import backup
 
-    def _kill_denied(pid, sig):  # type: ignore[no-untyped-def]
-        raise PermissionError("access denied")
-
-    monkeypatch.setattr(backup.os, "kill", _kill_denied)
+    monkeypatch.setattr(runtime_marker, "probe_process_alive", lambda _pid: "unknown")
 
     assert backup._is_process_alive(12345) is True
+
+
+def test_probe_process_alive_never_calls_os_kill_on_windows_and_keeps_child_alive(monkeypatch):  # type: ignore[no-untyped-def]
+    """Windows で probe_process_alive / _is_process_alive が os.kill(pid, 0) を
+    呼ばず、確認対象の子プロセスを生かしたまま "alive" / True を返す。"""
+    if sys.platform != "win32":
+        pytest.skip("Windows-specific kernel32 probe test")
+
+    from sai_memory import backup
+
+    def _forbid_kill(pid, sig):  # type: ignore[no-untyped-def]
+        raise AssertionError(f"os.kill({pid}, {sig}) must not be called on Windows")
+
+    monkeypatch.setattr(runtime_marker.os, "kill", _forbid_kill)
+    monkeypatch.setattr(backup.os, "kill", _forbid_kill, raising=False)
+
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
+    try:
+        assert runtime_marker.probe_process_alive(child.pid) == "alive"
+        assert backup._is_process_alive(child.pid) is True
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+    assert runtime_marker.probe_process_alive(child.pid) == "dead"
+    assert backup._is_process_alive(child.pid) is False
+
+
+def test_probe_process_alive_invalid_pids_are_dead() -> None:
+    assert runtime_marker.probe_process_alive(0) == "dead"
+    assert runtime_marker.probe_process_alive(-1) == "dead"
+
+
+def test_probe_process_alive_posix_branch(monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(runtime_marker.sys, "platform", "linux")
+
+    monkeypatch.setattr(runtime_marker.os, "kill", lambda _pid, _sig: None)
+    assert runtime_marker.probe_process_alive(12345) == "alive"
+
+    def _raise_perm(_pid, _sig):  # type: ignore[no-untyped-def]
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(runtime_marker.os, "kill", _raise_perm)
+    assert runtime_marker.probe_process_alive(12345) == "unknown"
+
+    def _raise_lookup(_pid, _sig):  # type: ignore[no-untyped-def]
+        raise ProcessLookupError("no such process")
+
+    monkeypatch.setattr(runtime_marker.os, "kill", _raise_lookup)
+    assert runtime_marker.probe_process_alive(12345) == "dead"

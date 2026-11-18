@@ -1,6 +1,6 @@
 # runtime_marker の os.kill(pid, 0) は Windows で相手を終了させうる
 
-**状態**: 未解決 (2026-10-28 起票)
+**状態**: 修正 PR 待ち (2026-10-28 起票 / 2026-11-14 修正実装)
 
 ## 事実
 
@@ -12,6 +12,8 @@
 
 別プロセスが同じ DB を持っているかの判定 (CITY_SLUG の自動リネームの拒否など) の途中で、判定対象の SAIVerse プロセス (または pid を使い回した無関係のプロセス) を殺しうる。
 
-## 未裁定
+## 対応 (2026-11-14)
 
-直し方は決めていない。候補は「Windows では os.kill の代替を使わない (psutil が失敗したら不明として安全側に倒す)」など。
+- `saiverse/runtime_marker.py` に `probe_process_alive(pid)` を新設し、Windows (`sys.platform == "win32"`) では `os.kill(pid, 0)` を一切呼ばず、`ctypes` 経由で `kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` と `GetExitCodeProcess` を使って生存確認を行うようにした。`ERROR_INVALID_PARAMETER` または `exit_code != STILL_ACTIVE` のみ `"dead"`、それ以外のアクセス拒否や判定不能なエラーは安全側 (`"unknown"`) に倒す。`pid <= 0` は `"dead"` とする。
+- 同族の `sai_memory/backup.py` の `_is_process_alive(pid)` も `os.kill(pid, 0)` を直接呼んでいたため、`probe_process_alive(pid) != "dead"` を使う形に統一した。
+- `tests/test_runtime_marker_failclosed.py` で、Windows 上で `os.kill` を呼ばずに生存中の子プロセスを殺さないこと、および `psutil` 不在時・`backup._is_process_alive` の回帰テストを追加・更新した。

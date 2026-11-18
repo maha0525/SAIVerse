@@ -1,0 +1,38 @@
+name: Security Advisory Check
+
+on:
+  schedule:
+    # 毎日 00:00 UTC (日本時間 09:00) に自動点検する。
+    # 未対応の脆弱性や Node.js のセキュリティ更新が見つかると失敗終了し、
+    # GitHub 標準のワークフロー失敗通知メールでリポジトリオーナーへ知らせる。
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "点検するブランチまたはタグ (空欄なら develop)"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  advisory-check:
+    name: Check pinned dependencies (OSV & Node.js)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          # 定時実行は GitHub の仕様で既定ブランチ (main) から起動されるが、
+          # 修正 PR はまず develop に入るため develop を点検対象にする
+          # (develop で修正済みの間、リリースまでの毎日重複メールが飛ぶのを防ぐ)。
+          ref: ${{ github.event.inputs.target_ref || 'develop' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run dependency advisory check
+        run: python scripts/check_dependency_advisories.py

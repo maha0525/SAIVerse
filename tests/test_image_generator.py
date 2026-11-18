@@ -367,5 +367,137 @@ class TestImageGenerator(unittest.TestCase):
         self.assertIn('generate_image', TOOL_REGISTRY)
 
 
+class TestImageGenerationUsage(unittest.TestCase):
+    def test_record_gemini_image_usage_splits_image_and_text_tokens(self):
+        from types import SimpleNamespace
+
+        um = SimpleNamespace(
+            prompt_token_count=100,
+            candidates_token_count=1220,
+            thoughts_token_count=50,
+            cached_content_token_count=0,
+            candidates_tokens_details=[
+                SimpleNamespace(modality="Modality.TEXT", token_count=100),
+                SimpleNamespace(modality="Modality.IMAGE", token_count=1120),
+            ],
+        )
+        resp = SimpleNamespace(usage_metadata=um)
+        tracker = MagicMock()
+        with (
+            patch("saiverse.usage_tracker.get_usage_tracker", return_value=tracker),
+            patch.object(
+                _mod,
+                "_active_usage_context",
+                return_value={"persona_id": "p1", "building_id": "b1", "playbook_name": "pb"},
+            ),
+        ):
+            _mod._record_gemini_image_usage("gemini-nano-banana-2.1", resp)
+
+        tracker.record_direct_cost.assert_called_once()
+        kw = tracker.record_direct_cost.call_args.kwargs
+        self.assertEqual(kw["model_id"], "gemini-nano-banana-2.1")
+        self.assertEqual(kw["input_tokens"], 100)
+        self.assertEqual(kw["output_tokens"], 1270)
+        self.assertEqual(kw["category"], "image_generation")
+        self.assertEqual(kw["persona_id"], "p1")
+        # 100*1.5/1e6 + (100+50)*7.5/1e6 + 1120*30/1e6 = 0.00015 + 0.001125 + 0.0336 = 0.034875
+        self.assertAlmostEqual(kw["cost"], 0.034875, places=6)
+
+    def test_record_openai_image_usage_with_details_and_fallback(self):
+        from types import SimpleNamespace
+
+        usage = SimpleNamespace(
+            input_tokens=200,
+            output_tokens=1050,
+            input_tokens_details=SimpleNamespace(text_tokens=50, image_tokens=150),
+            output_tokens_details=SimpleNamespace(text_tokens=50, image_tokens=1000),
+        )
+        tracker = MagicMock()
+        with (
+            patch("saiverse.usage_tracker.get_usage_tracker", return_value=tracker),
+            patch.object(
+                _mod,
+                "_active_usage_context",
+                return_value={"persona_id": None, "building_id": None, "playbook_name": None},
+            ),
+        ):
+            _mod._record_openai_image_usage("gpt-image-2.6-flare", SimpleNamespace(usage=usage), "high")
+            _mod._record_openai_image_usage("gpt-image-2.6-flare", SimpleNamespace(usage=None), "medium")
+
+        self.assertEqual(tracker.record_direct_cost.call_count, 2)
+        first_kw = tracker.record_direct_cost.call_args_list[0].kwargs
+        # 50*5/1e6 + 150*8/1e6 + 50*10/1e6 + 1000*30/1e6 = 0.00025 + 0.0012 + 0.0005 + 0.03 = 0.03195
+        self.assertAlmostEqual(first_kw["cost"], 0.03195, places=6)
+        self.assertEqual(first_kw["input_tokens"], 200)
+        self.assertEqual(first_kw["output_tokens"], 1050)
+
+        second_kw = tracker.record_direct_cost.call_args_list[1].kwargs
+        self.assertAlmostEqual(second_kw["cost"], 0.04, places=6)
+
+    def test_record_xai_image_usage_fixed_rates(self):
+        tracker = MagicMock()
+        with (
+            patch("saiverse.usage_tracker.get_usage_tracker", return_value=tracker),
+            patch.object(
+                _mod,
+                "_active_usage_context",
+                return_value={"persona_id": "p2", "building_id": None, "playbook_name": None},
+            ),
+        ):
+            _mod._record_xai_image_usage({"quality": "medium", "resolution": "2k"}, 2)
+
+        tracker.record_direct_cost.assert_called_once()
+        kw = tracker.record_direct_cost.call_args.kwargs
+        self.assertEqual(kw["model_id"], "grok-imagine-image-2.0")
+        self.assertAlmostEqual(kw["cost"], 0.10, places=6)
+        self.assertEqual(kw["category"], "image_generation")
+
+    def test_record_gemini_text_only_response_uses_text_rate_not_image_rate(self):
+        from types import SimpleNamespace
+
+        um = SimpleNamespace(
+            prompt_token_count=0,
+            candidates_token_count=100,
+            thoughts_token_count=0,
+            cached_content_token_count=0,
+            candidates_tokens_details=[
+                SimpleNamespace(modality="Modality.TEXT", token_count=100),
+            ],
+        )
+        resp = SimpleNamespace(usage_metadata=um)
+        tracker = MagicMock()
+        with (
+            patch("saiverse.usage_tracker.get_usage_tracker", return_value=tracker),
+            patch.object(
+                _mod,
+                "_active_usage_context",
+                return_value={"persona_id": "p1", "building_id": None, "playbook_name": None},
+            ),
+        ):
+            _mod._record_gemini_image_usage("gemini-nano-banana-2.1", resp)
+
+        kw = tracker.record_direct_cost.call_args.kwargs
+        # 100 * $7.50 / 1e6 = $0.00075 (not $0.003 image rate)
+        self.assertAlmostEqual(kw["cost"], 0.00075, places=6)
+
+    def test_active_usage_context_resolves_building_id_from_persona(self):
+        from types import SimpleNamespace
+
+        fake_manager = SimpleNamespace(
+            all_personas={"p1": SimpleNamespace(current_building_id="living_room")}
+        )
+        with (
+            patch("tools.context.get_active_persona_id", return_value="p1"),
+            patch("tools.context.get_active_manager", return_value=fake_manager),
+            patch("tools.context.get_active_playbook_name", return_value="img_pb"),
+        ):
+            ctx = _mod._active_usage_context()
+
+        self.assertEqual(
+            ctx,
+            {"persona_id": "p1", "building_id": "living_room", "playbook_name": "img_pb"},
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

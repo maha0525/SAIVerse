@@ -1021,8 +1021,11 @@ class TestGenerateChronicleWiring:
 
         monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
         conn = adapter.conn
-        gap = _add_message(adapter, 0, 100)               # 発話・吸収先なし
-        n1 = _add_message(adapter, 10, 600, thread="t2")  # 隣は別スレッドのみ
+        # 発話あり・吸収先なしの run は、窓が読まないスレッド (t2) に置く。
+        # 窓のスレッドに置くと、そのスレッドの最後の run = 末尾の帯 (引き戻しの
+        # 対象) になる — 帯は窓が読むスレッドの行だけで判定する (2026-11-17)。
+        gap = _add_message(adapter, 0, 100, thread="t2")  # 発話・吸収先なし
+        n1 = _add_message(adapter, 10, 600)               # 隣は別スレッドのみ
         _entry(conn, [n1], start_min=10, end_min=10)
 
         manager = SimpleNamespace(SessionLocal=session_factory, personas={})
@@ -1705,6 +1708,7 @@ class TestReviewFixes:
         assert after.upper_regen_calls == 2
         assert after.estimated_llm_calls == (
             after.level1_calls + after.consolidation_calls + 2
+            + after.extraction_calls
         )
 
         # 実走 (run_absorption) の再生成回数と一致する
@@ -1845,7 +1849,9 @@ class TestReviewFixes:
         est = estimate_chronicle_generation_cost(conn, model_name="mock-model")
         assert est.upper_regen_calls == 1
         assert est.consolidation_calls == 0
-        assert est.estimated_llm_calls == est.level1_calls + 1
+        # 一次あらすじ 1 件ごとに Fragment 抽出が 1 回相乗りする
+        assert est.extraction_calls == est.level1_calls
+        assert est.estimated_llm_calls == est.level1_calls + 1 + est.extraction_calls
 
     def test_upper_regen_retries_empty_llm_response(self, adapter):
         """上位再生成の LLM が空応答を 2 回返しても 3 回目の本文で語り直しが
@@ -2717,6 +2723,92 @@ class TestTailRewind:
         # 冪等: 帯は窓の中に入ったので、再実行は何も見つけない
         assert run_tail_rewind(lc, _persona(adapter)) == "none"
 
+    def test_other_thread_tail_is_not_rewound_but_compiled(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """窓は有効なスレッドの行だけを読む — 別スレッドの末尾の極小 run へ
+        anchor を戻しても窓に入らない。帯に入れず、通常の編纂 (同じスレッドに
+        隣人が居なければ単独の一次あらすじ) に回す。
+
+        2026-11-17 まで: anchor が取り込んだ別スレッドの行へ戻され、その行は
+        窓にもあらすじにも入らないまま、再実行は「直すものなし」と答えていた。
+        """
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+        from sea.coverage_repair import run_tail_rewind, window_thread_id
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        _entry(conn, [n1, n2], start_min=0, end_min=1)
+        gap = _add_message(adapter, 10, 100, thread="imported_chatgpt")
+        m_a = _add_message(adapter, 20, 50)
+        lc = _make_lifecycle(session_factory)
+        lc.get_metabolism_watermarks = lambda persona, model_key=None: None
+        _warm_row(lc, "model-a", m_a)
+        persona = _persona(adapter)
+
+        est = estimate_chronicle_generation_cost(
+            conn, model_name="mock-model",
+            window_thread_id=window_thread_id(persona),
+        )
+        assert est.level1_calls == 1  # 別スレッドの run は単独編纂 (機構 E)
+
+        calls = []
+
+        class _C:
+            def generate(self, messages=None, tools=None, **kwargs):
+                calls.append(messages[-1]["content"])
+                return "あらすじ本文"
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=("mock-model", {"provider": "mock", "context_length": 1000}),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_C(),
+        ), patch(
+            "sai_memory.arasuji.bands.run_band_overflow", lambda *a, **k: 0,
+        ):
+            assert lc.generate_chronicle(persona, force=True) == "ok"
+        assert len(calls) == est.estimated_llm_calls
+        covered = conn.execute(
+            "SELECT COUNT(*) FROM arasuji_entries, json_each(source_ids_json) "
+            "WHERE level = 1 AND json_each.value = ?", (gap,),
+        ).fetchone()[0]
+        assert covered == 1
+
+        assert run_tail_rewind(lc, persona) == "none"
+        assert _row_anchor(lc, "model-a") == m_a  # 別スレッドの行へ戻さない
+
+    def test_window_thread_tail_is_rewound_past_newer_other_thread_rows(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """有効なスレッドの末尾の極小 run は、時刻の新しい側に別スレッドの行が
+        あっても帯として引き戻しの対象になる (帯の判定は窓のスレッドの行で)。"""
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        from sai_memory.arasuji.absorption import uncovered_tail_zone
+        from sai_memory.arasuji.alignment import plan_alignment
+        from sai_memory.arasuji.absorption import split_plan_for_absorption
+        from sai_memory.memory.storage import get_messages_for_chronicle
+        conn = adapter.conn
+        n1 = _add_message(adapter, 0, 300)
+        n2 = _add_message(adapter, 1, 300)
+        _entry(conn, [n1, n2], start_min=0, end_min=1)
+        gap = _add_message(adapter, 10, 100)
+        other = _add_message(adapter, 15, 100, thread="imported_chatgpt")
+        messages = get_messages_for_chronicle(conn)
+        processed = {n1, n2}
+        plan = plan_alignment(messages, processed, target_chars=TARGET)
+        _normal, tiny = split_plan_for_absorption(plan, target_chars=TARGET)
+        window_thread = adapter._thread_id(None)
+
+        ids, first, _idx = uncovered_tail_zone(
+            tiny, messages, window_thread_id=window_thread,
+        )
+        assert first == gap and ids == [gap]
+        # スレッドを区別しない従来の判定は、別スレッドの行も帯に混ぜていた
+        ids_all, first_all, _ = uncovered_tail_zone(tiny, messages)
+        assert first_all == gap and other in ids_all
+
     def test_oldest_cold_row_is_rewound_when_no_warm(
         self, adapter, session_factory, monkeypatch,
     ):
@@ -3203,7 +3295,19 @@ class TestTailRewind:
             adapter.conn, model_name="mock-model",
             tail_fold_estimator=lambda first_id, run_ids: (3, 3000),
         )
-        assert with_fold.estimated_llm_calls == base.estimated_llm_calls + 3
+        # 畳み 3 回 + 畳んだあらすじ 3 件それぞれの Fragment 抽出 3 回
+        # (記憶の整理も generate_chronicle を通り、抽出が相乗りする)
+        assert with_fold.extraction_calls == base.extraction_calls + 3
+        assert with_fold.estimated_llm_calls == base.estimated_llm_calls + 6
+        # 抽出の入力字数は 3 つ目の値 (抽出が送る全文の字数) を使う —
+        # 材料字数 (長い機構名義の行を縮めた後) で代用しない (Codex PR #492)
+        with_full = estimate_chronicle_generation_cost(
+            adapter.conn, model_name="mock-model",
+            tail_fold_estimator=lambda first_id, run_ids: (3, 3000, 90_000),
+        )
+        assert with_full.extraction_input_chars == (
+            base.extraction_input_chars + 90_000
+        )
 
     def test_position_lookup_failure_propagates_from_plan(
         self, adapter, session_factory, monkeypatch,

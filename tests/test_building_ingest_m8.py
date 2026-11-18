@@ -434,6 +434,63 @@ class BuildingIngestM8Test(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(self.persona.pulse_cursors[self.BID], int(after["seq"]))
 
+    def test_concurrent_withdraw_waits_for_transcription_and_never_splits_state(self):
+        """読み直し後から記憶追記の途中に取り下げが割り込んでも二重状態にならない。"""
+        import tempfile
+        import threading
+        import time
+        from database.building_messages import (
+            _MESSAGE_MUTATION_LOCKS,
+            withdraw_building_message_in_db,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_engine = create_engine(f"sqlite:///{Path(tmpdir) / 'shared.db'}")
+            Base.metadata.create_all(shared_engine)
+            shared_session_local = sessionmaker(
+                bind=shared_engine, autocommit=False, autoflush=False
+            )
+            self.SessionLocal = shared_session_local
+            self.manager.SessionLocal = shared_session_local
+            self.persona = self._build_persona()
+            self.manager.personas = {self.LISTENER: self.persona}
+            self.manager.all_personas = {self.LISTENER: self.persona}
+
+            try:
+                msg = self._insert("user", "競合テスト発言")
+                hm = self.persona.history_manager
+                real_add = hm.add_to_persona_only
+                append_started = threading.Event()
+                withdraw_result: list[tuple] = []
+
+                def slow_add(entry, **kwargs):
+                    append_started.set()
+                    time.sleep(0.05)
+                    return real_add(entry, **kwargs)
+
+                def run_withdraw():
+                    self.assertTrue(append_started.wait(timeout=2.0))
+                    withdraw_result.append(
+                        withdraw_building_message_in_db(
+                            self.SessionLocal, self.BID, msg["message_id"]
+                        )
+                    )
+
+                hm.add_to_persona_only = slow_add
+                t = threading.Thread(target=run_withdraw)
+                t.start()
+                count = auto_ingest_building_messages(self.persona, self.manager)
+                t.join(timeout=5.0)
+
+                self.assertEqual(count, 1)
+                self.assertEqual(self.adapter.appended_count("競合テスト発言"), 1)
+                self.assertEqual(withdraw_result, [(False, "already_heard", None)])
+                self.assertIn(self.LISTENER, self._ingested_by(msg["message_id"]))
+                # 参照カウント解放でロック辞書にゴミが残らないことも確認
+                self.assertNotIn((self.BID, msg["message_id"]), _MESSAGE_MUTATION_LOCKS)
+            finally:
+                shared_engine.dispose()
+
     # ------------------------------------------------------------------
     # tool 版 (get_building_messages) — 共通核の配線と件数表示
     # ------------------------------------------------------------------
