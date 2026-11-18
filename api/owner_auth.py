@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import subprocess
 import time
@@ -12,6 +13,8 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "saiverse_owner_session"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -130,6 +133,8 @@ def _self_magicdns_hostname() -> str | None:
             ["tailscale", "status", "--json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
             check=False,
         )
@@ -140,7 +145,8 @@ def _self_magicdns_hostname() -> str | None:
                 dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".").lower()
                 if dns_name.endswith(".ts.net") and len(dns_name) > len(".ts.net"):
                     hostname = dns_name
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
+        logger.debug("Failed to resolve local Tailscale MagicDNS hostname: %s", exc)
         hostname = None
 
     _magicdns_cache = (now, hostname)

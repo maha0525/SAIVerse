@@ -176,17 +176,29 @@ def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer(monkeypatc
 
 def test_self_magicdns_hostname_reads_tailscale_status_json(monkeypatch) -> None:
     monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
+    captured_kwargs: dict[str, object] = {}
+    # UTF-8 payload containing bytes invalid in cp932 (Windows default encoding)
+    utf8_payload = (
+        '{"Self": {"DNSName": "My-PC.Tail1234.ts.net.", "HostName": "日本語スマホ端末"}}'
+    ).encode("utf-8")
+
+    def _fake_run(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        decoded = utf8_payload.decode(
+            kwargs.get("encoding") or "cp932",
+            errors=kwargs.get("errors") or "strict",
+        )
+        return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout='{"Self": {"DNSName": "My-PC.Tail1234.ts.net."}}',
+            stdout=decoded,
             stderr="",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
     assert owner_auth._self_magicdns_hostname() == "my-pc.tail1234.ts.net"
+    assert captured_kwargs.get("encoding") == "utf-8"
+    assert captured_kwargs.get("errors") == "replace"
 
     monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
 
