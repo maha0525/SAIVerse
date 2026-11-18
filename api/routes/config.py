@@ -915,6 +915,45 @@ def set_reflex_timeout_setting(req: ReflexTimeoutRequest):
     return {"success": True, "seconds": value}
 
 
+class SpellMaxRoundsRequest(BaseModel):
+    rounds: int
+
+
+@router.get("/spell-max-rounds")
+def get_spell_max_rounds_setting():
+    """1 回のパルスでスペルを連続実行できる回数上限 (グローバル設定、既定 5 回)。"""
+    from sea.runtime_llm import (
+        SPELL_MAX_ROUNDS_DEFAULT,
+        SPELL_MAX_ROUNDS_MAX,
+        SPELL_MAX_ROUNDS_MIN,
+        get_spell_max_rounds,
+    )
+
+    return {
+        "rounds": get_spell_max_rounds(),
+        "default": SPELL_MAX_ROUNDS_DEFAULT,
+        "min": SPELL_MAX_ROUNDS_MIN,
+        "max": SPELL_MAX_ROUNDS_MAX,
+    }
+
+
+@router.post("/spell-max-rounds")
+def set_spell_max_rounds_setting(req: SpellMaxRoundsRequest):
+    """1 回のパルスでスペルを連続実行できる回数上限を保存する (.env)。
+
+    読む側 (``sea/runtime_llm.py`` の ``get_spell_max_rounds``) は呼び出しのたびに
+    env を読むので、保存した次のターンから再起動なしで効く。範囲外の値は範囲に
+    丸めて保存し、丸めた結果を画面へ返す。
+    """
+    from sea.runtime_llm import clamp_spell_max_rounds
+
+    value = clamp_spell_max_rounds(req.rounds)
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_SPELL_MAX_ROUNDS": str(value)})
+    _log.info("Spell max rounds per pulse: %s", value)
+    return {"success": True, "rounds": value}
+
+
 class GeminiAutoCacheRequest(BaseModel):
     enabled: bool
     keep_seconds: int = 0

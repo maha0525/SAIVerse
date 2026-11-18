@@ -1,6 +1,6 @@
 # Issue: spell round 上限到達時の挙動を line 別に再設計する
 
-**ステータス**: 🔲 未着手 (低優先 — 現状実害なし) → **前提変更を [episode.md](../intent/episode.md) §10 が記録（2026-07-13、レビュー中）**: 自律セッションの AUTONOMOUS 化で sub_line 持ち越し設計の前提が変わる。main_line 会話側（棄却）は不変
+**ステータス**: ✅ 完了（2026-11-19: 既定上限を 3→5 に引き上げ、グローバル設定 `GET/POST /api/config/spell-max-rounds` で再起動なしに変更可能にし、`_run_spell_loop` の各ラウンド結果へ残り回数・上限到達予告を添え、上限超過時は不発のシステム通知を締めの発言直後に記録＋チャット表示へ失敗ブロックを出す形を実装）
 **優先度**: low
 **作成日**: 2026-05-25
 **関連**: `sea/runtime_llm.py:_run_spell_loop` (L911 `while loop_count < _MAX_SPELL_LOOPS`), `SAIVERSE_SPELL_MAX_ROUNDS` (.env, 現状 10), `sea/pulse_context.py:current_line_metadata`
