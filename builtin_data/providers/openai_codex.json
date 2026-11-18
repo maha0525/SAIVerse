@@ -3,6 +3,8 @@
   "display_name": "OpenAI Codex (ChatGPT OAuth)",
   "protocol": "openai_codex",
   "current_models": [
+    "codex-gpt-6.2-astra",
+    "codex-gpt-6.2-sol",
     "codex-gpt-6.1-sol",
     "codex-gpt-6.1-terra",
     "codex-gpt-6-astra",
