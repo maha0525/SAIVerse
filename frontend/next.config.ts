@@ -54,6 +54,13 @@ const nextConfig: NextConfig = {
         // 値は「バイトが一切流れない時間」の上限であって、リクエスト全体の長さでは
         // ない。本当に死んだバックエンドへの接続を手放すための安全弁として 1 時間。
         proxyTimeout: 3_600_000,
+        // Next.js 16.4 は既定で agentUpgrade を 'security' にするため
+        // (next/dist/server/config-shared.js)、配布後に勧告が出ると start.bat の
+        // next build や start-dev.bat の next dev でコーディングエージェント向けの
+        // 対話メニュー (Upgrade now / Skip) が割り込む。しかもそこで書き換えると
+        // package.json / package-lock.json に差分が出て本体の自動更新が止まる。
+        // フロントエンドの版は SAIVerse 側の package-lock.json (npm ci) で管理する。
+        agentUpgrade: false,
     },
 };
 
