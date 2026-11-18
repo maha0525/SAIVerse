@@ -5052,12 +5052,13 @@ async def _run_spell_loop(
                     for raw_name, _, m in _overflow_malformed
                 ]
                 _overflow_entries.sort(key=lambda item: item[0])
-                _ov_before = final_continuation[:_overflow_entries[0][0]].rstrip()
-                _ov_after = final_continuation[_overflow_entries[-1][1]:].strip()
                 _closing_parts: List[str] = []
-                if _ov_before:
-                    _closing_parts.append(_ov_before)
-                for _, _, _ov_name, _ov_args, _ov_line in _overflow_entries:
+                _cursor = 0
+                for _ov_start, _ov_end, _ov_name, _ov_args, _ov_line in _overflow_entries:
+                    if _ov_start > _cursor:
+                        _between = final_continuation[_cursor:_ov_start].strip()
+                        if _between:
+                            _closing_parts.append(_between)
                     _closing_parts.append(
                         _build_spell_user_only_block(
                             _ov_name,
@@ -5068,8 +5069,11 @@ async def _run_spell_loop(
                             spell_line=_ov_line,
                         )
                     )
-                if _ov_after:
-                    _closing_parts.append(_ov_after)
+                    _cursor = max(_cursor, _ov_end)
+                if _cursor < len(final_continuation):
+                    _ov_after = final_continuation[_cursor:].strip()
+                    if _ov_after:
+                        _closing_parts.append(_ov_after)
                 closing_segment_text = "\n".join(_closing_parts)
 
         if final_continuation:

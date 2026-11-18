@@ -183,8 +183,11 @@ def test_spell_limit_exceeded_formats_segment_and_records_notice_after_closing(m
     monkeypatch.setenv("SAIVERSE_SPELL_MAX_ROUNDS", "2")
     calls: List[Tuple[str, dict]] = []
     closing_raw = (
-        "手帳に書いて戻るね！\n"
-        "/spell name='note_add' args={'step': 3}"
+        "手帳に書くね！\n"
+        "/spell name='note_add' args={'step': 3}\n"
+        "それから部屋にも戻るよ。\n"
+        "/spell name='note_add' args={'step': 4}\n"
+        "お待たせ！"
     )
     client = _ScriptedClient([
         "/spell name='note_add' args={'step': 2}",
@@ -221,11 +224,18 @@ def test_spell_limit_exceeded_formats_segment_and_records_notice_after_closing(m
     assert "[Spell Limit]" in result.limit_exceeded_notice
     assert "上限（2 回）" in result.limit_exceeded_notice
 
-    # チャット表示用の締め BeatSegment には失敗ブロックが入る
+    # チャット表示用の締め BeatSegment には失敗ブロックが入り、前・間・後ろの本文も全て保持される
     closing_seg_text = result.segments[-1].text
-    assert "手帳に書いて戻るね！" in closing_seg_text
-    assert "spellResultError" in closing_seg_text
+    assert "手帳に書くね！" in closing_seg_text
+    assert "それから部屋にも戻るよ。" in closing_seg_text
+    assert "お待たせ！" in closing_seg_text
+    assert closing_seg_text.count("spellResultError") == 2
     assert "上限（2 回）に達したため、実行されませんでした。" in closing_seg_text
+    assert (
+        closing_seg_text.index("手帳に書くね！")
+        < closing_seg_text.index("それから部屋にも戻るよ。")
+        < closing_seg_text.index("お待たせ！")
+    )
 
     # _finalize_beat を通すと、締め発言 (assistant) の直後にシステム通知が保存される
     beat = runtime_llm.BeatExecution.from_node_locals(
