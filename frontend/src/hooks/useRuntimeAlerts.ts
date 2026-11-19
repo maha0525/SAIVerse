@@ -48,7 +48,9 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     // 走っている取り直しの開始時点。覚えた知らせが要るのは、どれかの取り直しが
     // 走っている間だけ — 一つも走っていなければ捨ててよい (件数の上限では切らない。
     // 上限で切ると、取り直しの間に届いた分が落ちて画面から消える)。
-    const inflightStartsRef = useRef<Set<number>>(new Set());
+    // 取り直しごとに別の番号を振る (同じ瞬間に始まった二つを一つに潰さない)。
+    const inflightStartsRef = useRef<Map<number, number>>(new Map());
+    const refetchIdRef = useRef(0);
     const recentEventsRef = useRef<{ seq: number; event: RuntimeAlertEvent }[]>([]);
 
     const remember = useCallback((event: RuntimeAlertEvent) => {
@@ -63,7 +65,9 @@ export function useRuntimeAlerts(backendConnected: boolean) {
 
     const refetch = useCallback(async () => {
         const startedAt = eventSeqRef.current;
-        inflightStartsRef.current.add(startedAt);
+        refetchIdRef.current += 1;
+        const refetchId = refetchIdRef.current;
+        inflightStartsRef.current.set(refetchId, startedAt);
         try {
             const res = await apiFetch('/api/system/runtime-alerts');
             if (!res.ok) return;
@@ -79,11 +83,11 @@ export function useRuntimeAlerts(backendConnected: boolean) {
             // 裏側がまだ起動していないことがある。繋がり直したときに取り直す。
             console.warn('[runtime-alerts] failed to fetch the list', error);
         } finally {
-            inflightStartsRef.current.delete(startedAt);
+            inflightStartsRef.current.delete(refetchId);
             if (inflightStartsRef.current.size === 0) {
                 recentEventsRef.current = [];
             } else {
-                const oldest = Math.min(...Array.from(inflightStartsRef.current));
+                const oldest = Math.min(...Array.from(inflightStartsRef.current.values()));
                 recentEventsRef.current = recentEventsRef.current.filter(e => e.seq > oldest);
             }
         }
