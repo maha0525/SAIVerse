@@ -11,6 +11,7 @@ import { X, ChevronDown } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
 import { formatPricePeriodEnd, isPricePeriodOver } from '@/lib/modelPricing';
 import type { ModelRateLimit as RateLimitInfo, PickerModel as ModelInfo } from '@/lib/modelList';
+import { fetchFavoriteModels, useFavoriteModels } from '@/lib/favoriteModels';
 import ModelEditorModal from './settings/ModelEditorModal';
 import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
 import ModelPicker from './common/ModelPicker';
@@ -84,7 +85,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
+    const { favoriteModels, favoritesReady, toggleFavorite } = useFavoriteModels(isOpen);
     const [editorOpen, setEditorOpen] = useState(false);
     const [savingAs, setSavingAs] = useState(false);
     // Cache timer (Phase 1): persona switcher + read-only status polling
@@ -253,7 +254,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 apiFetch('/api/config/models', { signal: controller.signal }),
                 apiFetch('/api/config/config', { signal: controller.signal }),
                 apiFetch('/api/config/cache', { signal: controller.signal }),
-                apiFetch('/api/config/favorite-models', { signal: controller.signal })
             ]);
             if (!isStillValid()) return; // 取得中に新しい選択が入った — 結果を捨てる
 
@@ -307,15 +307,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 failures.push('cache');
             }
 
-            // Favorites
-            if (results[3].status === 'fulfilled' && results[3].value.ok) {
-                try {
-                    const favData = await results[3].value.json();
-                    if (!isStillValid()) return;
-                    setFavoriteModels(favData.models || []);
-                } catch (e) { console.error("Failed to parse favorites response", e); }
-            }
-
             if (failures.length === 3) {
                 setError(uiText("components.ChatOptions.text001"));
             } else if (failures.length > 0) {
@@ -331,24 +322,6 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         } finally {
             clearTimeout(timeoutId);
             setLoading(false);
-        }
-    };
-
-    const isFavorite = (modelId: string) => favoriteModels.includes(modelId);
-
-    const toggleFavorite = async (modelId: string) => {
-        const newFavorites = isFavorite(modelId)
-            ? favoriteModels.filter(id => id !== modelId)
-            : [...favoriteModels, modelId];
-        setFavoriteModels(newFavorites);
-        try {
-            await apiFetch('/api/config/favorite-models', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ models: newFavorites })
-            });
-        } catch (e) {
-            console.error("Failed to save favorite models", e);
         }
     };
 
@@ -698,7 +671,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                             {error && (
                                 <div className={styles.errorBanner}>
                                     <span>{error}</span>
-                                    <button data-i18n="components.ChatOptions.text035" className={styles.retryBtn} onClick={fetchData}>{uiText("components.ChatOptions.text035")}</button>
+                                    <button data-i18n="components.ChatOptions.text035" className={styles.retryBtn} onClick={() => { fetchData(); void fetchFavoriteModels().catch(e => console.error('Failed to load favorite models', e)); }}>{uiText("components.ChatOptions.text035")}</button>
                                 </div>
                             )}
                             <div className={styles.section}>
@@ -711,6 +684,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         emptyLabel={uiText("components.ChatOptions.text037")}
                                         favorites={favoriteModels}
                                         onToggleFavorite={toggleFavorite}
+                                        favoriteDisabled={!favoritesReady}
                                         ariaLabel={uiText("components.ChatOptions.text036")}
                                     />
                                     {(() => {

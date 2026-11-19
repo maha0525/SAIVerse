@@ -93,6 +93,7 @@ function harness(component, overrides = {}) {
         if (name.endsWith('/ImageUpload') || name.endsWith('/FileUpload')) return { __esModule: true, default: () => null };
         if (name.endsWith('/ModelPicker')) return { __esModule: true, default: () => null };
         if (name.endsWith('/lib/modelList')) return { fetchModelList: async () => [] };
+        if (name.endsWith('/lib/favoriteModels')) return { useFavoriteModels: () => ({ favoriteModels: [], favoritesReady: true, toggleFavorite: () => {} }) };
         if (name === '@/i18n/core') return { t: id => id };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
         if (name === '@/lib/movementNotices' || name === '@/lib/buildingSettingsSave') {

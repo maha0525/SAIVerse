@@ -33,6 +33,8 @@ export interface ModelPickerProps {
     favorites?: string[];
     /** 渡されたときだけ、各行に星のボタンを出す。 */
     onToggleFavorite?: (id: string) => void;
+    /** true のとき星のボタンだけを無効にする (お気に入りの初回取得前など)。 */
+    favoriteDisabled?: boolean;
     disabled?: boolean;
     ariaLabel?: string;
     /** 閉じたときのボタンを出さず、いつも広がった状態で見せる。開閉を呼ぶ側の
@@ -104,6 +106,7 @@ export default function ModelPicker({
     unknownValueLabel,
     favorites,
     onToggleFavorite,
+    favoriteDisabled = false,
     disabled = false,
     ariaLabel,
     alwaysOpen = false,
@@ -201,7 +204,7 @@ export default function ModelPicker({
                         data-i18n="components.common.ModelPicker.removeFavorite components.common.ModelPicker.addFavorite"
                         className={`${styles.favoriteBtn} ${isFavorite(m.id) ? styles.favoriteBtnActive : ''}`}
                         onClick={() => onToggleFavorite(m.id)}
-                        disabled={disabled}
+                        disabled={disabled || favoriteDisabled}
                         aria-pressed={isFavorite(m.id)}
                         aria-label={isFavorite(m.id)
                             ? uiText('components.common.ModelPicker.removeFavorite')
