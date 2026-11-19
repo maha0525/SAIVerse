@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { apiFetch } from '@/i18n/api';
 
 let cachedFavorites: string[] = [];
+let cacheVersion = 0;
 const listeners = new Set<(favorites: string[]) => void>();
 
 function notifyListeners(next: string[]) {
@@ -12,9 +13,11 @@ function notifyListeners(next: string[]) {
 }
 
 export async function fetchFavoriteModels(signal?: AbortSignal): Promise<string[] | null> {
+    const startVersion = cacheVersion;
     const res = await apiFetch('/api/config/favorite-models', signal ? { signal } : undefined);
     if (!res.ok) return null;
     const data = await res.json();
+    if (startVersion !== cacheVersion) return cachedFavorites;
     const list = Array.isArray(data?.models)
         ? data.models.filter((id: unknown): id is string => typeof id === 'string')
         : [];
@@ -23,6 +26,7 @@ export async function fetchFavoriteModels(signal?: AbortSignal): Promise<string[
 }
 
 export async function saveFavoriteModels(models: string[]): Promise<void> {
+    const writeVersion = ++cacheVersion;
     const previous = cachedFavorites;
     notifyListeners(models);
     try {
@@ -35,7 +39,7 @@ export async function saveFavoriteModels(models: string[]): Promise<void> {
             throw new Error(`HTTP ${res.status}`);
         }
     } catch (e) {
-        if (cachedFavorites === models) {
+        if (cacheVersion === writeVersion) {
             notifyListeners(previous);
         }
         console.error('Failed to save favorite models', e);

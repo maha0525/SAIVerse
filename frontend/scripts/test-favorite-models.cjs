@@ -1,0 +1,100 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+
+function loadFavoriteModels(apiFetch) {
+    const source = fs.readFileSync(path.join(__dirname, '../src/lib/favoriteModels.ts'), 'utf8');
+    const output = ts.transpileModule(source, {
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    }).outputText;
+
+    const listeners = [];
+    const React = {
+        useState: (init) => [typeof init === 'function' ? init() : init, (v) => listeners.push(v)],
+        useEffect: (fn) => { fn(); },
+    };
+    const mod = { exports: {} };
+    const localRequire = (name) => {
+        if (name === 'react') return React;
+        if (name === '@/i18n/api') return { apiFetch };
+        throw new Error(`Unexpected require: ${name}`);
+    };
+    new Function('require', 'module', 'exports', output)(localRequire, mod, mod.exports);
+    return { ...mod.exports, getLatestNotified: () => listeners[listeners.length - 1] };
+}
+
+(async () => {
+    // 1. Stale GET resolving after a newer saveFavoriteModels must NOT overwrite the cache
+    {
+        let resolveGet;
+        const getPromise = new Promise(r => { resolveGet = r; });
+        const posts = [];
+        const mod = loadFavoriteModels(async (url, opts) => {
+            assert.equal(url, '/api/config/favorite-models');
+            if (opts?.method === 'POST') {
+                posts.push(JSON.parse(opts.body));
+                return { ok: true };
+            }
+            return { ok: true, json: async () => await getPromise };
+        });
+
+        // Subscribe a listener via useFavoriteModels
+        const hookBefore = mod.useFavoriteModels(false);
+        assert.deepEqual(hookBefore.favoriteModels, []);
+
+        // Start a slow GET
+        const inflightGet = mod.fetchFavoriteModels();
+        // While GET is in flight, user toggles a favorite (POST succeeds)
+        await mod.saveFavoriteModels(['model-a']);
+        assert.deepEqual(mod.getLatestNotified(), ['model-a']);
+
+        // Now the slow GET resolves with stale data
+        resolveGet({ models: ['stale-old-model'] });
+        const after = await inflightGet;
+        assert.deepEqual(after, ['model-a']);
+        assert.deepEqual(mod.getLatestNotified(), ['model-a']);
+        assert.deepEqual(posts, [{ models: ['model-a'] }]);
+    }
+
+    // 2. Failed POST reverts only when no newer write happened
+    {
+        let rejectFirstPost;
+        let call = 0;
+        const mod = loadFavoriteModels(async (_url, opts) => {
+            if (opts?.method === 'POST') {
+                call++;
+                if (call === 1) {
+                    return await new Promise((_, rej) => { rejectFirstPost = rej; });
+                }
+                return { ok: true };
+            }
+            return { ok: true, json: async () => ({ models: ['initial'] }) };
+        });
+
+        await mod.fetchFavoriteModels();
+        mod.useFavoriteModels(false);
+
+        const origErr = console.error;
+        console.error = () => {};
+        try {
+            const firstSave = mod.saveFavoriteModels(['first']);
+            await mod.saveFavoriteModels(['second']);
+            rejectFirstPost(new Error('network error'));
+            await firstSave;
+            // Must stay ['second'], not revert to ['initial']
+            assert.deepEqual(mod.getLatestNotified(), ['second']);
+
+            // A standalone failing save reverts to ['second']
+            call = 0;
+            const failingSave = mod.saveFavoriteModels(['third']);
+            rejectFirstPost(new Error('network error'));
+            await failingSave;
+            assert.deepEqual(mod.getLatestNotified(), ['second']);
+        } finally {
+            console.error = origErr;
+        }
+    }
+
+    console.log('Favorite models cache version & race guard tests passed.');
+})();
