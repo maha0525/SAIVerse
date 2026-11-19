@@ -1,0 +1,124 @@
+/* 動作中の警告のカード (docs/intent/runtime_alerts.md)。page.module.css の
+   .toastContainer の中に、数秒で消える .toast と並べて置く。
+   ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。 */
+/* 閉じていない知らせが溜まっても画面を覆わないよう、並びの高さに上限を付け、
+   超えた分は並びの中でスクロールする。 */
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.card {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem 0.75rem 0.75rem 1rem;
+    border: 1px solid;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    animation: runtimeAlertSlideIn 0.3s ease-out;
+    max-width: 100%;
+    box-sizing: border-box;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.warning {
+    background: #422006;
+    border-color: #b45309;
+    color: #fde68a;
+}
+
+.error {
+    background: #450a0a;
+    border-color: #b91c1c;
+    color: #fecaca;
+}
+
+.icon {
+    flex-shrink: 0;
+    margin-top: 0.15rem;
+}
+
+.warning .icon {
+    color: #fbbf24;
+}
+
+.error .icon {
+    color: #f87171;
+}
+
+.body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.title {
+    font-weight: 600;
+}
+
+.message {
+    white-space: pre-wrap;
+}
+
+.meta {
+    font-size: 0.75rem;
+    opacity: 0.8;
+}
+
+.close {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 2px;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+
+.close:hover {
+    opacity: 1;
+}
+
+@keyframes runtimeAlertSlideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+:global([data-theme="light"]) .card {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+:global([data-theme="light"]) .warning {
+    background: #fef3c7;
+    border-color: #f59e0b;
+    color: #92400e;
+}
+
+:global([data-theme="light"]) .warning .icon {
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .error {
+    background: #fee2e2;
+    border-color: #ef4444;
+    color: #991b1b;
+}
+
+:global([data-theme="light"]) .error .icon {
+    color: #dc2626;
+}

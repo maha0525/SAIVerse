@@ -393,6 +393,41 @@ async def dismiss_system_alert(alert_id: str):
     return {"dismissed": known}
 
 
+@router.get("/runtime-alerts")
+def list_runtime_alerts_route():
+    """動作中に見つけた、まだ閉じていない警告の一覧 (最後に起きた時刻の新しい順)。
+
+    画面の右下に閉じるまで残す知らせ (docs/intent/runtime_alerts.md)。起きた瞬間は
+    常設 SSE (``/api/addon/events``、``type: "runtime_alert"``) で届くが、ブラウザが
+    繋がっていなかった間の分は届かないので、画面は開いたとき・繋ぎ直したときに
+    ここで取り直す。上部のバナーの ``/alerts`` (起動時の確認で見つけたもの) とは別。
+    """
+    from saiverse.runtime_alerts import RuntimeAlertsUnavailable, list_runtime_alerts
+
+    try:
+        return {"alerts": list_runtime_alerts()}
+    except RuntimeAlertsUnavailable:
+        raise HTTPException(status_code=503, detail="Runtime alerts not ready")
+
+
+@router.post("/runtime-alerts/{alert_id}/dismiss")
+def dismiss_runtime_alert_route(alert_id: int):
+    """動作中の警告を閉じる。閉じた時刻を DB に書き、開いているほかのタブからも消す。
+
+    閉じた知らせは、どのブラウザで開き直しても出ない。同じ原因でまた起きたら
+    新しい一枚として出る。既に閉じてあれば何も変えずに ``dismissed: false``。
+    """
+    from saiverse.runtime_alerts import RuntimeAlertsUnavailable, dismiss_runtime_alert
+
+    try:
+        result = dismiss_runtime_alert(alert_id)
+    except RuntimeAlertsUnavailable:
+        raise HTTPException(status_code=503, detail="Runtime alerts not ready")
+    if result is None:
+        raise HTTPException(status_code=404, detail="Runtime alert not found")
+    return {"dismissed": result}
+
+
 class LegacyLogArchiveResponse(BaseModel):
     success: bool
     message: str

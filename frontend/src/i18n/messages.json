@@ -8567,6 +8567,38 @@
     "ja": "次のペルソナの記録を読み込めなかったため、確認が必要なメッセージが残っているか分かりません: {names}。「確認する」から読み込みをやり直せます。このお知らせを閉じても、設定の「便利機能」から開けます。",
     "en": "The records of these personas could not be read, so it is unknown whether messages that need review remain: {names}. You can try reading them again from \"Review\". After closing this notice, you can still open it from \"Utilities\" in the settings."
   },
+  "api.runtimeAlerts.memorizeFailed.title": {
+    "ja": "記憶の保存に失敗しました",
+    "en": "Failed to save memory"
+  },
+  "api.runtimeAlerts.memorizeFailed.message": {
+    "ja": "{persona} の記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
+    "en": "Saving {persona}'s memory failed. The conversation may not have been recorded."
+  },
+  "api.runtimeAlerts.chronicleSkipped.title": {
+    "ja": "Chronicle の生成をスキップしました",
+    "en": "Chronicle generation skipped"
+  },
+  "api.runtimeAlerts.chronicleSkipped.message": {
+    "ja": "{persona} の Chronicle の生成をスキップしました。",
+    "en": "Chronicle generation for {persona} was skipped."
+  },
+  "api.runtimeAlerts.permissionTimeout.title": {
+    "ja": "Playbook の実行の許可リクエストがタイムアウトしました",
+    "en": "Playbook permission request timed out"
+  },
+  "api.runtimeAlerts.permissionTimeout.message": {
+    "ja": "{persona} の Playbook「{playbook}」の実行の許可リクエストがタイムアウトしたため、実行をスキップしました。",
+    "en": "The request for permission to run the playbook \"{playbook}\" for {persona} timed out, so it was skipped."
+  },
+  "components.RuntimeAlertCards.occurrence": {
+    "ja": "{count} 回目 (最後: {time})",
+    "en": "Occurrence {count} (last: {time})"
+  },
+  "components.RuntimeAlertCards.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
   "components.SystemNoticeReviewModal.question": {
     "ja": "これらは正式なシステムメッセージとして残しても良いですか？",
     "en": "May these be kept as official system messages?"

@@ -141,6 +141,8 @@ function createHarness(component, props = {}, relativePath = path.relative) {
             if (name.endsWith('ModalOverlay')) return { __esModule: true, default: passThrough };
             if (name.startsWith('@/hooks/')) return {
                 useActivityTracker() {}, useAddonEvents() {},
+                // Runtime alerts (docs/intent/runtime_alerts.md): none in this harness.
+                useRuntimeAlerts: () => ({ alerts: [], handleEvent() {}, refetch() {}, dismiss() {} }),
                 useActiveClientTab: () => ({ isActive: false }),
                 useClientActions: () => ({ dispatch() {} }),
                 // Entry/exit notice display (PR #376): show everything, never scroll.

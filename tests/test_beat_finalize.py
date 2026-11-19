@@ -286,14 +286,26 @@ class MemorizeTest(FinalizeTestBase):
         ))
         self.runtime._store_memory.assert_not_called()
 
-    def test_store_failure_emits_warning_event(self):
+    def test_store_failure_posts_runtime_alert(self):
+        """記憶の保存の失敗は、画面右下の閉じるまで残る知らせになる。
+
+        以前はチャットの返事のストリーミングに 5 秒で消える警告を載せていたので、
+        画面を見ていなかった回 (event_callback の無い回を含む) には届かなかった
+        (docs/intent/runtime_alerts.md)。返事のストリーミングには載せない。
+        """
         self.runtime._store_memory.return_value = None
-        events = []
-        _finalize_beat(self.runtime, _beat(
-            state={}, node_def=_node_def(memorize=True), event_callback=events.append,
-        ))
-        warnings = [e for e in events if e.get("type") == "warning"]
-        self.assertEqual(warnings[0]["warning_code"], "memorize_failed")
+        for callback in (None, []):
+            with self.subTest(event_callback=callback is not None):
+                events = callback
+                with patch("sea.runtime_llm.post_memorize_failed_alert") as post:
+                    _finalize_beat(self.runtime, _beat(
+                        state={}, node_def=_node_def(memorize=True),
+                        event_callback=events.append if events is not None else None,
+                    ))
+                post.assert_called_once()
+                self.assertEqual(post.call_args.args[0].persona_id, "p1")
+                if events is not None:
+                    self.assertEqual([e for e in events if e.get("type") == "warning"], [])
 
     def test_activity_trace_appended_for_normal_playbooks(self):
         state = {"_activity_trace": []}

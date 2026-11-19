@@ -1332,13 +1332,26 @@ class SEARuntime:
 
         if not responded or response is None:
             LOGGER.info("[sea][perm] Permission request %s timed out after %ds", request_id, timeout_sec)
-            if event_callback:
-                event_callback({
-                    "type": "warning",
-                    "content": f"Playbook実行の許可リクエストがタイムアウトしました（{display_name}）。スキップします。",
-                    "warning_code": "permission_timeout",
-                    "display": "toast",
-                })
+            # 確認の画面を見ていなかった回にも後で届くよう、閉じるまで残る知らせにする
+            # (docs/intent/runtime_alerts.md)。同じペルソナ・同じ Playbook の時間切れは
+            # 一枚にまとまる。
+            try:
+                from api.ui_messages import ui_message
+                from saiverse.runtime_alerts import post_runtime_alert
+
+                post_runtime_alert(
+                    f"permission_timeout:{persona_id}:{playbook_name}",
+                    "warning",
+                    ui_message("api.runtimeAlerts.permissionTimeout.title"),
+                    ui_message(
+                        "api.runtimeAlerts.permissionTimeout.message",
+                        persona=persona_name or persona_id or "",
+                        playbook=display_name,
+                    ),
+                    details={"persona_id": persona_id, "playbook_name": playbook_name},
+                )
+            except Exception:  # noqa: BLE001 — 知らせの失敗で時間切れの処理を止めない
+                LOGGER.warning("[sea][perm] Failed to post the permission timeout alert", exc_info=True)
             return "timeout"
 
         LOGGER.info("[sea][perm] Permission response for %s: %s", playbook_name, response)

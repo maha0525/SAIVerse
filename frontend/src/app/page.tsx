@@ -46,6 +46,8 @@ import { useMovementNoticeSettings } from '@/hooks/useMovementNoticeSettings';
 import { useMovementNoticeAutoScroll } from '@/hooks/useMovementNoticeAutoScroll';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
+import { useRuntimeAlerts } from '@/hooks/useRuntimeAlerts';
+import RuntimeAlertCards from '@/components/RuntimeAlertCards';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
 import { useClientActions } from '@/hooks/useClientActions';
 import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
@@ -360,6 +362,19 @@ export default function Home() {
         getAddonMetadata,
     });
 
+    // Backend connection status
+    const [backendConnected, setBackendConnected] = useState(true);
+
+    // 動作中に見つけた、部屋に結びつかない警告 (右下に閉じるまで残す。
+    // docs/intent/runtime_alerts.md)。常設 SSE の runtime_alert はここへ渡し、
+    // アドオンの受け手 (dispatchClientActions) には流さない。
+    const {
+        alerts: runtimeAlerts,
+        handleEvent: handleRuntimeAlertEvent,
+        refetch: refetchRuntimeAlerts,
+        dismiss: dismissRuntimeAlert,
+    } = useRuntimeAlerts(backendConnected);
+
     // アドオンSSEイベント購読：audio_ready など非同期完了イベントを受信してメタデータを更新
     useAddonEvents(useCallback((event) => {
         if (event.message_id && event.data) {
@@ -376,7 +391,11 @@ export default function Home() {
         }
         // 同時に client_actions をディスパッチ (event.data 経由で URL 等を解決)
         dispatchClientActions(event);
-    }, [dispatchClientActions, updateAddonMetadata]));
+    }, [dispatchClientActions, updateAddonMetadata]), {
+        onRuntimeAlert: handleRuntimeAlertEvent,
+        // SSE が切れていた間の警告は届かないので、繋ぎ直したら一覧を取り直す
+        onOpen: refetchRuntimeAlerts,
+    });
 
     const [messages, setMessages] = useState<Message[]>([]);
     const { settings: movementNoticeSettings } = useMovementNoticeSettings();
@@ -631,9 +650,6 @@ export default function Home() {
     // Tutorial state
     const [showTutorial, setShowTutorial] = useState(false);
     const [tutorialChecked, setTutorialChecked] = useState(false);
-
-    // Backend connection status
-    const [backendConnected, setBackendConnected] = useState(true);
 
     // Check tutorial status on mount and when backend reconnects
     useEffect(() => {
@@ -2841,21 +2857,16 @@ export default function Home() {
                                 personaName: event.persona_name || '',
                             });
                         } else if (event.type === 'warning') {
-                            if (event.display === 'toast') {
-                                const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                                setToasts(prev => [...prev, { id, content: event.content || '' }]);
-                                setTimeout(() => {
-                                    setToasts(prev => prev.filter(t => t.id !== id));
-                                }, 5000);
-                            } else {
-                                setMessages(prev => [...prev, {
-                                    role: 'system',
-                                    content: event.content || '',
-                                    isWarning: true,
-                                    warningCode: event.warning_code,
-                                    timestamp: new Date().toISOString()
-                                }]);
-                            }
+                            // サーバーからの警告のうち画面を見ていない人にも届けるものは、
+                            // チャットの返事のストリーミングではなく動作中の警告
+                            // (右下に閉じるまで残る、docs/intent/runtime_alerts.md) で届く。
+                            setMessages(prev => [...prev, {
+                                role: 'system',
+                                content: event.content || '',
+                                isWarning: true,
+                                warningCode: event.warning_code,
+                                timestamp: new Date().toISOString()
+                            }]);
                         } else if (event.type === 'info') {
                             // Info notification (e.g. 504 stream interruption)
                             // サーバーが締めの生成を途中で切った回は、エラー札では
@@ -4586,9 +4597,10 @@ export default function Home() {
                 </ModalOverlay>
             )}
 
-            {/* Toast notifications */}
-            {toasts.length > 0 && (
+            {/* Toast notifications: 動作中の警告 (閉じるまで残る) と、ユーザー自身の操作の確認 (数秒で消える) */}
+            {(toasts.length > 0 || runtimeAlerts.length > 0) && (
                 <div className={styles.toastContainer}>
+                    <RuntimeAlertCards alerts={runtimeAlerts} onDismiss={dismissRuntimeAlert} />
                     {toasts.map(toast => (
                         <div key={toast.id} className={styles.toast}>
                             <AlertTriangle size={16} />

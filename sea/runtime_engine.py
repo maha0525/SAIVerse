@@ -14,7 +14,7 @@ from sea.message_stamp import (
     unstored_reply_for_last,
 )
 from sea.playbook_models import PlaybookSchema
-from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY
+from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY, post_memorize_failed_alert
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.cancellation import ExecutionCancelledException
 from sea.runtime_utils import _format, _resolve_template_arg, event_building_id
@@ -439,13 +439,7 @@ class RuntimeEngine:
                     metadata={SYSTEM_NOTICE_KEY: "playbook_exec_error"},
                 ):
                     LOGGER.warning("Failed to store exec error to SAIMemory for node %s", node_id)
-                    if event_callback:
-                        event_callback({
-                            "type": "warning",
-                            "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
-                            "warning_code": "memorize_failed",
-                            "display": "toast",
-                        })
+                    post_memorize_failed_alert(persona)
                 # Append error to PulseContext
                 _pulse_ctx = state.get("_pulse_context")
                 if _pulse_ctx:
@@ -599,13 +593,7 @@ class RuntimeEngine:
                 attach_stored_id_to_unstored_reply(state, stored)
             if not stored:
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
-                if event_callback:
-                    event_callback({
-                        "type": "warning",
-                        "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
-                        "warning_code": "memorize_failed",
-                        "display": "toast",
-                    })
+                post_memorize_failed_alert(persona)
             log_sea_trace(
                 playbook.name, node_id, "MEMORIZE",
                 f"role={role} line_role={line_role} scope={scope} tags={tags} text=\"{memo_text}\"",

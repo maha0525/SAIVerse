@@ -107,6 +107,9 @@ saiverse/
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
 ├── update_dependencies_alert.py # 起動前のパッケージの入れ直し（update_engine --check-complete）が失敗した
 │                           #   記録を読み、画面のバナー（startup_alerts）に載せる警告にする
+├── runtime_alerts.py       # 動作中に見つけた、部屋に結びつかない警告を runtime_alerts 表に書き（同じ識別キーは
+│                           #   一枚にまとめて回数を数える）、常設 SSE（addon_events）で画面右下へ送る。
+│                           #   ユーザーが閉じるまで残る（runtime_alerts.md）
 ├── system_notice_review.py # システム通知の移行が確認待ちにした記憶の行を集めて束ね、所有者が画面で選んだ
 │                           #   操作（keep / system / user / delete）で確定する。件数に応じてバナーの警告を置き直す
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
@@ -122,6 +125,7 @@ saiverse/
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
+├── addon_events.py         # 常設 SSE（/api/addon/events）の配信。アドオンのイベントと動作中の警告（runtime_alert）が載る
 ├── addon_context.py        # アドオンの案内（context_provider）の登録簿。読み手は head の addon_guidance セクション
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール

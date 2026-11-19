@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 53
+**テーブル数**: 54
 
 ## addon_config
 
@@ -133,6 +133,21 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `PRIORITY` | INTEGER | NOT NULL, default=0 |  |
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
+
+## runtime_alerts
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `ALERT_ID` | INTEGER | PK, NOT NULL |  |
+| `ALERT_KEY` | VARCHAR(255) | NOT NULL |  |
+| `LEVEL` | VARCHAR(16) | NOT NULL |  |
+| `TITLE_JSON` | TEXT | NOT NULL |  |
+| `MESSAGE_JSON` | TEXT | NOT NULL |  |
+| `DETAILS_JSON` | TEXT | — |  |
+| `OCCURRENCE_COUNT` | INTEGER | NOT NULL, default=1 |  |
+| `FIRST_AT` | INTEGER | NOT NULL |  |
+| `LAST_AT` | INTEGER | NOT NULL |  |
+| `DISMISSED_AT` | INTEGER | — |  |
 
 ## session_anchor
 

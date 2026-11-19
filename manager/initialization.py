@@ -57,6 +57,11 @@ class InitializationMixin:
         from saiverse.usage_tracker import get_usage_tracker
         get_usage_tracker().configure(self.SessionLocal)
 
+        # 動作中の警告 (画面右下に閉じるまで残る知らせ) も同じ DB に書く
+        # (docs/intent/runtime_alerts.md)
+        from saiverse import runtime_alerts
+        runtime_alerts.configure(self.SessionLocal)
+
     def _init_city_config(self, city_name: str) -> None:
         """Step 1: Load City Configuration from DB."""
         db = self.SessionLocal()

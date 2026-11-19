@@ -223,6 +223,32 @@ def notify_speak_persisted(
         )
 
 
+def post_memorize_failed_alert(persona: Any) -> None:
+    """記憶 (SAIMemory) への保存に失敗したことを、画面右下の閉じるまで残る知らせにする。
+
+    docs/intent/runtime_alerts.md。以前はチャットの返事のストリーミングに
+    ``{"type": "warning", "warning_code": "memorize_failed", "display": "toast"}``
+    を載せて 5 秒で消していたため、画面を見ていなかった回 (自律の Pulse を含む) は
+    誰にも届かなかった。同じペルソナで繰り返し失敗したら一枚にまとまる
+    (識別キー ``memorize_failed:<persona_id>``)。呼び出し元の処理は止めない。
+    """
+    try:
+        from api.ui_messages import ui_message
+        from saiverse.runtime_alerts import post_runtime_alert
+
+        persona_id = str(getattr(persona, "persona_id", None) or "unknown")
+        persona_name = str(getattr(persona, "persona_name", None) or persona_id)
+        post_runtime_alert(
+            f"memorize_failed:{persona_id}",
+            "error",
+            ui_message("api.runtimeAlerts.memorizeFailed.title"),
+            ui_message("api.runtimeAlerts.memorizeFailed.message", persona=persona_name),
+            details={"persona_id": persona_id},
+        )
+    except Exception:  # noqa: BLE001 — 知らせの失敗で記憶の処理の後始末を止めない
+        LOGGER.warning("post_memorize_failed_alert: could not post the alert", exc_info=True)
+
+
 @dataclass
 class SpeakFinalizeResult:
     """``emit_speak_finalize`` の三値の結果。

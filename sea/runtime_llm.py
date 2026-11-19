@@ -155,6 +155,10 @@ from .runtime_emitters import (  # noqa: E402
     note_saved_utterance,
 )
 
+#: 記憶の保存の失敗を画面右下の閉じるまで残る知らせにする口
+#: (docs/intent/runtime_alerts.md)。
+from .runtime_emitters import post_memorize_failed_alert  # noqa: E402
+
 
 def _finalize_speak_with_signal(
     runtime: Any,
@@ -1544,8 +1548,10 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
             # 判断ターンは scope='discardable' のまま残る。
 
-        if not _memorize_ok and event_callback:
-            event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
+        if not _memorize_ok:
+            # 画面を見ていなかった回にも後で届くよう、閉じるまで残る知らせにする
+            # (docs/intent/runtime_alerts.md)。event_callback の有無に関わらず出す。
+            post_memorize_failed_alert(persona)
 
         # Activity trace: record LLM memorize
         if not playbook.name.startswith(("meta_", "sub_")):
