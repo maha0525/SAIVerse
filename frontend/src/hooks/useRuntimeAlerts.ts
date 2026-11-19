@@ -45,19 +45,25 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     // 結果に、始めた後に届いた分を重ね直してから表示する。
     const eventSeqRef = useRef(0);
     const dismissedIdsRef = useRef<Set<number>>(new Set());
+    // 走っている取り直しの開始時点。覚えた知らせが要るのは、どれかの取り直しが
+    // 走っている間だけ — 一つも走っていなければ捨ててよい (件数の上限では切らない。
+    // 上限で切ると、取り直しの間に届いた分が落ちて画面から消える)。
+    const inflightStartsRef = useRef<Set<number>>(new Set());
     const recentEventsRef = useRef<{ seq: number; event: RuntimeAlertEvent }[]>([]);
 
     const remember = useCallback((event: RuntimeAlertEvent) => {
         if (event.action === 'dismiss') dismissedIdsRef.current.add(event.id);
         eventSeqRef.current += 1;
-        recentEventsRef.current.push({ seq: eventSeqRef.current, event });
-        if (recentEventsRef.current.length > 200) {
-            recentEventsRef.current = recentEventsRef.current.slice(-200);
+        if (inflightStartsRef.current.size === 0) {
+            recentEventsRef.current = [];
+            return;
         }
+        recentEventsRef.current.push({ seq: eventSeqRef.current, event });
     }, []);
 
     const refetch = useCallback(async () => {
         const startedAt = eventSeqRef.current;
+        inflightStartsRef.current.add(startedAt);
         try {
             const res = await apiFetch('/api/system/runtime-alerts');
             if (!res.ok) return;
@@ -72,6 +78,14 @@ export function useRuntimeAlerts(backendConnected: boolean) {
         } catch (error) {
             // 裏側がまだ起動していないことがある。繋がり直したときに取り直す。
             console.warn('[runtime-alerts] failed to fetch the list', error);
+        } finally {
+            inflightStartsRef.current.delete(startedAt);
+            if (inflightStartsRef.current.size === 0) {
+                recentEventsRef.current = [];
+            } else {
+                const oldest = Math.min(...Array.from(inflightStartsRef.current));
+                recentEventsRef.current = recentEventsRef.current.filter(e => e.seq > oldest);
+            }
         }
     }, []);
 
