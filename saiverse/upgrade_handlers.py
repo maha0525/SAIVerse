@@ -1514,4 +1514,26 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.31 -> 0.3.32 (no schema or world-data changes).",
     ),
+    # ---- v0.3.33 ----
+    # Windows の Tailscale MagicDNS Origin 検査の UTF-8 読み取り修正、
+    # アドオンのペルソナ別ファイル API での日本語ペルソナ ID 受け付け、
+    # Gemini 4 Neon (有料 Tier) 追加、全画面の ModelPicker でのお気に入り対応、
+    # スペル連続実行上限の既定 5 回化・グローバル設定化・残り回数と上限超過通知。
+    # DB の形は変わらず、起動時に世界のデータを書き換える処理も無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_33",
+        scope="city",
+        from_version="0.3.32",
+        to_version="0.3.33",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.32 -> 0.3.33 (no schema or world-data changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_33",
+        scope="ai",
+        from_version="0.3.32",
+        to_version="0.3.33",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.32 -> 0.3.33 (no schema or world-data changes).",
+    ),
 ]
