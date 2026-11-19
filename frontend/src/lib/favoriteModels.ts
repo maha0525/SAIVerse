@@ -29,29 +29,31 @@ export async function fetchFavoriteModels(signal?: AbortSignal): Promise<string[
         try {
             const res = await apiFetch('/api/config/favorite-models', signal ? { signal } : undefined);
             if (!res.ok) {
-                if (!hasLoaded) pendingToggles = [];
+                if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
                 return null;
             }
             const data = await res.json();
             if (startVersion !== cacheVersion) {
-                pendingToggles = [];
+                if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
                 return cachedFavorites;
             }
             const list = Array.isArray(data?.models)
                 ? data.models.filter((id: unknown): id is string => typeof id === 'string')
                 : [];
             hasLoaded = true;
+            // 取得済み一覧を先に共有キャッシュへ反映しておかないと、直後のマージ保存が
+            // 失敗したときの復元先 previous が空配列のままになる。
+            notifyListeners(list);
             if (pendingToggles.length > 0) {
                 const queued = pendingToggles;
                 pendingToggles = [];
                 const merged = queued.reduce(applyToggle, list);
                 await saveFavoriteModels(merged);
-                return merged;
+                return cachedFavorites;
             }
-            notifyListeners(list);
             return list;
         } catch (e) {
-            if (!hasLoaded) pendingToggles = [];
+            if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
             throw e;
         } finally {
             if (inflightFetchId === fetchId) {

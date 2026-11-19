@@ -141,5 +141,41 @@ function loadFavoriteModels(apiFetch) {
         assert.deepEqual(posts, []);
     }
 
+    // 5. Failed merged POST after initial GET rolls back to fetched list, not empty array
+    {
+        let postCount = 0;
+        const posts = [];
+        const mod = loadFavoriteModels(async (_url, opts) => {
+            if (opts?.method === 'POST') {
+                postCount++;
+                posts.push(JSON.parse(opts.body));
+                if (postCount === 1) return { ok: false, status: 500 };
+                return { ok: true };
+            }
+            return { ok: true, json: async () => ({ models: ['existing-a', 'existing-b'] }) };
+        });
+
+        const { toggleFavorite } = mod.useFavoriteModels(false);
+        const inflightGet = mod.fetchFavoriteModels();
+        toggleFavorite('new-fav');
+
+        const origErr = console.error;
+        console.error = () => {};
+        try {
+            await inflightGet;
+        } finally {
+            console.error = origErr;
+        }
+
+        // First POST failed, so cache must have rolled back to ['existing-a', 'existing-b']
+        assert.deepEqual(mod.getLatestNotified(), ['existing-a', 'existing-b']);
+
+        // Next toggle must build on ['existing-a', 'existing-b'], not []
+        toggleFavorite('another-fav');
+        await new Promise(r => setTimeout(r, 0));
+        assert.deepEqual(posts[1], { models: ['existing-a', 'existing-b', 'another-fav'] });
+        assert.deepEqual(mod.getLatestNotified(), ['existing-a', 'existing-b', 'another-fav']);
+    }
+
     console.log('Favorite models cache version & race guard tests passed.');
 })();
