@@ -96,5 +96,50 @@ function loadFavoriteModels(apiFetch) {
         }
     }
 
+    // 3. Toggling before initial GET completes merges with server favorites instead of wiping them
+    {
+        let resolveGet;
+        const getPromise = new Promise(r => { resolveGet = r; });
+        const posts = [];
+        const mod = loadFavoriteModels(async (_url, opts) => {
+            if (opts?.method === 'POST') {
+                posts.push(JSON.parse(opts.body));
+                return { ok: true };
+            }
+            return { ok: true, json: async () => await getPromise };
+        });
+
+        const { toggleFavorite } = mod.useFavoriteModels(false);
+        const inflightGet = mod.fetchFavoriteModels();
+
+        // User toggles 'new-fav' and un-toggles 'existing-b' before initial GET resolves
+        toggleFavorite('new-fav');
+        toggleFavorite('existing-b');
+        assert.deepEqual(posts, []); // Must NOT POST empty/partial list yet
+
+        resolveGet({ models: ['existing-a', 'existing-b'] });
+        await inflightGet;
+        assert.deepEqual(posts, [{ models: ['existing-a', 'new-fav'] }]);
+        assert.deepEqual(mod.getLatestNotified(), ['existing-a', 'new-fav']);
+    }
+
+    // 4. Failed initial GET discards queued toggles and never overwrites server favorites
+    {
+        const posts = [];
+        const mod = loadFavoriteModels(async (_url, opts) => {
+            if (opts?.method === 'POST') {
+                posts.push(JSON.parse(opts.body));
+                return { ok: true };
+            }
+            return { ok: false, status: 500 };
+        });
+
+        const { toggleFavorite } = mod.useFavoriteModels(false);
+        const inflightGet = mod.fetchFavoriteModels();
+        toggleFavorite('new-fav');
+        await inflightGet;
+        assert.deepEqual(posts, []);
+    }
+
     console.log('Favorite models cache version & race guard tests passed.');
 })();
