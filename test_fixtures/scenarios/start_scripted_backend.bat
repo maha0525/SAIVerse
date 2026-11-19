@@ -18,6 +18,8 @@ set "SCRIPTED_DIR=%PROJECT_ROOT%\test_data\scripted_llm"
 if not exist "%SCRIPTED_DIR%" mkdir "%SCRIPTED_DIR%"
 
 rem --- Discord gateway off (same values as start_test_server.bat) ---
+rem --- let the test UI (start_test_frontend.bat, port 18010) send state-changing requests ---
+set "SAIVERSE_ALLOWED_ORIGINS=http://127.0.0.1:18010,http://localhost:18010"
 set "SAIVERSE_GATEWAY_ENABLED=0"
 set "SAIVERSE_GATEWAY_WS_URL=ws://127.0.0.1:9/test-disabled"
 set "SAIVERSE_GATEWAY_TOKEN=test-disabled"

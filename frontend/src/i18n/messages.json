@@ -495,6 +495,22 @@
     "ja": "この世界には建物がひとつもありません。設定の「世界の編集」から建物を作成してください。",
     "en": "This world has no buildings. Create one from the World Editor in Settings."
   },
+  "app.page.failureDetail.label": {
+    "ja": "詳細: ",
+    "en": "Details: "
+  },
+  "app.page.failureDetail.model": {
+    "ja": "モデル: ",
+    "en": "Model: "
+  },
+  "app.page.failureDetail.raw": {
+    "ja": "エラーの原文: ",
+    "en": "Original error: "
+  },
+  "app.page.failureDetail.code": {
+    "ja": "エラーの種類: ",
+    "en": "Error type: "
+  },
   "app.page.text096": {
     "ja": "表示していた建物は削除されました。サイドバーかマップから別の建物を選んでください。",
     "en": "The building you were viewing has been deleted. Select another building from the sidebar or the map."
@@ -8566,6 +8582,106 @@
   "api.systemNoticeReview.alertMessageUnreadable": {
     "ja": "次のペルソナの記録を読み込めなかったため、確認が必要なメッセージが残っているか分かりません: {names}。「確認する」から読み込みをやり直せます。このお知らせを閉じても、設定の「便利機能」から開けます。",
     "en": "The records of these personas could not be read, so it is unknown whether messages that need review remain: {names}. You can try reading them again from \"Review\". After closing this notice, you can still open it from \"Utilities\" in the settings."
+  },
+  "api.runtimeAlerts.memorizeFailed.title": {
+    "ja": "記憶の保存に失敗しました",
+    "en": "Failed to save memory"
+  },
+  "api.runtimeAlerts.memorizeFailed.message": {
+    "ja": "{persona} の記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
+    "en": "Saving {persona}'s memory failed. The conversation may not have been recorded."
+  },
+  "api.runtimeAlerts.chronicleSkipped.title": {
+    "ja": "Chronicle の生成をスキップしました",
+    "en": "Chronicle generation skipped"
+  },
+  "api.runtimeAlerts.chronicleSkipped.message": {
+    "ja": "{persona} の Chronicle の生成をスキップしました。",
+    "en": "Chronicle generation for {persona} was skipped."
+  },
+  "api.runtimeAlerts.permissionTimeout.title": {
+    "ja": "Playbook の実行の許可リクエストがタイムアウトしました",
+    "en": "Playbook permission request timed out"
+  },
+  "api.runtimeAlerts.permissionTimeout.message": {
+    "ja": "{persona} の Playbook「{playbook}」の実行の許可リクエストがタイムアウトしたため、実行をスキップしました。",
+    "en": "The request for permission to run the playbook \"{playbook}\" for {persona} timed out, so it was skipped."
+  },
+  "api.runtimeAlerts.scheduleUnrunnable.title": {
+    "ja": "スケジュールを実行できませんでした",
+    "en": "A schedule could not run"
+  },
+  "api.runtimeAlerts.scheduleUnrunnable.personaNotFound": {
+    "ja": "{persona} のスケジュール「{schedule}」を実行できませんでした。対象のペルソナが見つかりません。",
+    "en": "The schedule \"{schedule}\" for {persona} could not run. The persona could not be found."
+  },
+  "api.runtimeAlerts.scheduleUnrunnable.noLocation": {
+    "ja": "{persona} のスケジュール「{schedule}」を実行できませんでした。ペルソナの現在地がありません。",
+    "en": "The schedule \"{schedule}\" for {persona} could not run. The persona has no current location."
+  },
+  "api.runtimeAlerts.eventUnrunnable.title": {
+    "ja": "外部イベントに応答できませんでした",
+    "en": "Could not respond to an external event"
+  },
+  "api.runtimeAlerts.eventUnrunnable.personaNotFound": {
+    "ja": "{persona} 宛ての外部イベントに応答できませんでした。対象のペルソナが見つかりません。",
+    "en": "An external event for {persona} could not be handled. The persona could not be found."
+  },
+  "api.runtimeAlerts.eventUnrunnable.noLocation": {
+    "ja": "{persona} 宛ての外部イベントに応答できませんでした。ペルソナの現在地がありません。",
+    "en": "An external event for {persona} could not be handled. The persona has no current location."
+  },
+  "api.runtimeAlerts.conversationUnrunnable.title": {
+    "ja": "会話を始められませんでした",
+    "en": "Could not start the conversation"
+  },
+  "api.runtimeAlerts.conversationUnrunnable.personaNotFound": {
+    "ja": "{persona} との会話を始められませんでした。対象のペルソナが見つかりません。",
+    "en": "The conversation with {persona} could not start. The persona could not be found."
+  },
+  "api.runtimeAlerts.conversationUnrunnable.noLocation": {
+    "ja": "{persona} との会話を始められませんでした。ペルソナの現在地がありません。",
+    "en": "The conversation with {persona} could not start. The persona has no current location."
+  },
+  "api.runtimeAlerts.conversationUnrunnable.noRunner": {
+    "ja": "{persona} との会話を始められませんでした。返事を作る処理を起動できません。",
+    "en": "The conversation with {persona} could not start. The reply process could not be started."
+  },
+  "api.noUtterance.gateClosed": {
+    "ja": "このペルソナ宛ての未配送の記録を配れなかったため、実行を始められませんでした。",
+    "en": "The run could not start because undelivered records for this persona could not be delivered."
+  },
+  "api.noUtterance.gateClosedRetriesExhausted": {
+    "ja": "このペルソナ宛ての未配送の記録を配れなかったため、実行を始められませんでした。自動のやり直しも尽きました。",
+    "en": "The run could not start because undelivered records for this persona could not be delivered. Automatic retries were exhausted."
+  },
+  "api.noUtterance.floorUnmet": {
+    "ja": "記憶の窓を用意できなかったため、実行を始められませんでした。",
+    "en": "The run could not start because the memory window could not be prepared."
+  },
+  "api.noUtterance.floorUnmetRetriesExhausted": {
+    "ja": "記憶の窓を用意できなかったため、実行を始められませんでした。自動のやり直しも尽きました。",
+    "en": "The run could not start because the memory window could not be prepared. Automatic retries were exhausted."
+  },
+  "api.noUtterance.emptyResponse": {
+    "ja": "{attempts} 回やり直しても、モデルから空の応答しか返りませんでした。",
+    "en": "The model returned only empty responses after {attempts} attempts."
+  },
+  "api.noUtterance.playbookNotFound": {
+    "ja": "指定された Playbook「{playbook}」が見つかりませんでした。",
+    "en": "The specified playbook \"{playbook}\" was not found."
+  },
+  "api.noUtterance.queueOverflow": {
+    "ja": "処理待ちの列が上限 ({limit} 件) を超えたため、この実行は取り下げられました。",
+    "en": "This run was dropped because the waiting queue exceeded its limit ({limit})."
+  },
+  "components.RuntimeAlertCards.occurrence": {
+    "ja": "{count} 回目 (最後: {time})",
+    "en": "Occurrence {count} (last: {time})"
+  },
+  "components.RuntimeAlertCards.close": {
+    "ja": "閉じる",
+    "en": "Close"
   },
   "components.SystemNoticeReviewModal.question": {
     "ja": "これらは正式なシステムメッセージとして残しても良いですか？",

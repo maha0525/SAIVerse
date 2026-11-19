@@ -23,6 +23,11 @@ class LLMError(Exception):
     #: 案内する。
     interrupted_building_id: str | None = None
     interrupted_building_name: str | None = None
+    #: 失敗した呼び出しのモデル名 (分かるときだけ)。LLM ノード
+    #: (sea/runtime_llm.py の lg_llm_node) が、その Beat で選んだモデルを後から
+    #: 書き足す。発言が生まれなかった回の知らせの詳細 (画面だけに出す) に載る
+    #: (docs/intent/no_utterance_error_notice.md)。
+    model: str | None = None
 
     def __init__(
         self,
@@ -119,14 +124,65 @@ class InvalidRequestError(LLMError):
     user_message = "リクエストが不正です。入力内容を確認してください。"
 
 
+class ContextLengthExceededError(LLMError):
+    """Raised when the request is longer than the model's context window.
+
+    Separated from :class:`InvalidRequestError` because it is a common failure
+    with one clear remedy for the user: switch to a model with a larger context
+    (docs/intent/no_utterance_error_notice.md, fix 5).
+    """
+
+    error_code = "context_length_exceeded"
+    user_message = (
+        "会話の長さが、使っているモデルの上限を超えました。"
+        "より長い会話を扱えるモデル (コンテキストの上限が大きいモデル) に切り替えてください。"
+    )
+
+
+#: 会話の長さの上限超過を表す、各社のエラー文の手がかり (小文字で照合する)。
+#: - OpenAI / OpenAI 互換 (OpenRouter など): "maximum context length" /
+#:   エラーコード "context_length_exceeded"
+#: - llama.cpp server (OpenAI 互換の口): "exceeds the available context size"
+#: - Anthropic: "prompt is too long" / "exceed context limit"
+#: - Gemini: "exceeds the maximum number of tokens allowed"
+#: - xAI: "maximum prompt length"
+_CONTEXT_LENGTH_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "exceeds the available context size",
+    "prompt is too long",
+    "exceed context limit",
+    "exceeds the maximum number of tokens allowed",
+    "maximum prompt length",
+)
+
+
+def is_context_length_error(err: BaseException) -> bool:
+    """プロバイダーの例外が、会話の長さの上限超過を表しているか。
+
+    各クライアントのエラー分類 (``*_convert_to_llm_error``) が、他の分類より先に
+    呼ぶ。手がかりはエラー文と、OpenAI 形式の本文の ``error.code``。
+    """
+    body = getattr(err, "body", None)
+    if isinstance(body, dict):
+        error_obj = body.get("error")
+        if isinstance(error_obj, dict) and error_obj.get("code") == "context_length_exceeded":
+            return True
+    msg = str(err).lower()
+    return any(marker in msg for marker in _CONTEXT_LENGTH_MARKERS)
+
+
 class ModelUnavailableError(LLMError):
     """The model a persona is set to use has no definition, or cannot be connected to.
 
     SAIVerse does not substitute another model in that case
     (docs/intent/persona_model_selection.md, decision 7). The ``user_message``
     names who could not speak, which model is missing or unreachable, where to
-    reselect it, and that no restart is needed. It is shown in the chat screen
-    only — it is never written to the building log or the persona's memory.
+    reselect it, and that no restart is needed. It is shown in the chat screen,
+    and the failed reply also leaves a host row in the building log whose body
+    says only that the persona could not speak; this ``user_message`` goes into
+    that row's server-only metadata, never into any persona's memory
+    (docs/intent/no_utterance_error_notice.md).
 
     Attributes:
         role: ``"default_model"`` or ``"lightweight_model"``.

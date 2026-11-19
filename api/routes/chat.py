@@ -38,6 +38,21 @@ class ChatMessageLLMUsageTotal(BaseModel):
     models_used: List[str] = []
     currency: str = "USD"
 
+class ChatMessageFailureDetail(BaseModel):
+    """発言が生まれなかった回の行 (role=host) が持つ、画面だけに出す詳細。
+
+    永続化は行の metadata["__no_utterance_error__"]
+    (sea/no_utterance_notice.py NO_UTTERANCE_DETAIL_KEY)。ペルソナの記憶には
+    行の本文だけが届き、この詳細は届かない。
+    設計: docs/intent/no_utterance_error_notice.md
+    """
+    error_code: str
+    # 利用者向けの文。LLMError の user_message (文) か、ui_message の形
+    # ({"$ui": key, "params": {...}} — 画面の decodeUIMessages が訳す)。
+    message: Optional[Any] = None
+    technical_detail: Optional[str] = None
+    model: Optional[str] = None
+
 class ChatMessage(BaseModel):
     id: Optional[str] = None
     role: str
@@ -65,6 +80,10 @@ class ChatMessage(BaseModel):
     # 永続化は metadata["_interrupted"] (sea/runtime_llm.py INTERRUPTED_METADATA_KEY)。
     # 設計: docs/issues/user_utterance_path_failure_inventory.md
     interrupted: bool = False
+    # この host の行は「エラー (やサーバーの停止) で発言できなかった」の知らせで、
+    # 画面は行の下に原因の詳細を出す。content / metadata の外に置く — 画面の
+    # decodeUIMessages はその二つの中を訳さないため。
+    failure_detail: Optional[ChatMessageFailureDetail] = None
     # Presentation-only classification; never filters persisted/persona history.
     is_movement_notice: bool = False
     building_id: Optional[str] = None
@@ -253,6 +272,20 @@ def serialize_history_message(
     if metadata and "activity_trace" in metadata:
         activity_trace_data = metadata["activity_trace"]
 
+    # 発言が生まれなかった回の行の詳細 (host の行だけが持つ)。
+    failure_detail_data = None
+    if role == "host" and isinstance(metadata, dict):
+        from sea.no_utterance_notice import NO_UTTERANCE_DETAIL_KEY
+
+        raw_failure = metadata.get(NO_UTTERANCE_DETAIL_KEY)
+        if isinstance(raw_failure, dict) and raw_failure.get("error_code"):
+            failure_detail_data = ChatMessageFailureDetail(
+                error_code=str(raw_failure.get("error_code")),
+                message=raw_failure.get("message"),
+                technical_detail=raw_failure.get("technical_detail"),
+                model=raw_failure.get("model"),
+            )
+
     # Existing records already retain structured occupancy metadata. Do not infer
     # movement from prose/HTML: ordinary conversation can quote the same notice.
     event = metadata.get("event") if isinstance(metadata, dict) else None
@@ -280,6 +313,7 @@ def serialize_history_message(
         llm_usage=llm_usage_data,
         llm_usage_total=llm_usage_total_data,
         interrupted=bool(metadata.get("_interrupted")) if metadata else False,
+        failure_detail=failure_detail_data,
         is_movement_notice=is_movement_notice,
         building_id=building_id or msg.get("building_id"),
     )

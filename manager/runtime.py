@@ -911,6 +911,22 @@ class RuntimeService(
                             break
                         _enrich_event(e.to_dict())
                         continue
+                    except LLMError as e:
+                        # 1 人目の LLM の失敗で 2 人目以降を止めない (モデルが無い回と
+                        # 同じ理由)。部屋の記録への「発言できませんでした」の行は
+                        # PulseController._execute_unlocked が投げ直す前に置いている
+                        # (docs/intent/no_utterance_error_notice.md)。画面のエラー表示は
+                        # このペルソナの分を出す (問い 4 — 両方出す)。
+                        logging.error(
+                            "[runtime] persona %s failed with an LLM error; continuing "
+                            "with the other personas: %s",
+                            captured_persona.persona_id, e, exc_info=True,
+                        )
+                        if stop_event.is_set():
+                            _enrich_event({"type": "cancelled", "content": "生成を中止しました。"})
+                            break
+                        _enrich_event(e.to_dict())
+                        continue
                     # Check stop event after each persona completes
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected after persona %s; breaking loop", persona.persona_id)

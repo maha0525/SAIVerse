@@ -21,6 +21,8 @@ TEST_DB_PATH="$SAIVERSE_USER_DATA_DIR/database/saiverse.db"
 # from the repository .env, and discord_gateway/config.py reads .env by itself.
 # Keep these non-empty and identical to start_test_server.bat: in cmd,
 # set "VAR=" deletes the variable, so an empty value cannot be expressed there.
+# テスト用の画面 (ポート 18010) から状態を変える要求を送れるようにする (api/owner_auth.py の BrowserOriginMiddleware)
+export SAIVERSE_ALLOWED_ORIGINS="http://127.0.0.1:18010,http://localhost:18010"
 export SAIVERSE_GATEWAY_ENABLED=0
 export SAIVERSE_GATEWAY_WS_URL="ws://127.0.0.1:9/test-disabled"
 export SAIVERSE_GATEWAY_TOKEN="test-disabled"

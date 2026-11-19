@@ -78,10 +78,26 @@ def inject_persona_event(
         return "error: no pulse_dispatcher"
 
     # Resolve persona's current building
+    # 対象のペルソナが居ない・現在地が無い回は、書く部屋が決まらないので部屋の
+    # 記録には書けない。画面右下の閉じるまで残る知らせに出す (この経路には
+    # 自動のやり直しが無いので、その場で一度 — docs/intent/no_utterance_error_notice.md
+    # 問い 3)。
+    from sea.no_utterance_notice import (
+        CAUSE_NO_LOCATION,
+        CAUSE_PERSONA_NOT_FOUND,
+        persona_label,
+        post_unrunnable_alert,
+    )
+
     persona = _manager.all_personas.get(persona_id)
     if persona is None:
         LOGGER.warning(
             "[inject_persona_event] Persona %s not found in all_personas", persona_id
+        )
+        post_unrunnable_alert(
+            "event", persona_id, CAUSE_PERSONA_NOT_FOUND,
+            persona=persona_label(_manager, persona_id),
+            details={"persona_id": persona_id, "event_type": event_type},
         )
         return f"error: persona {persona_id} not found"
 
@@ -89,6 +105,11 @@ def inject_persona_event(
     if not building_id:
         LOGGER.warning(
             "[inject_persona_event] Persona %s has no current_building_id", persona_id
+        )
+        post_unrunnable_alert(
+            "event", persona_id, CAUSE_NO_LOCATION,
+            persona=persona_label(_manager, persona_id),
+            details={"persona_id": persona_id, "event_type": event_type},
         )
         return f"error: persona {persona_id} has no building"
 

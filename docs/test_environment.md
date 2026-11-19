@@ -44,7 +44,7 @@ python test_fixtures/test_api.py --quick # クイックテスト（LLM除く）
 
 ## 画面を隔離したバックエンドへつなぐ
 
-バックエンド (18000) を起動したあと、Windows では `test_fixtures\start_test_frontend.bat` を実行する。画面は 18010 で開き、スクリプトが HTTP 中継用の `SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000` と音声通話用の `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000` を設定する。手動起動なら:
+バックエンド (18000) を起動したあと、Windows では `test_fixtures\start_test_frontend.bat` を実行する。バックエンドの起動スクリプト (`start_test_server.*`・`scenarios/start_scripted_backend.bat`) は `SAIVERSE_ALLOWED_ORIGINS=http://127.0.0.1:18010,http://localhost:18010` を設定する — これが無いと、画面からの状態を変える要求 (発言の送信・知らせを閉じる等) は `api/owner_auth.py` の `BrowserOriginMiddleware` に別サイトからの要求として 403 で断られる (既定で許すのは 3000 番の画面だけ)。画面は 18010 で開き、スクリプトが HTTP 中継用の `SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000` と音声通話用の `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000` を設定する。手動起動なら:
 
 ```bash
 cd frontend

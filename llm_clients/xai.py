@@ -20,6 +20,7 @@ from saiverse.llm_router import route
 from .base import LLMClient, ToolSpecFormat, get_llm_logger
 from .exceptions import (
     AuthenticationError,
+    ContextLengthExceededError,
     EmptyResponseError,
     InvalidRequestError,
     LLMError,
@@ -28,6 +29,7 @@ from .exceptions import (
     RateLimitError,
     SafetyFilterError,
     ServerError,
+    is_context_length_error,
 )
 from .system_notice import (
     accepts_mid_conversation_system,
@@ -69,6 +71,10 @@ def _should_retry(err: Exception) -> bool:
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
     """Convert xai_sdk / gRPC exceptions to SAIVerse LLMError subclasses."""
     msg = str(err).lower()
+
+    # 上限超過は gRPC の INVALID_ARGUMENT で届く — 状態コードの分類より先に見る。
+    if is_context_length_error(err):
+        return ContextLengthExceededError(f"xAI {context}: context length exceeded", err)
 
     # Try gRPC status codes first
     try:

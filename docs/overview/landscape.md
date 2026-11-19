@@ -76,6 +76,8 @@ SAIVerse の世界は複数の層で構成される。AI の主体が **Persona*
 
 SAIVerse を利用する人間（`User` テーブル、`CURRENT_CITYID` / `CURRENT_BUILDINGID` で現在地を保持）。チャットUI（= Building）にメッセージを書き込み、Building の内容を見る。ペルソナと並ぶ主体だが AI ではなく、**Building を介してペルソナと相互に感知し合う**。ペルソナにとってユーザーの発言は、Building 経由で Session（短期記憶 §6）に流入する外界入力の一つ。
 
+ユーザーにだけ届き、どの Building にも書かない知らせもある。起動時の確認で見つけたものは画面上部のバナー（`startup_alerts`）、サーバーが動いている間に見つけたものは画面右下の**動作中の警告**（`runtime_alerts` 表、`saiverse/runtime_alerts.py`）。動作中の警告はユーザーが閉じるまで残り、同じ原因は一枚にまとまって回数が出る。配信は常設 SSE（`/api/addon/events`、アドオンのイベントと共用）。どちらもペルソナには届かない。→ [`runtime_alerts.md`](../intent/runtime_alerts.md)
+
 ### Building / City
 
 **Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）を持つ。旧自動 pulse 間隔（`AUTO_INTERVAL_SEC`）は API・DB 互換のため残るが、現行の駆動には使わず、設定 UI にも出さない（§9）。

@@ -341,6 +341,38 @@
     flex-shrink: 0;
 }
 
+/* 「エラーで発言できなかった」の行の下に出す原因の詳細
+   (docs/intent/no_utterance_error_notice.md)。ユーザーだけが読む材料なので、
+   本文より一段控えめに、エラーの赤の系統の薄い地で出す。
+   ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。 */
+.systemNoticeFailureDetail {
+    max-width: min(640px, 100%);
+    width: fit-content;
+    overflow-x: hidden;
+    padding: 0.35em 0.7em;
+    border-radius: 6px;
+    border: 1px solid rgba(217, 83, 79, 0.3);
+    background-color: rgba(217, 83, 79, 0.08);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    text-align: left;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    box-sizing: border-box;
+}
+
+.systemNoticeFailureDetailRaw {
+    opacity: 0.8;
+    font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+:global([data-theme="light"]) .systemNoticeFailureDetail {
+    border-color: rgba(185, 60, 55, 0.35);
+    background-color: rgba(185, 60, 55, 0.06);
+}
+
 .systemNoticeTime {
     font-size: 0.68rem;
     color: var(--text-secondary);

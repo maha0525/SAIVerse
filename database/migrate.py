@@ -1462,6 +1462,34 @@ def ensure_task_book_table(db_path: str) -> None:
         engine.dispose()
 
 
+def _ensure_runtime_alerts_table(engine) -> None:
+    """動作中の警告 (runtime_alerts) を軽量パスで揃える。
+
+    docs/intent/runtime_alerts.md。新規テーブルは needs_migration →
+    try_additive_migration の汎用パスでも作られるが、実行台帳・タスク帳と同様
+    「テーブル追加は素早く確実に適用したい」ため CREATE TABLE IF NOT EXISTS 相当の
+    冪等な軽量シンク経路を別途持つ (schema_sync.ensure_table_columns_indexes に
+    委譲: 未作成なら CREATE / 列不足なら ALTER / インデックス不足なら CREATE INDEX)。
+    既存 DB に対してはテーブル追加のみ (既存行に触れず、行 0 件で無害)。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import RuntimeAlert
+        ensure_table_columns_indexes(engine, RuntimeAlert.__table__)
+    except Exception as e:
+        logging.error("動作中の警告テーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_runtime_alerts_table(db_path: str) -> None:
+    """動作中の警告テーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_runtime_alerts_table(engine)
+    finally:
+        engine.dispose()
+
+
 def _due_at_to_local_epoch(value):
     """``persona_task.due_at`` を epoch 秒 (整数) へ。解釈できなければ None。
 

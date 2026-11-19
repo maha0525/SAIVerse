@@ -262,10 +262,63 @@ class PulseDispatcher:
             meta_playbook=meta_playbook,
             args=args,
         )
+        # 実行を始められなかった (関所閉鎖 / 最終防衛ライン未達) 回。この直接経路
+        # には自動のやり直しが無いので、PulseController (実行の種類はスケジュールと
+        # 同じで、ここから来たかを見分けられない) の代わりにここで部屋の記録へ一行
+        # 置く (docs/intent/no_utterance_error_notice.md 問い 1 — やり直しの無い
+        # 経路はその場で置く)。回収経路の応対は別の口を通り、やり直しが尽きたときに
+        # 置く。
+        if result.get("runtime_outcome") in ("gate_closed", "floor_unmet"):
+            self._record_unstarted_event_response(
+                persona_id, building_id, result.get("runtime_outcome"), result.get("error"),
+            )
         return (
             result.get("action") == "queued"
             or result.get("runtime_outcome") in ("completed", "cancelled")
         )
+
+    def _record_unstarted_event_response(
+        self,
+        persona_id: str,
+        building_id: str,
+        runtime_outcome: Optional[str],
+        error: Optional[str],
+    ) -> None:
+        """外部イベントへの応答を始められなかったことを、その部屋の記録へ一行置く。"""
+        try:
+            from api.ui_messages import ui_message
+            from sea.no_utterance_notice import (
+                CODE_BEAT_GATE_CLOSED,
+                CODE_WINDOW_FLOOR_UNMET,
+                failure_detail,
+                record_no_utterance_notice,
+            )
+
+            persona = (getattr(self.manager, "all_personas", None) or {}).get(persona_id)
+            if persona is None:
+                LOGGER.warning(
+                    "[dispatcher] event response for %s did not start (%s) and the "
+                    "persona is not loaded; nothing recorded", persona_id, runtime_outcome,
+                )
+                return
+            if runtime_outcome == "gate_closed":
+                detail = failure_detail(
+                    CODE_BEAT_GATE_CLOSED,
+                    message=ui_message("api.noUtterance.gateClosed"),
+                    technical_detail=error or "",
+                )
+            else:
+                detail = failure_detail(
+                    CODE_WINDOW_FLOOR_UNMET,
+                    message=ui_message("api.noUtterance.floorUnmet"),
+                    technical_detail=error or "",
+                )
+            record_no_utterance_notice(self.manager, persona, building_id, detail=detail)
+        except Exception:  # noqa: BLE001 — 知らせの失敗で応答の精算を止めない
+            LOGGER.warning(
+                "[dispatcher] could not record the unstarted event response (persona=%s)",
+                persona_id, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # 自律 tick — AutonomyManager の定期 tick (2b, v2 で watchdog に縮退)

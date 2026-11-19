@@ -190,8 +190,11 @@ class SEARuntime:
 
         この返事の段 (自律は軽量、それ以外は標準) のモデルの設定ファイルが無ければ、
         返事の前処理 (実行モデルの解決・読み戻し・床の確保) より前に
-        ModelUnavailableError で止める。代わりのモデルでは動かさず、建物の記録にも
-        ペルソナの記憶にも何も書かない (知らせはチャット画面のエラーだけ)。
+        ModelUnavailableError で止める。代わりのモデルでは動かさない。知らせは
+        チャット画面のエラーと、PulseController が部屋の記録に置く一行
+        「(エラーにより、{名前}は発言できませんでした)」で、その部屋に居合わせた
+        全員の記憶に届く。どのモデルが使えなかったかは行の画面だけの詳細に置き、
+        ペルソナの記憶には書かない (docs/intent/no_utterance_error_notice.md)。
         """
         from saiverse.persona_model_selection import (
             TIER_LIGHTWEIGHT,
@@ -440,6 +443,26 @@ class SEARuntime:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
             if playbook is None:
                 LOGGER.warning("Meta playbook '%s' not found; aborting execution", meta_playbook)
+                # 例外にはしない (runtime_outcome は completed のまま — schedule の
+                # 台帳の分類を動かさない)。発言が生まれなかった理由として、この
+                # 実行の札に記録する — PulseController._execute_unlocked が読み、
+                # 部屋の記録へ一行置く (docs/intent/no_utterance_error_notice.md)。
+                from api.ui_messages import ui_message
+                from sea.no_utterance_notice import (
+                    CODE_PLAYBOOK_NOT_FOUND,
+                    failure_detail,
+                    note_no_utterance_cause,
+                )
+
+                note_no_utterance_cause(
+                    cancellation_token,
+                    failure_detail(
+                        CODE_PLAYBOOK_NOT_FOUND,
+                        message=ui_message(
+                            "api.noUtterance.playbookNotFound", playbook=meta_playbook,
+                        ),
+                    ),
+                )
                 if event_callback:
                     event_callback({
                         "type": "error",
@@ -1332,13 +1355,26 @@ class SEARuntime:
 
         if not responded or response is None:
             LOGGER.info("[sea][perm] Permission request %s timed out after %ds", request_id, timeout_sec)
-            if event_callback:
-                event_callback({
-                    "type": "warning",
-                    "content": f"Playbook実行の許可リクエストがタイムアウトしました（{display_name}）。スキップします。",
-                    "warning_code": "permission_timeout",
-                    "display": "toast",
-                })
+            # 確認の画面を見ていなかった回にも後で届くよう、閉じるまで残る知らせにする
+            # (docs/intent/runtime_alerts.md)。同じペルソナ・同じ Playbook の時間切れは
+            # 一枚にまとまる。
+            try:
+                from api.ui_messages import ui_message
+                from saiverse.runtime_alerts import post_runtime_alert
+
+                post_runtime_alert(
+                    f"permission_timeout:{persona_id}:{playbook_name}",
+                    "warning",
+                    ui_message("api.runtimeAlerts.permissionTimeout.title"),
+                    ui_message(
+                        "api.runtimeAlerts.permissionTimeout.message",
+                        persona=persona_name or persona_id or "",
+                        playbook=display_name,
+                    ),
+                    details={"persona_id": persona_id, "playbook_name": playbook_name},
+                )
+            except Exception:  # noqa: BLE001 — 知らせの失敗で時間切れの処理を止めない
+                LOGGER.warning("[sea][perm] Failed to post the permission timeout alert", exc_info=True)
             return "timeout"
 
         LOGGER.info("[sea][perm] Permission response for %s: %s", playbook_name, response)

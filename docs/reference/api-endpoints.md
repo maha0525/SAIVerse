@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 400（tag グループ: 26）
+**エンドポイント数**: 402（tag グループ: 26）
 
 ## addon
 
@@ -428,6 +428,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/system/notice-review` | 確認待ちの行 (起動時の移行がシステム通知か発話かを決められなかった行) の一覧。 |
 | POST | `/api/system/notice-review/apply` | 確認待ちの行に所有者が選んだ操作 (keep / system / user / delete) を当てる。 |
 | GET | `/api/system/notice-review/context` | 確認待ちの行の前後の文脈 (同じスレッドの前の 3 件と後ろの 3 件) を読み取り専用で返す。 |
+| GET | `/api/system/runtime-alerts` | 動作中に見つけた、まだ閉じていない警告の一覧 (最後に起きた時刻の新しい順)。 |
+| POST | `/api/system/runtime-alerts/{alert_id}/dismiss` | 動作中の警告を閉じる。閉じた時刻を DB に書き、開いているほかのタブからも消す。 |
 | POST | `/api/system/update` | Trigger a self-update: spawn detached updater, then shutdown. |
 | GET | `/api/system/version` | Return current version and check for updates. |
 

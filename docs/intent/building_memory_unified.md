@@ -157,7 +157,7 @@ CAS との役割分担:
 
 「タブA で移動するとタブB の表示にも自動反映される」というリアルタイム同期 (SSE / WS push) は本ドキュメントのスコープ外。クライアント側の `status` polling か手動リロードで状態追随する Lv1 で止める。
 
-理由: SAIVerse には現状で汎用的なクライアント push 基盤がない (`addon_events` SSE は別目的)。新規実装すれば AI 発言通知 / ペルソナ移動通知など他機能でも要るので、独立した設計判断として別 Intent Doc で扱う。
+理由: 起草当時の SAIVerse には汎用的なクライアント push 基盤がなかった (`addon_events` SSE はアドオン専用だった)。新規実装すれば AI 発言通知 / ペルソナ移動通知など他機能でも要るので、独立した設計判断として別 Intent Doc で扱う。その後、常設 SSE (`/api/addon/events`、`saiverse/addon_events.py`) はアドオン以外の知らせも `type` で分けて載せるようになった — 最初の利用者は動作中の警告 ([runtime_alerts.md](runtime_alerts.md))。タブ間の状態同期にこの経路を使うかは、なお別の設計判断として残る。
 
 ### C. 発言契機の入室ルール
 
