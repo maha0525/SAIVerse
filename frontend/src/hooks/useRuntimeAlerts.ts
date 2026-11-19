@@ -20,6 +20,8 @@ import type { RuntimeAlert, RuntimeAlertEvent } from './useAddonEvents';
  * 知らせ・自分で閉じる操作のどれかが来たら、その取り直しの結果は古い可能性がある
  * ので採らず、終わった後でもう一度取り直す。画面に出す一覧は、いつも「最中に何も
  * 起きなかった取り直し」の結果なので、サーバーの閉じていない知らせと一致する。
+ * もう一度取り直す前には少し待つ (0.3 秒から倍々、最大 5 秒) — 知らせが届き続けても
+ * 取り直しを休みなく繰り返さない。
  * 取り直しが失敗したら、成功するまで間隔を空けてやり直す (2 秒から倍々、最大 30 秒)。
  *
  * 一覧の `title` / `message` は `apiFetch` / `parseUIEvent` が表示用の文に変えた
@@ -51,6 +53,7 @@ export function useRuntimeAlerts(backendConnected: boolean) {
         }
         inFlightRef.current = true;
         clearRetry();
+        let staleWait = 300;
         try {
             for (;;) {
                 staleRef.current = false;
@@ -74,7 +77,12 @@ export function useRuntimeAlerts(backendConnected: boolean) {
                     return;
                 }
                 if (!mountedRef.current) return;
-                if (staleRef.current) continue;
+                if (staleRef.current) {
+                    await new Promise(resolve => setTimeout(resolve, staleWait));
+                    staleWait = Math.min(staleWait * 2, 5000);
+                    if (!mountedRef.current) return;
+                    continue;
+                }
                 retryDelayRef.current = 2000;
                 const dismissedIds = dismissedIdsRef.current;
                 setAlerts(fetched.filter(a => !dismissedIds.has(a.id)));
@@ -98,6 +106,7 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     }, [backendConnected, refetch]);
 
     const handleEvent = useCallback((event: RuntimeAlertEvent) => {
+        if (!mountedRef.current) return;
         if (inFlightRef.current) staleRef.current = true;
         if (event.action === 'upsert' && event.alert) {
             const incoming = event.alert;
