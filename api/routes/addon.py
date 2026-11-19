@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api.deps import get_manager
+from manager.ids import is_safe_path_component, path_component_error
 
 LOGGER = logging.getLogger(__name__)
 
@@ -831,6 +832,20 @@ def _validate_names(*names: str) -> None:
             )
 
 
+def _validate_persona_id(persona_id: str) -> None:
+    """persona_id がフォルダ名として安全かを検査し、不合格なら 400 を返す。
+
+    persona_id は 2026-08-16 の文字種契約より前に作られた日本語 ID が在籍し続けるため、
+    作成時の契約 (_SAFE_NAME_RE) ではなく is_safe_path_component による
+    フォルダ名としての安全性だけを問う。
+    """
+    if not is_safe_path_component(persona_id):
+        raise HTTPException(
+            status_code=400,
+            detail=path_component_error("persona_id", persona_id),
+        )
+
+
 def _get_file_param_schema(addon_name: str, param_key: str) -> AddonParamSchema:
     from saiverse.data_paths import EXPANSION_DATA_DIR
     manifest_path = EXPANSION_DATA_DIR / addon_name / "addon.json"
@@ -899,7 +914,8 @@ async def upload_persona_file(
     パラメータにのみ使用可能。ファイルは ~/.saiverse/user_data/addon_data/<addon>/inputs/
     配下に保存され (``_resolve_file_dir``)、AddonPersonaConfig.params_json に保存先パスが書き込まれる。
     """
-    _validate_names(addon_name, persona_id, param_key)
+    _validate_names(addon_name, param_key)
+    _validate_persona_id(persona_id)
     schema = _get_file_param_schema(addon_name, param_key)
 
     if not schema.persona_configurable:
@@ -998,7 +1014,8 @@ async def get_persona_file(
     _manager=Depends(get_manager),
 ):
     """ペルソナ別のファイルパラメータを取得(プレビュー/ダウンロード)する。"""
-    _validate_names(addon_name, persona_id, param_key)
+    _validate_names(addon_name, param_key)
+    _validate_persona_id(persona_id)
     _get_file_param_schema(addon_name, param_key)
 
     # Look up file path from AddonPersonaConfig
@@ -1043,7 +1060,8 @@ async def delete_persona_file(
     _manager=Depends(get_manager),
 ):
     """ペルソナ別のファイルパラメータを削除する。"""
-    _validate_names(addon_name, persona_id, param_key)
+    _validate_names(addon_name, param_key)
+    _validate_persona_id(persona_id)
 
     # Remove from params_json
     from database.models import AddonPersonaConfig
