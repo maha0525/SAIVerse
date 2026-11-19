@@ -10,6 +10,7 @@ import ImageUpload from '../common/ImageUpload';
 import FileUpload from '../common/FileUpload';
 import ModelPicker from '../common/ModelPicker';
 import { fetchModelList, type PickerModel } from '../../lib/modelList';
+import { useFavoriteModels } from '../../lib/favoriteModels';
 import { DB_TABLE_PAGE_SIZE, fetchAllTableRows, fetchTablePage } from '../../lib/dbTable';
 
 // Helper Form Components - defined outside component to prevent re-creation on each render
@@ -270,6 +271,7 @@ const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: ()
 export default function WorldEditor() {
     useLocale();
     const [subTab, setSubTab] = useState('city');
+    const { favoriteModels, toggleFavorite } = useFavoriteModels(subTab === 'ai');
 
     // Data State — 各タブの一覧はページ送りで読む
     const cityList = useTableList<City>('city');
@@ -817,6 +819,8 @@ export default function WorldEditor() {
                                     onChange={(id) => setFormData({ ...formData, default_model: id })}
                                     emptyLabel={uiText("components.settings.WorldEditor.text072")}
                                     unknownValueLabel={uiText("components.settings.WorldEditor.text073")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
                                     ariaLabel={uiText("components.settings.WorldEditor.text071")}
                                 /></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text074")}><ModelPicker
@@ -825,6 +829,8 @@ export default function WorldEditor() {
                                     onChange={(id) => setFormData({ ...formData, lightweight_model: id })}
                                     emptyLabel={uiText("components.settings.WorldEditor.text075")}
                                     unknownValueLabel={uiText("components.settings.WorldEditor.text076")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
                                     ariaLabel={uiText("components.settings.WorldEditor.text074")}
                                 /></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>

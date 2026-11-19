@@ -8,6 +8,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch } from 'lucide-react';
 import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import { fetchModelList, type PickerModel } from '@/lib/modelList';
+import { useFavoriteModels } from '@/lib/favoriteModels';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -72,6 +73,7 @@ type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const currentLocale = useLocale();
+    const { favoriteModels, toggleFavorite } = useFavoriteModels(isOpen);
     const [activeTab, setActiveTab] = useState<TabId>('env');
     const [envVars, setEnvVars] = useState<EnvVar[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -1619,6 +1621,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                                 models={modelsAvailable.filter(m => !m.reflex_only || role === REFLEX_JUDGMENT_ROLE)}
                                                                 value={info.value || ''}
                                                                 onChange={(modelId) => handleModelRoleChange(info.env_key, modelId)}
+                                                                favorites={favoriteModels}
+                                                                onToggleFavorite={toggleFavorite}
                                                                 ariaLabel={getModelRoleLabel(role, info.label)}
                                                             />
                                                         </div>
