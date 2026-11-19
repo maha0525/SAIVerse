@@ -3,17 +3,38 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/i18n/api';
 
-let cachedFavorites: string[] = [];
-let cacheVersion = 0;
-let hasLoaded = false;
-let inflightFetch: Promise<string[] | null> | null = null;
-let inflightFetchId = 0;
-let pendingToggles: string[] = [];
-const listeners = new Set<(favorites: string[]) => void>();
+export interface FavoriteModelsSnapshot {
+    favorites: string[];
+    ready: boolean;
+}
 
-function notifyListeners(next: string[]) {
-    cachedFavorites = next;
-    listeners.forEach(listener => listener(next));
+/** サーバーから確定できた最新の一覧。null は初回取得がまだ成功していない状態。 */
+let serverFavorites: string[] | null = null;
+/** 画面に表示している一覧 (楽観更新を含む)。 */
+let displayedFavorites: string[] = [];
+/** 次にサーバーへ送るべき目標一覧。null は未送信の変更なし。 */
+let pendingTarget: string[] | null = null;
+/** POST が進行中なら true。 */
+let isSaving = false;
+/** POST を直列実行している進行中のフラッシュ処理。 */
+let activeFlush: Promise<void> | null = null;
+/** ローカル書き込みの開始・完了ごとに増やす世代番号。 */
+let writeEpoch = 0;
+/** 複数 GET の前後逆転を防ぐ通し番号。 */
+let nextFetchSeq = 0;
+let appliedFetchSeq = 0;
+
+let currentSnapshot: FavoriteModelsSnapshot = { favorites: [], ready: false };
+const listeners = new Set<(snapshot: FavoriteModelsSnapshot) => void>();
+
+function publish(nextFavorites: string[]) {
+    displayedFavorites = nextFavorites;
+    const nextReady = serverFavorites !== null;
+    if (currentSnapshot.favorites === nextFavorites && currentSnapshot.ready === nextReady) {
+        return;
+    }
+    currentSnapshot = { favorites: nextFavorites, ready: nextReady };
+    listeners.forEach(listener => listener(currentSnapshot));
 }
 
 function applyToggle(list: string[], modelId: string): string[] {
@@ -22,82 +43,113 @@ function applyToggle(list: string[], modelId: string): string[] {
         : [...list, modelId];
 }
 
-export async function fetchFavoriteModels(signal?: AbortSignal): Promise<string[] | null> {
-    const startVersion = cacheVersion;
-    const fetchId = ++inflightFetchId;
-    const promise = (async () => {
+function hasInflightOrPendingWrite(): boolean {
+    return isSaving || pendingTarget !== null;
+}
+
+function flushWrites(): Promise<void> {
+    if (activeFlush) return activeFlush;
+    isSaving = true;
+    let resolveFlush!: () => void;
+    const promise = new Promise<void>(resolve => {
+        resolveFlush = resolve;
+    });
+    activeFlush = promise;
+
+    (async () => {
         try {
-            const res = await apiFetch('/api/config/favorite-models', signal ? { signal } : undefined);
-            if (!res.ok) {
-                if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
-                return null;
+            while (pendingTarget !== null) {
+                const target = pendingTarget;
+                pendingTarget = null;
+                try {
+                    const res = await apiFetch('/api/config/favorite-models', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ models: target }),
+                    });
+                    if (!res.ok) {
+                        throw new Error(`HTTP ${res.status}`);
+                    }
+                    serverFavorites = target;
+                    writeEpoch++;
+                    if (pendingTarget === null) {
+                        publish(displayedFavorites);
+                    }
+                } catch (e) {
+                    writeEpoch++;
+                    console.error('Failed to save favorite models', e);
+                    // 後続の更新が積まれていなければ、サーバー確定済みの値へ戻す
+                    if (pendingTarget === null) {
+                        publish(serverFavorites ?? []);
+                    }
+                }
             }
-            const data = await res.json();
-            if (startVersion !== cacheVersion) {
-                if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
-                return cachedFavorites;
-            }
-            const list = Array.isArray(data?.models)
-                ? data.models.filter((id: unknown): id is string => typeof id === 'string')
-                : [];
-            hasLoaded = true;
-            // 取得済み一覧を先に共有キャッシュへ反映しておかないと、直後のマージ保存が
-            // 失敗したときの復元先 previous が空配列のままになる。
-            notifyListeners(list);
-            if (pendingToggles.length > 0) {
-                const queued = pendingToggles;
-                pendingToggles = [];
-                const merged = queued.reduce(applyToggle, list);
-                await saveFavoriteModels(merged);
-                return cachedFavorites;
-            }
-            return list;
-        } catch (e) {
-            if (!hasLoaded && inflightFetchId === fetchId) pendingToggles = [];
-            throw e;
         } finally {
-            if (inflightFetchId === fetchId) {
-                inflightFetch = null;
-            }
+            isSaving = false;
+            activeFlush = null;
+            resolveFlush();
         }
     })();
-    inflightFetch = promise;
+
     return promise;
 }
 
-export async function saveFavoriteModels(models: string[]): Promise<void> {
-    const writeVersion = ++cacheVersion;
-    const previous = cachedFavorites;
-    notifyListeners(models);
-    try {
-        const res = await apiFetch('/api/config/favorite-models', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ models }),
-        });
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-    } catch (e) {
-        if (cacheVersion === writeVersion) {
-            notifyListeners(previous);
-        }
-        console.error('Failed to save favorite models', e);
+export async function fetchFavoriteModels(signal?: AbortSignal): Promise<string[] | null> {
+    // 書き込みが進行中または待機中のときに GET を送ると、サーバー側の
+    // 保存前の一覧を読んでしまい得るため、取得せず現在の表示をそのまま返す。
+    if (hasInflightOrPendingWrite()) {
+        return displayedFavorites;
     }
+    const startEpoch = writeEpoch;
+    const seq = ++nextFetchSeq;
+    const res = await apiFetch('/api/config/favorite-models', signal ? { signal } : undefined);
+    if (!res.ok) return null;
+    const data = await res.json();
+    // 取得開始後に書き込みが開始・完了した、またはより新しい GET が既に適用済み、
+    // あるいは呼び出し側が中断済みの場合は、この取得結果を破棄する。
+    if (
+        signal?.aborted
+        || hasInflightOrPendingWrite()
+        || startEpoch !== writeEpoch
+        || seq < appliedFetchSeq
+    ) {
+        return displayedFavorites;
+    }
+    const rawModels = Array.isArray(data?.models)
+        ? data.models
+        : Array.isArray(data)
+            ? data
+            : null;
+    if (rawModels === null) return null;
+    const list = rawModels.filter((id: unknown): id is string => typeof id === 'string');
+    appliedFetchSeq = seq;
+    serverFavorites = list;
+    publish(list);
+    return list;
+}
+
+export function saveFavoriteModels(models: string[]): Promise<void> {
+    const next = [...models];
+    writeEpoch++;
+    pendingTarget = next;
+    publish(next);
+    return flushWrites();
 }
 
 /**
  * お気に入りモデルの一覧を購読し、全画面の ModelPicker で共有するフック。
  * どこかの画面で星を切り替えると、開いている他の画面にも即座に反映される。
+ * 初回取得が完了するまでは favoritesReady=false となり、既存のお気に入りを
+ * 空配列で上書きしないよう切り替え操作を無効化する。
  */
 export function useFavoriteModels(enabled = true) {
-    const [favoriteModels, setFavoriteModels] = useState<string[]>(cachedFavorites);
+    const [snapshot, setSnapshot] = useState<FavoriteModelsSnapshot>(() => currentSnapshot);
 
     useEffect(() => {
-        listeners.add(setFavoriteModels);
-        setFavoriteModels(cachedFavorites);
+        listeners.add(setSnapshot);
+        setSnapshot(currentSnapshot);
         return () => {
-            listeners.delete(setFavoriteModels);
+            listeners.delete(setSnapshot);
         };
     }, []);
 
@@ -112,20 +164,14 @@ export function useFavoriteModels(enabled = true) {
     }, [enabled]);
 
     const toggleFavorite = (modelId: string) => {
-        // 初回取得が完了する前に星が押された場合、空のキャッシュで POST すると
-        // 既存のお気に入りが消えるため、取得完了後にサーバーの一覧へマージして保存する。
-        if (!hasLoaded) {
-            pendingToggles = applyToggle(pendingToggles, modelId);
-            if (!inflightFetch) {
-                fetchFavoriteModels().catch(e => {
-                    console.error('Failed to load favorite models', e);
-                });
-            }
-            return;
-        }
-        const next = applyToggle(cachedFavorites, modelId);
+        if (serverFavorites === null) return;
+        const next = applyToggle(displayedFavorites, modelId);
         void saveFavoriteModels(next);
     };
 
-    return { favoriteModels, toggleFavorite };
+    return {
+        favoriteModels: snapshot.favorites,
+        favoritesReady: snapshot.ready,
+        toggleFavorite,
+    };
 }

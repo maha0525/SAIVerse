@@ -271,7 +271,7 @@ const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: ()
 export default function WorldEditor() {
     useLocale();
     const [subTab, setSubTab] = useState('city');
-    const { favoriteModels, toggleFavorite } = useFavoriteModels(subTab === 'ai');
+    const { favoriteModels, favoritesReady, toggleFavorite } = useFavoriteModels(subTab === 'ai');
 
     // Data State — 各タブの一覧はページ送りで読む
     const cityList = useTableList<City>('city');
@@ -821,6 +821,7 @@ export default function WorldEditor() {
                                     unknownValueLabel={uiText("components.settings.WorldEditor.text073")}
                                     favorites={favoriteModels}
                                     onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.settings.WorldEditor.text071")}
                                 /></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text074")}><ModelPicker
@@ -831,6 +832,7 @@ export default function WorldEditor() {
                                     unknownValueLabel={uiText("components.settings.WorldEditor.text076")}
                                     favorites={favoriteModels}
                                     onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.settings.WorldEditor.text074")}
                                 /></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>

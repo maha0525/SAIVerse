@@ -73,8 +73,8 @@ type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const currentLocale = useLocale();
-    const { favoriteModels, toggleFavorite } = useFavoriteModels(isOpen);
     const [activeTab, setActiveTab] = useState<TabId>('env');
+    const { favoriteModels, favoritesReady, toggleFavorite } = useFavoriteModels(isOpen && activeTab === 'models');
     const [envVars, setEnvVars] = useState<EnvVar[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -1623,6 +1623,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                                 onChange={(modelId) => handleModelRoleChange(info.env_key, modelId)}
                                                                 favorites={favoriteModels}
                                                                 onToggleFavorite={toggleFavorite}
+                                                                favoriteDisabled={!favoritesReady}
                                                                 ariaLabel={getModelRoleLabel(role, info.label)}
                                                             />
                                                         </div>
