@@ -258,20 +258,24 @@ def dismiss_runtime_alert(alert_id: int) -> Optional[bool]:
     from database.models import RuntimeAlert
 
     factory = _require_factory()
-    db = factory()
-    try:
-        row = db.query(RuntimeAlert).filter(RuntimeAlert.ALERT_ID == alert_id).first()
-        if row is None:
-            return None
-        if row.DISMISSED_AT is not None:
-            return False
-        row.DISMISSED_AT = int(time.time())
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    # post_runtime_alert と同じ鍵の下で閉じる。鍵の外で閉じると、同じ key の
+    # 再発が「閉じる前の行」を読んで更新し、閉じた行へ回数を足して消えてしまう
+    # (再発は閉じた後なら新しい行になる、という約束が破れる)。
+    with _upsert_lock:
+        db = factory()
+        try:
+            row = db.query(RuntimeAlert).filter(RuntimeAlert.ALERT_ID == alert_id).first()
+            if row is None:
+                return None
+            if row.DISMISSED_AT is not None:
+                return False
+            row.DISMISSED_AT = int(time.time())
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     LOGGER.info("runtime_alerts: dismissed id=%s", alert_id)
     _broadcast({"type": "runtime_alert", "action": "dismiss", "id": alert_id})

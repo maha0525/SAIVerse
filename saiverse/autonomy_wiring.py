@@ -43,6 +43,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import threading
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, Optional
 
@@ -1434,6 +1435,8 @@ RECOVERED_RESPONSE_MAX_ATTEMPTS = 3
 #: やり直しが尽きて知らせを出した (execution_id, 理由)。同じ応対の諦めに二度は
 #: 出さない (プロセス内だけの記録)。
 _RECOVERED_GIVEN_UP_REPORTED: set = set()
+#: 確かめてから記録するまでを一つにする (同じ回収応対の諦めが同時に二度来ても一度)。
+_RECOVERED_GIVEN_UP_LOCK = threading.Lock()
 
 
 def _report_recovered_response_given_up(
@@ -1476,9 +1479,10 @@ def _report_recovered_response_given_up(
         if not cause:
             return
         report_key = (execution_id, cause)
-        if report_key in _RECOVERED_GIVEN_UP_REPORTED:
-            return
-        _RECOVERED_GIVEN_UP_REPORTED.add(report_key)
+        with _RECOVERED_GIVEN_UP_LOCK:
+            if report_key in _RECOVERED_GIVEN_UP_REPORTED:
+                return
+            _RECOVERED_GIVEN_UP_REPORTED.add(report_key)
         if cause in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
             post_unrunnable_alert(
                 "event", persona_id,

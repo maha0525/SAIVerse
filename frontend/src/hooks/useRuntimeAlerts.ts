@@ -1,7 +1,7 @@
 "use client";
 import { apiFetch } from '@/i18n/api';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RuntimeAlert, RuntimeAlertEvent } from './useAddonEvents';
 
 /**
@@ -19,15 +19,43 @@ import type { RuntimeAlert, RuntimeAlertEvent } from './useAddonEvents';
  * 一覧の `title` / `message` は `apiFetch` / `parseUIEvent` が表示用の文に変えた
  * もの (取り出すたびに今の表示言語で読む)。オブジェクトを展開して複製しない。
  */
+function applyEvent(list: RuntimeAlert[], event: RuntimeAlertEvent): RuntimeAlert[] {
+    if (event.action === 'upsert' && event.alert) {
+        const incoming = event.alert;
+        return [incoming, ...list.filter(a => a.id !== incoming.id)];
+    }
+    if (event.action === 'dismiss') {
+        return list.filter(a => a.id !== event.id);
+    }
+    return list;
+}
+
 export function useRuntimeAlerts(backendConnected: boolean) {
     const [alerts, setAlerts] = useState<RuntimeAlert[]>([]);
+    // 一覧の取り直しの最中に届いた知らせ (出た・閉じた) を、届いた順に覚えておく。
+    // 取り直した一覧は取り直しを始めた時点の内容なので、そのまま置き換えると、
+    // その間に SSE で届いた新しい知らせが消え、閉じた知らせが戻る。取り直しの
+    // 結果に、始めた後に届いた分を重ね直してから表示する。
+    const eventSeqRef = useRef(0);
+    const recentEventsRef = useRef<{ seq: number; event: RuntimeAlertEvent }[]>([]);
+
+    const remember = useCallback((event: RuntimeAlertEvent) => {
+        eventSeqRef.current += 1;
+        recentEventsRef.current.push({ seq: eventSeqRef.current, event });
+        if (recentEventsRef.current.length > 200) {
+            recentEventsRef.current = recentEventsRef.current.slice(-200);
+        }
+    }, []);
 
     const refetch = useCallback(async () => {
+        const startedAt = eventSeqRef.current;
         try {
             const res = await apiFetch('/api/system/runtime-alerts');
             if (!res.ok) return;
             const data = await res.json();
-            setAlerts(Array.isArray(data?.alerts) ? data.alerts : []);
+            const fetched: RuntimeAlert[] = Array.isArray(data?.alerts) ? data.alerts : [];
+            const later = recentEventsRef.current.filter(e => e.seq > startedAt);
+            setAlerts(later.reduce((list, e) => applyEvent(list, e.event), fetched));
         } catch (error) {
             // 裏側がまだ起動していないことがある。繋がり直したときに取り直す。
             console.warn('[runtime-alerts] failed to fetch the list', error);
@@ -39,16 +67,15 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     }, [backendConnected, refetch]);
 
     const handleEvent = useCallback((event: RuntimeAlertEvent) => {
-        if (event.action === 'upsert' && event.alert) {
-            const incoming = event.alert;
-            setAlerts(prev => [incoming, ...prev.filter(a => a.id !== incoming.id)]);
-        } else if (event.action === 'dismiss') {
-            setAlerts(prev => prev.filter(a => a.id !== event.id));
-        }
-    }, []);
+        remember(event);
+        setAlerts(prev => applyEvent(prev, event));
+    }, [remember]);
 
     const dismiss = useCallback(async (id: number) => {
-        setAlerts(prev => prev.filter(a => a.id !== id));
+        // 自分で閉じた分も「閉じた」として覚える (取り直しの結果に戻らないように)。
+        const closed: RuntimeAlertEvent = { type: 'runtime_alert', action: 'dismiss', id };
+        remember(closed);
+        setAlerts(prev => applyEvent(prev, closed));
         try {
             const res = await apiFetch(`/api/system/runtime-alerts/${id}/dismiss`, { method: 'POST' });
             // 404 は既に無い知らせ。それ以外の失敗は、閉じられていないので一覧を取り直して戻す。
@@ -60,7 +87,7 @@ export function useRuntimeAlerts(backendConnected: boolean) {
             console.warn('[runtime-alerts] dismiss failed', error);
             refetch();
         }
-    }, [refetch]);
+    }, [refetch, remember]);
 
     return { alerts, handleEvent, refetch, dismiss };
 }

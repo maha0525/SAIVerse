@@ -29,6 +29,7 @@ register/unregister の失敗は回復 tick (execution_ledger_wiring、60 秒周
 """
 import json
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -162,6 +163,9 @@ class ScheduleManager:
         # 直して再び尽きても、二度目は出さない (諦めた一回につき一度)。
         # プロセス内だけの記録で、再起動を跨ぐと同じ occurrence にもう一度出うる。
         self._given_up_reported: set = set()
+        # 確かめてから記録するまでを一つにする (発火の精算と reconciliation が
+        # 同時に同じ occurrence を諦めても、知らせは一度)。
+        self._given_up_reported_lock = threading.Lock()
         LOGGER.info("[ScheduleManager] Initialized (push-driven via EventScheduler)")
 
     # ------------------------------------------------------------------
@@ -956,13 +960,18 @@ class ScheduleManager:
         """
         try:
             report_key = (occurrence_key, detail)
-            if report_key in self._given_up_reported:
+            if detail not in (
+                DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET,
+                DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION,
+            ):
                 return
-            if detail in (DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET):
+            with self._given_up_reported_lock:
+                if report_key in self._given_up_reported:
+                    return
                 self._given_up_reported.add(report_key)
+            if detail in (DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET):
                 self._record_given_up_in_room(schedule, detail)
             elif detail in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
-                self._given_up_reported.add(report_key)
                 from sea.no_utterance_notice import (
                     CAUSE_NO_LOCATION,
                     CAUSE_PERSONA_NOT_FOUND,
