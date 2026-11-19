@@ -143,6 +143,17 @@ interface MessageLLMUsageTotal {
     currency?: string;
 }
 
+// 「エラーで発言できなかった」の host の行が持つ、画面だけに出す詳細
+// (api/routes/chat.py の ChatMessageFailureDetail)。message は LLMError の
+// 利用者向けの文、またはサーバーの文言キー (apiFetch が訳して文になる)。
+// 設計: docs/intent/no_utterance_error_notice.md
+interface MessageFailureDetail {
+    error_code: string;
+    message?: unknown;
+    technical_detail?: string | null;
+    model?: string | null;
+}
+
 interface Message {
     id?: string;
     role: 'user' | 'assistant' | 'system' | 'host';
@@ -181,6 +192,8 @@ interface Message {
     // この発言は言い切っていない (生成が中断された)。立っている間だけ
     // 「続きの生成」ボタンを出す。サーバーの metadata["_interrupted"] 由来。
     interrupted?: boolean;
+    // host の行だけが持つ。エラーで発言できなかった回の原因の詳細。
+    failure_detail?: MessageFailureDetail | null;
     // この発言に返事が来なかった。立っている間だけ「再送」ボタンを出す。
     // 発言そのものは残っているので、押しても送り直しにはならない (応答だけ)。
     needsRetry?: boolean;
@@ -3945,6 +3958,34 @@ export default function Home() {
                                     ) : (
                                         <div className={styles.systemNoticeInner}>
                                             <MessageMarkdown content={msg.content} components={markdownComponents} />
+                                        </div>
+                                    )}
+                                    {msg.failure_detail && (
+                                        <div className={styles.systemNoticeFailureDetail}>
+                                            <div>
+                                                <span data-i18n="app.page.failureDetail.label">{uiText("app.page.failureDetail.label")}</span>
+                                                {typeof msg.failure_detail.message === 'string' && msg.failure_detail.message
+                                                    ? msg.failure_detail.message
+                                                    : msg.failure_detail.error_code}
+                                            </div>
+                                            {typeof msg.failure_detail.message === 'string' && msg.failure_detail.message && (
+                                                <div>
+                                                    <span data-i18n="app.page.failureDetail.code">{uiText("app.page.failureDetail.code")}</span>
+                                                    {msg.failure_detail.error_code}
+                                                </div>
+                                            )}
+                                            {msg.failure_detail.model && (
+                                                <div>
+                                                    <span data-i18n="app.page.failureDetail.model">{uiText("app.page.failureDetail.model")}</span>
+                                                    {msg.failure_detail.model}
+                                                </div>
+                                            )}
+                                            {msg.failure_detail.technical_detail && (
+                                                <div className={styles.systemNoticeFailureDetailRaw}>
+                                                    <span data-i18n="app.page.failureDetail.raw">{uiText("app.page.failureDetail.raw")}</span>
+                                                    {msg.failure_detail.technical_detail}
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     {msg.timestamp && (

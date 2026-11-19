@@ -66,6 +66,16 @@ SCHEDULE_DISPATCH_MAX_ATTEMPTS = 3
 #: occurrence を失う (Codex 四巡目 high1)。
 SCHEDULE_DISPATCH_WAITING_ERROR_PREFIX = "waiting:"
 
+#: failed (副作用ゼロ確定) の理由のうち、やり直しが尽きたときに知らせを出すもの
+#: (docs/intent/no_utterance_error_notice.md 問い 1・問い 3)。値は台帳の ERROR と
+#: ログに残る文字列で、回収経路 (autonomy_wiring の回収応対) も同じ分類を借りる。
+#: - 部屋は決まっていて、実行を始められなかった → 部屋の記録に一行
+DISPATCH_DETAIL_GATE_CLOSED = "beat gate closed"
+DISPATCH_DETAIL_FLOOR_UNMET = "window floor unmet"
+#: - 書く部屋が決まらない → 画面右下の閉じるまで残る知らせ
+DISPATCH_DETAIL_PERSONA_NOT_FOUND = "persona not found"
+DISPATCH_DETAIL_NO_LOCATION = "persona has no current_building_id"
+
 # reconciliation (handoff D6) で「次回 occurrence の再登録」をブロックする台帳
 # status。running = 実行中 (>60s の長 Pulse) への二重登録防止 / applied・
 # completed = 既に済んだ occurrence / unknown = 裁定待ちの自動再実行禁止
@@ -147,6 +157,11 @@ class ScheduleManager:
         self._stop_event = None
         # 台帳の無い manager (旧テストスタブ) への degrade WARN を一回に抑える
         self._ledger_missing_warned = False
+        # やり直しが尽きて知らせ (部屋の記録の行 / 右下の知らせ) を出した
+        # (occurrence の冪等キー, 理由)。reconciliation が同じ occurrence を拾い
+        # 直して再び尽きても、二度目は出さない (諦めた一回につき一度)。
+        # プロセス内だけの記録で、再起動を跨ぐと同じ occurrence にもう一度出うる。
+        self._given_up_reported: set = set()
         LOGGER.info("[ScheduleManager] Initialized (push-driven via EventScheduler)")
 
     # ------------------------------------------------------------------
@@ -912,11 +927,100 @@ class ScheduleManager:
             schedule_id, detail, occurrence_token, attempt,
             SCHEDULE_DISPATCH_MAX_ATTEMPTS,
         )
+        self._report_given_up(
+            schedule,
+            _occurrence_key(schedule_id, instance_token, generation, occurrence_token),
+            detail,
+        )
         if schedule.SCHEDULE_TYPE == "periodic":
             # periodic はこの occurrence を諦め、次回 (翌日) を登録する
             self._do_register(schedule, session)
         # oneshot / interval は登録しない — reconciliation (Chunk C) が 60 秒
         # 周期で拾い、cadence を落として再試行を続ける
+
+    def _report_given_up(
+        self, schedule: PersonaSchedule, occurrence_key: str, detail: str,
+    ) -> None:
+        """やり直しが尽きた occurrence を、ユーザーとペルソナに知らせる。
+
+        docs/intent/no_utterance_error_notice.md の問い 1・問い 3:
+
+        - 実行を始められなかった (関所閉鎖 / 最終防衛ライン未達) — 部屋は
+          ペルソナの今の現在地。その部屋の記録へ「(エラーにより、…は発言
+          できませんでした)」を一行置く (部屋の全員に届く)。
+        - ペルソナが居ない / 現在地が無い — 書く部屋が決まらないので、画面
+          右下の閉じるまで残る知らせに出す。
+
+        ほかの理由 (受付前の例外など) は従来どおりログだけ。同じ occurrence に
+        二度は出さない (``_given_up_reported``)。知らせの失敗で精算を止めない。
+        """
+        try:
+            report_key = (occurrence_key, detail)
+            if report_key in self._given_up_reported:
+                return
+            if detail in (DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET):
+                self._given_up_reported.add(report_key)
+                self._record_given_up_in_room(schedule, detail)
+            elif detail in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
+                self._given_up_reported.add(report_key)
+                from sea.no_utterance_notice import (
+                    CAUSE_NO_LOCATION,
+                    CAUSE_PERSONA_NOT_FOUND,
+                    persona_label,
+                    post_unrunnable_alert,
+                )
+
+                cause = (
+                    CAUSE_PERSONA_NOT_FOUND
+                    if detail == DISPATCH_DETAIL_PERSONA_NOT_FOUND else CAUSE_NO_LOCATION
+                )
+                post_unrunnable_alert(
+                    "schedule", schedule.SCHEDULE_ID, cause,
+                    persona=persona_label(self.manager, schedule.PERSONA_ID),
+                    schedule=schedule.DESCRIPTION or f"#{schedule.SCHEDULE_ID}",
+                    details={
+                        "schedule_id": schedule.SCHEDULE_ID,
+                        "persona_id": schedule.PERSONA_ID,
+                        "occurrence": occurrence_key,
+                    },
+                )
+        except Exception:
+            LOGGER.exception(
+                "[ScheduleManager] could not report the given-up occurrence %s",
+                occurrence_key,
+            )
+
+    def _record_given_up_in_room(self, schedule: PersonaSchedule, detail: str) -> None:
+        """実行を始められずに諦めた回を、ペルソナの今の部屋の記録へ一行置く。"""
+        from api.ui_messages import ui_message
+        from sea.no_utterance_notice import (
+            CODE_BEAT_GATE_CLOSED,
+            CODE_WINDOW_FLOOR_UNMET,
+            failure_detail,
+            record_no_utterance_notice,
+        )
+
+        persona = self.manager.all_personas.get(schedule.PERSONA_ID)
+        building_id = getattr(persona, "current_building_id", None) if persona else None
+        if persona is None or not building_id:
+            LOGGER.warning(
+                "[ScheduleManager] schedule %d gave up (%s) but persona %s has no "
+                "room to record it in", schedule.SCHEDULE_ID, detail, schedule.PERSONA_ID,
+            )
+            return
+        if detail == DISPATCH_DETAIL_GATE_CLOSED:
+            failure = failure_detail(
+                CODE_BEAT_GATE_CLOSED,
+                message=ui_message("api.noUtterance.gateClosedRetriesExhausted"),
+                technical_detail=detail,
+            )
+        else:
+            failure = failure_detail(
+                CODE_WINDOW_FLOOR_UNMET,
+                message=ui_message("api.noUtterance.floorUnmetRetriesExhausted"),
+                technical_detail=detail,
+            )
+        record_no_utterance_notice(self.manager, persona, building_id, detail=failure)
 
     # ------------------------------------------------------------------
     # スケジュール実行 (旧実装からほぼそのまま引き継ぎ)
@@ -1059,11 +1163,11 @@ class ScheduleManager:
             return "accepted", detail
         if runtime_outcome == "gate_closed":
             # Beat 関所閉鎖 = 副作用ゼロ確定 → 再試行安全
-            return "failed", "beat gate closed"
+            return "failed", DISPATCH_DETAIL_GATE_CLOSED
         if runtime_outcome == "floor_unmet":
             # 最終防衛ライン未達 (arasuji_levels.md §15-5) = Playbook 未起動・
             # 副作用ゼロ確定 → 再試行安全。occurrence は消費しない。
-            return "failed", "window floor unmet"
+            return "failed", DISPATCH_DETAIL_FLOOR_UNMET
         if action in ("unavailable", "error_before_submit", "skipped"):
             # 受付裁定前 / 受付されず — LLM は動いていない → 再試行安全
             return "failed", detail
@@ -1159,12 +1263,12 @@ class ScheduleManager:
         persona = self.manager.all_personas.get(persona_id)
         if not persona:
             LOGGER.warning("[ScheduleManager] Persona %s not found in all_personas", persona_id)
-            return "failed", "persona not found"
+            return "failed", DISPATCH_DETAIL_PERSONA_NOT_FOUND
 
         building_id = getattr(persona, "current_building_id", None)
         if not building_id:
             LOGGER.warning("[ScheduleManager] Persona %s has no current_building_id", persona_id)
-            return "failed", "persona has no current_building_id"
+            return "failed", DISPATCH_DETAIL_NO_LOCATION
 
         user_input = self._generate_schedule_prompt(schedule, session, persona_id)
 

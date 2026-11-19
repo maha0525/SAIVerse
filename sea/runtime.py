@@ -190,8 +190,11 @@ class SEARuntime:
 
         この返事の段 (自律は軽量、それ以外は標準) のモデルの設定ファイルが無ければ、
         返事の前処理 (実行モデルの解決・読み戻し・床の確保) より前に
-        ModelUnavailableError で止める。代わりのモデルでは動かさず、建物の記録にも
-        ペルソナの記憶にも何も書かない (知らせはチャット画面のエラーだけ)。
+        ModelUnavailableError で止める。代わりのモデルでは動かさない。知らせは
+        チャット画面のエラーと、PulseController が部屋の記録に置く一行
+        「(エラーにより、{名前}は発言できませんでした)」で、その部屋に居合わせた
+        全員の記憶に届く。どのモデルが使えなかったかは行の画面だけの詳細に置き、
+        ペルソナの記憶には書かない (docs/intent/no_utterance_error_notice.md)。
         """
         from saiverse.persona_model_selection import (
             TIER_LIGHTWEIGHT,
@@ -440,6 +443,26 @@ class SEARuntime:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
             if playbook is None:
                 LOGGER.warning("Meta playbook '%s' not found; aborting execution", meta_playbook)
+                # 例外にはしない (runtime_outcome は completed のまま — schedule の
+                # 台帳の分類を動かさない)。発言が生まれなかった理由として、この
+                # 実行の札に記録する — PulseController._execute_unlocked が読み、
+                # 部屋の記録へ一行置く (docs/intent/no_utterance_error_notice.md)。
+                from api.ui_messages import ui_message
+                from sea.no_utterance_notice import (
+                    CODE_PLAYBOOK_NOT_FOUND,
+                    failure_detail,
+                    note_no_utterance_cause,
+                )
+
+                note_no_utterance_cause(
+                    cancellation_token,
+                    failure_detail(
+                        CODE_PLAYBOOK_NOT_FOUND,
+                        message=ui_message(
+                            "api.noUtterance.playbookNotFound", playbook=meta_playbook,
+                        ),
+                    ),
+                )
                 if event_callback:
                     event_callback({
                         "type": "error",

@@ -44,7 +44,7 @@
 
 ### 先例
 
-- 途中まで喋ってから止まった回は、`sea/reply_stop_exit.py` の `settle_reply_stop` が、部屋の記録に `role: "host"` の中断の通告を置いている。書き込みは `sea/runtime_llm.py` の `_record_interruption_notice` (`add_to_building_only`)。取り込み (`builtin_data/tools/get_building_messages.py:341-379`) がこの行を role=system のシステム通知 (`SYSTEM_NOTICE_KEY: "building_event"`) にしてペルソナの記憶へ配り、画面は host 行をシステム通知として描く。
+- 途中まで喋ってから止まった回は、`sea/reply_stop_exit.py` の `settle_reply_stop` が、部屋の記録に `role: "host"` の中断の通告を置いている。書き込みは `sea/runtime_llm.py` の `_record_interruption_notice` (`add_to_building_only`。2026-11-19 に `sea/host_notice.py` の `record_host_notice` へ移した)。取り込み (`builtin_data/tools/get_building_messages.py:341-379`) がこの行を role=system のシステム通知 (`SYSTEM_NOTICE_KEY: "building_event"`) にしてペルソナの記憶へ配り、画面は host 行をシステム通知として描く。
 - ただし `settle_reply_stop` は、この返事の中で何かが保存された回だけを扱う (`sea/reply_stop_exit.py:272-276`)。一言も生まれなかった回には何もしない。
 - 2026-08-26 に「一言も出ないうちに止められた回」の記録を撤去した理由は、「返事が生まれなかった回には昔から何も書いておらず、そこだけ機構の声を足すと不揃いになる」だった。今回の方向は、エラーの回についてこの前提を変える。
 

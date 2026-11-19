@@ -5,11 +5,13 @@ import anthropic
 
 from .exceptions import (
     AuthenticationError,
+    ContextLengthExceededError,
     LLMError,
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
     ServerError,
+    is_context_length_error,
 )
 
 
@@ -69,6 +71,8 @@ def _should_retry(err: Exception) -> bool:
 
 
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
+    if is_context_length_error(err):
+        return ContextLengthExceededError(f"Anthropic {context} failed: context length exceeded", err)
     if _is_payment_error(err):
         return PaymentError(f"Anthropic {context} failed: payment required", err)
     if _is_rate_limit_error(err):

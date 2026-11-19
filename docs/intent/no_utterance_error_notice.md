@@ -81,7 +81,7 @@
 - **全部のきっかけがここを通る。** ユーザーの発言・スケジュール・外部イベント・再起動後に拾い直された外部イベントへの応答・処理待ちの列から繰り上がった実行・中断からの再開。拾い直しに使うのは実行の記録 (`execution_ledger`。スケジュールや外部イベントへの応答の実行がどこまで進んだかを残す表で、再起動後にやり残しを拾い直すのに使う)。処理待ちの列の分は、ここ以外では誰も結果を見ていない。
 - **自律行動の判断は自然に外れる。** 判断点 (`saiverse/judgment_points.py`。一日の始まりと終わりや外部イベントの時点で、判断の Playbook を走らせる仕組み) の実行は、`submit_meta_judgment` から `_submit_meta_lane` という別の経路を通り、`_execute_unlocked` を通らない。判断の Playbook はそもそも発言しない。
 - **「発言が生まれたか」を確かめる材料が既にある。** `sea/runtime_emitters.py` の `last_saved_utterance(persona_id)` は、ペルソナが最後に発言を保存した時刻を持っていて、保存の成功判定を一箇所にまとめた `notify_speak_persisted` だけがこれを更新する。`_execute_unlocked` の開始時刻と比べれば、この実行の中で発言が保存されたかが分かる。中断を知らせる行を置く処理 (`settle_reply_stop`) も同じ記録を参照するが、そちらの起点は `run_meta_user` の中の `_reply_started_at` (`sea/runtime.py:489`) で、`_execute_unlocked` の開始より少し後になる。起点が早い分、今回の確認ではより広い時間を「この実行の中」とみなすので、中断を知らせる行が置かれた回 (保存あり) に今回の行も置く、ということは起きない (上の「この設計で保証すること」の 5)。
-- **書き込みは既存の関数を使う。** `sea/runtime_llm.py` の `_record_interruption_notice` が `role: "host"` の行を置いている。この関数に、原因の詳細 (`metadata`) と、記憶へ届ける相手の一覧 (`heard_by`) を渡せるようにして使う (関数名は役目に合わせて改める)。置く部屋は `request.building_id`。
+- **書き込みは既存の関数を使う。** `sea/runtime_llm.py` の `_record_interruption_notice` が `role: "host"` の行を置いている。この関数に、原因の詳細 (`metadata`) を渡せるようにして使う (関数名は役目に合わせて改める)。置く部屋は `request.building_id`。実装では `sea/host_notice.py` の `record_host_notice` へ移し (中断の通告と共用)、記憶へ届ける相手は中断の通告と同じく在室者 + 本人にした (問い 0 の答え)。
 
 同じ型の先例: ユーザーがチャットから話しかけた経路の「何も届かなかった回」の確認は、入口を数え上げずに `backend_worker` の `finally` に一つだけ置いた ([user_utterance_path_failure_inventory.md](../issues/archive/user_utterance_path_failure_inventory.md) の「束 2 — 無言をなくす (バックエンド)」)。入口を数え切る守り方は必ず漏れる。
 

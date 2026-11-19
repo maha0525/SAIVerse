@@ -180,7 +180,16 @@ class PhenomenonManager:
 
             LOGGER.info("[PhenomenonManager] Executing phenomenon '%s' with args: %s", phenomenon_name, args)
             result = impl(**args)
-            LOGGER.info("[PhenomenonManager] Phenomenon '%s' completed successfully", phenomenon_name)
+            # 失敗を例外ではなく "error: ..." の文字列で返すフェノメノンがある
+            # (inject_persona_event)。戻り値を見ずに成功と書くと、外部イベントの
+            # 失敗がログ上で成功に化ける (docs/intent/no_utterance_error_notice.md)。
+            if isinstance(result, str) and result.startswith("error:"):
+                LOGGER.warning(
+                    "[PhenomenonManager] Phenomenon '%s' reported a failure: %s",
+                    phenomenon_name, result,
+                )
+            else:
+                LOGGER.info("[PhenomenonManager] Phenomenon '%s' completed successfully", phenomenon_name)
             return result
         except Exception as e:
             LOGGER.error("[PhenomenonManager] Failed to execute phenomenon '%s': %s", phenomenon_name, e, exc_info=True)

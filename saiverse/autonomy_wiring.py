@@ -1295,21 +1295,33 @@ def _engage_recovered_user_conversation(
 
 
 def _dispatch_recovered_response(
-    manager: Any, persona_id: str, context: Dict[str, Any]
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    failure: Optional[Dict[str, Any]] = None,
 ) -> str:
     """回収経路の応対 —— 台帳 payload に凍結された**種別**で入口を選ぶ。
 
     ユーザー発話の仲裁は会話の開始、それ以外の外部イベントは応対 Pulse の
     再構成。初回発火と同じ入口を通すのが原則で、種別を落として一律に外部
     イベント形へ流すと帳簿が食い違う (F4)。
+
+    ``failure``: 外部イベントの応対が副作用ゼロで起動できなかったとき、その理由を
+    書き込む器 (:func:`_dispatch_recovered_event_response`)。やり直しが尽きたときの
+    知らせ (:func:`_report_recovered_response_given_up`) が読む。
     """
     if context.get("utterance_conflict"):
         return _engage_recovered_user_conversation(manager, persona_id, context)
-    return _dispatch_recovered_event_response(manager, persona_id, context)
+    return _dispatch_recovered_event_response(
+        manager, persona_id, context, failure=failure,
+    )
 
 
 def _dispatch_recovered_event_response(
-    manager: Any, persona_id: str, context: Dict[str, Any]
+    manager: Any,
+    persona_id: str,
+    context: Dict[str, Any],
+    failure: Optional[Dict[str, Any]] = None,
 ) -> str:
     """回収経路で engage_now と判断されたイベントの応対 Pulse を再構成して起動する。
 
@@ -1331,7 +1343,18 @@ def _dispatch_recovered_event_response(
         不在、Beat 関所閉鎖、受付前の例外) — 再試行してよい。
         :data:`RECOVERED_DISPATCH_UNKNOWN` = 実行中の例外で LLM が動いたか
         不明 — 再試行してはいけない。
+
+    副作用ゼロの失敗のうち、やり直しが尽きたら知らせるもの (ペルソナが居ない・
+    現在地が無い・関所閉鎖・最終防衛ライン未達) は、理由を ``failure`` に書く
+    (``{"cause": ..., "building_id": ...}`` — 毎回上書き。最後の失敗が残る)。
     """
+    from saiverse.schedule_manager import (
+        DISPATCH_DETAIL_FLOOR_UNMET,
+        DISPATCH_DETAIL_GATE_CLOSED,
+        DISPATCH_DETAIL_NO_LOCATION,
+        DISPATCH_DETAIL_PERSONA_NOT_FOUND,
+    )
+
     dispatcher = getattr(manager, "pulse_dispatcher", None)
     personas = getattr(manager, "all_personas", None) or getattr(
         manager, "personas", None
@@ -1345,6 +1368,12 @@ def _dispatch_recovered_event_response(
             "building=%s)", dispatcher is not None, persona is not None,
             building_id,
         )
+        if failure is not None:
+            failure.clear()
+            if persona is None:
+                failure["cause"] = DISPATCH_DETAIL_PERSONA_NOT_FOUND
+            elif not building_id:
+                failure["cause"] = DISPATCH_DETAIL_NO_LOCATION
         return RECOVERED_DISPATCH_SAFE_FAILURE
     envelope = context.get("dispatch_envelope")
     if isinstance(envelope, dict) and envelope.get("user_input"):
@@ -1381,6 +1410,11 @@ def _dispatch_recovered_event_response(
             "[autonomy-wiring] recovered on_event response did not start "
             "(%s); safe to retry (persona=%s)", detail, persona_id,
         )
+        if failure is not None:
+            failure.clear()
+            if detail in (DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET):
+                failure["cause"] = detail
+                failure["building_id"] = building_id
         return RECOVERED_DISPATCH_SAFE_FAILURE
     LOGGER.error(
         "[autonomy-wiring] recovered on_event response ended unknown (%s); "
@@ -1397,18 +1431,112 @@ RECOVERED_RESPONSE_RETRY_BACKOFF_SECONDS = 120.0
 RECOVERED_RESPONSE_MAX_ATTEMPTS = 3
 
 
+#: やり直しが尽きて知らせを出した (execution_id, 理由)。同じ応対の諦めに二度は
+#: 出さない (プロセス内だけの記録)。
+_RECOVERED_GIVEN_UP_REPORTED: set = set()
+
+
+def _report_recovered_response_given_up(
+    manager: Any,
+    persona_id: str,
+    execution_id: Optional[str],
+    failure: Optional[Dict[str, Any]],
+) -> None:
+    """回収応対のやり直しが尽きたことを、ユーザーとペルソナに知らせる。
+
+    docs/intent/no_utterance_error_notice.md の問い 1・問い 3 (スケジュールの
+    ``ScheduleManager._report_given_up`` と同じ分け方):
+
+    - 関所閉鎖 / 最終防衛ライン未達 — 最後に試した部屋の記録へ
+      「(エラーにより、…は発言できませんでした)」を一行置く。
+    - ペルソナが居ない / 現在地が無い — 画面右下の閉じるまで残る知らせ。
+
+    理由が分からない失敗 (dispatcher 不在など) は従来どおりログだけ。
+    知らせの失敗で呼び出し元を止めない。
+    """
+    try:
+        from saiverse.schedule_manager import (
+            DISPATCH_DETAIL_FLOOR_UNMET,
+            DISPATCH_DETAIL_GATE_CLOSED,
+            DISPATCH_DETAIL_NO_LOCATION,
+            DISPATCH_DETAIL_PERSONA_NOT_FOUND,
+        )
+        from sea.no_utterance_notice import (
+            CAUSE_NO_LOCATION,
+            CAUSE_PERSONA_NOT_FOUND,
+            CODE_BEAT_GATE_CLOSED,
+            CODE_WINDOW_FLOOR_UNMET,
+            failure_detail,
+            persona_label,
+            post_unrunnable_alert,
+            record_no_utterance_notice,
+        )
+
+        cause = (failure or {}).get("cause")
+        if not cause:
+            return
+        report_key = (execution_id, cause)
+        if report_key in _RECOVERED_GIVEN_UP_REPORTED:
+            return
+        _RECOVERED_GIVEN_UP_REPORTED.add(report_key)
+        if cause in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
+            post_unrunnable_alert(
+                "event", persona_id,
+                CAUSE_PERSONA_NOT_FOUND
+                if cause == DISPATCH_DETAIL_PERSONA_NOT_FOUND else CAUSE_NO_LOCATION,
+                persona=persona_label(manager, persona_id),
+                details={"persona_id": persona_id, "execution_id": execution_id},
+            )
+            return
+        building_id = (failure or {}).get("building_id")
+        personas = getattr(manager, "all_personas", None) or getattr(
+            manager, "personas", None
+        ) or {}
+        persona = personas.get(persona_id)
+        if persona is None or not building_id:
+            return
+        from api.ui_messages import ui_message
+
+        if cause == DISPATCH_DETAIL_GATE_CLOSED:
+            detail = failure_detail(
+                CODE_BEAT_GATE_CLOSED,
+                message=ui_message("api.noUtterance.gateClosedRetriesExhausted"),
+                technical_detail=cause,
+            )
+        elif cause == DISPATCH_DETAIL_FLOOR_UNMET:
+            detail = failure_detail(
+                CODE_WINDOW_FLOOR_UNMET,
+                message=ui_message("api.noUtterance.floorUnmetRetriesExhausted"),
+                technical_detail=cause,
+            )
+        else:
+            return
+        record_no_utterance_notice(manager, persona, building_id, detail=detail)
+    except Exception:
+        LOGGER.exception(
+            "[autonomy-wiring] could not report the given-up recovered response "
+            "(persona=%s execution=%s)", persona_id, execution_id,
+        )
+
+
 def _schedule_recovered_response_retry(
     manager: Any,
     persona_id: str,
     context: Dict[str, Any],
     execution_id: Optional[str],
     attempt: int,
+    failure: Optional[Dict[str, Any]] = None,
 ) -> None:
     """回収応対の明示失敗 (dispatcher 不在 / 関所閉鎖 / submit 例外) を再試行する。
 
     判断は completed 済みで台帳側の再試行装置が無いので、EventScheduler の揮発
-    予約で bounded backoff を回す。上限で ERROR (イベント応対の消失を黙らせない)。
+    予約で bounded backoff を回す。上限で ERROR (イベント応対の消失を黙らせない)
+    と、最後の失敗の理由に応じた知らせ (:func:`_report_recovered_response_given_up`)。
+
+    ``failure``: 直前の失敗の理由の器。やり直しのたびに同じ器を渡し、上書きする。
     """
+    if failure is None:
+        failure = {}
     if attempt > RECOVERED_RESPONSE_MAX_ATTEMPTS:
         LOGGER.error(
             "[autonomy-wiring] recovered on_event response could not be "
@@ -1416,6 +1544,7 @@ def _schedule_recovered_response_retry(
             "(persona=%s execution=%s)",
             RECOVERED_RESPONSE_MAX_ATTEMPTS, persona_id, execution_id,
         )
+        _report_recovered_response_given_up(manager, persona_id, execution_id, failure)
         return
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is None:
@@ -1424,10 +1553,13 @@ def _schedule_recovered_response_retry(
             "the event response is lost (persona=%s execution=%s)",
             persona_id, execution_id,
         )
+        _report_recovered_response_given_up(manager, persona_id, execution_id, failure)
         return
 
     def _retry() -> None:
-        outcome = _dispatch_recovered_response(manager, persona_id, context)
+        outcome = _dispatch_recovered_response(
+            manager, persona_id, context, failure=failure,
+        )
         if outcome == RECOVERED_DISPATCH_OK:
             LOGGER.info(
                 "[autonomy-wiring] recovered on_event response dispatched on "
@@ -1442,6 +1574,7 @@ def _schedule_recovered_response_retry(
             return
         _schedule_recovered_response_retry(
             manager, persona_id, context, execution_id, attempt + 1,
+            failure=failure,
         )
 
     scheduler.schedule(
@@ -1470,7 +1603,10 @@ def _dispatch_recovered_response_with_retry(
     再試行がこの応対の唯一の救済路 (Codex 五巡目 high3)。unknown (実行中の例外)
     と unroutable (応対先が決まらない) は再試行しない。
     """
-    outcome = _dispatch_recovered_response(manager, persona_id, context)
+    failure: Dict[str, Any] = {}
+    outcome = _dispatch_recovered_response(
+        manager, persona_id, context, failure=failure,
+    )
     if outcome == RECOVERED_DISPATCH_OK:
         LOGGER.info(
             "[autonomy-wiring] recovered on_event response dispatched from the "
@@ -1479,6 +1615,7 @@ def _dispatch_recovered_response_with_retry(
     elif outcome == RECOVERED_DISPATCH_SAFE_FAILURE:
         _schedule_recovered_response_retry(
             manager, persona_id, context, execution_id, attempt=1,
+            failure=failure,
         )
     return outcome
 

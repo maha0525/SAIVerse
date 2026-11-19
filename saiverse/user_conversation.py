@@ -697,8 +697,26 @@ def _start_main_line_pulse(
     """会話開始用の main_line Pulse を起動する。
 
     manager / persona / building_id が揃わないと起動できないので、欠けていれば
-    WARN ログを出してスキップする (起動経路の堅牢性のため)。
+    WARN ログを出してスキップする (起動経路の堅牢性のため)。ペルソナ・現在地・
+    ``run_sea_user`` が欠けた回は、書く部屋が決まらないので部屋の記録には書けず、
+    画面右下の閉じるまで残る知らせに出す (docs/intent/no_utterance_error_notice.md
+    問い 3)。manager が無い回は知らせを出す土台も無いのでログだけ。
     """
+    from sea.no_utterance_notice import (
+        CAUSE_NO_LOCATION,
+        CAUSE_NO_RUNNER,
+        CAUSE_PERSONA_NOT_FOUND,
+        persona_label,
+        post_unrunnable_alert,
+    )
+
+    def _alert(cause: str) -> None:
+        post_unrunnable_alert(
+            "conversation", persona_id, cause,
+            persona=persona_label(manager, persona_id),
+            details={"persona_id": persona_id},
+        )
+
     if manager is None:
         LOGGER.warning(
             "[user-conv] cannot start the main_line pulse: manager is None "
@@ -711,6 +729,7 @@ def _start_main_line_pulse(
             "[user-conv] cannot start the main_line pulse: persona not found (%s)",
             persona_id,
         )
+        _alert(CAUSE_PERSONA_NOT_FOUND)
         return
     building_id = getattr(persona, "current_building_id", None)
     if not building_id:
@@ -718,6 +737,7 @@ def _start_main_line_pulse(
             "[user-conv] cannot start the main_line pulse: persona %s has no "
             "current_building_id", persona_id,
         )
+        _alert(CAUSE_NO_LOCATION)
         return
     run_sea_user = getattr(manager, "run_sea_user", None)
     if run_sea_user is None:
@@ -725,6 +745,7 @@ def _start_main_line_pulse(
             "[user-conv] cannot start the main_line pulse: manager.run_sea_user "
             "is not available (persona=%s)", persona_id,
         )
+        _alert(CAUSE_NO_RUNNER)
         return
 
     options = dict(pulse_options or {})

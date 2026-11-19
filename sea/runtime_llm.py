@@ -3223,61 +3223,20 @@ def _is_user_interruption(interrupted_by: Optional[str]) -> bool:
     return interrupted_by in ("user", "user_stop")
 
 
-def _record_interruption_notice(
-    runtime: Any,
-    persona: Any,
-    building_id: str,
-    *,
-    content: str,
-    msg_id: Optional[str] = None,
-) -> bool:
-    """中断があった事実を、建物の記録へ host 名義で一行置く。置けたら True。
+def _note_failed_model(exc: LLMError, state: Any) -> None:
+    """LLM ノードの失敗に、その Beat で選んだモデル名を書き足す (分かるときだけ)。
 
-    途中で切られた発言は他のペルソナから見ても不自然な場所で終わっている。
-    それが本人の言い切りなのか外から止められたのかを知れる方がよい
-    (2026-08-26 まはー裁定)。役は ``host`` で、入退室の通知と同じ道を通る。
-    取り込みの側が建物名を添えて role=system のシステム通知へ組み替えてから
-    各ペルソナの記憶へ配るので、**ここでその形を自分で作らない**。ただし
-    取り込みが配るのは ``heard_by`` に載ったペルソナだけ — 在室者を渡さないと、
-    通告は建物の記録に残るだけで誰の記憶にも永遠に届かない (2026-08-27 の
-    実機検証で発覚)。
-
-    呼ぶのは返事が止まった回の後始末 (sea/reply_stop_exit.py) だけで、文面
-    (``content``) もそちらが発言の形と原因から選ぶ。書き込みに失敗しても
-    例外は投げない (通告は救済であって、返事の本体ではない) が、置けたか
-    どうかは返す — 印と通告は必ず対 (不変条件 2) なので、置けなかった回は
-    呼び出し元が印を取り下げる。
+    モデル名の出どころは ``state["_execution_context"]`` (lg_llm_node がモデルを
+    選んだ直後に置く ``ExecutionContext``)。クライアントが既にモデル名を
+    持たせた例外 (``ModelUnavailableError`` など) は上書きしない。読むのは
+    発言が生まれなかった回の知らせの詳細だけ (sea/no_utterance_notice.py)。
     """
-    try:
-        heard_by = list(runtime.manager.occupants.get(building_id, []) or [])
-        # 直接参照 (getattr にしない) — 属性名のタイポを黙って飲むと、本人が
-        # heard_by から静かに落ちて通告だけ配られる。無ければ except が握る
-        # (旧実装と同じ倒れ方 = 通告ごと見送り + WARNING)。
-        persona_id = persona.persona_id
-        if persona_id and persona_id not in heard_by:
-            heard_by.append(persona_id)
-        written = persona.history_manager.add_to_building_only(
-            building_id,
-            {"role": "host", "content": content},
-            heard_by=heard_by,
-        )
-        # 置けたかの判定は、戻り値に DB 採番の message_id が付いているか
-        # (builtin_data/tools/tell.py と同じ裁定)。add_to_building_only は
-        # DB 挿入が再試行の後に失敗しても例外を投げず、渡した dict を id 無しで
-        # 返す — 例外が出なかったことは、置けた証拠にならない。
-        if isinstance(written, dict) and written.get("message_id"):
-            return True
-        LOGGER.warning(
-            "[sea][pipeline] the interruption notice was not persisted to the "
-            "building (msg=%s building=%s)", msg_id, building_id,
-        )
-        return False
-    except Exception:
-        LOGGER.warning(
-            "[sea][pipeline] could not record the interruption notice to the "
-            "building (msg=%s)", msg_id, exc_info=True,
-        )
-        return False
+    if getattr(exc, "model", None):
+        return
+    context = state.get("_execution_context") if isinstance(state, dict) else None
+    model_key = getattr(context, "model_key", None)
+    if model_key:
+        exc.model = str(model_key)
 
 
 def _save_cut_utterance(
@@ -6982,6 +6941,31 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "Proceeding with empty response.",
                             max_stream_retries
                         )
+                        # 例外にはしない (runtime_outcome は completed のまま)。
+                        # 発言が生まれなかった理由として、この実行の札に記録する
+                        # — PulseController._execute_unlocked が、この実行で何も
+                        # 保存されなかったときに部屋の記録へ一行置く
+                        # (docs/intent/no_utterance_error_notice.md)。
+                        from api.ui_messages import ui_message
+                        from sea.no_utterance_notice import (
+                            CODE_EMPTY_RESPONSE,
+                            failure_detail,
+                            note_no_utterance_cause,
+                        )
+
+                        note_no_utterance_cause(
+                            cancellation_token,
+                            failure_detail(
+                                CODE_EMPTY_RESPONSE,
+                                message=ui_message(
+                                    "api.noUtterance.emptyResponse",
+                                    attempts=max_stream_retries,
+                                ),
+                                model=getattr(
+                                    state.get("_execution_context"), "model_key", None,
+                                ),
+                            ),
+                        )
 
                     # ストリームの途中で止められた回。下書き行を途中までの本文で
                     # 保存する (詳しくは ``_save_cut_utterance`` の docstring)。
@@ -7853,16 +7837,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             # Propagate LLM errors to the caller for proper handling
             _save_draft_on_beat_death(exc)
             _backfill_memory_on_beat_death(exc)
+            _note_failed_model(exc, state)
             raise
         except Exception as exc:
             _save_draft_on_beat_death(exc)
             _backfill_memory_on_beat_death(exc)
             LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
             # Convert to LLMError so it propagates to the frontend
-            raise LLMError(
+            _wrapped = LLMError(
                 f"LLM node failed: {type(exc).__name__}: {exc}",
                 original_error=exc,
-            ) from exc
+            )
+            _note_failed_model(_wrapped, state)
+            raise _wrapped from exc
         except asyncio.CancelledError as exc:
             # タスクの取り消し (サーバー停止等) は Exception では捕まらないだけで、
             # 下書き行を孤児にする力は同じ。確定だけ済ませてそのまま伝播させる。

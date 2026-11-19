@@ -219,6 +219,8 @@ sea/
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
 ├── progress_events.py    # チャット画面の「いま何をしているか」の段階 (status の phase)。文言はフロントの lib/chatProgress.ts（chat_progress_display intent）
 ├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
+├── host_notice.py        # 部屋の記録へ host 名義の一行を置く共通の書き手（中断の通告と、発言できなかった回の知らせが使う）
+├── no_utterance_notice.py # エラー・サーバーの停止で発言が生まれなかった回の知らせ（部屋の記録の一行 + 画面だけの詳細。書く部屋が無い回は右下の知らせ。no_utterance_error_notice intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、

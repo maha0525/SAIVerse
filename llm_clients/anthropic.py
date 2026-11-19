@@ -27,6 +27,7 @@ from .anthropic_retry_policy import (
 )
 from .exceptions import (
     AuthenticationError,
+    ContextLengthExceededError,
     EmptyResponseError as LLMEmptyResponseError,
     InvalidRequestError,
     LLMError,
@@ -35,6 +36,7 @@ from .exceptions import (
     RateLimitError,
     SafetyFilterError,
     ServerError,
+    is_context_length_error,
 )
 
 
@@ -288,6 +290,10 @@ class AnthropicClient(LLMClient):
                         f"Anthropic {context} content policy violation: {e}",
                         e,
                         user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
+                    )
+                if is_context_length_error(e):
+                    raise ContextLengthExceededError(
+                        f"Anthropic {context} failed: context length exceeded: {e}", e,
                     )
                 raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
             except Exception as e:
@@ -548,6 +554,10 @@ class AnthropicClient(LLMClient):
                         f"Anthropic streaming API call content policy violation: {e}",
                         e,
                         user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
+                    )
+                if is_context_length_error(e):
+                    raise ContextLengthExceededError(
+                        f"Anthropic streaming API call failed: context length exceeded: {e}", e,
                     )
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
             except Exception as e:

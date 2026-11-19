@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from llm_clients.exceptions import (
     AuthenticationError,
+    ContextLengthExceededError,
     LLMError,
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
     SafetyFilterError,
     ServerError,
+    is_context_length_error,
 )
 
 import openai
@@ -73,6 +75,9 @@ def should_retry(err: Exception) -> bool:
 
 
 def convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
+    # 上限超過は 400 の本文に "rate" などの語を含みうるので、他の分類より先に見る。
+    if is_context_length_error(err):
+        return ContextLengthExceededError(f"OpenAI {context} failed: context length exceeded", err)
     if is_payment_error(err):
         return PaymentError(f"OpenAI {context} failed: payment required", err)
     if is_rate_limit_error(err):
