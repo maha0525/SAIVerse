@@ -2543,6 +2543,22 @@
     "ja": "{p1}〜{p2} 分。既定は 5 分。キャッシュは作ってからこの時間で消えます。会話の返事以外の呼び出しは自動キャッシュと同じ動きをします。",
     "en": "{p1}-{p2} minutes. The default is 5. Each cache expires this long after it is created. Calls other than conversation replies behave as with automatic caching."
   },
+  "components.GlobalSettingsModal.text123": {
+    "ja": "スペル連続実行の上限回数",
+    "en": "Max consecutive spell rounds"
+  },
+  "components.GlobalSettingsModal.text124": {
+    "ja": "1 回の応答やスケジュールの中で、ペルソナがスペルを続けて発動できる発言回数の上限です（1 発言内に複数並べたスペルは 1 回と数えます）。",
+    "en": "Maximum number of consecutive turns in a single response or schedule where a persona can invoke spells (multiple spells in one message count as one round)."
+  },
+  "components.GlobalSettingsModal.text125": {
+    "ja": "上限回数",
+    "en": "Max rounds"
+  },
+  "components.GlobalSettingsModal.text126": {
+    "ja": "{p1}〜{p2} 回。既定は {p3} 回。保存すると次のターンから効きます。",
+    "en": "{p1}-{p2} rounds. The default is {p3}. It takes effect from the next turn."
+  },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",
     "en": "Inventory: "

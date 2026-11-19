@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 398（tag グループ: 26）
+**エンドポイント数**: 400（tag グループ: 26）
 
 ## addon
 
@@ -162,6 +162,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/config/reflex-timeout` | 反射判断を何秒まで待つかを保存する (.env)。 |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
+| GET | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限 (グローバル設定、既定 5 回)。 |
+| POST | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限を保存する (.env)。 |
 | GET | `/api/config/startup-warnings` | Return startup warnings plus model-setting warnings built from the current settings. |
 | GET | `/api/config/update-check` | Get update check monitoring status. |
 | POST | `/api/config/update-check` | Toggle update availability check on/off. |

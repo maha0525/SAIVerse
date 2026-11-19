@@ -1372,6 +1372,8 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # 普通に言い終えた発言にまで印が漏れる (本文が空で memorize を通らない回が
     # あるため、消費は保存の分岐の中ではなくこの位置に置く)。
     interrupted = bool(state.pop(INTERRUPTED_METADATA_KEY, None))
+    # スペル上限超過の不発通知も同様にここで必ず消費する。
+    spell_limit_notice = state.pop("_spell_limit_exceeded_notice", None)
 
     state["last"] = text
     # Structured output may return a dict; serialise to JSON string
@@ -1666,6 +1668,43 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     else:
         clear_unstored_reply(state)
 
+    # スペル連続実行回数の上限を超過して不発になったスペルが締めの発言に
+    # 含まれていた場合、締めの発言（assistant）の直後にシステム通知を並べる。
+    # これにより、同じ Pulse の後続ノードや次のターンでペルソナ自身が
+    # 「直前のスペルは上限で実行されなかった」と確実に把握できる。
+    if spell_limit_notice:
+        _limit_notice_msg = system_notice_message(
+            presented_system_record_content(spell_limit_notice),
+            _SPELL_RESULT_NOTICE,
+        )
+        if isinstance(state.get("_messages"), list):
+            state["_messages"] = list(state["_messages"]) + [_limit_notice_msg]
+        if _pulse_ctx:
+            from sea.pulse_context import PulseLogEntry
+            _pulse_ctx.append(PulseLogEntry(
+                role="system",
+                content=spell_limit_notice,
+                node_id=node_id,
+                playbook_name=playbook.name,
+            ))
+        if memorize_config or _is_important:
+            _limit_base_tags = (
+                list(memorize_config.get("tags") or [])
+                if isinstance(memorize_config, dict)
+                else []
+            )
+            _limit_tags = (_limit_base_tags + ["spell"]) if _limit_base_tags else ["conversation", "spell"]
+            runtime._store_memory(
+                persona,
+                spell_limit_notice,
+                role="system",
+                tags=_limit_tags,
+                pulse_id=state.get("_pulse_id"),
+                playbook_name=playbook.name,
+                metadata=_spell_result_record_metadata(None),
+                pulse_context=_pulse_ctx,
+            )
+
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
     LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", speak_content)
@@ -1681,7 +1720,55 @@ def _resolve_tool_call_id(result: Dict[str, Any]) -> str:
 
 # ── Spell system (text-based tool invocation) ──
 
-_MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
+SPELL_MAX_ROUNDS_DEFAULT = 5
+SPELL_MAX_ROUNDS_MIN = 1
+SPELL_MAX_ROUNDS_MAX = 20
+
+
+def clamp_spell_max_rounds(value: Any) -> int:
+    """Clamp a spell max rounds value into [SPELL_MAX_ROUNDS_MIN, SPELL_MAX_ROUNDS_MAX]."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return SPELL_MAX_ROUNDS_DEFAULT
+    return min(SPELL_MAX_ROUNDS_MAX, max(SPELL_MAX_ROUNDS_MIN, parsed))
+
+
+def get_spell_max_rounds() -> int:
+    """1 回のパルスでスペルを連続実行できるラウンド数上限を返す (既定 5)。
+
+    呼び出しのたびに ``SAIVERSE_SPELL_MAX_ROUNDS`` を読むので、グローバル設定で
+    保存した次のターンから再起動なしで効く。
+    """
+    raw = os.getenv("SAIVERSE_SPELL_MAX_ROUNDS")
+    if raw is None or not str(raw).strip():
+        return SPELL_MAX_ROUNDS_DEFAULT
+    return clamp_spell_max_rounds(raw)
+
+
+_MAX_SPELL_LOOPS = get_spell_max_rounds()
+
+
+def _format_spell_round_budget_note(loop_count: int, max_rounds: int) -> str:
+    """各ラウンドのスペル結果末尾に添える残り実行回数の注釈。"""
+    remaining = max_rounds - loop_count
+    if remaining > 0:
+        return (
+            f"[Spell Rounds] このターンの残りスペル実行回数: "
+            f"あと {remaining} 回（上限 {max_rounds} 回）"
+        )
+    return (
+        f"[Spell Rounds] このターンのスペル実行回数が上限（{max_rounds} 回）に"
+        "達しました。次の応答ではスペルを実行できません（書いても不発になります）。"
+    )
+
+
+def _format_spell_limit_exceeded_notice(max_rounds: int) -> str:
+    """上限超過で不発になったスペルがあったときに記録するシステム通知。"""
+    return (
+        f"[Spell Limit] スペル連続実行回数の上限（{max_rounds} 回）に達しているため、"
+        "直前の発言に含まれるスペルは実行されませんでした。"
+    )
 
 # Canonical form: /spell name='tool' args={...}
 # /quick_spell (quick_spell.md): 同形の別動詞 = 「この発話で完了」の宣言。
@@ -3493,6 +3580,7 @@ class SpellLoopResult:
     closing_output_phases: Any = None
     stop_error: Optional[BaseException] = None
     final_stream_error: Optional[Dict[str, Any]] = None
+    limit_exceeded_notice: Optional[str] = None
 
 
 def _spell_display_name(name: str, success: bool) -> str:
@@ -3704,7 +3792,7 @@ async def _run_spell_loop(
         )
 
     _effective_max_rounds = (
-        max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else _MAX_SPELL_LOOPS
+        max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else get_spell_max_rounds()
     )
     loop_count = 0
     segments: List[BeatSegment] = []
@@ -4401,6 +4489,15 @@ async def _run_spell_loop(
                 f"[Spell {'Result' if rec['success'] else 'Error'}: {rec['name']}]\n{rec['result']}"
                 for rec in round_records
             )
+            # /quick_spell の正常終端では次の応答ラウンドが無いので残り回数注釈は付けない。
+            # それ以外のラウンドでは残り実行回数（上限到達時は次ラウンド不発の予告）を
+            # combined_results の末尾に添える — 送信内容と SAIMemory 保存内容を一致させて
+            # プレフィックスキャッシュを割らない。
+            if combined_results and not (_all_quick and not _round_has_failure):
+                combined_results = (
+                    f"{combined_results}\n"
+                    f"{_format_spell_round_budget_note(loop_count, _effective_max_rounds)}"
+                )
             # Aggregate media from successful spell results so the next LLM round
             # can see images / files etc. as attachments. iter_image_media() in
             # each LLM client picks this up via message["metadata"]["media"].
@@ -4909,10 +5006,79 @@ async def _run_spell_loop(
                 closing_output_phases=None if text_stream_error else pending_output_phases,
                 final_stream_error=text_stream_error,
             )
-        # 締めの Beat (= 最後の retry が返した、スペルを含まない発言)。
+        # 締めの Beat (= 最後の retry が返した発言)。
+        # 上限到達にもかかわらずスペル構文が含まれていた場合は、不発だったことを
+        # ユーザー向け表示 (<user_only> 失敗ブロック) とペルソナ向け記憶通知
+        # (limit_exceeded_notice — _finalize_beat が締め発言の直後に保存する) の
+        # 両方に記録する。final_continuation 本体は生のまま保つ。
+        limit_exceeded_notice: Optional[str] = None
+        closing_segment_text = final_continuation
+        if final_continuation and loop_count >= _effective_max_rounds:
+            _overflow_malformed: List[Tuple[str, str, Any]] = []
+            _overflow_parsed = _parse_spell_lines(
+                final_continuation, malformed_out=_overflow_malformed, quiet=True,
+            )
+            if _overflow_parsed or _overflow_malformed:
+                limit_exceeded_notice = _format_spell_limit_exceeded_notice(
+                    _effective_max_rounds
+                )
+                state["_spell_limit_exceeded_notice"] = limit_exceeded_notice
+                LOGGER.info(
+                    "[sea][spell] Round limit (%d) exceeded: %d unexecuted spell(s) in closing text",
+                    _effective_max_rounds,
+                    len(_overflow_parsed) + len(_overflow_malformed),
+                )
+                _limit_block_reason = (
+                    f"スペル連続実行回数の上限（{_effective_max_rounds} 回）に達したため、"
+                    "実行されませんでした。"
+                )
+                _overflow_entries: List[Tuple[int, int, str, dict, str]] = [
+                    (
+                        p.m.start(),
+                        p.m.end(),
+                        canonicalize_spell_name(p.name),
+                        p.args,
+                        p.norm,
+                    )
+                    for p in _overflow_parsed
+                ] + [
+                    (
+                        m.start(),
+                        m.end(),
+                        raw_name,
+                        {},
+                        final_continuation[m.start():m.end()],
+                    )
+                    for raw_name, _, m in _overflow_malformed
+                ]
+                _overflow_entries.sort(key=lambda item: item[0])
+                _closing_parts: List[str] = []
+                _cursor = 0
+                for _ov_start, _ov_end, _ov_name, _ov_args, _ov_line in _overflow_entries:
+                    if _ov_start > _cursor:
+                        _between = final_continuation[_cursor:_ov_start].strip()
+                        if _between:
+                            _closing_parts.append(_between)
+                    _closing_parts.append(
+                        _build_spell_user_only_block(
+                            _ov_name,
+                            _ov_args,
+                            _ov_name,
+                            _limit_block_reason,
+                            success=False,
+                            spell_line=_ov_line,
+                        )
+                    )
+                    _cursor = max(_cursor, _ov_end)
+                if _cursor < len(final_continuation):
+                    _ov_after = final_continuation[_cursor:].strip()
+                    if _ov_after:
+                        _closing_parts.append(_ov_after)
+                closing_segment_text = "\n".join(_closing_parts)
+
         if final_continuation:
             segments.append(BeatSegment(
-                text=final_continuation,
+                text=closing_segment_text,
                 building_id=current_building_id,
                 llm_usage=pending_llm_usage,
                 occupants=current_occupants,
@@ -4931,6 +5097,7 @@ async def _run_spell_loop(
             # 切られた締めの本文には分け方を付けない。
             closing_output_phases=None if text_stream_error else pending_output_phases,
             final_stream_error=text_stream_error,
+            limit_exceeded_notice=limit_exceeded_notice,
         )
     except (ExecutionCancelledException, BeatGateClosedError) as exc:
         # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく

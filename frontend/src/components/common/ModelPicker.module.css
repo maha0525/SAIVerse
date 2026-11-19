@@ -163,6 +163,11 @@
     border-color: #f59e0b;
 }
 
+.favoriteBtn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .groupButtons {
     display: flex;
     flex-wrap: wrap;

@@ -13,6 +13,7 @@ import ModalOverlay from './common/ModalOverlay';
 import DebugPanel from './DebugPanel';
 import { formatCost } from '@/lib/formatCost';
 import { fetchModelList, type PickerModel } from '@/lib/modelList';
+import { useFavoriteModels } from '@/lib/favoriteModels';
 import ModelPicker from './common/ModelPicker';
 
 interface SettingsModalProps {
@@ -95,6 +96,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<PickerModel[]>([]);
     const [availableUsers, setAvailableUsers] = useState<UserChoice[]>([]);
+    const { favoriteModels, favoritesReady, toggleFavorite } = useFavoriteModels(isOpen);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -505,6 +507,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setDefaultModel}
                                     emptyLabel={uiText("components.SettingsModal.text013")}
                                     unknownValueLabel={uiText("components.SettingsModal.text014")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text012")}
                                 />
                             </div>
@@ -517,6 +522,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setLightweightModel}
                                     emptyLabel={uiText("components.SettingsModal.text016")}
                                     unknownValueLabel={uiText("components.SettingsModal.text017")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text015")}
                                 />
                                 <div data-i18n="components.SettingsModal.text018" className={styles.description}>{uiText("components.SettingsModal.text018")}</div>
@@ -530,6 +538,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setMemoryWeaveModel}
                                     emptyLabel={uiText("components.SettingsModal.text020")}
                                     unknownValueLabel={uiText("components.SettingsModal.text021")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text019")}
                                 />
                                 <div data-i18n="components.SettingsModal.text022" className={styles.description}>{uiText("components.SettingsModal.text022")}</div>
@@ -543,6 +554,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setVisionModel}
                                     emptyLabel={uiText("components.SettingsModal.text024")}
                                     unknownValueLabel={uiText("components.SettingsModal.text025")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text023")}
                                 />
                                 <div data-i18n="components.SettingsModal.text026" className={styles.description}>{uiText("components.SettingsModal.text026")}</div>
@@ -556,6 +570,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setAudioModel}
                                     emptyLabel={uiText("components.SettingsModal.text028")}
                                     unknownValueLabel={uiText("components.SettingsModal.text029")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text027")}
                                 />
                                 <div data-i18n="components.SettingsModal.text030" className={styles.description}>{uiText("components.SettingsModal.text030")}</div>
@@ -569,6 +586,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setVideoModel}
                                     emptyLabel={uiText("components.SettingsModal.text032")}
                                     unknownValueLabel={uiText("components.SettingsModal.text033")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.text031")}
                                 />
                                 <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
@@ -582,6 +602,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setReflexJudgmentModel}
                                     emptyLabel={uiText("components.SettingsModal.reflexJudgmentModelGlobal")}
                                     unknownValueLabel={uiText("components.SettingsModal.reflexJudgmentModelUnknown")}
+                                    favorites={favoriteModels}
+                                    onToggleFavorite={toggleFavorite}
+                                    favoriteDisabled={!favoritesReady}
                                     ariaLabel={uiText("components.SettingsModal.reflexJudgmentModelLabel")}
                                 />
                                 <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>
