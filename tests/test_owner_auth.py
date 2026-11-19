@@ -108,7 +108,11 @@ def test_browser_origin_allows_local_scripts_without_browser_headers() -> None:
 
 def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> None:
     monkeypatch.setenv("SAIVERSE_ALLOWED_ORIGINS", "https://my-box.tailnet.ts.net:3000")
-    monkeypatch.setattr(owner_auth, "_self_magicdns_hostname", lambda: "my-pc.tailnet-abc.ts.net")
+    monkeypatch.setattr(
+        owner_auth,
+        "_self_tailscale_identity",
+        lambda: ("my-pc.tailnet-abc.ts.net", frozenset({"100.64.0.10", "fd7a:115c:a1e0::1"})),
+    )
     client = TestClient(_local_app())
 
     assert client.post("/api/items", headers={"Origin": "http://localhost:3000"}).status_code == 200
@@ -129,7 +133,29 @@ def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> 
             "Origin": "http://my-pc.tailnet-abc.ts.net:3000",
         },
     ).status_code == 200
-    # Different tailnet MagicDNS host must still be rejected
+    # Own Tailscale IPv4 / IPv6 origins through Next.js route proxy
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://100.64.0.10:3000",
+        },
+    ).status_code == 200
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://[fd7a:115c:a1e0::1]:3000",
+        },
+    ).status_code == 200
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://[fd7a:115c:a1e0:0:0:0:0:1]:3000",
+        },
+    ).status_code == 200
+    # Different tailnet MagicDNS host or another device's IP must still be rejected
     assert client.post(
         "/api/items",
         headers={
@@ -137,13 +163,27 @@ def test_browser_origin_allows_configured_and_same_host_origins(monkeypatch) -> 
             "Origin": "https://attacker.unrelated-tailnet.ts.net",
         },
     ).status_code == 403
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://100.64.0.99:3000",
+        },
+    ).status_code == 403
+    assert client.post(
+        "/api/items",
+        headers={
+            "Host": "127.0.0.1:8000",
+            "Origin": "http://192.168.1.50:3000",
+        },
+    ).status_code == 403
 
 
 def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer(monkeypatch) -> None:
-    monkeypatch.setattr(owner_auth, "_self_magicdns_hostname", lambda: None)
+    monkeypatch.setattr(owner_auth, "_self_tailscale_identity", lambda: (None, frozenset()))
     client = TestClient(_local_app())
 
-    # Untrusted Origin / null Origin / empty Origin / lookalike domain / unrelated MagicDNS
+    # Untrusted Origin / null Origin / empty Origin / lookalike domain / unrelated MagicDNS / IP
     assert client.post("/api/items", headers={"Origin": "https://evil.example"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": "http://evil-ts.net:3000"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": "https://ts.net"}).status_code == 403
@@ -154,6 +194,7 @@ def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer(monkeypatc
         ).status_code
         == 403
     )
+    assert client.post("/api/items", headers={"Origin": "http://100.64.0.10:3000"}).status_code == 403
     assert client.delete("/api/items/1", headers={"Origin": "null"}).status_code == 403
     assert client.post("/api/items", headers={"Origin": ""}).status_code == 403
 
@@ -174,12 +215,16 @@ def test_browser_origin_rejects_untrusted_origin_sec_fetch_or_referer(monkeypatc
     assert client.get("/api/items", headers={"Origin": "https://evil.example"}).status_code == 200
 
 
-def test_self_magicdns_hostname_reads_tailscale_status_json(monkeypatch) -> None:
-    monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
+def test_self_tailscale_identity_reads_tailscale_status_json(monkeypatch) -> None:
+    monkeypatch.setattr(owner_auth, "_tailscale_self_cache", None)
     captured_kwargs: dict[str, object] = {}
     # UTF-8 payload containing bytes invalid in cp932 (Windows default encoding)
     utf8_payload = (
-        '{"Self": {"DNSName": "My-PC.Tail1234.ts.net.", "HostName": "日本語スマホ端末"}}'
+        '{"Self": {'
+        '"DNSName": "My-PC.Tail1234.ts.net.", '
+        '"TailscaleIPs": ["100.64.0.10", "FD7A:115C:A1E0:0:0:0:0:1", "not-an-ip", 123], '
+        '"HostName": "日本語スマホ端末"'
+        "}}"
     ).encode("utf-8")
 
     def _fake_run(*args, **kwargs):
@@ -196,14 +241,17 @@ def test_self_magicdns_hostname_reads_tailscale_status_json(monkeypatch) -> None
         )
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    assert owner_auth._self_magicdns_hostname() == "my-pc.tail1234.ts.net"
+    assert owner_auth._self_tailscale_identity() == (
+        "my-pc.tail1234.ts.net",
+        frozenset({"100.64.0.10", "fd7a:115c:a1e0::1"}),
+    )
     assert captured_kwargs.get("encoding") == "utf-8"
     assert captured_kwargs.get("errors") == "replace"
 
-    monkeypatch.setattr(owner_auth, "_magicdns_cache", None)
+    monkeypatch.setattr(owner_auth, "_tailscale_self_cache", None)
 
     def _raise_missing(*args, **kwargs):
         raise FileNotFoundError("tailscale not found")
 
     monkeypatch.setattr(subprocess, "run", _raise_missing)
-    assert owner_auth._self_magicdns_hostname() is None
+    assert owner_auth._self_tailscale_identity() == (None, frozenset())
