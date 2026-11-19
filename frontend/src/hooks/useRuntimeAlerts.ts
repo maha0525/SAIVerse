@@ -55,6 +55,12 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     // 始まった取り直しの結果が遅れて届いても、新しい一覧を古い一覧で上書きしない。
     const committedRefetchIdRef = useRef(0);
     const recentEventsRef = useRef<{ seq: number; event: RuntimeAlertEvent }[]>([]);
+    // 取り直しが失敗したら、成功するまで間隔を空けてやり直す (2 秒から倍々、最大 30 秒)。
+    // 接続し直したときの取り直しが失敗したまま止まると、繋がっていなかった間に出た
+    // 知らせが画面に出ないままになる。
+    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const retryDelayRef = useRef(2000);
+    const refetchRef = useRef<() => Promise<void>>(async () => {});
 
     const remember = useCallback((event: RuntimeAlertEvent) => {
         if (event.action === 'dismiss') dismissedIdsRef.current.add(event.id);
@@ -73,11 +79,16 @@ export function useRuntimeAlerts(backendConnected: boolean) {
         inflightStartsRef.current.set(refetchId, startedAt);
         try {
             const res = await apiFetch('/api/system/runtime-alerts');
-            if (!res.ok) return;
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const fetched: RuntimeAlert[] = Array.isArray(data?.alerts) ? data.alerts : [];
             if (refetchId < committedRefetchIdRef.current) return;
             committedRefetchIdRef.current = refetchId;
+            if (retryTimerRef.current) {
+                clearTimeout(retryTimerRef.current);
+                retryTimerRef.current = null;
+            }
+            retryDelayRef.current = 2000;
             const later = recentEventsRef.current.filter(e => e.seq > startedAt);
             const dismissedIds = dismissedIdsRef.current;
             setAlerts(later.reduce(
@@ -85,8 +96,17 @@ export function useRuntimeAlerts(backendConnected: boolean) {
                 fetched.filter(a => !dismissedIds.has(a.id)),
             ));
         } catch (error) {
-            // 裏側がまだ起動していないことがある。繋がり直したときに取り直す。
+            // 裏側がまだ起動していないことがある。後から始まった取り直しがもう
+            // 結果を出していなければ、間隔を空けてやり直す。
             console.warn('[runtime-alerts] failed to fetch the list', error);
+            if (refetchId >= committedRefetchIdRef.current && !retryTimerRef.current) {
+                const delay = retryDelayRef.current;
+                retryDelayRef.current = Math.min(delay * 2, 30000);
+                retryTimerRef.current = setTimeout(() => {
+                    retryTimerRef.current = null;
+                    void refetchRef.current();
+                }, delay);
+            }
         } finally {
             inflightStartsRef.current.delete(refetchId);
             if (inflightStartsRef.current.size === 0) {
@@ -96,6 +116,15 @@ export function useRuntimeAlerts(backendConnected: boolean) {
                 recentEventsRef.current = recentEventsRef.current.filter(e => e.seq > oldest);
             }
         }
+    }, []);
+
+    useEffect(() => {
+        refetchRef.current = refetch;
+    }, [refetch]);
+
+    useEffect(() => () => {
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
     }, []);
 
     useEffect(() => {
