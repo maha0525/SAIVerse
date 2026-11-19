@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -116,18 +117,22 @@ def websocket_owner_authorized(websocket: object) -> bool:
     return bool(cookie and hmac.compare_digest(cookie, _session_value(token)))
 
 
-_MAGICDNS_CACHE_TTL_SECONDS = 60.0
-_magicdns_cache: tuple[float, str | None] | None = None
+_TAILSCALE_SELF_CACHE_TTL_SECONDS = 60.0
+_tailscale_self_cache: tuple[float, tuple[str | None, frozenset[str]]] | None = None
 
 
-def _self_magicdns_hostname() -> str | None:
-    """この端末自身の Tailscale MagicDNS ホスト名を ``tailscale status --json`` から取得する。"""
-    global _magicdns_cache
+def _self_tailscale_identity() -> tuple[str | None, frozenset[str]]:
+    """この端末自身の Tailscale MagicDNS ホスト名と Tailscale IP 一覧を ``tailscale status --json`` から取得する。"""
+    global _tailscale_self_cache
     now = time.monotonic()
-    if _magicdns_cache is not None and (now - _magicdns_cache[0]) < _MAGICDNS_CACHE_TTL_SECONDS:
-        return _magicdns_cache[1]
+    if (
+        _tailscale_self_cache is not None
+        and (now - _tailscale_self_cache[0]) < _TAILSCALE_SELF_CACHE_TTL_SECONDS
+    ):
+        return _tailscale_self_cache[1]
 
     hostname: str | None = None
+    ips: set[str] = set()
     try:
         result = subprocess.run(
             ["tailscale", "status", "--json"],
@@ -145,19 +150,31 @@ def _self_magicdns_hostname() -> str | None:
                 dns_name = str(self_info.get("DNSName") or "").strip().rstrip(".").lower()
                 if dns_name.endswith(".ts.net") and len(dns_name) > len(".ts.net"):
                     hostname = dns_name
+                raw_ips = self_info.get("TailscaleIPs")
+                if isinstance(raw_ips, list):
+                    for raw_ip in raw_ips:
+                        if not isinstance(raw_ip, str):
+                            continue
+                        try:
+                            ips.add(str(ipaddress.ip_address(raw_ip.strip())))
+                        except ValueError:
+                            continue
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
-        logger.debug("Failed to resolve local Tailscale MagicDNS hostname: %s", exc)
+        logger.debug("Failed to resolve local Tailscale identity: %s", exc)
         hostname = None
+        ips.clear()
 
-    _magicdns_cache = (now, hostname)
-    return hostname
+    identity = (hostname, frozenset(ips))
+    _tailscale_self_cache = (now, identity)
+    return identity
 
 
-def _is_magicdns_origin(origin: str) -> bool:
-    """この端末自身の Tailscale MagicDNS (``*.ts.net``) 由来のブラウザ Origin か判定する。
+def _is_tailscale_origin(origin: str) -> bool:
+    """この端末自身の Tailscale (MagicDNS ``*.ts.net`` または Tailscale IP) 由来のブラウザ Origin か判定する。
 
     ``SAIVERSE_ALLOWED_ORIGINS`` 未設定の既定ローカル起動でも、端末自身の
-    MagicDNS ホスト経由のアクセスだけを通し、他 tailnet の ``*.ts.net`` は拒否する。
+    MagicDNS ホストおよび Tailscale IP 経由のアクセスだけを通し、他端末の
+    ``*.ts.net`` や別 IP は拒否する。
     """
     try:
         parsed = urlsplit(origin)
@@ -166,24 +183,32 @@ def _is_magicdns_origin(origin: str) -> bool:
     if parsed.scheme not in ("http", "https"):
         return False
     host = (parsed.hostname or "").lower()
-    if not (len(host) > len(".ts.net") and host.endswith(".ts.net")):
+    if not host:
         return False
-    self_host = _self_magicdns_hostname()
-    return bool(self_host and host == self_host)
+    if len(host) > len(".ts.net") and host.endswith(".ts.net"):
+        self_host, _ = _self_tailscale_identity()
+        return bool(self_host and host == self_host)
+    try:
+        canonical_ip = str(ipaddress.ip_address(host))
+    except ValueError:
+        return False
+    _, self_ips = _self_tailscale_identity()
+    return canonical_ip in self_ips
 
 
 def _browser_origin_allowed(origin: str, request: Request) -> bool:
     """ローカル起動時のブラウザ CSRF 防止用の Origin 照合。
 
-    ``allowed_browser_origins()`` と Tailscale MagicDNS (``*.ts.net``) に加え、
-    リクエスト自身の ``Host`` と一致する同一オリジン (例: FastAPI ``/docs``) を許可する。
+    ``allowed_browser_origins()`` と自端末の Tailscale (MagicDNS ``*.ts.net`` /
+    Tailscale IP) に加え、リクエスト自身の ``Host`` と一致する同一オリジン
+    (例: FastAPI ``/docs``) を許可する。
     """
     normalized = origin.strip().rstrip("/")
     if not normalized:
         return False
     if normalized in allowed_browser_origins():
         return True
-    if _is_magicdns_origin(normalized):
+    if _is_tailscale_origin(normalized):
         return True
     host_header = request.headers.get("host", "").strip()
     if host_header:
