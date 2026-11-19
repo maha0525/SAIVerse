@@ -16,8 +16,8 @@
 |---|---|---|
 | 上部のお知らせのバナー (`SystemAlertBanner`、`GET /api/system/alerts`、`manager.startup_alerts`) | 起動時の処理で作られる知らせ。アドオンの環境が壊れている、旧ログが読めない、といった続いている状態のほか、「記憶の移行が済みました」のような一回きりの出来事も載る。動作中に中身を差し替える箇所もある (`saiverse/system_notice_review.py`) | 閉じると、その起動のあいだは閉じたまま (閉じた記録はメモリにだけ置く)。次の起動で作り直される |
 | 上部のモデル設定の警告のバナー (`startupWarningBanner`、`GET /api/config/startup-warnings`) | ペルソナが話せないモデル設定の警告 ([persona_model_selection.md](persona_model_selection.md) の決まったこと 8) | ページを開くたびに今の設定から作る |
-| 右下の数秒で消える知らせ (`frontend/src/app/page.tsx` の `toasts`) | 画面の操作の結果 (「更新が終わりました」、更新の開始の失敗など)。**サーバーからの警告も来ている** — 「記憶の保存に失敗しました。会話内容が記録されていない可能性があります。」(`memorize_failed`、`sea/runtime_llm.py:1548`・`sea/runtime_engine.py:447`・`:607`)、記憶の整理を見送った知らせ (`chronicle_skipped`、`sea/session_lifecycle.py:6489`)、許可の確認が時間切れになった知らせ (`permission_timeout`、`sea/runtime.py:1340`) | 5・8・15 秒で消える。サーバーからの警告は、チャットの返事を少しずつ送る通信 (1 行ずつデータを送る NDJSON 形式) で届くので、そのとき画面を見ていた人にしか届かない |
-| チャット欄の警告 (`isWarning`) | 上のチャットの返事の通信で届く警告のうち、右下に出さないもの | 次の操作で消える (`clearTransientNotices`) |
+| 右下の数秒で消える知らせ (`frontend/src/app/page.tsx` の `toasts`) | 画面の操作の結果 (「更新が終わりました」、更新の開始の失敗など)。**サーバーからの警告も来ている** — 「記憶の保存に失敗しました。会話内容が記録されていない可能性があります。」(`memorize_failed`、`sea/runtime_llm.py:1548`・`sea/runtime_engine.py:447`・`:607`)、記憶の整理を見送った知らせ (`chronicle_skipped`、`sea/session_lifecycle.py:6489`)、許可の確認が時間切れになった知らせ (`permission_timeout`、`sea/runtime.py:1340`) | 5・8・15 秒で消える。サーバーからの警告は、チャットの返事のストリーミング (NDJSON) で届くので、そのとき画面を見ていた人にしか届かない |
+| チャット欄の警告 (`isWarning`) | チャットの返事のストリーミングで届く警告のうち、右下に出さないもの | 次の操作で消える (`clearTransientNotices`) |
 | チャット欄のエラー表示 | 返事が失敗したときの案内 (再送ボタンへの案内つき) | 次の操作で消える |
 | お知らせのベル (`/api/system/announcements`) | 配布元が出すお知らせ | ユーザーが既読にする |
 
@@ -79,7 +79,7 @@
   - [building_memory_unified.md](building_memory_unified.md) には「`addon_events` SSE は別目的で、汎用的なクライアントへの push 基盤は別の設計書で扱う」と書かれている (ここでの SSE・push 基盤は、この節で言う常時接続と同じ仕組みを指す)。この設計書が、その「別の設計書」にあたる。あちらの文と、`saiverse/addon_events.py` の説明書き (アドオン専用と書かれている) と、`docs/overview/landscape.md` を同じ変更で直す。
 - **API**: `GET /api/system/runtime-alerts` (閉じていない知らせの一覧) と `POST /api/system/runtime-alerts/{id}/dismiss` (閉じる) を `api/routes/system.py` に足す。API と DB の定義を足したら、自動生成のリファレンス (`docs/reference/api-endpoints.md`・`docs/reference/database-schema.md`) を作り直す (`gen_reference_docs.bat`)。
 - **画面**: `frontend/src/app/page.tsx` の右下の通知の表示エリア (`toastContainer`) に、閉じるまで残る知らせを並べる。数秒で消える知らせと違い、見出し・重要度・回数と最後の時刻・閉じるボタンを持つ。ダークモードとライトモードの両方の色を用意する。
-- **今の 5 秒で消えるサーバーの警告の移し替え**: `memorize_failed`・`chronicle_skipped`・`permission_timeout` を送っている箇所 (上の表) は、チャットの返事の通信 (NDJSON) に `{"type": "warning", "display": "toast"}` を載せるのをやめて、`post_runtime_alert` を呼ぶ形に変える。画面の側で `display === 'toast'` を 5 秒で消える知らせにしている分岐 (`frontend/src/app/page.tsx` の 2843-2849 行付近) は、送り手がいなくなるので消す。
+- **今の 5 秒で消えるサーバーの警告の移し替え**: `memorize_failed`・`chronicle_skipped`・`permission_timeout` を送っている箇所 (上の表) は、チャットの返事のストリーミング (NDJSON) に `{"type": "warning", "display": "toast"}` を載せるのをやめて、`post_runtime_alert` を呼ぶ形に変える。画面の側で `display === 'toast'` を 5 秒で消える知らせにしている分岐 (`frontend/src/app/page.tsx` の 2843-2849 行付近) は、送り手がいなくなるので消す。
 
 ### 上部のお知らせのバナーの仕組みを広げない理由
 
