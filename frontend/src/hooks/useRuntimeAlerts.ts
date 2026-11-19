@@ -51,6 +51,9 @@ export function useRuntimeAlerts(backendConnected: boolean) {
     // 取り直しごとに別の番号を振る (同じ瞬間に始まった二つを一つに潰さない)。
     const inflightStartsRef = useRef<Map<number, number>>(new Map());
     const refetchIdRef = useRef(0);
+    // 画面に出した一覧のうち、いちばん新しく始まった取り直しの番号。これより前に
+    // 始まった取り直しの結果が遅れて届いても、新しい一覧を古い一覧で上書きしない。
+    const committedRefetchIdRef = useRef(0);
     const recentEventsRef = useRef<{ seq: number; event: RuntimeAlertEvent }[]>([]);
 
     const remember = useCallback((event: RuntimeAlertEvent) => {
@@ -73,6 +76,8 @@ export function useRuntimeAlerts(backendConnected: boolean) {
             if (!res.ok) return;
             const data = await res.json();
             const fetched: RuntimeAlert[] = Array.isArray(data?.alerts) ? data.alerts : [];
+            if (refetchId < committedRefetchIdRef.current) return;
+            committedRefetchIdRef.current = refetchId;
             const later = recentEventsRef.current.filter(e => e.seq > startedAt);
             const dismissedIds = dismissedIdsRef.current;
             setAlerts(later.reduce(
@@ -113,12 +118,15 @@ export function useRuntimeAlerts(backendConnected: boolean) {
             if (!res.ok && res.status !== 404) {
                 console.warn('[runtime-alerts] dismiss failed', res.status);
                 // 閉じられていないので「閉じた」の記録を外し、一覧から戻す。
+                // 走っている取り直しが重ね直さないよう、覚えた分からも消す。
                 dismissedIdsRef.current.delete(id);
+                recentEventsRef.current = recentEventsRef.current.filter(e => e.event !== closed);
                 refetch();
             }
         } catch (error) {
             console.warn('[runtime-alerts] dismiss failed', error);
             dismissedIdsRef.current.delete(id);
+            recentEventsRef.current = recentEventsRef.current.filter(e => e.event !== closed);
             refetch();
         }
     }, [refetch, remember]);
