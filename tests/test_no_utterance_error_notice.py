@@ -762,3 +762,46 @@ def test_a_direct_external_event_that_ran_writes_nothing_from_the_dispatcher():
         assert dispatcher.dispatch_phenomenon_event("eris", "room", "event") is True
 
     assert _host_rows(persona) == []
+
+
+def test_schedule_exhaustion_retries_the_notice_when_writing_it_failed():
+    """行を書けなかった回は「出した」印を外し、拾い直したときにもう一度試す
+    (Codex 2 巡目 — 一時的な書き込みの失敗で知らせを永久に失わない)。"""
+    from saiverse.schedule_manager import (
+        DISPATCH_DETAIL_GATE_CLOSED,
+        SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+        ScheduleManager,
+    )
+
+    _controller, manager, persona = _world()
+    manager.event_scheduler = MagicMock()
+    sm = ScheduleManager(manager)
+    schedule = _schedule()
+    with patch(
+        "sea.no_utterance_notice.record_no_utterance_notice", side_effect=[False, True],
+    ) as record:
+        for _ in range(3):
+            sm._retry_or_give_up(
+                schedule, None, "tok", "occ1", 0, SCHEDULE_DISPATCH_MAX_ATTEMPTS,
+                DISPATCH_DETAIL_GATE_CLOSED,
+            )
+    # 1 回目は失敗 → 2 回目で書けた → 3 回目は出さない
+    assert record.call_count == 2
+
+
+def test_recovered_response_retries_the_notice_when_writing_it_failed():
+    from saiverse import autonomy_wiring
+    from saiverse.schedule_manager import DISPATCH_DETAIL_GATE_CLOSED
+
+    _controller, manager, _persona = _world()
+    autonomy_wiring._RECOVERED_GIVEN_UP_REPORTED.clear()
+    failure = {"cause": DISPATCH_DETAIL_GATE_CLOSED, "building_id": "room"}
+    with patch(
+        "sea.no_utterance_notice.record_no_utterance_notice", side_effect=[False, True],
+    ) as record:
+        for _ in range(3):
+            autonomy_wiring._report_recovered_response_given_up(
+                manager, "eris", "exec-1", failure,
+            )
+    assert record.call_count == 2
+    autonomy_wiring._RECOVERED_GIVEN_UP_REPORTED.clear()

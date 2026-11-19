@@ -958,6 +958,7 @@ class ScheduleManager:
         ほかの理由 (受付前の例外など) は従来どおりログだけ。同じ occurrence に
         二度は出さない (``_given_up_reported``)。知らせの失敗で精算を止めない。
         """
+        claimed = False
         try:
             report_key = (occurrence_key, detail)
             if detail not in (
@@ -969,8 +970,10 @@ class ScheduleManager:
                 if report_key in self._given_up_reported:
                     return
                 self._given_up_reported.add(report_key)
+            claimed = True
+            written = False
             if detail in (DISPATCH_DETAIL_GATE_CLOSED, DISPATCH_DETAIL_FLOOR_UNMET):
-                self._record_given_up_in_room(schedule, detail)
+                written = self._record_given_up_in_room(schedule, detail)
             elif detail in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
                 from sea.no_utterance_notice import (
                     CAUSE_NO_LOCATION,
@@ -983,7 +986,7 @@ class ScheduleManager:
                     CAUSE_PERSONA_NOT_FOUND
                     if detail == DISPATCH_DETAIL_PERSONA_NOT_FOUND else CAUSE_NO_LOCATION
                 )
-                post_unrunnable_alert(
+                written = post_unrunnable_alert(
                     "schedule", schedule.SCHEDULE_ID, cause,
                     persona=persona_label(self.manager, schedule.PERSONA_ID),
                     schedule=schedule.DESCRIPTION or f"#{schedule.SCHEDULE_ID}",
@@ -993,14 +996,24 @@ class ScheduleManager:
                         "occurrence": occurrence_key,
                     },
                 )
+            if not written:
+                # 書けなかった回は印を外す — reconciliation が同じ occurrence を拾い
+                # 直したときに、もう一度知らせを試せるように。
+                self._release_given_up_claim(report_key)
         except Exception:
+            if claimed:
+                self._release_given_up_claim((occurrence_key, detail))
             LOGGER.exception(
                 "[ScheduleManager] could not report the given-up occurrence %s",
                 occurrence_key,
             )
 
-    def _record_given_up_in_room(self, schedule: PersonaSchedule, detail: str) -> None:
-        """実行を始められずに諦めた回を、ペルソナの今の部屋の記録へ一行置く。"""
+    def _release_given_up_claim(self, report_key: tuple) -> None:
+        with self._given_up_reported_lock:
+            self._given_up_reported.discard(report_key)
+
+    def _record_given_up_in_room(self, schedule: PersonaSchedule, detail: str) -> bool:
+        """実行を始められずに諦めた回を、ペルソナの今の部屋の記録へ一行置く。置けたら True。"""
         from api.ui_messages import ui_message
         from sea.no_utterance_notice import (
             CODE_BEAT_GATE_CLOSED,
@@ -1016,7 +1029,9 @@ class ScheduleManager:
                 "[ScheduleManager] schedule %d gave up (%s) but persona %s has no "
                 "room to record it in", schedule.SCHEDULE_ID, detail, schedule.PERSONA_ID,
             )
-            return
+            # 部屋が無いのは書き込みの一時的な失敗ではないので、やり直しても同じ。
+            # 二度目を試さないよう「出した」扱いにする。
+            return True
         if detail == DISPATCH_DETAIL_GATE_CLOSED:
             failure = failure_detail(
                 CODE_BEAT_GATE_CLOSED,
@@ -1029,7 +1044,7 @@ class ScheduleManager:
                 message=ui_message("api.noUtterance.floorUnmetRetriesExhausted"),
                 technical_detail=detail,
             )
-        record_no_utterance_notice(self.manager, persona, building_id, detail=failure)
+        return record_no_utterance_notice(self.manager, persona, building_id, detail=failure)
 
     # ------------------------------------------------------------------
     # スケジュール実行 (旧実装からほぼそのまま引き継ぎ)

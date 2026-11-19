@@ -246,7 +246,7 @@ def post_unrunnable_alert(
     persona: str,
     schedule: Optional[str] = None,
     details: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> bool:
     """書く部屋が決まらず、ペルソナを動かせなかったことを画面右下に知らせる。
 
     ``scope`` は ``"schedule"`` / ``"event"`` / ``"conversation"``。識別キーは
@@ -254,13 +254,13 @@ def post_unrunnable_alert(
     「何が・どの対象で・どんな原因で」)。同じキーでまだ閉じていない知らせは一枚に
     まとまり、回数が増える。呼ぶ側は、諦めた一回につき一度だけ呼ぶ。
 
-    知らせの失敗で呼び出し元を止めない (例外を投げない)。
+    知らせの失敗で呼び出し元を止めない (例外を投げない)。保存できたら True。
     """
     title_key = _UNRUNNABLE_TITLES.get(scope)
     message_key = _UNRUNNABLE_MESSAGES.get((scope, cause))
     if title_key is None or message_key is None:
         LOGGER.error("[no_utterance] unknown unrunnable alert (scope=%s cause=%s)", scope, cause)
-        return
+        return False
     try:
         from api.ui_messages import ui_message
         from saiverse.runtime_alerts import post_runtime_alert
@@ -268,18 +268,20 @@ def post_unrunnable_alert(
         params: Dict[str, Any] = {"persona": persona}
         if schedule is not None:
             params["schedule"] = schedule
-        post_runtime_alert(
+        stored = post_runtime_alert(
             f"{scope}_unrunnable:{subject_id}:{cause}",
             "error",
             ui_message(title_key),
             ui_message(message_key, **params),
             details=details,
         )
+        return stored is not None
     except Exception:  # noqa: BLE001 — 知らせの失敗で呼び出し元の処理を止めない
         LOGGER.warning(
             "[no_utterance] could not post the unrunnable alert (scope=%s subject=%s cause=%s)",
             scope, subject_id, cause, exc_info=True,
         )
+        return False
 
 
 __all__ = [

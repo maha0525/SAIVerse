@@ -1457,6 +1457,7 @@ def _report_recovered_response_given_up(
     理由が分からない失敗 (dispatcher 不在など) は従来どおりログだけ。
     知らせの失敗で呼び出し元を止めない。
     """
+    claimed_key: Optional[tuple] = None
     try:
         from saiverse.schedule_manager import (
             DISPATCH_DETAIL_FLOOR_UNMET,
@@ -1483,14 +1484,17 @@ def _report_recovered_response_given_up(
             if report_key in _RECOVERED_GIVEN_UP_REPORTED:
                 return
             _RECOVERED_GIVEN_UP_REPORTED.add(report_key)
+        claimed_key = report_key
         if cause in (DISPATCH_DETAIL_PERSONA_NOT_FOUND, DISPATCH_DETAIL_NO_LOCATION):
-            post_unrunnable_alert(
+            written = post_unrunnable_alert(
                 "event", persona_id,
                 CAUSE_PERSONA_NOT_FOUND
                 if cause == DISPATCH_DETAIL_PERSONA_NOT_FOUND else CAUSE_NO_LOCATION,
                 persona=persona_label(manager, persona_id),
                 details={"persona_id": persona_id, "execution_id": execution_id},
             )
+            if not written:
+                _release_recovered_given_up_claim(report_key)
             return
         building_id = (failure or {}).get("building_id")
         personas = getattr(manager, "all_personas", None) or getattr(
@@ -1515,12 +1519,21 @@ def _report_recovered_response_given_up(
             )
         else:
             return
-        record_no_utterance_notice(manager, persona, building_id, detail=detail)
+        if not record_no_utterance_notice(manager, persona, building_id, detail=detail):
+            # 書けなかった回は印を外し、同じ応対がもう一度諦められたときに試せるようにする。
+            _release_recovered_given_up_claim(report_key)
     except Exception:
+        if claimed_key is not None:
+            _release_recovered_given_up_claim(claimed_key)
         LOGGER.exception(
             "[autonomy-wiring] could not report the given-up recovered response "
             "(persona=%s execution=%s)", persona_id, execution_id,
         )
+
+
+def _release_recovered_given_up_claim(report_key: tuple) -> None:
+    with _RECOVERED_GIVEN_UP_LOCK:
+        _RECOVERED_GIVEN_UP_REPORTED.discard(report_key)
 
 
 def _schedule_recovered_response_retry(

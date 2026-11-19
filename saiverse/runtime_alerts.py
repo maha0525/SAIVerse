@@ -199,8 +199,12 @@ def post_runtime_alert(
         return None
 
     now = int(time.time())
-    try:
-        with _upsert_lock:
+    # 保存と配信を同じ鍵の中で行う。鍵の外で配ると、同じ知らせの「更新」と
+    # 「閉じた」が保存した順と逆の順で画面に届き、閉じた知らせが開いている
+    # 画面に戻ってくる。配信 (broadcast_event) は待たずに積むだけなので、
+    # 鍵の中で呼んでも詰まらない。
+    with _upsert_lock:
+        try:
             try:
                 alert = _upsert(factory, key, level, title_json, message_json, details_json, now)
             except Exception as exc:
@@ -211,15 +215,15 @@ def post_runtime_alert(
                 if not isinstance(exc, IntegrityError):
                     raise
                 alert = _upsert(factory, key, level, title_json, message_json, details_json, now)
-    except Exception:  # noqa: BLE001 — 警告の保存の失敗で呼び出し元の処理を止めない
-        LOGGER.error("runtime_alerts: failed to store alert key=%s", key, exc_info=True)
-        return None
+        except Exception:  # noqa: BLE001 — 警告の保存の失敗で呼び出し元の処理を止めない
+            LOGGER.error("runtime_alerts: failed to store alert key=%s", key, exc_info=True)
+            return None
 
-    LOGGER.info(
-        "runtime_alerts: posted key=%s level=%s count=%s id=%s",
-        key, level, alert["count"], alert["id"],
-    )
-    _broadcast({"type": "runtime_alert", "action": "upsert", "alert": alert})
+        LOGGER.info(
+            "runtime_alerts: posted key=%s level=%s count=%s id=%s",
+            key, level, alert["count"], alert["id"],
+        )
+        _broadcast({"type": "runtime_alert", "action": "upsert", "alert": alert})
     return alert
 
 
@@ -277,6 +281,7 @@ def dismiss_runtime_alert(alert_id: int) -> Optional[bool]:
         finally:
             db.close()
 
-    LOGGER.info("runtime_alerts: dismissed id=%s", alert_id)
-    _broadcast({"type": "runtime_alert", "action": "dismiss", "id": alert_id})
+        LOGGER.info("runtime_alerts: dismissed id=%s", alert_id)
+        # 保存と同じ鍵の中で配る (post_runtime_alert と同じ理由)。
+        _broadcast({"type": "runtime_alert", "action": "dismiss", "id": alert_id})
     return True
