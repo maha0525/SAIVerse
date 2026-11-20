@@ -48,6 +48,19 @@ _RELEASE_LIST_PER_PAGE = 50
 _cached_release_list: Optional[list] = None
 _cached_release_list_at: float = 0.0
 
+# How long a failed GitHub request is remembered. Without it, an install that
+# cannot reach GitHub asks again on every call (the announcement check runs
+# each time the tab comes back to the front), and each attempt can wait for
+# the 10 s timeout per address plus an unbounded DNS lookup.
+_FETCH_FAILURE_BACKOFF = 300  # 5 minutes
+_latest_failed_at: float = 0.0
+_release_list_failed_at: float = 0.0
+_announcements_failed_at: float = 0.0
+
+
+def _recently_failed(failed_at: float, now: float) -> bool:
+    return failed_at > 0.0 and (now - failed_at) < _FETCH_FAILURE_BACKOFF
+
 
 def _parse_release_version(value: Optional[str]) -> Optional[Version]:
     """PEP 440 version of a tag / VERSION string (``v`` prefix allowed), or None.
@@ -124,11 +137,13 @@ def _fetch_release_list() -> Optional[list]:
     Returns a list of dicts with tag_name, html_url, name, published_at,
     prerelease and draft, or None on failure. Cached for _CACHE_TTL seconds.
     """
-    global _cached_release_list, _cached_release_list_at
+    global _cached_release_list, _cached_release_list_at, _release_list_failed_at
 
     now = time.time()
     if _cached_release_list is not None and (now - _cached_release_list_at) < _CACHE_TTL:
         return _cached_release_list
+    if _recently_failed(_release_list_failed_at, now):
+        return None
 
     url = (
         f"https://api.github.com/repos/{_GITHUB_REPO}/releases"
@@ -140,9 +155,11 @@ def _fetch_release_list() -> Optional[list]:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError) as exc:
         LOGGER.warning("Failed to fetch the release list from GitHub: %s", exc)
+        _release_list_failed_at = now
         return None
     if not isinstance(data, list):
         LOGGER.warning("GitHub release list has an unexpected shape: %s", type(data).__name__)
+        _release_list_failed_at = now
         return None
     result = [
         {
@@ -188,11 +205,13 @@ def _fetch_latest_release() -> Optional[dict]:
     Returns dict with tag_name, html_url, or None on failure.
     Caches result for _CACHE_TTL seconds.
     """
-    global _cached_latest, _cached_at
+    global _cached_latest, _cached_at, _latest_failed_at
 
     now = time.time()
     if _cached_latest is not None and (now - _cached_at) < _CACHE_TTL:
         return _cached_latest
+    if _recently_failed(_latest_failed_at, now):
+        return None
 
     url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
     req = Request(url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "SAIVerse"})
@@ -210,6 +229,7 @@ def _fetch_latest_release() -> Optional[dict]:
             return result
     except (URLError, OSError, json.JSONDecodeError, KeyError) as exc:
         LOGGER.warning("Failed to fetch latest release from GitHub: %s", exc)
+        _latest_failed_at = now
         return None
 
 
@@ -259,8 +279,14 @@ def _early_access_version_fields(current: str) -> dict:
 
 
 @router.get("/version")
-async def get_version():
+def get_version():
     """Return current version and check for updates.
+
+    A plain ``def`` on purpose: the GitHub request below blocks, and FastAPI
+    runs ``def`` handlers on a worker thread. As ``async def`` it ran on the
+    event loop, and while it waited every other request stalled with it —
+    including the chat stream's 2-second pings, which the chat screen treats
+    as a dead connection after 15 seconds of silence.
 
     ``channel`` / ``branch`` say which release line this checkout is on. On the
     stable channel (main, and any other branch) the check is the unchanged
@@ -318,11 +344,13 @@ def _fetch_announcements() -> Optional[dict]:
     Returns the parsed JSON dict, or None on failure.
     Caches result for _ANNOUNCEMENTS_CACHE_TTL seconds.
     """
-    global _cached_announcements, _cached_announcements_at
+    global _cached_announcements, _cached_announcements_at, _announcements_failed_at
 
     now = time.time()
     if _cached_announcements is not None and (now - _cached_announcements_at) < _ANNOUNCEMENTS_CACHE_TTL:
         return _cached_announcements
+    if _recently_failed(_announcements_failed_at, now):
+        return _cached_announcements  # stale cache if available
 
     # Append timestamp to bypass GitHub CDN cache (max-age=300)
     bust = f"{'&' if '?' in _ANNOUNCEMENTS_GIST_URL else '?'}t={int(now)}"
@@ -335,12 +363,17 @@ def _fetch_announcements() -> Optional[dict]:
             return data
     except (URLError, OSError, json.JSONDecodeError) as exc:
         LOGGER.warning("Failed to fetch announcements from Gist: %s", exc)
+        _announcements_failed_at = now
         return _cached_announcements  # return stale cache if available
 
 
 @router.get("/announcements")
-async def get_announcements():
-    """Return announcements from the configured Gist."""
+def get_announcements():
+    """Return announcements from the configured Gist.
+
+    A plain ``def`` for the same reason as :func:`get_version`: the Gist
+    request blocks and must not run on the event loop.
+    """
     data = _fetch_announcements()
     if data is None:
         return {"announcements": []}
