@@ -1605,14 +1605,36 @@ def run_auto_recall(
         LOGGER.debug("[auto_recall] conn/embedder unavailable; skip (persona=%s)", persona_id)
         return AutoRecallResult(False, None, "", 0, 0, 0, 0)
 
+    # 部分ごとの所要時間 (秒)。どの出口でも _log_timing() で同じ形の INFO ログを
+    # 一行出す (docs/intent/vector_binary_storage.md §6)。実行しなかった部分は 0.0。
+    timing: Dict[str, float] = {
+        "query": 0.0, "entity": 0.0, "keywords": 0.0, "collect": 0.0, "reflex": 0.0,
+    }
+    timing_start = time.perf_counter()
+    rest_started: Optional[float] = None
+
+    def _log_timing() -> None:
+        now = time.perf_counter()
+        rest = now - rest_started if rest_started is not None else 0.0
+        LOGGER.info(
+            "[auto_recall] timing persona=%s total=%.2fs query=%.2fs entity=%.2fs "
+            "keywords=%.2fs collect=%.2fs reflex=%.2fs rest=%.2fs",
+            persona_id, now - timing_start, timing["query"], timing["entity"],
+            timing["keywords"], timing["collect"], timing["reflex"], rest,
+        )
+
+    part_started = time.perf_counter()
     query = build_query(messages)
+    timing["query"] += time.perf_counter() - part_started
 
     threshold = get_similarity_threshold()
     msg_threshold_offset = get_message_threshold_offset()
     sticky_turns = get_sticky_turns()
     topk = get_topk()
 
+    part_started = time.perf_counter()
     context_ids = _context_message_ids(messages)
+    timing["query"] += time.perf_counter() - part_started
     ledger = _get_ledger(persona_id, thread_id)
 
     # 強化が効くのは「ペルソナのスイッチ ON」かつ「反射判断が使える」ときだけ。
@@ -1635,11 +1657,13 @@ def run_auto_recall(
     # --- エンティティトリガー経路 (決定論・埋め込み検索と並行) ---
     accepted_keys: set = set()
     accepted_count = 0
+    part_started = time.perf_counter()
     try:
         entity_hits = _find_entity_triggers(conn, messages)
     except Exception:
         LOGGER.warning("[auto_recall] entity trigger raised (persona=%s)", persona_id, exc_info=True)
         entity_hits = []
+    timing["entity"] += time.perf_counter() - part_started
 
     excluded_keys: set = (
         {(str(k[0]), str(k[1])) for k in exclude_keys} if exclude_keys else set()
@@ -1712,7 +1736,9 @@ def run_auto_recall(
         hits = []
     else:
         if reflex_enabled:
+            part_started = time.perf_counter()
             keywords = _extract_recall_keywords(conn, query, observations=observations)
+            timing["keywords"] += time.perf_counter() - part_started
             enhanced_kwargs = {
                 # 抽出できなかったターンは None = 従来の split 挙動に戻す。
                 "keywords": keywords or None,
@@ -1722,7 +1748,9 @@ def run_auto_recall(
                 "exclude_message_ids": context_ids,
                 "source_allocations": _ENHANCED_SOURCE_ALLOCATIONS,
             }
+        part_started = time.perf_counter()
         collected = _collect(enhanced_kwargs)
+        timing["collect"] += time.perf_counter() - part_started
         hits = collected if collected is not None else []
 
     # --- 反射判断による選別 (オプション、既定 OFF) ---
@@ -1732,11 +1760,13 @@ def run_auto_recall(
     # 「時間内に答えなかったせいで従来方式へ戻った」ターンの印 (画面の注記用)。
     reflex_deadline_fallback = False
     if reflex_enabled:
+        part_started = time.perf_counter()
         reflex_decisions, reflex_deadline_fallback = _run_reflex_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
             observations=observations, reflex_model_key=reflex_model_key,
         )
+        timing["reflex"] += time.perf_counter() - part_started
         if reflex_decisions is None and enhanced_kwargs:
             # 判定が使えなかったターンは、候補集めからやり直して従来の形に戻す。
             # 広げた母集団のまま cosine の選別に掛けると、従来経路では拾わない記憶が
@@ -1746,7 +1776,9 @@ def run_auto_recall(
                 "[auto_recall][reflex] the judgment was unavailable this turn; "
                 "re-collecting candidates the conventional way (persona=%s)", persona_id,
             )
+            part_started = time.perf_counter()
             recollected = _collect({})
+            timing["collect"] += time.perf_counter() - part_started
             if recollected is not None:
                 hits = recollected
             else:
@@ -1759,6 +1791,8 @@ def run_auto_recall(
                 )
 
     # --- 選別: しきい値を満たすヒットを台帳に反映 ---
+    # ここから出口までが timing の rest (台帳への反映と注入する文の組み立て)。
+    rest_started = time.perf_counter()
     for hit in hits:
         key = (hit.source_type, str(hit.source_id))
         # エンティティトリガーで既に採用済みなら埋め込み側は重複処理しない。
@@ -1854,6 +1888,7 @@ def run_auto_recall(
         LOGGER.debug("[auto_recall] ledger empty after update; no injection (persona=%s)", persona_id)
         # 注入が無いターンでも旗は持ち帰る — 判定が時間切れになった事実は、記憶が
         # 一つも浮かばなかったかどうかとは関係が無い (費用は同じく発生している)。
+        _log_timing()
         return AutoRecallResult(
             False, None, query, len(hits), accepted_count, 0, 0,
             reflex_deadline_fallback=reflex_deadline_fallback,
@@ -1886,6 +1921,7 @@ def run_auto_recall(
                 "[auto_recall] no newly surfaced memory this turn; no injection "
                 "(persona=%s, new_only)", persona_id,
             )
+            _log_timing()
             return AutoRecallResult(
                 False, None, query, len(hits), accepted_count, len(ledger.items), 0,
                 reflex_deadline_fallback=reflex_deadline_fallback,
@@ -1952,6 +1988,7 @@ def run_auto_recall(
         query[:60],
     )
 
+    _log_timing()
     return AutoRecallResult(
         injected=True,
         block=block,

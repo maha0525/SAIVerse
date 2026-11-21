@@ -1366,6 +1366,14 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
     messages: List[Dict[str, Any]] = []
 
+    # 段階ごとの所要時間 (秒)。実行しなかった段階は 0.0 のまま関数の終わりの
+    # INFO ログに出す (docs/intent/vector_binary_storage.md §6)。
+    timing_start = time.perf_counter()
+    head_elapsed = 0.0
+    history_elapsed = 0.0
+    realtime_elapsed = 0.0
+    auto_recall_elapsed = 0.0
+
     # ---- head: system prompt + Memory Weave + 自分の外見とインベントリ (self_view) ----
     # Cached Head Architecture (Phase 2-h) で section pipeline 経由に統一済み。
     # 旧 live state 直読み経路 (= section 群を毎回ここで組み立てる) は廃止。
@@ -1378,11 +1386,13 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         from sea.head_pipeline import render_head_messages
         from sea.head_pipeline.types import HeadNotReadyError
         try:
+            head_started = time.perf_counter()
             head_messages = render_head_messages(
                 persona, runtime.manager, building_id,
                 enabled_sections=enabled_sections,
                 model_key=model_key,
             )
+            head_elapsed = time.perf_counter() - head_started
             if head_messages:
                 messages.extend(head_messages)
                 LOGGER.debug(
@@ -1410,12 +1420,14 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # 組み立ては _append_history (ターンの最初の送信の前に記録から読み直す
     # reread_recorded_history と同じ一枚)。
     history_start = len(messages)
+    history_started = time.perf_counter()
     history_built = _append_history(
         runtime, persona, building_id, reqs, messages,
         pulse_id=pulse_id, preview_only=preview_only, model_key=model_key,
         context_meta=context_meta, persist_anchor_advance=persist_anchor_advance,
         pinned_anchor_id=pinned_anchor_id, pulse_type=pulse_type,
     )
+    history_elapsed = time.perf_counter() - history_started
     history_region = list(messages[history_start:])
 
     # ---- Recalled Memory Context — 廃止済み ----
@@ -1467,8 +1479,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # This ensures LLM responds to user input, not the realtime context.
     # (残すモデルでは差し込まずに取っておき、下で自動想起とまとめて一番後ろに置く。)
     if reqs.realtime_context:
+        realtime_started = time.perf_counter()
         try:
             realtime_msg = runtime._build_realtime_context(persona, building_id, messages)
+            realtime_elapsed = time.perf_counter() - realtime_started
             if realtime_msg and persist_mode:
                 persist_realtime_msg = realtime_msg
             elif realtime_msg:
@@ -1485,6 +1499,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                     messages.append(realtime_msg)
                     LOGGER.debug("[sea][prepare-context] Added realtime context at end (no user message found)")
         except Exception as exc:
+            if not realtime_elapsed:
+                # _build_realtime_context 自体が失敗した場合も、そこまでの時間を出す。
+                realtime_elapsed = time.perf_counter() - realtime_started
             LOGGER.debug("[sea][prepare-context] Failed to build realtime context: %s", exc)
 
     # ---- 自動想起 第0層 (ゾーン C) — 「浮かんだ記憶」の末尾注入 ----
@@ -1496,6 +1513,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
     recall_result = None
     if not preview_only:
+        auto_recall_started = time.perf_counter()
         try:
             recall_result = _maybe_inject_auto_recall(
                 runtime, persona, messages,
@@ -1505,6 +1523,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             )
         except Exception:
             LOGGER.exception("[sea][prepare-context] auto_recall injection failed (non-fatal)")
+        auto_recall_elapsed = time.perf_counter() - auto_recall_started
 
     # ---- 残すモデル: そのターンのリアルタイム情報と自動想起を一番後ろへ ----
     # 位置は最新の発言と、そのターンの知覚のまとめの後ろ。次のターンにこの
@@ -1535,6 +1554,20 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         # attachment_limit_is_off で読む。組んだときのモデルの判定に従う (§3) —
         # 子が写す列 (line='sub') にも、スペルの繰り返しで後ろに積む列にも残る。
         mark_attachment_limit_off(messages)
+
+    # ---- 所要時間のログ (画面のプレビューでは出さない) ----
+    if not preview_only:
+        LOGGER.info(
+            "[sea][prepare-context] timing persona=%s total=%.2fs head=%.2fs "
+            "history=%.2fs realtime=%.2fs auto_recall=%.2fs messages=%d",
+            getattr(persona, "persona_id", None),
+            time.perf_counter() - timing_start,
+            head_elapsed,
+            history_elapsed,
+            realtime_elapsed,
+            auto_recall_elapsed,
+            len(messages),
+        )
 
     # ---- Token budget check ----
     return messages
