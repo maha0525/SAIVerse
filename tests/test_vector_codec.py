@@ -130,7 +130,7 @@ def test_score_vector_rows_scores_rows_and_counts_the_others():
     ]
     got = score_vector_rows(iter(rows), [1.0, 1.0])
     assert got.rows == [("a",), ("b",), ("zero",)]
-    assert got.scores.dtype == np.float32
+    assert got.scores.dtype == np.float64
     assert got.scores.shape == (3,)
     inv_sqrt2 = np.float32(1.0 / np.sqrt(2.0))
     assert np.allclose(got.scores, [inv_sqrt2, inv_sqrt2, 0.0], atol=1e-7)
@@ -143,7 +143,7 @@ def test_score_vector_rows_scores_rows_and_counts_the_others():
 def test_score_vector_rows_zero_query_scores_zero():
     rows = [(encode_vector([1.0, 2.0]), "a"), (encode_vector([3.0, 4.0]), "b")]
     got = score_vector_rows(iter(rows), [0.0, 0.0])
-    assert np.array_equal(got.scores, np.zeros(2, dtype=np.float32))
+    assert np.array_equal(got.scores, np.zeros(2, dtype=np.float64))
 
 
 def _mixed_rows(n_good: int, rng):
@@ -196,7 +196,7 @@ def test_score_vector_rows_across_block_boundaries_matches_one_matrix(n_good):
     got = score_vector_rows(iter(rows), query, block_rows=7)
 
     assert got.rows == expected_rows  # カーソルの順番のまま
-    assert got.scores.dtype == np.float32
+    assert got.scores.dtype == np.float64
     assert got.scores.shape == (n_good,)
     whole = np.array(good_vecs, dtype=np.float32).reshape(n_good, DIM)
     expected = cosine_scores(whole, query)
@@ -681,6 +681,14 @@ def _score_before_the_byte_format(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 
+def _score_before_the_byte_format_in_recall(a: np.ndarray, b: np.ndarray) -> float:
+    """バイト列形式にする前の semantic_recall の一行ぶんの計算 (recall.py の _cosine_sim)。"""
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
 def test_cosine_scores_equal_the_scores_before_the_byte_format():
     """類似度は、バイト列形式にする前の一行ずつの計算と完全に同じ値になる。
 
@@ -727,3 +735,23 @@ def test_cosine_scores_equal_the_scores_before_the_byte_format():
         np.argsort(-whole.astype(np.float64), kind="stable"),
         np.argsort(-expected, kind="stable"),
     )
+
+    # semantic_recall / semantic_recall_groups の変更前の計算 (分母を Python の
+    # float にしない) とも、完全に同じ値になる。
+    expected_recall = np.array(
+        [
+            _score_before_the_byte_format_in_recall(
+                query, np.array(vecs[i].tolist(), dtype=np.float32),
+            )
+            for i in range(n)
+        ],
+        dtype=np.float64,
+    )
+    assert np.array_equal(
+        cosine_scores(vecs, query, float_denominator=False), expected_recall,
+    )
+    got = score_vector_rows(
+        ((encode_vector(vecs[i]), i) for i in range(n)), query,
+        block_rows=7, float_denominator=False,
+    )
+    assert np.array_equal(got.scores, expected_recall)

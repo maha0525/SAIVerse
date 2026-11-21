@@ -1056,7 +1056,9 @@ def score_embeddings_for_scope(
         sql = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
         cur = conn.execute(sql, tuple(params))
 
-    out = score_vector_rows(cur, query)
+    # semantic_recall / semantic_recall_groups divided by a NumPy float32
+    # scalar before the byte format (vector_codec.cosine_scores).
+    out = score_vector_rows(cur, query, float_denominator=False)
     out.rows = [
         (mid, int(chunk_index) if chunk_index is not None else 0)
         for mid, chunk_index in out.rows

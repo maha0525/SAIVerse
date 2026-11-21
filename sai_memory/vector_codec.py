@@ -121,7 +121,7 @@ class ScoredVectorRows:
     """
 
     rows: List[Tuple[Any, ...]]
-    scores: np.ndarray  # float32, shape (len(rows),)
+    scores: np.ndarray  # float64, shape (len(rows),)
     # (other columns, stored dim) of byte-format rows whose dim is not the
     # query's.
     mismatched: List[Tuple[Tuple[Any, ...], int]] = field(default_factory=list)
@@ -141,6 +141,7 @@ def score_vector_rows(
     query: Any,
     *,
     block_rows: int = DEFAULT_BLOCK_ROWS,
+    float_denominator: bool = True,
 ) -> ScoredVectorRows:
     """Read rows ``(vector, *other columns)`` and score each against ``query``.
 
@@ -149,8 +150,9 @@ def score_vector_rows(
     vectors are put into one float32 array of ``block_rows`` rows, which is
     scored and reused for the next rows when it is full. So the vectors of
     every row are never held at once: besides that one array, only the other
-    columns and one float32 score per row are kept, whatever the number of
-    rows.
+    columns and one score per row are kept, whatever the number of rows.
+    ``float_denominator`` is passed to :func:`cosine_scores` (which of the two
+    pre-change divisions to use).
     """
     # storage imports this module at load time, so its constant is read here.
     from sai_memory.memory.storage import DEFERRED_VECTOR
@@ -182,12 +184,12 @@ def score_vector_rows(
         rows.append(other)
         n += 1
         if n == block_rows:
-            score_parts.append(cosine_scores(block, q))
+            score_parts.append(cosine_scores(block, q, float_denominator=float_denominator))
             n = 0
     if n:
-        score_parts.append(cosine_scores(block[:n], q))
+        score_parts.append(cosine_scores(block[:n], q, float_denominator=float_denominator))
     scores = (
-        np.concatenate(score_parts) if score_parts else np.zeros(0, dtype=np.float32)
+        np.concatenate(score_parts) if score_parts else np.zeros(0, dtype=np.float64)
     )
     return ScoredVectorRows(
         rows=rows,
@@ -198,8 +200,13 @@ def score_vector_rows(
     )
 
 
-def cosine_scores(matrix: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Cosine similarity of every row of ``matrix`` with ``query`` (float32).
+def cosine_scores(
+    matrix: np.ndarray,
+    query: np.ndarray,
+    *,
+    float_denominator: bool = True,
+) -> np.ndarray:
+    """Cosine similarity of every row of ``matrix`` with ``query`` (float64 array).
 
     Each row is scored on its own, with the operations the search used before
     the byte format (``np.dot`` and ``np.linalg.norm`` on two 1-D float32
@@ -208,14 +215,30 @@ def cosine_scores(matrix: np.ndarray, query: np.ndarray) -> np.ndarray:
     matrix product over all rows rounds differently (differences around 1e-8),
     which is enough to swap two nearly tied memories.
 
+    The two searches divided differently before the byte format, and both
+    forms are kept so that neither changes:
+
+    - ``float_denominator=True`` (``unified_recall``): the denominator is made
+      a Python float first, ``np.dot(q, v) / float(norm(q) * norm(v))``.
+    - ``float_denominator=False`` (``semantic_recall`` /
+      ``semantic_recall_groups``): the denominator stays a NumPy float32
+      scalar, ``np.dot(q, v) / (norm(q) * norm(v))``.
+
+    NumPy 2 gives the same float32 quotient for both. NumPy 1.x gives a
+    float64 quotient for the first form (a float32 scalar divided by a Python
+    float) and a float32 quotient for the second. The scores are returned as
+    float64 so that either quotient is kept exactly.
+
     A row or query whose norm is 0 scores 0.0.
     """
     q = np.asarray(query, dtype=np.float32).reshape(-1)
-    out = np.zeros(matrix.shape[0], dtype=np.float32)
+    out = np.zeros(matrix.shape[0], dtype=np.float64)
     q_norm = np.linalg.norm(q)
     for i in range(matrix.shape[0]):
         row = matrix[i]
-        denom = float(q_norm * np.linalg.norm(row))
+        denom = q_norm * np.linalg.norm(row)
+        if float_denominator:
+            denom = float(denom)
         if denom == 0:
             continue
         out[i] = float(np.dot(q, row) / denom)
