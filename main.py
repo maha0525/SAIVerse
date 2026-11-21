@@ -589,6 +589,19 @@ def main():
         from saiverse.addon_events import set_event_loop
 
         set_event_loop(asyncio.get_running_loop())
+
+        # イベントループが 5 秒以上止まったら、各スレッドの実行位置を
+        # timeout_diagnostics.log に残す監視スレッド (docs/intent/backend_stall_handling.md)。
+        from saiverse.loop_stall_watch import start_loop_stall_watch
+
+        # 監視スレッドが始められなくても、バックエンドの起動は止めない。
+        try:
+            start_loop_stall_watch(asyncio.get_running_loop())
+            logging.info(
+                "Event loop stall watch started (stalls over 5 s are recorded in timeout_diagnostics.log)"
+            )
+        except Exception:
+            logging.exception("Failed to start the event loop stall watch")
         yield
         # 終了処理はここに書かない。上の shutdown_everything (atexit / SIGTERM) が
         # 唯一の終了経路で、二本目を作ると順序が絡む (発言生成の後始末 → MCP →
@@ -677,6 +690,14 @@ def main():
     # attaches its own stderr-only handlers with propagate=False, and the
     # "Exception in ASGI application" tracebacks for 500 errors never reach
     # backend.log (see docs/issues/uvicorn_traceback_not_in_logs.md).
+    #
+    # timeout_keep_alive=3600: uvicorn は既定で、5 秒使われなかった接続を閉じる。
+    # Next.js の中継 (rewrites) はバックエンドへの接続を閉じずに再利用するので、
+    # イベントループが遅れている最中は、中継がリクエストを送った直後の接続を
+    # uvicorn が読まないまま閉じることがあり、リクエストが失われて画面に 500 が
+    # 出ていた。期限を 1 時間に延ばして、使われている接続の期限が切れないようにする。
+    # 1 時間は、相手が消えた接続を手放すための上限で、frontend/next.config.ts の
+    # proxyTimeout と同じ考え方 (docs/intent/backend_stall_handling.md の「仕組み 1」)。
     uvicorn.run(
         app,
         host=listen_host,
@@ -684,6 +705,7 @@ def main():
         log_level="info",
         log_config=None,
         timeout_graceful_shutdown=5,
+        timeout_keep_alive=3600,
     )
 
 

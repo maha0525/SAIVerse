@@ -105,6 +105,9 @@ saiverse/
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
+├── loop_stall_watch.py     # バックエンドのイベントループの遅れを監視するデーモンスレッド。5 秒以上止まったら
+│                           #   各スレッドの実行位置（ファイル・行番号・関数名だけ。変数と行の文面は書かない）を
+│                           #   timeout_diagnostics.log に書く。main.py の _lifespan から始まる（backend_stall_handling.md）
 ├── update_dependencies_alert.py # 起動前のパッケージの入れ直し（update_engine --check-complete）が失敗した
 │                           #   記録を読み、画面のバナー（startup_alerts）に載せる警告にする
 ├── runtime_alerts.py       # 動作中に見つけた、部屋に結びつかない警告を runtime_alerts 表に書き（同じ識別キーは
