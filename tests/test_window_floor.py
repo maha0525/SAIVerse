@@ -527,6 +527,14 @@ def test_preflight_cycle_is_stable_when_a_straddling_fold_alone_exceeds_high(ses
         message_ids=[f"b{i}" for i in range(10)] + ["m0"], chronicle_entry_ids=["e_f"],
     )
     lc.save_folded_ranges(PERSONA_ID, MODEL, [straddling])
+    # 会話中の窓 = 温かい行から始める。圧縮区間の書き込みは「壊れた」申告を
+    # 載せる (提示列が変わるため) ので、準備の最後に温度を立て直す — 冷えた行で
+    # 始めると §14-2 の前進が先に走り、見たい二状態の往復ではなくなる。
+    lc.upsert_anchor_entry(PERSONA_ID, MODEL, {
+        "anchor_id": "m0",
+        "updated_at": datetime.now().replace(microsecond=0).isoformat(),
+        "ttl_seconds": 3600,
+    })
     wm = Watermarks(target=5000, high=8000)
     lc.is_chronicle_enabled_for_persona = lambda p: True
     lc.ensure_recall_embeddings = lambda p: None

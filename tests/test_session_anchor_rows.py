@@ -1282,12 +1282,17 @@ def test_resolve_cold_advance_preserves_live_folds(session_factory, tmp_path):
         persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
     )
     _set_pan_marker(persona, "m6")
+    # 圧縮区間の書き込み自体が「壊れた」申告を載せる (提示列が変わるので) ため、
+    # 行の温度は上で入れた stale より更に過去にある。前進が温度を動かさないことを
+    # 見たいので、比較の相手は前進の直前の実値。
+    before_updated_at = lc.load_anchor_entry(PERSONA_ID, "model-a")["updated_at"]
+    assert stale.isoformat() != before_updated_at
 
     assert lc.resolve_metabolism_anchor(persona) == ("m3", "frontier")
 
     row = lc.load_anchor_entry(PERSONA_ID, "model-a")
     assert row["anchor_id"] == "m3"
-    assert row["updated_at"] == stale.isoformat()  # 温度は据え置き (冷えたまま)
+    assert row["updated_at"] == before_updated_at  # 温度は据え置き (冷えたまま)
     folds = lc.load_folded_ranges(PERSONA_ID, "model-a")
     assert [f.message_ids for f in folds] == [["m2", "m4"], ["m4", "m5"]]
     conn.close()
@@ -1578,6 +1583,10 @@ def test_touch_cas_rejects_stale_anchor_write(session_factory):
     lc.save_folded_ranges(PERSONA_ID, "model-a", [
         FoldedRange(message_ids=["m4", "m5"]),
     ])
+    # 圧縮区間の書き込みは「壊れた」申告を載せる (提示列が変わるため) ので、
+    # 行の温度は stale より更に過去。棄却された touch が温かい行を偽造しない
+    # ことを見たいので、比較の相手は touch の直前の実値。
+    before_updated_at = lc.load_anchor_entry(PERSONA_ID, "model-a")["updated_at"]
     persona = SimpleNamespace(persona_id=PERSONA_ID, model="model-a")
 
     # keepalive が LLM 呼び出し前に読んだ古い anchor (m1) の touch が後から届く
@@ -1586,8 +1595,8 @@ def test_touch_cas_rejects_stale_anchor_write(session_factory):
     )
 
     row = lc.load_anchor_entry(PERSONA_ID, "model-a")
-    assert row["anchor_id"] == "m3"                # 巻き戻らない
-    assert row["updated_at"] == stale.isoformat()  # 温かい行を偽造しない
+    assert row["anchor_id"] == "m3"                 # 巻き戻らない
+    assert row["updated_at"] == before_updated_at   # 温かい行を偽造しない
     folds = lc.load_folded_ranges(PERSONA_ID, "model-a")
     assert [f.message_ids for f in folds] == [["m4", "m5"]]  # fold も無傷
 
@@ -1597,7 +1606,7 @@ def test_touch_cas_rejects_stale_anchor_write(session_factory):
     )
     row = lc.load_anchor_entry(PERSONA_ID, "model-a")
     assert row["anchor_id"] == "m3"
-    assert row["updated_at"] != stale.isoformat()
+    assert row["updated_at"] != before_updated_at
     assert row["ttl_seconds"] == 300
 
 
