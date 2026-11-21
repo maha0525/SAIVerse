@@ -671,3 +671,59 @@ def test_sqlite_keeps_blob_in_text_column(tmp_path):
         assert np.array_equal(decode_vector(value), np.array([1.0, 2.0], dtype=np.float32))
     finally:
         conn.close()
+
+
+def _score_before_the_byte_format(a: np.ndarray, b: np.ndarray) -> float:
+    """バイト列形式にする前の検索が使っていた一行ぶんの計算 (unified_recall の _cosine_sim)。"""
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def test_cosine_scores_equal_the_scores_before_the_byte_format():
+    """類似度は、バイト列形式にする前の一行ずつの計算と完全に同じ値になる。
+
+    行列積でまとめて計算すると 1e-8 ほどの丸めの差が出て、ほぼ同点の記憶の
+    順番が入れ替わる (Codex 3 巡目の指摘)。行ごとに同じ演算をするので、値も
+    順番も変わらない。行が配列のどこにあっても同じ値になることも確かめる。
+    """
+    rng = np.random.default_rng(20261122)
+    dim = 768
+    n = 3000
+    vecs = rng.standard_normal((n, dim)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    # ほぼ同点の行: 同じベクトルに、最後の桁だけ違う揺らぎを足す。
+    base = vecs[0].copy()
+    for k in range(1, 40):
+        vecs[k] = base + rng.standard_normal(dim).astype(np.float32) * np.float32(1e-7)
+    vecs[40] = 0.0  # ノルムが 0 の行
+    query = rng.standard_normal(dim).astype(np.float32)
+
+    # 変更前: JSON から読んだリストを、一行ずつ新しい float32 の配列にしていた。
+    expected = np.array(
+        [
+            _score_before_the_byte_format(query, np.array(vecs[i].tolist(), dtype=np.float32))
+            for i in range(n)
+        ],
+        dtype=np.float64,
+    )
+
+    whole = cosine_scores(vecs, query)
+    assert np.array_equal(whole.astype(np.float64), expected)
+
+    # かたまりに分けても、行の位置が変わっても、同じ値。
+    for block_rows in (1, 7, 4096):
+        got = score_vector_rows(
+            ((encode_vector(vecs[i]), i) for i in range(n)), query, block_rows=block_rows,
+        )
+        assert np.array_equal(got.scores.astype(np.float64), expected)
+        assert [r[0] for r in got.rows] == list(range(n))
+    shifted = cosine_scores(vecs[5:], query)
+    assert np.array_equal(shifted.astype(np.float64), expected[5:])
+
+    # 順番 (同点は先に出た行が先) も変わらない。
+    assert np.array_equal(
+        np.argsort(-whole.astype(np.float64), kind="stable"),
+        np.argsort(-expected, kind="stable"),
+    )

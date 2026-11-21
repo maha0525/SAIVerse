@@ -201,14 +201,22 @@ def score_vector_rows(
 def cosine_scores(matrix: np.ndarray, query: np.ndarray) -> np.ndarray:
     """Cosine similarity of every row of ``matrix`` with ``query`` (float32).
 
-    A row or query whose norm is 0 scores 0.0, as the per-row computation did.
+    Each row is scored on its own, with the operations the search used before
+    the byte format (``np.dot`` and ``np.linalg.norm`` on two 1-D float32
+    arrays). So a row's score is the value that computation gave, and it does
+    not depend on the other rows or on where the row sits in the matrix: a
+    matrix product over all rows rounds differently (differences around 1e-8),
+    which is enough to swap two nearly tied memories.
+
+    A row or query whose norm is 0 scores 0.0.
     """
     q = np.asarray(query, dtype=np.float32).reshape(-1)
-    if matrix.shape[0] == 0:
-        return np.zeros(0, dtype=np.float32)
-    dots = matrix @ q
-    denom = np.linalg.norm(matrix, axis=1) * np.linalg.norm(q)
     out = np.zeros(matrix.shape[0], dtype=np.float32)
-    nonzero = denom != 0
-    out[nonzero] = dots[nonzero] / denom[nonzero]
+    q_norm = np.linalg.norm(q)
+    for i in range(matrix.shape[0]):
+        row = matrix[i]
+        denom = float(q_norm * np.linalg.norm(row))
+        if denom == 0:
+            continue
+        out[i] = float(np.dot(q, row) / denom)
     return out
