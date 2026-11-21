@@ -1605,8 +1605,10 @@ def run_auto_recall(
         LOGGER.debug("[auto_recall] conn/embedder unavailable; skip (persona=%s)", persona_id)
         return AutoRecallResult(False, None, "", 0, 0, 0, 0)
 
-    # 部分ごとの所要時間 (秒)。どの出口でも _log_timing() で同じ形の INFO ログを
-    # 一行出す (docs/intent/vector_binary_storage.md §6)。実行しなかった部分は 0.0。
+    # 部分ごとの所要時間 (秒)。ここから先のどの出口でも _log_timing() で同じ形の
+    # INFO ログを一行出す (docs/intent/vector_binary_storage.md §6)。実行しなかった
+    # 部分は 0.0。上の conn / embedder が無い場合の出口では、自動想起を行って
+    # いないのでログを出さない。
     timing: Dict[str, float] = {
         "query": 0.0, "entity": 0.0, "keywords": 0.0, "collect": 0.0, "reflex": 0.0,
     }
