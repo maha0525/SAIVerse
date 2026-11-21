@@ -213,21 +213,28 @@ def scan_stale_vector_tables(
     the middle of a table, since search skips such a row without a warning.
 
     ``skip_deferred=True`` does not count the empty vector row of a deferred
-    embedding (``storage.DEFERRED_VECTOR``). The startup check counts and
-    reports those rows on their own (``count_deferred_message_embeddings``),
-    so it passes this to keep them out of the "length differs" report.
+    embedding (``storage.DEFERRED_VECTOR``) in ``message_embeddings``. The
+    startup check counts and reports those rows on their own
+    (``count_deferred_message_embeddings``), so it passes this to keep them
+    out of the "length differs" report. Only ``message_embeddings`` holds
+    deferred embeddings; ``'[]'`` in any other table is always counted.
     """
     from sai_memory.memory.storage import DEFERRED_VECTOR
 
-    condition = stale_vector_sql(expected_dim)
-    params: tuple = ()
-    if skip_deferred:
-        condition += " AND NOT (typeof(vector) = 'text' AND vector = ?)"
-        params = (DEFERRED_VECTOR,)
+    stale_condition = stale_vector_sql(expected_dim)
     stale: List[str] = []
     for table in VECTOR_TABLES:
         if not _relation_exists(conn, table):
             continue
+        condition = stale_condition
+        params: tuple = ()
+        # The empty vector row is a deferred embedding only in
+        # message_embeddings, the one table count_deferred_message_embeddings
+        # counts. In the other tables '[]' is a stale value nothing else
+        # reports, so it is never skipped there.
+        if skip_deferred and table == "message_embeddings":
+            condition += " AND NOT (typeof(vector) = 'text' AND vector = ?)"
+            params = (DEFERRED_VECTOR,)
         row = conn.execute(
             f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {condition})", params
         ).fetchone()

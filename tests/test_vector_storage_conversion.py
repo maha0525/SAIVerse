@@ -1285,6 +1285,11 @@ _MIDDLE_VALUES = {
     "length not a multiple of 4": b"\x00" * (EMBED_DIM * 4 - 1),
     "unconvertible JSON": json.dumps([[0.1, 0.2], [0.3, 0.4]]),
     "invalid UTF-8 text": ("sql", "CAST(x'fffe41' AS TEXT)"),
+    # 空のベクトル行の値。message_embeddings では「ベクトルをまだ作っていない」
+    # 印で、件数を別に数えて警告に載せる。ほかの 3 つの表では、ほかに誰も
+    # 数えない検索に使えない値 (Codex 6 巡目: 起動時の検査が 4 表すべてで
+    # この値を飛ばしていて、3 つの表で見逃していた)。
+    "empty vector row": "[]",
 }
 
 #: ``vector`` 列に NULL を入れられる表 (ほかの 3 つは ``NOT NULL``)。
