@@ -1,11 +1,20 @@
-"""アドオンイベントのブロードキャスト管理モジュール。
+"""常設 SSE チャネル (GET /api/addon/events) のブロードキャスト管理モジュール。
 
-チャット応答のSSEとは独立した常設SSEチャネルを提供する。
-拡張パックからは以下のようにインポートして使用する:
+チャット応答の NDJSON ストリームとは独立した、つなぎっぱなしの SSE チャネルを
+提供する。フロントエンドは GET /api/addon/events に EventSource で接続し続ける
+(URL はアドオンが使っているので変えない)。載る知らせは ``type`` で分かれる:
 
-    from saiverse.addon_events import emit_addon_event
+- ``type: "addon_event"`` — アドオンの非同期イベント。拡張パックからは以下のように
+  インポートして使用する::
 
-フロントエンドは GET /api/addon/events に EventSource で接続し続ける。
+      from saiverse.addon_events import emit_addon_event
+
+- ``type: "runtime_alert"`` — サーバーの動作中に見つけた、部屋に結びつかない警告
+  (``saiverse/runtime_alerts.py`` が ``broadcast_event`` で送る。
+  docs/intent/runtime_alerts.md)。
+
+受け手がいない間に送った知らせは保持しない (届かない)。取りこぼしてはいけない
+知らせは、送り手の側で保存して、画面が開いた・繋ぎ直したときに一覧で取らせる。
 """
 from __future__ import annotations
 
@@ -78,7 +87,16 @@ def emit_addon_event(
         "addon_events: emit addon=%s event=%s message_id=%s subscribers=%d",
         addon, event, message_id, len(_subscribers),
     )
+    broadcast_event(payload)
 
+
+def broadcast_event(payload: Dict[str, Any]) -> None:
+    """``payload`` をそのまま全接続クライアントにブロードキャストする。
+
+    ``payload`` には画面側が振り分けに使う ``type`` を必ず入れる。
+    asyncio スレッドからも非asyncioスレッドからも安全に呼べる。受け手が
+    いなければ何もしない。
+    """
     if not _subscribers:
         return
 

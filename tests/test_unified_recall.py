@@ -436,8 +436,8 @@ class TestFragmentVisibilityFollowsPage(unittest.TestCase):
         self.assertNotIn("memopedia", types)
         self.assertNotIn("fragment", types)
         # embedding corpus の取得ゲートも直接固定 (embedding 経路単体の回帰検知)。
-        from sai_memory.unified_recall import get_fragment_embeddings
-        self.assertEqual(get_fragment_embeddings(self.conn), [])
+        from sai_memory.unified_recall import score_fragment_embeddings
+        self.assertEqual(score_fragment_embeddings(self.conn, query=[1.0] * 64).rows, [])
         # embedding 行そのものは保持される (復元で再計算不要)。
         self.assertEqual(count_fragment_embeddings(self.conn), 1)
 
@@ -447,8 +447,8 @@ class TestFragmentVisibilityFollowsPage(unittest.TestCase):
         types = self._source_types(self._hits())
         self.assertIn("memopedia", types)
         self.assertIn("fragment", types)
-        from sai_memory.unified_recall import get_fragment_embeddings
-        self.assertEqual(len(get_fragment_embeddings(self.conn)), 1)
+        from sai_memory.unified_recall import score_fragment_embeddings
+        self.assertEqual(len(score_fragment_embeddings(self.conn, query=[1.0] * 64).rows), 1)
 
     def test_orphan_fragment_excluded_from_recall(self):
         # 親ページ行そのものを物理削除して孤児化 → 通常想起から出ない。
@@ -456,8 +456,8 @@ class TestFragmentVisibilityFollowsPage(unittest.TestCase):
         self.conn.commit()
         types = self._source_types(self._hits())
         self.assertNotIn("fragment", types)
-        from sai_memory.unified_recall import get_fragment_embeddings
-        self.assertEqual(get_fragment_embeddings(self.conn), [])
+        from sai_memory.unified_recall import score_fragment_embeddings
+        self.assertEqual(score_fragment_embeddings(self.conn, query=[1.0] * 64).rows, [])
 
 
 class ConstantEmbedder:
@@ -551,8 +551,8 @@ class TestMessageSearchRealConversationOnly(unittest.TestCase):
         self.assertEqual(ids, self.visible)
 
     def test_embedding_corpus_gate_excludes_internal_rows(self):
-        from sai_memory.unified_recall import get_message_embeddings
-        corpus_ids = {row[0] for row in get_message_embeddings(self.conn)}
+        from sai_memory.unified_recall import score_message_embeddings
+        corpus_ids = {row[0] for row in score_message_embeddings(self.conn, query=[1.0, 0.0]).rows}
         self.assertEqual(corpus_ids, self.visible)
 
     def test_embeddings_still_stored_for_excluded_rows(self):

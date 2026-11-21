@@ -15,6 +15,7 @@ from google.genai import types
 
 from .exceptions import (
     AuthenticationError,
+    ContextLengthExceededError,
     EmptyResponseError as LLMEmptyResponseError,
     InvalidRequestError,
     LLMError,
@@ -24,6 +25,7 @@ from .exceptions import (
     RateLimitError,
     SafetyFilterError,
     ServerError,
+    is_context_length_error,
 )
 
 try:  # pragma: no cover - optional defensive patching
@@ -1540,6 +1542,10 @@ class GeminiClient(LLMClient):
 
     def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
         """Convert a generic exception to an appropriate LLMError subclass."""
+        if is_context_length_error(err):
+            return ContextLengthExceededError(
+                f"Gemini {context} failed: context length exceeded", err,
+            )
         if self._is_payment_error(err):
             return PaymentError(f"Gemini {context} failed: payment required", err)
         elif self._is_rate_limit_error(err):

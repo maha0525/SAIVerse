@@ -805,6 +805,7 @@ class PerceptionRecallReadPortTest(unittest.TestCase):
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.storage import create_entry
         from sai_memory.unified_recall import unified_recall
+        from sai_memory.vector_codec import encode_vector
         init_arasuji_tables(self.conn)
         # キーワードにヒットする別 Chronicle。
         other = create_entry(
@@ -820,7 +821,7 @@ class PerceptionRecallReadPortTest(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
-            (target.id, json.dumps([0.0, 0.0, 0.0])),
+            (target.id, encode_vector([0.0, 0.0, 0.0])),
         )
         self.conn.commit()
         b1 = _batch(self.conn, "白鯨バーの噂の知覚", at=1250)

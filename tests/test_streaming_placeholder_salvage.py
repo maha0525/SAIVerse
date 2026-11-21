@@ -30,6 +30,7 @@ import pytest
 from llm_clients.exceptions import LLMError, ModelUnavailableError
 from sea import runtime_llm
 from sea.cancellation import ExecutionCancelledException
+from sea.host_notice import record_host_notice
 from sea.reply_stop_exit import interruption_notice_text, settle_reply_stop
 from sea.runtime_emitters import (
     SAVED_FORM_COMPLETE,
@@ -419,20 +420,20 @@ def test_a_notice_write_that_returns_no_id_withdraws_the_mark_too():
 
 
 def test_the_notice_write_reports_success_only_with_a_db_numbered_row():
-    """_record_interruption_notice 単体 — 戻り値は message_id の有無で決まる。"""
+    """record_host_notice 単体 — 戻り値は message_id の有無で決まる。"""
     runtime, persona = _reply_world()
-    assert runtime_llm._record_interruption_notice(
-        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    assert record_host_notice(
+        runtime.manager, persona, "b1", content="(通告)", ref="m1",
     ) is True
     persona.history_manager.add_to_building_only.side_effect = None
     persona.history_manager.add_to_building_only.return_value = {"role": "host"}
-    assert runtime_llm._record_interruption_notice(
-        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    assert record_host_notice(
+        runtime.manager, persona, "b1", content="(通告)", ref="m1",
     ) is False
     # 空の dict も DB の採番が無いので置けなかった扱い
     persona.history_manager.add_to_building_only.return_value = {}
-    assert runtime_llm._record_interruption_notice(
-        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    assert record_host_notice(
+        runtime.manager, persona, "b1", content="(通告)", ref="m1",
     ) is False
 
 

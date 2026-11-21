@@ -528,8 +528,8 @@ class TestExecuteMerge:
         conn, memopedia = self._setup()
         from sai_memory.memopedia.storage import create_fragment
         from sai_memory.unified_recall import (
-            get_fragment_embeddings,
             get_fragments_without_embeddings,
+            score_fragment_embeddings,
             store_fragment_embedding,
         )
 
@@ -556,7 +556,7 @@ class TestExecuteMerge:
         pending = {r[0] for r in get_fragments_without_embeddings(conn)}
         assert frag.id in pending
         # survivor 側の embedding は巻き添えにしない
-        visible = {r[0] for r in get_fragment_embeddings(conn)}
+        visible = {r[0] for r in score_fragment_embeddings(conn, query=[1.0, 0.0]).rows}
         assert keeper.id in visible
         assert frag.id not in visible  # 再生成されるまでは embedding 検索に出ない
 

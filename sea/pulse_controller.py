@@ -123,6 +123,10 @@ class ExecutionRequest:
     #   ("completed" / "gate_closed" / "cancelled" / "error")
     dispatch_action: Optional[str] = None
     runtime_outcome: Optional[str] = None
+    # 割り込まれて、復帰の写し (_queue_for_resumption) が処理待ちの列に入った。
+    # 発言はまだ失われていない (写しが後で走る) ので、この request の側では
+    # 「発言できなかった」の行を置かない (docs/intent/no_utterance_error_notice.md)。
+    requeued: bool = False
 
 
     @property
@@ -424,6 +428,7 @@ class PulseController:
                 "(shutdown in progress)",
                 request.type, request.persona_id,
             )
+            self._record_lost_before_run(request, shutdown=True)
             return None
 
         # pulse_dispatch.md §4.3 / §6: メタ判断は priority 体系外のレーンで
@@ -434,7 +439,14 @@ class PulseController:
 
         persona_id = request.persona_id
         lock = self._get_lock(persona_id)
-        
+        # 行の書き込み (発言できなかったことの記録) は DB に触れるので、
+        # ペルソナのロックの外で行う。ロックの内側では何を書くかだけ決める。
+        # - rejected_at_shutdown: 終了処理中で受け付けなかった
+        # - dropped: 処理待ちの列があふれて取り下げた古い request
+        rejected_at_shutdown = False
+        dropped: Optional[ExecutionRequest] = None
+        action = "skipped"
+
         # Phase 1: Check state and determine action (with lock)
         with lock:
             # 冒頭の速い経路のガードを通過した後、ここへ来るまでの間に
@@ -448,71 +460,77 @@ class PulseController:
                     "(shutdown in progress)",
                     request.type, persona_id,
                 )
-                return None
-
-            current = self._current.get(persona_id)
-            
-            if current is None:
-                # No execution running, register and proceed
-                self._current[persona_id] = request
-                self._add_running(request)
-                action = "execute"
-            elif self._should_interrupt(current, request):
-                # Cancel current execution
-                LOGGER.info(
-                    "[PulseController] Interrupting %s (priority=%d) for %s (priority=%d) on persona %s",
-                    current.type, current.priority, request.type, request.priority, persona_id
-                )
-                current.cancellation_token.cancel(interrupted_by=request.type)
-
-                # Notify interrupt callbacks (e.g., AutonomyManager pause)
-                if current.type == "auto" and request.type == "user":
-                    for cb in self._on_interrupt_callbacks:
-                        try:
-                            cb(persona_id, request.type)
-                        except Exception:
-                            LOGGER.debug("[PulseController] Interrupt callback error", exc_info=True)
-
-                # Queue current for resumption if it has wait policy
-                if current.config.on_blocked == "wait":
-                    self._queue_for_resumption(current)
-
-                # Register new request
-                self._current[persona_id] = request
-                self._add_running(request)
-                action = "execute"
+                rejected_at_shutdown = True
             else:
-                # New request doesn't win - queue or skip based on policy
-                if request.config.on_blocked == "wait":
-                    self._add_to_queue(request)
-                    LOGGER.info(
-                        "[PulseController] Queued %s request for persona %s (queue size: %d)",
-                        request.type, persona_id, len(self._get_queue(persona_id))
-                    )
-                    action = "queued"
-                else:
-                    LOGGER.debug(
-                        "[PulseController] Skipping %s request for persona %s (busy with %s)",
-                        request.type, persona_id, current.type
-                    )
-                    action = "skipped"
+                current = self._current.get(persona_id)
 
-            # publish-then-validate: 台帳へ登録した後に旗を再検査する。
-            # shutdown() は「旗を立てる → 台帳の一覧を取る」の順で動くので、
-            # 一覧取得より後に載った登録は、この時点で必ず旗が見える —
-            # 見えたら自分で席を消して skipped で返る。これで「取り消されずに
-            # 走る登録」の経路が消える。queued / skipped (登録していない)
-            # の場合は席が無いので触らない。
-            if self._shutting_down and self._current.get(persona_id) is request:
-                del self._current[persona_id]
-                self._remove_running(request)
-                request.dispatch_action = "skipped"
-                LOGGER.info(
-                    "[PulseController] Rejecting %s request for persona %s "
-                    "(shutdown in progress)",
-                    request.type, persona_id,
-                )
-                return None
+                if current is None:
+                    # No execution running, register and proceed
+                    self._current[persona_id] = request
+                    self._add_running(request)
+                    action = "execute"
+                elif self._should_interrupt(current, request):
+                    # Cancel current execution
+                    LOGGER.info(
+                        "[PulseController] Interrupting %s (priority=%d) for %s (priority=%d) on persona %s",
+                        current.type, current.priority, request.type, request.priority, persona_id
+                    )
+                    current.cancellation_token.cancel(interrupted_by=request.type)
+
+                    # Notify interrupt callbacks (e.g., AutonomyManager pause)
+                    if current.type == "auto" and request.type == "user":
+                        for cb in self._on_interrupt_callbacks:
+                            try:
+                                cb(persona_id, request.type)
+                            except Exception:
+                                LOGGER.debug("[PulseController] Interrupt callback error", exc_info=True)
+
+                    # Queue current for resumption if it has wait policy
+                    if current.config.on_blocked == "wait":
+                        self._queue_for_resumption(current)
+
+                    # Register new request
+                    self._current[persona_id] = request
+                    self._add_running(request)
+                    action = "execute"
+                else:
+                    # New request doesn't win - queue or skip based on policy
+                    if request.config.on_blocked == "wait":
+                        dropped = self._add_to_queue(request)
+                        LOGGER.info(
+                            "[PulseController] Queued %s request for persona %s (queue size: %d)",
+                            request.type, persona_id, len(self._get_queue(persona_id))
+                        )
+                        action = "queued"
+                    else:
+                        LOGGER.debug(
+                            "[PulseController] Skipping %s request for persona %s (busy with %s)",
+                            request.type, persona_id, current.type
+                        )
+                        action = "skipped"
+
+                # publish-then-validate: 台帳へ登録した後に旗を再検査する。
+                # shutdown() は「旗を立てる → 台帳の一覧を取る」の順で動くので、
+                # 一覧取得より後に載った登録は、この時点で必ず旗が見える —
+                # 見えたら自分で席を消して skipped で返る。これで「取り消されずに
+                # 走る登録」の経路が消える。queued / skipped (登録していない)
+                # の場合は席が無いので触らない。
+                if self._shutting_down and self._current.get(persona_id) is request:
+                    del self._current[persona_id]
+                    self._remove_running(request)
+                    request.dispatch_action = "skipped"
+                    LOGGER.info(
+                        "[PulseController] Rejecting %s request for persona %s "
+                        "(shutdown in progress)",
+                        request.type, persona_id,
+                    )
+                    rejected_at_shutdown = True
+
+        if dropped is not None:
+            self._record_lost_before_run(dropped, shutdown=False)
+        if rejected_at_shutdown:
+            self._record_lost_before_run(request, shutdown=True)
+            return None
 
         # W3 Chunk A: 受付の裁定を request に記入 (呼び出し側の観測用)
         request.dispatch_action = action
@@ -536,19 +554,27 @@ class PulseController:
         # Lower priority never interrupts
         return False
     
-    def _add_to_queue(self, request: ExecutionRequest) -> None:
-        """Add request to the pending queue."""
+    def _add_to_queue(self, request: ExecutionRequest) -> Optional[ExecutionRequest]:
+        """Add request to the pending queue.
+
+        Returns:
+            列があふれて取り下げた最も古い request (無ければ None)。取り下げた
+            request の「発言できなかった」の行は、呼び出し元がロックの外で置く
+            (docs/intent/no_utterance_error_notice.md)。
+        """
         queue = self._get_queue(request.persona_id)
-        
+        dropped: Optional[ExecutionRequest] = None
+
         if len(queue) >= QUEUE_LIMIT:
             LOGGER.error(
                 "[PulseController] Queue limit (%d) exceeded for persona %s! "
                 "Dropping oldest request.",
                 QUEUE_LIMIT, request.persona_id
             )
-            queue.pop(0)  # Remove oldest
-        
+            dropped = queue.pop(0)  # Remove oldest
+
         queue.append(request)
+        return dropped
     
     def _queue_for_resumption(self, request: ExecutionRequest) -> None:
         """Queue an interrupted request for resumption."""
@@ -580,6 +606,9 @@ class PulseController:
         # Add to front of queue (high priority for resumption)
         queue = self._get_queue(request.persona_id)
         queue.insert(0, resumed)
+        # 発言は写しが引き継ぐ — 割り込まれた側の実行では「発言できなかった」の
+        # 行を置かない (_settle_no_utterance)。
+        request.requeued = True
         
         LOGGER.info(
             "[PulseController] Queued %s for resumption on persona %s",
@@ -594,11 +623,18 @@ class PulseController:
         """
         persona_id = request.persona_id
         lock = self._get_lock(persona_id)
-        
+        # 「この実行の中で発言が保存されたか」を見る起点。時計は
+        # sea/runtime_emitters.py の record_saved_utterance (saved_at) と同じ
+        # 単調時計 (docs/intent/no_utterance_error_notice.md)。
+        started_at = time.monotonic()
+
         try:
             result = self._do_execute(request)
             # W3 Chunk A: 実行の顛末を request に記入 (呼び出し側の観測用)
             request.runtime_outcome = "completed"
+            # 例外を出さずに終わる失敗 (空の応答・Playbook が無い) は、札に
+            # 記録された理由だけで見分ける — 理由の無い沈黙は意図した沈黙。
+            self._settle_no_utterance(request, started_at)
             return result
         except BeatGateClosedError as e:
             # 関所 fail-closed (execution_ledger.md §2.2): この persona 宛の
@@ -608,11 +644,18 @@ class PulseController:
             # 残る実行は回復処理 (execution_ledger_wiring) が拾う。
             request.runtime_outcome = "gate_closed"
             if request.type == "user":
+                # user の経路には自動のやり直しが無いので、その場で行を置く
+                # (自動でやり直す経路は、やり直しが尽きたときに置く — 問い 1)。
+                self._settle_no_utterance(
+                    request, started_at, exc=e,
+                    detail=self._gate_closed_detail(e),
+                )
                 raise
             LOGGER.warning(
                 "[PulseController] Beat gate closed for persona %s (type=%s): %s",
                 persona_id, request.type, e,
             )
+            self._discard_no_utterance_cause(request)
             return []
         except ExecutionCancelledException as e:
             request.runtime_outcome = "cancelled"
@@ -620,13 +663,16 @@ class PulseController:
                 "[PulseController] Execution cancelled for persona %s, interrupted_by=%s",
                 persona_id, e.interrupted_by
             )
-            # ここで中断を記憶へ書く機構はもう無い (2026-08-26 撤去)。
-            #
-            # 届く条件が「生成が始まる前に止められた」= 一言も出ていない回だけで、
-            # 707 セッションの記録を数えて実際に通ったのは 1 回だった。そして
-            # 一言も出ていない回は、ペルソナから見れば「返事が生まれなかった」回と
-            # 区別がつかない — そちらには昔から何も書いておらず、中断だけ機構の声を
-            # 足すと、そこだけ不揃いになる。
+            # 一言も出ないうちに止められた回に置くのは、サーバーの停止の回だけ
+            # (「(サーバーの停止により、…は発言できませんでした)」)。停止ボタン
+            # (user_stop) はユーザー自身の操作なので置かない。割り込み ("user"
+            # など) は写しが処理待ちの列に戻り、発言はまだ失われていないので
+            # 置かない。判定は _settle_no_utterance が札と例外から行う。
+            # (2026-08-26 に一言も出ない中断の記録を撤去したときの理由「返事が
+            # 生まれなかった回には何も書いておらず、そこだけ不揃いになる」は、
+            # エラーで返事が生まれなかった回にも行を置くようになって前提が
+            # 変わった — docs/intent/no_utterance_error_notice.md。)
+            self._settle_no_utterance(request, started_at, exc=e)
             #
             # 途中まで喋ってから止められた回は、言いかけた本文を
             # ``sea/runtime_llm.py`` の停止の保存が書き、印と中断の通告を返事の
@@ -645,10 +691,21 @@ class PulseController:
                 "[PulseController] window floor unmet; %s pulse for persona %s "
                 "did not run: %s", request.type, persona_id, e,
             )
+            if request.type == "user":
+                # 関所と同じく、自動のやり直しが無い user の経路だけその場で置く。
+                self._settle_no_utterance(
+                    request, started_at, exc=e,
+                    detail=self._floor_unmet_detail(e),
+                )
+            else:
+                self._discard_no_utterance_cause(request)
             return []
-        except LLMError:
+        except LLMError as e:
             # Propagate LLM errors to the caller for frontend display
             request.runtime_outcome = "error"
+            # 投げ直す前に置く — user の経路はこの後の画面のエラー表示とは別に、
+            # 部屋の記録にも残す (問い 4)。
+            self._settle_no_utterance(request, started_at, exc=e)
             raise
         except Exception as e:
             request.runtime_outcome = "error"
@@ -656,6 +713,7 @@ class PulseController:
                 "[PulseController] Error executing %s for persona %s: %s",
                 request.type, persona_id, e
             )
+            self._settle_no_utterance(request, started_at, exc=e)
             return []
         finally:
             with lock:
@@ -729,48 +787,234 @@ class PulseController:
         """Process the next item in the queue for a persona."""
         lock = self._get_lock(persona_id)
         queue = self._get_queue(persona_id)
+        # 終了処理で捨てる request。「発言できなかった」の行はロックの外で置く。
+        discarded: List[ExecutionRequest] = []
+        next_request: Optional[ExecutionRequest] = None
 
         with lock:
             # 終了処理中は待機列を繰り上げない — 取り消しで空いた席に待機列の
-            # 次が座って、終了処理中に新しい生成が始まるのを防ぐ。
+            # 次が座って、終了処理中に新しい生成が始まるのを防ぐ。列に残った
+            # request はこのプロセスでは二度と走らないので、ここで捨てて
+            # それぞれに行を置く (docs/intent/no_utterance_error_notice.md 問い 2)。
             if self._shutting_down:
+                discarded = list(queue)
+                queue.clear()
+            elif not queue or persona_id in self._current:
+                # 列が空 / ほかの実行が走っている
                 return
+            else:
+                next_request = queue.pop(0)
+                self._current[persona_id] = next_request
+                self._add_running(next_request)
 
-            if not queue:
-                return
+                # publish-then-validate: 台帳へ登録した後に旗を再検査する。
+                # shutdown() の一覧取得より後に載った登録は、この時点で必ず旗が
+                # 見える — 見えたら自分で席を消して繰り上げをやめる。
+                if self._shutting_down:
+                    del self._current[persona_id]
+                    self._remove_running(next_request)
+                    discarded = [next_request] + list(queue)
+                    queue.clear()
+                    next_request = None
 
-            if persona_id in self._current:
-                # Something else is already running
-                return
-
-            next_request = queue.pop(0)
-            self._current[persona_id] = next_request
-            self._add_running(next_request)
-
-            # publish-then-validate: 台帳へ登録した後に旗を再検査する。
-            # shutdown() の一覧取得より後に載った登録は、この時点で必ず旗が
-            # 見える — 見えたら自分で席を消して繰り上げをやめる。
-            if self._shutting_down:
-                del self._current[persona_id]
-                self._remove_running(next_request)
+        if next_request is None:
+            for lost in discarded:
                 LOGGER.info(
                     "[PulseController] Discarding queued %s request for "
                     "persona %s (shutdown in progress)",
-                    next_request.type, persona_id,
+                    lost.type, persona_id,
                 )
-                return
+                self._record_lost_before_run(lost, shutdown=True)
+            return
 
         LOGGER.info(
             "[PulseController] Processing queued %s request for persona %s",
             next_request.type, persona_id
         )
-        
+
         # Execute in a new thread to avoid blocking
         def run():
-            self._execute_unlocked(next_request)
-        
+            # _execute_unlocked は LLMError (と user の関所閉鎖) を呼び出し元へ
+            # 投げ直す。処理待ちの列から走った実行には受け止める呼び出し元が
+            # いないので、ここで受け止めてログへ書く — 受け止めないとスレッドの
+            # 未処理例外になる。部屋の記録への行は _execute_unlocked の中で
+            # 置き終えている。
+            try:
+                self._execute_unlocked(next_request)
+            except Exception:
+                LOGGER.exception(
+                    "[PulseController] Queued %s request for persona %s failed",
+                    next_request.type, persona_id,
+                )
+
         threading.Thread(target=run, daemon=True).start()
     
+    # ------------------------------------------------------------------
+    # 発言が生まれなかった回の記録 (docs/intent/no_utterance_error_notice.md)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cancel_cause(request: ExecutionRequest, exc: Optional[BaseException]) -> Optional[str]:
+        """この実行が取り消されていたら、その原因 (interrupted_by) を返す。
+
+        LLM ノードは取り消しを LLMError に包み直すので、例外の連鎖もたどる
+        (sea/reply_stop_exit.py の _stopped_by_user と同じ読み方)。取り消されて
+        いなければ None。原因が刻まれずに取り消された回は ``""``。
+        """
+        token = request.cancellation_token
+        try:
+            if token is not None and token.is_cancelled():
+                return token.interrupted_by or ""
+        except Exception:
+            LOGGER.debug("[PulseController] could not read the cancellation token", exc_info=True)
+        seen = set()
+        current = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, ExecutionCancelledException):
+                return current.interrupted_by or ""
+            nxt = getattr(current, "original_error", None)
+            if not isinstance(nxt, BaseException):
+                nxt = current.__cause__ or current.__context__
+            current = nxt
+        return None
+
+    @staticmethod
+    def _discard_no_utterance_cause(request: ExecutionRequest) -> None:
+        """行を置かない終わり方で、札に記録された理由を捨てる。"""
+        from sea.no_utterance_notice import take_no_utterance_cause
+
+        take_no_utterance_cause(request.cancellation_token)
+
+    @staticmethod
+    def _gate_closed_detail(exc: BaseException) -> Dict[str, Any]:
+        from api.ui_messages import ui_message
+        from sea.no_utterance_notice import CODE_BEAT_GATE_CLOSED, failure_detail
+
+        return failure_detail(
+            CODE_BEAT_GATE_CLOSED,
+            message=ui_message("api.noUtterance.gateClosed"),
+            technical_detail=str(exc),
+        )
+
+    @staticmethod
+    def _floor_unmet_detail(exc: BaseException) -> Dict[str, Any]:
+        from api.ui_messages import ui_message
+        from sea.no_utterance_notice import CODE_WINDOW_FLOOR_UNMET, failure_detail
+
+        return failure_detail(
+            CODE_WINDOW_FLOOR_UNMET,
+            message=ui_message("api.noUtterance.floorUnmet"),
+            technical_detail=str(exc),
+        )
+
+    def _settle_no_utterance(
+        self,
+        request: ExecutionRequest,
+        started_at: float,
+        *,
+        exc: Optional[BaseException] = None,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """実行が発言を一つも残さずに失敗したら、その部屋の記録へ一行置く。
+
+        _execute_unlocked の終わり方ごとに一度だけ呼ぶ (一回の実行につき多くても
+        一行)。置かないのは:
+
+        - この実行の開始より後に、このペルソナの発言が保存された
+          (``last_saved_utterance``)。途中まで喋ってから止まった回は、
+          settle_reply_stop が中断の通告を置いている。
+        - 取り消されていて、原因がサーバーの停止ではない (停止ボタン
+          ``user_stop`` はユーザー自身の操作、割り込みは写しが列に戻る)。
+        - 割り込まれて写しが処理待ちの列に入った (``request.requeued``)。
+        - 例外も、札に記録された理由も無い (意図した沈黙)。
+
+        失敗しても例外は投げない (後始末の失敗で元の例外をすり替えない)。
+        """
+        from sea.no_utterance_notice import (
+            failure_detail_from_exception,
+            take_no_utterance_cause,
+        )
+        from sea.runtime_emitters import last_saved_utterance
+
+        try:
+            noted = take_no_utterance_cause(request.cancellation_token)
+            if request.type == "meta_judgment" or request.requeued:
+                return
+            record = last_saved_utterance(request.persona_id)
+            if record is not None and record.saved_at >= started_at:
+                return
+            cause = self._cancel_cause(request, exc)
+            shutdown = False
+            if cause is not None:
+                if cause != "server_shutdown":
+                    return
+                shutdown = True
+            if detail is None:
+                if exc is not None and not isinstance(exc, ExecutionCancelledException):
+                    detail = failure_detail_from_exception(exc)
+                elif noted is not None:
+                    detail = noted
+            if detail is None and not shutdown:
+                return
+            self._write_no_utterance(request, shutdown=shutdown, detail=detail)
+        except Exception:
+            LOGGER.exception(
+                "[PulseController] could not settle the no-utterance notice "
+                "(persona=%s type=%s)", request.persona_id, request.type,
+            )
+
+    def _record_lost_before_run(self, request: ExecutionRequest, *, shutdown: bool) -> None:
+        """実行に入る前に失われた request について、その部屋の記録へ一行置く。
+
+        終了処理中の受付拒否・列のあふれ・終了処理での列の破棄が呼ぶ。メタ判断は
+        発言しないので置かない。停止ボタンなどで既に取り消されていた request
+        (原因がサーバーの停止ではない) にも置かない。
+        """
+        try:
+            if request.type == "meta_judgment":
+                return
+            cause = self._cancel_cause(request, None)
+            if cause is not None and cause != "server_shutdown":
+                return
+            detail = None
+            if not shutdown:
+                from api.ui_messages import ui_message
+                from sea.no_utterance_notice import CODE_QUEUE_OVERFLOW, failure_detail
+
+                detail = failure_detail(
+                    CODE_QUEUE_OVERFLOW,
+                    message=ui_message("api.noUtterance.queueOverflow", limit=QUEUE_LIMIT),
+                )
+            self._write_no_utterance(request, shutdown=shutdown, detail=detail)
+        except Exception:
+            LOGGER.exception(
+                "[PulseController] could not record the lost request "
+                "(persona=%s type=%s)", request.persona_id, request.type,
+            )
+
+    def _write_no_utterance(
+        self,
+        request: ExecutionRequest,
+        *,
+        shutdown: bool,
+        detail: Optional[Dict[str, Any]],
+    ) -> None:
+        from sea.no_utterance_notice import record_no_utterance_notice
+
+        persona = self._get_persona(request.persona_id)
+        manager = getattr(self.sea_runtime, "manager", None)
+        if persona is None or manager is None:
+            LOGGER.warning(
+                "[PulseController] cannot record that %s could not speak "
+                "(persona or manager unavailable)", request.persona_id,
+            )
+            return
+        record_no_utterance_notice(
+            manager, persona, request.building_id,
+            shutdown=shutdown, detail=detail,
+        )
+
     def _get_persona(self, persona_id: str):
         """Get persona object from manager."""
         manager = getattr(self.sea_runtime, "manager", None)

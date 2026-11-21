@@ -63,6 +63,7 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
     from sai_memory.embedding_migration import (
         RECALL_SOURCES,
         begin_reembed,
+        convert_json_vectors,
         finish_reembed,
         message_reembed_targets,
         model_label_changed,
@@ -95,6 +96,18 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
         conn = init_db(str(db_path), check_same_thread=False)
 
         try:
+            # Before anything else, rewrite JSON-format rows in the byte
+            # format, so the rows that hold one vector are not rebuilt below
+            # (docs/intent/vector_binary_storage.md §4).
+            conversion = convert_json_vectors(conn)
+            if conversion.did_anything:
+                LOGGER.info(
+                    "Re-embed for %s: converted %d stored vector(s) to the byte "
+                    "format (kept %d that are not one vector; legacy rows deleted: %d)",
+                    persona_id, conversion.converted, conversion.kept,
+                    conversion.legacy_deleted,
+                )
+
             # 0. A changed model label, or an in-progress mark left by a job
             #    that died half way, rebuilds everything; then mark the
             #    memory.db before the first deletion.

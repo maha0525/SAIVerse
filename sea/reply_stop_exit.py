@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Optional
 
 from llm_clients.exceptions import LLMError
 from sea.cancellation import ExecutionCancelledException
+from sea.host_notice import record_host_notice
 from sea.runtime_emitters import (
     SAVED_FORM_COMPLETE,
     SAVED_FORM_CUT,
@@ -38,7 +39,6 @@ from sea.runtime_emitters import (
 from sea.runtime_llm import (
     INTERRUPTED_METADATA_KEY,
     _is_user_interruption,
-    _record_interruption_notice,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -291,10 +291,13 @@ def _settle(
             _emit(event_callback, _stream_cut_info_event(persona, stream_error, {}))
         return None
 
-    if not _record_interruption_notice(
-        runtime, persona, record.building_id,
+    # 途中で切られた発言は他のペルソナから見ても不自然な場所で終わっている。
+    # それが本人の言い切りなのか外から止められたのかを知れる方がよい
+    # (2026-08-26 まはー裁定) ので、在室者全員に届ける (record_host_notice)。
+    if not record_host_notice(
+        runtime.manager, persona, record.building_id,
         content=interruption_notice_text(record.form, by_user=by_user),
-        msg_id=record.message_id,
+        ref=record.message_id,
     ):
         # 印と通告は必ず対 (不変条件 2)。通告が置けなかったら印を取り下げ、
         # 案内も出さない — 印だけの行は「続きの生成」が押せるのに Gemini 系で

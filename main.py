@@ -304,7 +304,7 @@ def main():
     # 追加系 (新規テーブル / 新規列) は ALTER/CREATE で生きた DB に直接当てる軽量パスを優先する。
     # 全書換 (ファイル move) は他コネクションがファイルを開いていると Windows で WinError 32 に
     # なるため、 破壊的差分 (列削除/型変更) のときだけフォールバックする。
-    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_city_display_names, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table, ensure_feed_tables, ensure_task_book_table, migrate_deadline_tasks_to_task_book
+    from database.migrate import needs_migration, migrate_database_in_place, try_additive_migration, backfill_track_short_ids, backfill_item_short_ids, backfill_city_display_names, backfill_day_plan_refs, backfill_desire_stage_normalization, drop_empty_legacy_note_tables, backfill_session_anchors, backfill_session_head_snapshots, backfill_schedule_instance_tokens, ensure_active_occupancy_unique, ensure_region_entrance_unique, ensure_episode_inheritance_table, ensure_feed_tables, ensure_task_book_table, ensure_runtime_alerts_table, migrate_deadline_tasks_to_task_book
     if needs_migration(str(db_path)):
         logging.info("Database schema change detected. Running auto-migration...")
         if try_additive_migration(str(db_path)):
@@ -379,6 +379,11 @@ def main():
     # テーブル追加のみを素早く確実に適用する。既存 DB には行 0 件で追加される
     # だけで既存行に触れない (無害)。冪等。
     ensure_task_book_table(str(db_path))
+
+    # 動作中の警告 (runtime_alerts) の軽量シンク (docs/intent/runtime_alerts.md):
+    # テーブル追加のみを素早く確実に適用する。既存 DB には行 0 件で追加される
+    # だけで既存行に触れない (無害)。冪等。
+    ensure_runtime_alerts_table(str(db_path))
 
     # 締め切りつきタスク → タスク帳の機械写し (autonomous_behavior_v3.md §9-8)。
     # 期限のある生きた persona_task を IDEM_KEY 付きで写す。写し元は無傷で残り、
@@ -584,6 +589,19 @@ def main():
         from saiverse.addon_events import set_event_loop
 
         set_event_loop(asyncio.get_running_loop())
+
+        # イベントループが 5 秒以上止まったら、各スレッドの実行位置を
+        # timeout_diagnostics.log に残す監視スレッド (docs/intent/backend_stall_handling.md)。
+        from saiverse.loop_stall_watch import start_loop_stall_watch
+
+        # 監視スレッドが始められなくても、バックエンドの起動は止めない。
+        try:
+            start_loop_stall_watch(asyncio.get_running_loop())
+            logging.info(
+                "Event loop stall watch started (stalls over 5 s are recorded in timeout_diagnostics.log)"
+            )
+        except Exception:
+            logging.exception("Failed to start the event loop stall watch")
         yield
         # 終了処理はここに書かない。上の shutdown_everything (atexit / SIGTERM) が
         # 唯一の終了経路で、二本目を作ると順序が絡む (発言生成の後始末 → MCP →
@@ -672,6 +690,14 @@ def main():
     # attaches its own stderr-only handlers with propagate=False, and the
     # "Exception in ASGI application" tracebacks for 500 errors never reach
     # backend.log (see docs/issues/uvicorn_traceback_not_in_logs.md).
+    #
+    # timeout_keep_alive=3600: uvicorn は既定で、5 秒使われなかった接続を閉じる。
+    # Next.js の中継 (rewrites) はバックエンドへの接続を閉じずに再利用するので、
+    # イベントループが遅れている最中は、中継がリクエストを送った直後の接続を
+    # uvicorn が読まないまま閉じることがあり、リクエストが失われて画面に 500 が
+    # 出ていた。期限を 1 時間に延ばして、使われている接続の期限が切れないようにする。
+    # 1 時間は、相手が消えた接続を手放すための上限で、frontend/next.config.ts の
+    # proxyTimeout と同じ考え方 (docs/intent/backend_stall_handling.md の「仕組み 1」)。
     uvicorn.run(
         app,
         host=listen_host,
@@ -679,6 +705,7 @@ def main():
         log_level="info",
         log_config=None,
         timeout_graceful_shutdown=5,
+        timeout_keep_alive=3600,
     )
 
 

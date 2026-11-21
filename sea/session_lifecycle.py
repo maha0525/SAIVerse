@@ -6481,13 +6481,28 @@ class SessionLifecycle:
             if not responded or response != "allow":
                 reason = "timeout" if not responded else response
                 LOGGER.info("[metabolism] Chronicle generation skipped (user %s)", reason)
-                if event_callback:
-                    event_callback({
-                        "type": "warning",
-                        "content": "Chronicle生成をスキップしました。",
-                        "warning_code": "chronicle_skipped",
-                        "display": "toast",
-                    })
+                # 確認の画面に誰も答えなかった (時間切れの) 回だけ、閉じるまで残る知らせに
+                # する (docs/intent/runtime_alerts.md)。ユーザーが自分で「許可しない」を
+                # 選んだ回は本人の操作の結果なので出さない (同設計書の保証 6)。同じ
+                # ペルソナで繰り返し見送ったら一枚にまとまる。
+                if reason == "timeout":
+                    try:
+                        from api.ui_messages import ui_message
+                        from saiverse.runtime_alerts import post_runtime_alert
+
+                        _alert_persona_id = getattr(persona, "persona_id", None)
+                        post_runtime_alert(
+                            f"chronicle_skipped:{_alert_persona_id}",
+                            "warning",
+                            ui_message("api.runtimeAlerts.chronicleSkipped.title"),
+                            ui_message(
+                                "api.runtimeAlerts.chronicleSkipped.message",
+                                persona=persona_name or _alert_persona_id or "",
+                            ),
+                            details={"persona_id": _alert_persona_id, "reason": reason},
+                        )
+                    except Exception:  # noqa: BLE001 — 知らせの失敗で見送りの処理を止めない
+                        LOGGER.warning("[metabolism] Failed to post the chronicle skipped alert", exc_info=True)
                 return "deferred"
             LOGGER.info("[metabolism] Chronicle generation approved by user")
         else:

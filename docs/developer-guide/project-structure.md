@@ -105,8 +105,14 @@ saiverse/
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
+├── loop_stall_watch.py     # バックエンドのイベントループの遅れを監視するデーモンスレッド。5 秒以上止まったら
+│                           #   各スレッドの実行位置（ファイル・行番号・関数名だけ。変数と行の文面は書かない）を
+│                           #   timeout_diagnostics.log に書く。main.py の _lifespan から始まる（backend_stall_handling.md）
 ├── update_dependencies_alert.py # 起動前のパッケージの入れ直し（update_engine --check-complete）が失敗した
 │                           #   記録を読み、画面のバナー（startup_alerts）に載せる警告にする
+├── runtime_alerts.py       # 動作中に見つけた、部屋に結びつかない警告を runtime_alerts 表に書き（同じ識別キーは
+│                           #   一枚にまとめて回数を数える）、常設 SSE（addon_events）で画面右下へ送る。
+│                           #   ユーザーが閉じるまで残る（runtime_alerts.md）
 ├── system_notice_review.py # システム通知の移行が確認待ちにした記憶の行を集めて束ね、所有者が画面で選んだ
 │                           #   操作（keep / system / user / delete）で確定する。件数に応じてバナーの警告を置き直す
 ├── meta_layer.py           # 判断 Pulse の共有基盤だけが残る（per-persona Lock / 判断ログ / 設定読み。
@@ -122,6 +128,7 @@ saiverse/
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
+├── addon_events.py         # 常設 SSE（/api/addon/events）の配信。アドオンのイベントと動作中の警告（runtime_alert）が載る
 ├── addon_context.py        # アドオンの案内（context_provider）の登録簿。読み手は head の addon_guidance セクション
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
@@ -215,6 +222,8 @@ sea/
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
 ├── progress_events.py    # チャット画面の「いま何をしているか」の段階 (status の phase)。文言はフロントの lib/chatProgress.ts（chat_progress_display intent）
 ├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
+├── host_notice.py        # 部屋の記録へ host 名義の一行を置く共通の書き手（中断の通告と、発言できなかった回の知らせが使う）
+├── no_utterance_notice.py # エラー・サーバーの停止で発言が生まれなかった回の知らせ（部屋の記録の一行 + 画面だけの詳細。書く部屋が無い回は右下の知らせ。no_utterance_error_notice intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、
@@ -272,6 +281,7 @@ sai_memory/
 │                     #   下ろす／現在地でない部屋の様子を一行へ。提示だけ・台帳は無傷）
 ├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
+├── vector_codec.py   # 記憶の検索用のベクトルを保存用のバイト列 (float32) に変える・戻す関数（vector 列の読み書きはここだけ）
 ├── embedding_migration.py # 埋め込みモデル移行（古い長さのベクトルの検出と 4 系統の作り直し。起動時判定・reembed API・CLI が共有）
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py

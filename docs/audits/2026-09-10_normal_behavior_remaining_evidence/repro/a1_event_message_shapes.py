@@ -11,9 +11,9 @@
    (SQL) を通り抜けるかどうかを、行を実際に置いて数える。対象は
    - `real_conversation_filter()` — 自動想起と unified_recall の message ソース
    - `_conversation_exclusion()` — scene 切り出し・会話キーワード検索
-   - `get_embeddings_for_scope(required_tags=["conversation"], ...)` —
+   - `score_embeddings_for_scope(required_tags=["conversation"], ...)` —
      adapter の recall / 記憶デバッグ API / memory_search_brief スペル
-   - `get_embeddings_for_scope(exclude_tags=["handy_tool","spell"])` —
+   - `score_embeddings_for_scope(exclude_tags=["handy_tool","spell"])` —
      `saiverse/recall_walk.py` の意味的近傍の辺と同じ引数の形
    - `chronicle_eligibility_filter()` — あらすじ編纂の材料
 3. **Memopedia の差分通知**: ユーザーが Memopedia のページを作成・更新・削除
@@ -194,10 +194,10 @@ def part_b_recall_filters(conn):
     from sai_memory.memory.storage import (
         add_message,
         chronicle_eligibility_filter,
-        get_embeddings_for_scope,
         get_or_create_thread,
         real_conversation_filter,
         replace_message_embeddings,
+        score_embeddings_for_scope,
         _conversation_exclusion,
     )
 
@@ -249,15 +249,16 @@ def part_b_recall_filters(conn):
         *chronicle_eligibility_filter()
     )
 
-    got = get_embeddings_for_scope(
-        conn, required_tags=["conversation"], exclude_tags=["handy_tool", "spell"],
+    query = [1.0, 0.0, 0.0]
+    got = score_embeddings_for_scope(
+        conn, required_tags=["conversation"], exclude_tags=["handy_tool", "spell"], query=query,
     )
     results['required_tags=["conversation"] (adapter recall / デバッグ API / スペル)'] = {
-        str(m.id) for m, _v, _i in got
+        str(mid) for mid, _i in got.rows
     }
-    got2 = get_embeddings_for_scope(conn, exclude_tags=["handy_tool", "spell"])
+    got2 = score_embeddings_for_scope(conn, exclude_tags=["handy_tool", "spell"], query=query)
     results['exclude_tags のみ (recall_walk の意味的近傍の辺と同じ形)'] = {
-        str(m.id) for m, _v, _i in got2
+        str(mid) for mid, _i in got2.rows
     }
     return label_by_id, results
 

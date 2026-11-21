@@ -1609,3 +1609,48 @@ class PersonaPackImport(Base):
     IMPORT_ID = Column(String(64), primary_key=True)
     PERSONA_ID = Column(String(255), nullable=False)
     APPLIED_AT = Column(Integer, nullable=False)  # epoch 秒
+
+
+# ============================================================================
+# 動作中に見つけた、部屋に結びつかない警告 (画面右下に閉じるまで残る)
+# docs/intent/runtime_alerts.md
+# ============================================================================
+
+class RuntimeAlert(Base):
+    """サーバーの動作中に見つけた、どの部屋にも結びつかない警告の一件。
+
+    書き込みは ``saiverse/runtime_alerts.py`` の ``post_runtime_alert`` だけが行う。
+    同じ ``ALERT_KEY`` でまだ閉じていない行 (``DISMISSED_AT IS NULL``) があれば
+    新しい行を作らず、``OCCURRENCE_COUNT``・``LAST_AT``・見出し・本文・詳細を
+    最後の発生の内容に更新する。閉じた後に同じキーで起きたら新しい行になる
+    (部分一意 index ``uq_runtime_alerts_open_key`` が「閉じていない行はキーごとに
+    高々 1 行」を DB でも守る)。
+
+    見出し (``TITLE_JSON``) と本文 (``MESSAGE_JSON``) は ``api.ui_messages.ui_message``
+    の形 (文言のキーと値) を JSON で持つ。閉じるまでアップデートをまたいで残るので、
+    ここで使う文言のキーは後から名前を変えない。画面だけの知らせで、ペルソナには
+    届かない。
+
+    時刻は epoch 秒 int。ユーザーが現実に読む「最後に起きた時刻」なので
+    ``time.time()`` (実時刻) で刻む。
+    """
+    __tablename__ = "runtime_alerts"
+    ALERT_ID = Column(Integer, primary_key=True, autoincrement=True)
+    # まとめるための識別キー (「何が・どの対象で・どんな原因で」。例: memorize_failed:<persona_id>)
+    ALERT_KEY = Column(String(255), nullable=False)
+    LEVEL = Column(String(16), nullable=False)  # warning / error
+    TITLE_JSON = Column(Text, nullable=False)    # ui_message の JSON
+    MESSAGE_JSON = Column(Text, nullable=False)  # ui_message の JSON
+    DETAILS_JSON = Column(Text, nullable=True)   # 任意の詳細 (最後の発生の内容)
+    OCCURRENCE_COUNT = Column(Integer, nullable=False, default=1)
+    FIRST_AT = Column(Integer, nullable=False)  # epoch 秒
+    LAST_AT = Column(Integer, nullable=False)   # epoch 秒
+    DISMISSED_AT = Column(Integer, nullable=True)  # epoch 秒。NULL = まだ閉じていない
+    __table_args__ = (
+        Index(
+            "uq_runtime_alerts_open_key", "ALERT_KEY",
+            unique=True, sqlite_where=DISMISSED_AT.is_(None),
+        ),
+        # 閉じていない知らせの一覧 (新しい順) 用
+        Index("idx_runtime_alerts_open", "DISMISSED_AT", "LAST_AT"),
+    )

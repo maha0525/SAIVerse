@@ -13,6 +13,8 @@ rem load_dotenv() (main.py etc.) fills every variable that is NOT set from the
 rem repository .env, and discord_gateway/config.py reads .env by itself.
 rem cmd pitfall: set "VAR=" DELETES the variable (then .env refills it),
 rem so these must stay non-empty disabled values.
+rem --- let the test UI (start_test_frontend.bat, port 18010) send state-changing requests ---
+set "SAIVERSE_ALLOWED_ORIGINS=http://127.0.0.1:18010,http://localhost:18010"
 set "SAIVERSE_GATEWAY_ENABLED=0"
 set "SAIVERSE_GATEWAY_WS_URL=ws://127.0.0.1:9/test-disabled"
 set "SAIVERSE_GATEWAY_TOKEN=test-disabled"

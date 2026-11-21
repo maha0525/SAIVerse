@@ -68,6 +68,9 @@ def initialise_memory_adapter(persona) -> Optional[SAIMemoryAdapter]:
             # だけで行う (S4)。使い捨て adapter に許すと走行中の Stelis を
             # 誤って巻き戻すため。
             recover_orphaned_thread=True,
+            # JSON 形式のベクトルの行をバイト列形式へ書き換えるのも登録経路
+            # だけ (docs/intent/vector_binary_storage.md §4)。
+            convert_stored_vectors=True,
         )
         if adapter.is_ready():
             logging.info("SAIMemory ready for persona %s", persona.persona_id)
