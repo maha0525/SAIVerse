@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | 「通信が途中で切れました」と 500 がまとまって出る件 (バックエンドの受付が断続的に止まる) | 500 を止める設定と、イベントループが止まったときに各スレッドの実行位置を残す記録が、PR に入っている。次 = まはーが PR を確認する。止めている原因は未特定で、この記録が入ったバージョンで同じ報告が来たら、利用者の timeout_diagnostics.log から調べる。 | まはー (PR の確認) | [intent](../intent/backend_stall_handling.md) / [issue](../issues/chat_stream_cut_and_relay_500_on_backend_stall.md) | 2026-11-21 |
+| 🟣 検証待ち | 「通信が途中で切れました」と 500 がまとまって出る件 (バックエンドの受付が断続的に止まる) | 500 を止める設定と、イベントループが止まったときに各スレッドの実行位置を残す記録が、develop に入っている。止めている原因は未特定。次 = 利用者に頼む backend.log の行から、止まっていた間に動いていた処理を読む。この二つを含むバージョンが出たあとは、利用者の timeout_diagnostics.log から調べる。 | まはー (利用者への返信・リリースの範囲) / 利用者 (ログ) | [intent](../intent/backend_stall_handling.md) / [issue](../issues/chat_stream_cut_and_relay_500_on_backend_stall.md) | 2026-11-21 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |
 | 🟣 検証待ち | Gemini の準備・本文送信・応答待ちの DEBUG 計測 | develop に入り、v0.3.30 に載る。次 = 更新・再起動後の通常利用で、メティスが backend.log から送信完了と応答待ちを分けて確認する。 | 私 (ログ確認) | [PR #445](https://github.com/maha0525/SAIVerse/pull/445) / [intent](../intent/gemini_request_timing.md) | 2026-11-10 |
