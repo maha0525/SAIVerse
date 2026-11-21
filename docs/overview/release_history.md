@@ -14,6 +14,8 @@
 >
 > **発行の手続きの型**: hotfix/vX.Y.Z → PR → main (PR はまはーが内容確認してからマージ) →
 > タグ vX.Y.Z (Actions が ZIP を添付、ノートは gh release edit で差し替え) → develop へ還流。
+>
+> **main 向けの PR を出す前に回す検査** (v0.3.33 までの発行の記録で回していたもの。v0.3.34 では、後ろの三つをタグのあとに回した): テスト全件 / `check_in_flight.py` / `npm --prefix frontend test` / `gen_reference_docs.py --check` / `check_dependency_advisories.py`。後ろの三つのうち前の二つは、画面側のパッケージとアドオンがそろった本体の作業フォルダで回す (作業用の worktree では、パッケージやアドオンが無くて落ちるか、ずれが出る)。
 
 ## 次のバージョンの範囲
 
