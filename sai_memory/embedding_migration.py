@@ -385,7 +385,8 @@ def convert_json_vectors(
       list of numbers), encoded with ``vector_codec.encode_vector``. Its
       dimension is not checked (an old dimension is the stale-vector check's
       business). Other rows (broken values, the legacy "list of vectors"
-      format) are left as they are and counted in ``kept``.
+      format, values whose parse or encoding raises) are left as they are and
+      counted in ``kept``.
     - Only the ``vector`` column is written. ``embed_metadata`` (the model
       label, the in-progress mark) is neither read nor written.
     - When every table was processed without an exception, the legacy
@@ -433,11 +434,20 @@ def convert_json_vectors(
                     ).fetchall()
                 updates = []
                 for rowid, value in rows:
-                    vector = _json_vector_or_none(value)
-                    if vector is None:
+                    # A value can make the parse or the encoding raise (deeply
+                    # nested JSON: RecursionError; an integer too large for
+                    # float32: OverflowError). Such a row is kept like any
+                    # other row that is not one vector, so that it cannot stop
+                    # every later run (and the re-embed, which runs this first).
+                    try:
+                        vector = _json_vector_or_none(value)
+                        encoded = None if vector is None else encode_vector(vector)
+                    except Exception:
+                        encoded = None
+                    if encoded is None:
                         counts["kept"] += 1
                     else:
-                        updates.append((encode_vector(vector), rowid))
+                        updates.append((encoded, rowid))
                 if updates:
                     conn.executemany(
                         f"UPDATE {table} SET vector = ? "

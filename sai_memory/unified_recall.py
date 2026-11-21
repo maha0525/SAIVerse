@@ -19,8 +19,12 @@ from sai_memory.vector_codec import (
     cosine_scores,
     encode_vector,
     read_vector_rows,
+    vector_read_sql,
 )
 from saiverse.references import to_uri
+
+# The vector column of the search reads below (sai_memory.vector_codec.vector_read_sql).
+_E_VECTOR = vector_read_sql("e.vector")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,8 +94,8 @@ def get_chronicle_embeddings(
     """
     if level is not None:
         cur = conn.execute(
-            """
-            SELECT e.vector, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
+            f"""
+            SELECT {_E_VECTOR}, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
             FROM arasuji_embeddings e
             JOIN arasuji_entries a ON e.entry_id = a.id
             WHERE a.level = ?
@@ -100,8 +104,8 @@ def get_chronicle_embeddings(
         )
     else:
         cur = conn.execute(
-            """
-            SELECT e.vector, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
+            f"""
+            SELECT {_E_VECTOR}, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
             FROM arasuji_embeddings e
             JOIN arasuji_entries a ON e.entry_id = a.id
             """,
@@ -171,8 +175,8 @@ def get_memopedia_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVec
         vector (byte-format vectors of ``dim`` only).
     """
     cur = conn.execute(
-        """
-        SELECT e.vector, e.page_id, p.title, p.summary, p.category, p.short_id
+        f"""
+        SELECT {_E_VECTOR}, e.page_id, p.title, p.summary, p.category, p.short_id
         FROM memopedia_embeddings e
         JOIN memopedia_pages p ON e.page_id = p.id
         WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
@@ -258,7 +262,7 @@ def get_fragment_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVect
     """
     cur = conn.execute(
         f"""
-        SELECT e.vector, e.fragment_id, f.content, f.entity_id,
+        SELECT {_E_VECTOR}, e.fragment_id, f.content, f.entity_id,
                f.chronicle_entry_id, f.source_date, p.title, p.category, p.short_id
         FROM memopedia_fragment_embeddings e
         JOIN memopedia_fragments f ON e.fragment_id = f.id
@@ -321,7 +325,7 @@ def get_message_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVecto
     clause, params = real_conversation_filter()
     cur = conn.execute(
         f"""
-        SELECT e.vector, e.message_id, e.chunk_index
+        SELECT {_E_VECTOR}, e.message_id, e.chunk_index
         FROM message_embeddings e
         JOIN messages m ON e.message_id = m.id
         WHERE {clause}

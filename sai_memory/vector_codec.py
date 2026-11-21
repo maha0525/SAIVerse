@@ -43,6 +43,28 @@ _ITEM_SIZE = _DTYPE.itemsize  # 4
 VECTOR_FOR_DIM_SQL = "CASE WHEN typeof(vector) = 'text' THEN NULL ELSE vector END"
 
 
+def vector_read_sql(column: str) -> str:
+    """SQL expression that reads the vector column ``column`` for search.
+
+    Unlike :data:`VECTOR_FOR_DIM_SQL`, the search must tell the empty vector
+    row of a deferred embedding (``storage.DEFERRED_VECTOR``, ``'[]'``) apart
+    (:func:`read_vector_rows` counts it in ``deferred``), so that one text
+    value is kept. Every other text value (JSON-format rows, text that is not
+    valid UTF-8) is read as ``NULL``, which :func:`read_vector_rows` counts in
+    ``unreadable``: Python decodes TEXT values on fetch, and one value that is
+    not valid UTF-8 would otherwise make the whole read raise. Byte-format
+    values are read as they are.
+
+    ``column`` is the column as written in the query (``"vector"``,
+    ``"e.vector"``). The ``'[]'`` below must stay equal to
+    ``storage.DEFERRED_VECTOR`` (checked by a test).
+    """
+    return (
+        f"CASE WHEN typeof({column}) = 'text' AND {column} != '[]' "
+        f"THEN NULL ELSE {column} END"
+    )
+
+
 def encode_vector(vector: Any) -> bytes:
     """Return the stored value (byte format) of ``vector`` (list / tuple / ndarray)."""
     return np.asarray(vector, dtype=_DTYPE).reshape(-1).tobytes()

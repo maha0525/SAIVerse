@@ -10,7 +10,12 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.logging_utils import debug
-from sai_memory.vector_codec import StoredVectorRows, encode_vector, read_vector_rows
+from sai_memory.vector_codec import (
+    StoredVectorRows,
+    encode_vector,
+    read_vector_rows,
+    vector_read_sql,
+)
 
 #: The vector stored for a message whose embedding is deferred (a chat-log
 #: import embeds in the background after storing the text). Its length (0)
@@ -1036,8 +1041,8 @@ def get_embeddings_for_scope(
             )
             params.append(tag)
 
-    base_query = """
-        SELECT e.vector, m.id, e.chunk_index
+    base_query = f"""
+        SELECT {vector_read_sql('e.vector')}, m.id, e.chunk_index
         FROM messages m JOIN message_embeddings e ON m.id = e.message_id
     """
 

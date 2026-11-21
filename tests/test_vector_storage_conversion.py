@@ -816,6 +816,361 @@ def test_null_vector_does_not_break_opening(tmp_path, convert):
         adapter.close()
 
 
+def test_vector_read_sql_matches_the_deferred_vector_constant(tmp_path):
+    """``vector_read_sql`` の式の中の ``'[]'`` は ``storage.DEFERRED_VECTOR`` と同じ。"""
+    from sai_memory.vector_codec import vector_read_sql
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, vector TEXT)")
+        blob = encode_vector([0.5, 0.25])
+        conn.execute("INSERT INTO t(id, vector) VALUES(1, ?)", (DEFERRED_VECTOR,))
+        conn.execute("INSERT INTO t(id, vector) VALUES(2, ?)", (blob,))
+        conn.execute("INSERT INTO t(id, vector) VALUES(3, ?)", (json.dumps([0.5, 0.25]),))
+        conn.execute("INSERT INTO t(id, vector) VALUES(4, CAST(x'fffe41' AS TEXT))")
+        conn.execute("INSERT INTO t(id, vector) VALUES(5, NULL)")
+        got = dict(conn.execute(f"SELECT id, {vector_read_sql('vector')} FROM t"))
+        assert got == {1: DEFERRED_VECTOR, 2: blob, 3: None, 4: None, 5: None}
+        aliased = dict(conn.execute(f"SELECT e.id, {vector_read_sql('e.vector')} FROM t e"))
+        assert aliased == got
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# UTF-8 として読めない文字列の値が混ざった memory.db での検索
+# ---------------------------------------------------------------------------
+
+_BAD_TEXT_SQL = "CAST(x'fffe41' AS TEXT)"
+
+
+def _db_with_invalid_utf8_row(tmp_path, table: str) -> tuple:
+    """正常なバイト列形式の行の間に、UTF-8 として読めない文字列の値を一行置く。
+
+    返り値は (接続, 正常な行の ID の集合, 読めない行の ID)。ID は検索の結果の
+    ``source_id`` (メッセージは message_id)。
+    """
+    from sai_memory.arasuji.storage import create_entry
+    from sai_memory.memopedia.storage import create_fragment, create_page
+    from sai_memory.unified_recall import (
+        store_chronicle_embedding,
+        store_fragment_embedding,
+        store_memopedia_embedding,
+    )
+
+    conn = _open(tmp_path / "memory.db")
+    seeded = _seed(conn, EMBED_DIM)
+    set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+    good_vec = [0.1] * EMBED_DIM
+
+    if table == "message_embeddings":
+        bad, after = _add_messages(conn, 2, start=500)
+        conn.execute(
+            "INSERT INTO message_embeddings(message_id, chunk_index, vector) "
+            f"VALUES(?, 0, {_BAD_TEXT_SQL})",
+            (bad,),
+        )
+        conn.commit()
+        replace_message_embeddings(conn, after, [good_vec])
+        good = {*seeded["messages"], after}
+    elif table == "arasuji_embeddings":
+        for entry_id in ("chr_bad", "chr_after"):
+            create_entry(conn, level=1, content=f"あらすじ {entry_id}", source_ids=[],
+                         start_time=3000, end_time=4000, source_count=1, message_count=1,
+                         entry_id=entry_id)
+        conn.execute(
+            f"INSERT INTO arasuji_embeddings(entry_id, vector) VALUES('chr_bad', {_BAD_TEXT_SQL})"
+        )
+        conn.commit()
+        store_chronicle_embedding(conn, "chr_after", good_vec)
+        bad = "chr_bad"
+        good = {seeded["chronicle"], "chr_after"}
+    elif table == "memopedia_embeddings":
+        bad_page = create_page(conn, parent_id="root_terms", title="壊れたページ",
+                               summary="読めない値", content="", category="terms")
+        after_page = create_page(conn, parent_id="root_terms", title="後ろのページ",
+                                 summary="正常な値", content="", category="terms")
+        conn.execute(
+            f"INSERT INTO memopedia_embeddings(page_id, vector) VALUES(?, {_BAD_TEXT_SQL})",
+            (bad_page.id,),
+        )
+        conn.commit()
+        store_memopedia_embedding(conn, after_page.id, good_vec)
+        bad = bad_page.id
+        good = {seeded["page"], after_page.id}
+    else:
+        bad_frag = create_fragment(conn, entity_id=seeded["page"], content="壊れた断片")
+        after_frag = create_fragment(conn, entity_id=seeded["page"], content="後ろの断片")
+        conn.execute(
+            "INSERT INTO memopedia_fragment_embeddings(fragment_id, vector) "
+            f"VALUES(?, {_BAD_TEXT_SQL})",
+            (bad_frag.id,),
+        )
+        conn.commit()
+        store_fragment_embedding(conn, after_frag.id, good_vec)
+        bad = bad_frag.id
+        good = {seeded["fragment"], after_frag.id}
+    return conn, good, bad
+
+
+_SOURCE_OF_TABLE = {
+    "message_embeddings": "message",
+    "arasuji_embeddings": "chronicle",
+    "memopedia_embeddings": "memopedia",
+    "memopedia_fragment_embeddings": "fragment",
+}
+
+
+@pytest.mark.parametrize("table", VECTOR_TABLES)
+def test_unified_recall_skips_invalid_utf8_text_rows(tmp_path, table):
+    from sai_memory.unified_recall import unified_recall
+
+    conn, good, bad = _db_with_invalid_utf8_row(tmp_path, table)
+    try:
+        source = _SOURCE_OF_TABLE[table]
+        hits = unified_recall(
+            conn, FakeEmbedder(), "qqqq",
+            topk=20,
+            search_chronicle=source == "chronicle",
+            search_memopedia=source == "memopedia",
+            search_fragments=source == "fragment",
+            search_messages=source == "message",
+        )
+        found = {h.source_id for h in hits if h.source_type == source and h.embed_score is not None}
+        assert found and found <= good
+        assert bad not in found
+
+        # 読み込みは正常な行を全部返し、読めない行は unreadable に数える
+        from sai_memory import unified_recall as ur
+
+        reader = {
+            "message": ur.get_message_embeddings,
+            "chronicle": lambda c, dim: ur.get_chronicle_embeddings(c, level=1, dim=dim),
+            "memopedia": ur.get_memopedia_embeddings,
+            "fragment": ur.get_fragment_embeddings,
+        }[source]
+        corpus = reader(conn, dim=EMBED_DIM)
+        assert {row[0] for row in corpus.rows} == good
+        assert corpus.unreadable == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("groups", [False, True])
+def test_semantic_recall_skips_invalid_utf8_text_rows(tmp_path, groups):
+    from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
+
+    conn, good, bad = _db_with_invalid_utf8_row(tmp_path, "message_embeddings")
+    try:
+        fn = semantic_recall_groups if groups else semantic_recall
+        out = fn(
+            conn, FakeEmbedder(), "qqqq",
+            thread_id="p:__persona__", resource_id=None, topk=20,
+            range_before=0, range_after=0, scope="thread",
+        )
+        ids = {seed.id for seed, _group, _score in out} if groups else {m.id for m in out}
+        assert good <= ids
+        assert bad not in ids
+    finally:
+        conn.close()
+
+
+def test_vivid_source_messages_skips_invalid_utf8_text_rows(tmp_path):
+    from sai_memory.arasuji.storage import create_entry
+    from sai_memory.memopedia.storage import create_fragment
+    from sai_memory.unified_recall import store_fragment_embedding
+    from sea.auto_recall import _LedgerItem, _vivid_source_messages
+
+    conn, good, bad = _db_with_invalid_utf8_row(tmp_path, "message_embeddings")
+    try:
+        page_id = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE title = '猫ロボット'"
+        ).fetchone()[0]
+        ordered = [
+            mid for (mid,) in conn.execute("SELECT id FROM messages ORDER BY rowid")
+        ]
+        create_entry(conn, level=1, content="猫ロボットの日", source_ids=ordered,
+                     start_time=1000, end_time=20000, source_count=len(ordered),
+                     message_count=len(ordered), entry_id="chr_vivid")
+        frag = create_fragment(conn, entity_id=page_id, content="耳は三角形",
+                               chronicle_entry_id="chr_vivid")
+        store_fragment_embedding(conn, frag.id, [0.1] * EMBED_DIM)
+        item = _LedgerItem(
+            source_type="fragment", source_id=frag.id, title="猫ロボット",
+            content="耳は三角形", uri="", best_score=0.9, chronicle_entry_id="chr_vivid",
+        )
+
+        result = _vivid_source_messages(conn, item, max_messages=10)
+
+        assert len(result) == len(good)
+
+        # Fragment 自身の値が読めない文字列でも、例外にならずに空を返す
+        conn.execute(
+            f"UPDATE memopedia_fragment_embeddings SET vector = {_BAD_TEXT_SQL} "
+            "WHERE fragment_id = ?",
+            (frag.id,),
+        )
+        conn.commit()
+        assert _vivid_source_messages(conn, item, max_messages=10) == []
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 変換で例外になる JSON の値
+# ---------------------------------------------------------------------------
+
+_RAISING_JSON = {
+    "deeply nested": "[" * 100000 + "]" * 100000,  # json.loads が RecursionError
+    "huge integer": "[1" + "0" * 400 + "]",  # encode_vector が OverflowError
+}
+
+
+def _db_with_raising_json_rows(db_path: Path) -> tuple:
+    conn = _open(db_path)
+    try:
+        ids = _add_messages(conn, 6)
+        values = {}
+        bad = {}
+        labels = iter(_RAISING_JSON.items())
+        for i, mid in enumerate(ids):
+            if i in (1, 3):
+                _label, value = next(labels)
+                conn.execute(
+                    "INSERT INTO message_embeddings(message_id, chunk_index, vector) "
+                    "VALUES(?, 0, ?)",
+                    (mid, value),
+                )
+                conn.commit()
+                bad[mid] = value
+            else:
+                values[(mid, 0)] = _rand_vec(400 + i)
+                _set_json(conn, mid, values[(mid, 0)])
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+    finally:
+        conn.close()
+    return values, bad
+
+
+@pytest.mark.parametrize("batch_size", [1, 1000])
+def test_json_rows_that_raise_are_kept_and_the_run_ends(tmp_path, batch_size):
+    db_path = tmp_path / "memory.db"
+    values, bad = _db_with_raising_json_rows(db_path)
+    conn = _open(db_path)
+    try:
+        result = convert_json_vectors(conn, batch_size=batch_size)
+
+        assert result.tables["message_embeddings"] == {
+            "converted": len(values), "kept": len(bad),
+        }
+        _assert_converted(conn, {"message_embeddings": values})
+        rows = dict(conn.execute(
+            "SELECT message_id, vector FROM message_embeddings"
+        ))
+        for mid, value in bad.items():
+            assert rows[mid] == value
+        # もう一度実行しても、残した行は残したまま
+        again = convert_json_vectors(conn, batch_size=batch_size)
+        assert again.tables["message_embeddings"] == {"converted": 0, "kept": len(bad)}
+    finally:
+        conn.close()
+
+
+def test_reembed_rebuilds_json_rows_that_raise(tmp_path):
+    db_path = tmp_path / "memory.db"
+    values, bad = _db_with_raising_json_rows(db_path)
+
+    status = _run_api_job(db_path, force=False, manager=None)
+    assert status["running"] is False, status
+    assert status["total"] == len(bad)
+
+    conn = _open(db_path)
+    try:
+        assert _types(conn, "message_embeddings") == {"blob"}
+        _assert_converted(conn, {"message_embeddings": values})
+        for mid in bad:
+            (stored,) = conn.execute(
+                "SELECT vector FROM message_embeddings WHERE message_id = ?", (mid,),
+            ).fetchone()
+            assert decode_vector(stored) is not None
+        assert _check(conn) is False
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 変換できずに残した行と起動時の警告
+# ---------------------------------------------------------------------------
+
+def _byte_db_with_middle_row(tmp_path, middle_value) -> None:
+    """バイト列形式の行を、起動時の検査が見る件数より十分多く入れ、真ん中に一行置く。"""
+    from sai_memory.embedding_migration import STARTUP_SAMPLE_PER_END
+
+    n = STARTUP_SAMPLE_PER_END * 2 * 3 + 1
+    conn = _open(tmp_path / "memory.db")
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+        ids = _add_messages(conn, n, start=1000)
+        for i, mid in enumerate(ids):
+            if i == n // 2 and middle_value is not None:
+                conn.execute(
+                    "INSERT INTO message_embeddings(message_id, chunk_index, vector) "
+                    "VALUES(?, 0, ?)",
+                    (mid, middle_value),
+                )
+                conn.commit()
+            else:
+                replace_message_embeddings(conn, mid, [_rand_vec(i)])
+        assert sample_stale_vector_tables(conn, EMBED_DIM) == []
+    finally:
+        conn.close()
+
+
+def test_adapter_flags_rows_kept_by_the_conversion(tmp_path, caplog):
+    _byte_db_with_middle_row(tmp_path, json.dumps([_rand_vec(1), _rand_vec(2)]))
+
+    with caplog.at_level(logging.WARNING, logger="saiverse_memory.adapter"):
+        adapter = _adapter(tmp_path, convert_stored_vectors=True)
+    try:
+        assert adapter.embed_model_changed is True
+        warned = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "Persona p:" in r.getMessage()
+            and "1 vector row(s)" in r.getMessage() and "re-embed" in r.getMessage()
+        ]
+        assert warned
+    finally:
+        adapter.close()
+
+
+def test_adapter_does_not_flag_when_nothing_was_kept(tmp_path):
+    _byte_db_with_middle_row(tmp_path, json.dumps(_rand_vec(3)))
+
+    adapter = _adapter(tmp_path, convert_stored_vectors=True)
+    try:
+        assert adapter.embed_model_changed is False
+        assert _types(adapter.conn, "message_embeddings") == {"blob"}
+    finally:
+        adapter.close()
+
+
+def test_adapter_flags_a_failed_conversion_even_when_the_sample_is_fresh(tmp_path, monkeypatch):
+    import sai_memory.embedding_migration as migration
+
+    _byte_db_with_middle_row(tmp_path, None)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("conversion exploded")
+
+    monkeypatch.setattr(migration, "convert_json_vectors", _boom)
+    adapter = _adapter(tmp_path, convert_stored_vectors=True)
+    try:
+        assert adapter.embed_model_changed is True
+    finally:
+        adapter.close()
+
+
 def test_rebuild_after_unreadable_values_leaves_every_row_in_the_byte_format(tmp_path):
     """読み解けない値と JSON 形式の行が残った memory.db も、再計算のあと全行がバイト列形式。"""
     db_path = tmp_path / "memory.db"

@@ -306,14 +306,21 @@ class SAIMemoryAdapter:
 
         # JSON-format vector rows -> byte format, before the check below (rows
         # converted here are not stale) and before the startup backup thread.
+        conversion_left_rows = False
         if convert_stored_vectors and self.conn is not None:
-            self._convert_stored_vectors()
+            conversion_left_rows = self._convert_stored_vectors()
 
         # Detect embedding model changes. The check needs only the DB and the
         # stored dimension (EMBED_DIM), so it runs whether or not the model
         # loaded.
         if self.conn is not None:
             self._check_embed_model_change()
+            if conversion_left_rows:
+                # The check only samples both ends of each table, so a row the
+                # conversion left in the JSON format between byte-format rows
+                # can pass it unseen. Such a row is not searchable, so the
+                # persona goes on the re-embed banner, which rebuilds it.
+                self.embed_model_changed = True
             if self.embedder is None:
                 # Recall stays off until the model loads. Raising the flag puts
                 # the persona on the re-embed banner; running the re-embed
@@ -341,14 +348,19 @@ class SAIMemoryAdapter:
     #: Rows between two progress lines of the conversion log.
     _CONVERSION_LOG_EVERY = 10_000
 
-    def _convert_stored_vectors(self) -> None:
+    def _convert_stored_vectors(self) -> bool:
         """Rewrite JSON-format vector rows in the byte format; never raises.
 
         Logs the start, the progress (every ``_CONVERSION_LOG_EVERY`` rows)
         and the end at INFO when there is something to convert; a memory.db
         with nothing to convert logs one DEBUG line. A failure is logged as a
-        WARNING and the adapter carries on: the rows left in the JSON format
-        are counted as stale vectors by the startup check.
+        WARNING and the adapter carries on.
+
+        Returns True when rows may be left in the JSON format: the conversion
+        kept at least one row (``kept``, logged as a WARNING), or it failed.
+        Those rows are not searchable until a re-embed rebuilds them, and the
+        startup check (a sample of both ends of each table) may not see them,
+        so ``__init__`` raises ``embed_model_changed`` on True.
         """
         from sai_memory.embedding_migration import convert_json_vectors
 
@@ -378,19 +390,19 @@ class SAIMemoryAdapter:
         except Exception:
             LOGGER.warning(
                 "Persona %s: converting stored vectors to the byte format failed "
-                "after %.1fs; the rows left in the JSON format are counted as "
-                "stale vectors.",
+                "after %.1fs; the rows left in the JSON format are not searchable "
+                "until the re-embed rebuilds them.",
                 self.persona_id, time.monotonic() - started,
                 exc_info=True,
             )
-            return
+            return True
         elapsed = time.monotonic() - started
         if not result.did_anything:
             LOGGER.debug(
                 "Persona %s: no stored vector to convert (%.2fs)",
                 self.persona_id, elapsed,
             )
-            return
+            return False
         per_table = ", ".join(
             f"{table}: converted {c['converted']}, kept {c['kept']}"
             for table, c in result.tables.items()
@@ -402,6 +414,15 @@ class SAIMemoryAdapter:
             self.persona_id, elapsed, per_table or "no JSON-format rows",
             result.legacy_deleted,
         )
+        if result.kept:
+            LOGGER.warning(
+                "Persona %s: %d vector row(s) could not be converted from the "
+                "JSON format and were left as they are; those memories are not "
+                "searchable until the re-embed rebuilds them.",
+                self.persona_id, result.kept,
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Embedding model change detection

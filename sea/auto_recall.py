@@ -1007,11 +1007,12 @@ def _vivid_source_messages(
     if not message_ids:
         return []
 
-    from sai_memory.vector_codec import decode_vector
+    from sai_memory.vector_codec import decode_vector, vector_read_sql
 
     try:
         cur = conn.execute(
-            "SELECT vector FROM memopedia_fragment_embeddings WHERE fragment_id = ?",
+            f"SELECT {vector_read_sql('vector')} FROM memopedia_fragment_embeddings "
+            "WHERE fragment_id = ?",
             (item.source_id,),
         )
         frag_row = cur.fetchone()
@@ -1031,7 +1032,7 @@ def _vivid_source_messages(
     placeholders = ",".join("?" for _ in message_ids)
     try:
         cur = conn.execute(
-            f"SELECT message_id, chunk_index, vector FROM message_embeddings "
+            f"SELECT message_id, chunk_index, {vector_read_sql('vector')} FROM message_embeddings "
             f"WHERE message_id IN ({placeholders})",
             message_ids,
         )
