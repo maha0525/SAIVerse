@@ -38,7 +38,6 @@ DB は一時ディレクトリの SQLite。LLM は呼ばない。
 from __future__ import annotations
 
 import contextlib
-import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -66,6 +65,7 @@ from sai_memory.unified_recall import (
     store_fragment_embedding,
     store_memopedia_embedding,
 )
+from sai_memory.vector_codec import encode_vector, stored_vector_dim
 
 OLD_DIM = 384
 TABLES = (
@@ -123,8 +123,18 @@ def _seed(conn: sqlite3.Connection, dim: int) -> dict:
     return {"messages": [m1, m2], "chronicle": "chr1", "page": page.id, "fragment": frag.id}
 
 
+def _dim_of(stored) -> object:
+    """保存された値の次元。空のベクトル行は 0、バイト列形式でない値は "not byte format"。"""
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    if stored == DEFERRED_VECTOR:
+        return 0
+    dim = stored_vector_dim(stored)
+    return dim if dim is not None else "not byte format"
+
+
 def _dims(conn: sqlite3.Connection, table: str) -> set:
-    return {len(json.loads(v)) for (v,) in conn.execute(f"SELECT vector FROM {table}")}
+    return {_dim_of(v) for (v,) in conn.execute(f"SELECT vector FROM {table}")}
 
 
 def _texts(conn: sqlite3.Connection) -> tuple:
@@ -192,7 +202,7 @@ def test_old_dimension_in_any_table_flags_even_with_current_name(tmp_path, table
     try:
         _seed(conn, EMBED_DIM)
         set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
-        conn.execute(f"UPDATE {table} SET vector = ?", (json.dumps(_vec(OLD_DIM)),))
+        conn.execute(f"UPDATE {table} SET vector = ?", (encode_vector(_vec(OLD_DIM)),))
         conn.commit()
         assert _check(conn) is True
     finally:
@@ -363,10 +373,10 @@ def test_api_job_without_force_keeps_current_vectors(tmp_path):
     try:
         ids = _seed(conn, EMBED_DIM)
         set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
-        marker = json.dumps([0.5] * EMBED_DIM)
+        marker = encode_vector([0.5] * EMBED_DIM)
         conn.execute("UPDATE memopedia_embeddings SET vector = ? WHERE page_id = ?",
                      (marker, ids["page"]))
-        conn.execute("UPDATE arasuji_embeddings SET vector = ?", (json.dumps(_vec(OLD_DIM)),))
+        conn.execute("UPDATE arasuji_embeddings SET vector = ?", (encode_vector(_vec(OLD_DIM)),))
         conn.commit()
     finally:
         conn.close()
@@ -621,7 +631,7 @@ def test_reembed_messages_skips_message_edited_while_embedding(tmp_path):
             conn, _EditingEmbedder(conn, _edit), [m1], chunk_min=120, chunk_max=480,
         )
         assert result["changed"] == 1 and result["embedded"] == 0
-        dims = {len(json.loads(v)) for (v,) in conn.execute(
+        dims = {_dim_of(v) for (v,) in conn.execute(
             "SELECT vector FROM message_embeddings WHERE message_id = ?", (m1,))}
         assert dims == {OLD_DIM}  # 古い本文のベクトルを新しい長さで書かない
 
@@ -1022,7 +1032,8 @@ def test_api_job_lifts_warning_for_persona_not_loaded(tmp_path):
 # ---------------------------------------------------------------------------
 
 SAME_DIM_OLD_MODEL = "embeddinggemma-2-q8@old"
-_OLD_SPACE_VEC = json.dumps([0.5] * EMBED_DIM)
+_OLD_SPACE_VALUES = [0.5] * EMBED_DIM
+_OLD_SPACE_VEC = encode_vector(_OLD_SPACE_VALUES)
 
 
 def _seed_same_dim_old_space(conn: sqlite3.Connection, label: str) -> None:
@@ -1485,14 +1496,14 @@ def test_force_rebuild_drops_vectors_the_generators_never_recreate(tmp_path):
         # 生成器が作らない行に置く: Chronicle Lv2、幹ページ、消えた断片の残骸
         create_entry(conn, level=2, content="上位のあらすじ", source_ids=[], start_time=1,
                      end_time=2, source_count=1, message_count=1, entry_id="chr2")
-        store_chronicle_embedding(conn, "chr2", json.loads(_OLD_SPACE_VEC))
+        store_chronicle_embedding(conn, "chr2", _OLD_SPACE_VALUES)
         trunk = create_page(conn, parent_id="root_terms", title="幹", summary="幹の要約",
                             content="", category="terms", is_trunk=True)
-        store_memopedia_embedding(conn, trunk.id, json.loads(_OLD_SPACE_VEC))
-        store_fragment_embedding(conn, "gone-fragment", json.loads(_OLD_SPACE_VEC))
+        store_memopedia_embedding(conn, trunk.id, _OLD_SPACE_VALUES)
+        store_fragment_embedding(conn, "gone-fragment", _OLD_SPACE_VALUES)
         # 修正前は検索の getter がこれらを除外せず返していた
-        assert "chr2" in {r[0] for r in get_chronicle_embeddings(conn)}
-        assert trunk.id in {r[0] for r in get_memopedia_embeddings(conn)}
+        assert "chr2" in {r[0] for r in get_chronicle_embeddings(conn, dim=EMBED_DIM).rows}
+        assert trunk.id in {r[0] for r in get_memopedia_embeddings(conn, dim=EMBED_DIM).rows}
 
         result = rebuild_recall_source_embeddings(conn, FakeEmbedder(), force=True)
 
@@ -1500,9 +1511,9 @@ def test_force_rebuild_drops_vectors_the_generators_never_recreate(tmp_path):
         assert result["memopedia"]["deleted"] == 2 and result["memopedia"]["done"] == 1
         assert result["fragment"]["deleted"] == 2 and result["fragment"]["done"] == 1
         assert _old_space_left(conn)["arasuji_embeddings"] == 0
-        assert {r[0] for r in get_chronicle_embeddings(conn)} == {ids["chronicle"]}
-        assert {r[0] for r in get_memopedia_embeddings(conn)} == {ids["page"]}
-        assert {r[0] for r in get_fragment_embeddings(conn)} == {ids["fragment"]}
+        assert {r[0] for r in get_chronicle_embeddings(conn, dim=EMBED_DIM).rows} == {ids["chronicle"]}
+        assert {r[0] for r in get_memopedia_embeddings(conn, dim=EMBED_DIM).rows} == {ids["page"]}
+        assert {r[0] for r in get_fragment_embeddings(conn, dim=EMBED_DIM).rows} == {ids["fragment"]}
         assert conn.execute(
             "SELECT COUNT(*) FROM memopedia_fragment_embeddings WHERE fragment_id = 'gone-fragment'"
         ).fetchone()[0] == 0
@@ -1692,7 +1703,7 @@ def test_deferred_append_writes_an_empty_row_and_skip_writes_nothing(tmp_path):
         assert _vector_rows(adapter.conn, deferred) == [DEFERRED_VECTOR]
         assert _vector_rows(adapter.conn, skipped) == []
         assert _vector_rows(adapter.conn, blank) == []  # 本文の無い行は埋め込みの対象外
-        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, normal)] == [EMBED_DIM]
+        assert [_dim_of(v) for v in _vector_rows(adapter.conn, normal)] == [EMBED_DIM]
         assert adapter.conn.in_transaction is False
     finally:
         adapter.close()
@@ -1905,7 +1916,7 @@ def test_reembed_without_include_missing_fills_empty_rows(tmp_path):
             conn, EMBED_DIM, force=False, include_missing=False) == {m1}
         result = reembed_messages(conn, FakeEmbedder(), [m1], chunk_min=120, chunk_max=480)
         assert result["embedded"] == 1
-        assert [len(json.loads(v)) for v in _vector_rows(conn, m1)] == [EMBED_DIM]
+        assert [_dim_of(v) for v in _vector_rows(conn, m1)] == [EMBED_DIM]
     finally:
         conn.close()
 
@@ -2102,7 +2113,7 @@ def _assert_flagged_then_filled(tmp_path, mid):
         assert adapter.embed_model_changed is True
         result = adapter.reembed_stale_messages()
         assert result["embedded"] == 1
-        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
+        assert [_dim_of(v) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
     finally:
         adapter.close()
     assert _flag_on_open(tmp_path) is False
@@ -2158,7 +2169,7 @@ def test_update_message_without_vectors_writes_an_empty_row(tmp_path, broken):
     adapter = _real_adapter(tmp_path)
     try:
         mid = adapter.append_persona_message({"role": "user", "content": "元の本文"})
-        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
+        assert [_dim_of(v) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
         adapter.embedder = None if broken == "no_embedder" else _FailingEmbedder()
         assert adapter.update_message(mid, new_content="書き換えた本文") is True
         assert adapter.conn.execute(
@@ -2228,7 +2239,7 @@ def test_manual_message_add_embeds_on_the_spot(tmp_path):
             "p", "p:__persona__",
             CreateMessageRequest(role="user", content="手で足した会話"), manager=manager,
         )
-        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, item.id)] == [EMBED_DIM]
+        assert [_dim_of(v) for v in _vector_rows(adapter.conn, item.id)] == [EMBED_DIM]
     finally:
         adapter.close()
 

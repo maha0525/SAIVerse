@@ -556,7 +556,7 @@ class TestExecuteMerge:
         pending = {r[0] for r in get_fragments_without_embeddings(conn)}
         assert frag.id in pending
         # survivor 側の embedding は巻き添えにしない
-        visible = {r[0] for r in get_fragment_embeddings(conn)}
+        visible = {r[0] for r in get_fragment_embeddings(conn, dim=2).rows}
         assert keeper.id in visible
         assert frag.id not in visible  # 再生成されるまでは embedding 検索に出ない
 

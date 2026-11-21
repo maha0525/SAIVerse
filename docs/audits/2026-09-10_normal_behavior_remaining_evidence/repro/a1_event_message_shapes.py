@@ -250,14 +250,14 @@ def part_b_recall_filters(conn):
     )
 
     got = get_embeddings_for_scope(
-        conn, required_tags=["conversation"], exclude_tags=["handy_tool", "spell"],
+        conn, required_tags=["conversation"], exclude_tags=["handy_tool", "spell"], dim=3,
     )
     results['required_tags=["conversation"] (adapter recall / デバッグ API / スペル)'] = {
-        str(m.id) for m, _v, _i in got
+        str(mid) for mid, _i in got.rows
     }
-    got2 = get_embeddings_for_scope(conn, exclude_tags=["handy_tool", "spell"])
+    got2 = get_embeddings_for_scope(conn, exclude_tags=["handy_tool", "spell"], dim=3)
     results['exclude_tags のみ (recall_walk の意味的近傍の辺と同じ形)'] = {
-        str(m.id) for m, _v, _i in got2
+        str(mid) for mid, _i in got2.rows
     }
     return label_by_id, results
 

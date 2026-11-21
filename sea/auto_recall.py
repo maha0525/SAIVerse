@@ -1007,7 +1007,8 @@ def _vivid_source_messages(
     if not message_ids:
         return []
 
-    import json
+    from sai_memory.vector_codec import decode_vector
+
     try:
         cur = conn.execute(
             "SELECT vector FROM memopedia_fragment_embeddings WHERE fragment_id = ?",
@@ -1021,10 +1022,11 @@ def _vivid_source_messages(
         LOGGER.debug("[auto_recall][vivid] no fragment embedding for %s; try fallback", item.source_id)
         return []
 
-    try:
-        frag_vec = json.loads(frag_row[0])
-    except (ValueError, TypeError):
+    frag_arr = decode_vector(frag_row[0])
+    if frag_arr is None:
+        # JSON 形式の行や読み解けない値は、検索の対象にしない。
         return []
+    frag_vec = frag_arr.tolist()
 
     placeholders = ",".join("?" for _ in message_ids)
     try:
@@ -1047,14 +1049,13 @@ def _vivid_source_messages(
 
     # message_id ごとに best (score, chunk_index) を取る (チャンク分割されているため)。
     best_by_message: Dict[str, Tuple[float, int]] = {}
-    for mid, chunk_idx, vec_json in chunk_rows:
-        try:
-            vec = json.loads(vec_json)
-        except (ValueError, TypeError):
+    for mid, chunk_idx, stored in chunk_rows:
+        arr = decode_vector(stored)
+        if arr is None:
+            # empty row of a deferred embedding, a JSON-format row, or an
+            # unreadable value: nothing to compare.
             continue
-        if not vec:
-            continue  # empty row of a deferred embedding: nothing to compare yet
-        score = _cosine(frag_vec, vec)
+        score = _cosine(frag_vec, arr.tolist())
         prev = best_by_message.get(mid)
         if prev is None or score > prev[0]:
             best_by_message[mid] = (score, int(chunk_idx) if chunk_idx is not None else 0)

@@ -24,9 +24,11 @@ from sai_memory.memory.storage import (
     Message,
     canonical_position_keys,
     get_embeddings_for_scope,
+    get_messages_by_ids,
     get_messages_last,
     get_window_with_anchor,
 )
+from sai_memory.vector_codec import cosine_scores
 
 LOGGER = logging.getLogger(__name__)
 
@@ -219,11 +221,79 @@ def _download_model(target_dir: Path) -> None:
     LOGGER.info("Embedding model downloaded to %s.", target_dir)
 
 
-def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    denom = (np.linalg.norm(a) * np.linalg.norm(b))
-    if denom == 0:
-        return 0.0
-    return float(np.dot(a, b) / denom)
+def _pick_scored_messages(
+    conn,
+    embedder: Embedder,
+    query_text: str,
+    *,
+    thread_id: str,
+    resource_id: str | None,
+    topk: int,
+    scope: str,
+    exclude_message_ids: set[str] | None,
+    required_tags: list[str] | None,
+    exclude_tags: list[str] | None,
+    label: str,
+) -> List[Tuple[Message, float, int]]:
+    """Top ``topk`` messages by their best chunk's cosine, as (message, score, chunk_index).
+
+    Shared by :func:`semantic_recall` and :func:`semantic_recall_groups`
+    (``label`` names the caller in the log lines). The cosine is computed for
+    every candidate row at once; message rows are read only for the picked
+    ids.
+    """
+    vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
+    q = np.array(vectors[0], dtype=np.float32)
+    vector_dim = q.shape[0]
+
+    if scope == "resource" and resource_id:
+        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags, dim=vector_dim)
+    else:
+        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags, dim=vector_dim)
+
+    def _excluded(mid: str) -> bool:
+        return bool(exclude_message_ids) and mid in exclude_message_ids
+
+    for (mid, _chunk_index), got_dim in corpus.mismatched:
+        if _excluded(mid):
+            continue
+        logging.warning(
+            "%s: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
+            label,
+            mid,
+            vector_dim,
+            got_dim,
+        )
+    # The empty row of a deferred embedding (an import still being embedded):
+    # expected for a while, so no warning per row.
+    deferred = sum(1 for (mid, _chunk_index) in corpus.deferred if not _excluded(mid))
+    if deferred:
+        LOGGER.debug("%s: skipped %d message(s) still waiting for their embeddings", label, deferred)
+    if corpus.unreadable:
+        LOGGER.debug(
+            "%s: skipped %d vector row(s) not in the byte format", label, corpus.unreadable,
+        )
+
+    scores = cosine_scores(corpus.matrix, q)
+    best: dict[str, Tuple[float, int]] = {}
+    for i, (mid, chunk_index) in enumerate(corpus.rows):
+        if _excluded(mid):
+            continue
+        s = float(scores[i])
+        current = best.get(mid)
+        if current is None or s > current[0]:
+            best[mid] = (s, chunk_index)
+
+    scored = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)
+    picked = scored[: max(0, topk)]
+    by_id = {m.id: m for m in get_messages_by_ids(conn, [mid for mid, _ in picked])}
+    out: List[Tuple[Message, float, int]] = []
+    for mid, (score, chunk_index) in picked:
+        msg = by_id.get(mid)
+        if msg is None:
+            continue  # deleted after the vectors were read
+        out.append((msg, score, chunk_index))
+    return out
 
 
 def semantic_recall(
@@ -241,44 +311,19 @@ def semantic_recall(
     required_tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
 ) -> List[Message]:
-    vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
-    q = np.array(vectors[0], dtype=np.float32)
-    vector_dim = q.shape[0]
-
-    if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags)
-    else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
-
-    scored_map: dict[str, Tuple[Message, float, int]] = {}
-    deferred = 0
-    for msg, vec, chunk_index in corpus:
-        if exclude_message_ids and msg.id in exclude_message_ids:
-            continue
-        if len(vec) != vector_dim:
-            if not vec:
-                # The empty row of a deferred embedding (an import still being
-                # embedded): expected for a while, so no warning per row.
-                deferred += 1
-                continue
-            logging.warning(
-                "semantic_recall: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
-                msg.id,
-                vector_dim,
-                len(vec),
-            )
-            continue
-        v = np.array(vec, dtype=np.float32)
-        s = _cosine_sim(q, v)
-        current = scored_map.get(msg.id)
-        if current is None or s > current[1]:
-            scored_map[msg.id] = (msg, s, chunk_index)
-    if deferred:
-        LOGGER.debug("semantic_recall: skipped %d message(s) still waiting for their embeddings", deferred)
-
-    scored = list(scored_map.values())
-    scored.sort(key=lambda x: x[1], reverse=True)
-    picked = scored[: max(0, topk)]
+    picked = _pick_scored_messages(
+        conn,
+        embedder,
+        query_text,
+        thread_id=thread_id,
+        resource_id=resource_id,
+        topk=topk,
+        scope=scope,
+        exclude_message_ids=exclude_message_ids,
+        required_tags=required_tags,
+        exclude_tags=exclude_tags,
+        label="semantic_recall",
+    )
 
     expanded: List[Message] = []
     seen = set()
@@ -332,44 +377,19 @@ def semantic_recall_groups(
       (created_at, rowid)
     - score: cosine similarity for the seed
     """
-    vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
-    q = np.array(vectors[0], dtype=np.float32)
-    vector_dim = q.shape[0]
-
-    if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags)
-    else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
-
-    scored_map: dict[str, Tuple[Message, float, int]] = {}
-    deferred = 0
-    for msg, vec, chunk_index in corpus:
-        if exclude_message_ids and msg.id in exclude_message_ids:
-            continue
-        if len(vec) != vector_dim:
-            if not vec:
-                # The empty row of a deferred embedding (an import still being
-                # embedded): expected for a while, so no warning per row.
-                deferred += 1
-                continue
-            logging.warning(
-                "semantic_recall_groups: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
-                msg.id,
-                vector_dim,
-                len(vec),
-            )
-            continue
-        v = np.array(vec, dtype=np.float32)
-        s = _cosine_sim(q, v)
-        current = scored_map.get(msg.id)
-        if current is None or s > current[1]:
-            scored_map[msg.id] = (msg, s, chunk_index)
-    if deferred:
-        LOGGER.debug("semantic_recall_groups: skipped %d message(s) still waiting for their embeddings", deferred)
-
-    scored = list(scored_map.values())
-    scored.sort(key=lambda x: x[1], reverse=True)
-    picked = scored[: max(0, topk)]
+    picked = _pick_scored_messages(
+        conn,
+        embedder,
+        query_text,
+        thread_id=thread_id,
+        resource_id=resource_id,
+        topk=topk,
+        scope=scope,
+        exclude_message_ids=exclude_message_ids,
+        required_tags=required_tags,
+        exclude_tags=exclude_tags,
+        label="semantic_recall_groups",
+    )
 
     groups: List[Tuple[Message, List[Message], float]] = []
     for seed, score, chunk_index in picked:

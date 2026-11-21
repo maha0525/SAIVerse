@@ -448,18 +448,20 @@ class TestVividRecall(AutoRecallBase):
 
     def _seed_chronicle_and_messages(self, conn, *, entry_id, message_ids_and_vectors, frag_id, frag_vector):
         import json
+
+        from sai_memory.vector_codec import encode_vector
         conn.execute(
             "INSERT INTO arasuji_entries (id, source_ids_json) VALUES (?, ?)",
             (entry_id, json.dumps([mid for mid, _v, _c, _r, _t in message_ids_and_vectors])),
         )
         conn.execute(
             "INSERT INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
-            (frag_id, json.dumps(frag_vector)),
+            (frag_id, encode_vector(frag_vector)),
         )
         for mid, vec, content, role, created_at in message_ids_and_vectors:
             conn.execute(
                 "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
-                (mid, json.dumps(vec)),
+                (mid, encode_vector(vec)),
             )
             conn.execute(
                 "INSERT INTO messages (id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -499,13 +501,15 @@ class TestVividRecall(AutoRecallBase):
     def test_vivid_skipped_when_no_message_embeddings(self):
         conn = self._make_conn()
         import json
+
+        from sai_memory.vector_codec import encode_vector
         conn.execute(
             "INSERT INTO arasuji_entries (id, source_ids_json) VALUES (?, ?)",
             ("chron1", json.dumps(["m1"])),
         )
         conn.execute(
             "INSERT INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
-            ("f1", json.dumps([1.0, 0.0, 0.0])),
+            ("f1", encode_vector([1.0, 0.0, 0.0])),
         )
         # message_embeddings は空のまま (埋め込み未生成)。
         conn.commit()
@@ -602,6 +606,8 @@ class TestVividRecallMultiItem(AutoRecallBase):
     def _seed(self, conn, *, entry_id, frag_id, frag_vector, message_rows, with_embeddings=True):
         """message_rows: [(message_id, vector_or_None, content, role, created_at), ...]"""
         import json
+
+        from sai_memory.vector_codec import encode_vector
         conn.execute(
             "INSERT INTO arasuji_entries (id, source_ids_json) VALUES (?, ?)",
             (entry_id, json.dumps([m[0] for m in message_rows])),
@@ -609,13 +615,13 @@ class TestVividRecallMultiItem(AutoRecallBase):
         if with_embeddings:
             conn.execute(
                 "INSERT INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
-                (frag_id, json.dumps(frag_vector)),
+                (frag_id, encode_vector(frag_vector)),
             )
         for mid, vec, content, role, created_at in message_rows:
             if with_embeddings and vec is not None:
                 conn.execute(
                     "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
-                    (mid, json.dumps(vec)),
+                    (mid, encode_vector(vec)),
                 )
             conn.execute(
                 "INSERT INTO messages (id, role, content, created_at) VALUES (?, ?, ?, ?)",

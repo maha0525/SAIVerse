@@ -58,7 +58,6 @@ edit the row between the comparison and the INSERT.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import uuid
@@ -67,6 +66,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from sai_memory.db_locks import immediate_transaction
+from sai_memory.vector_codec import stored_vector_dim
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,23 +96,25 @@ RECALL_SOURCES = ("chronicle", "memopedia", "fragment")
 ProgressCallback = Callable[[str, int, int], None]
 
 
-def is_stale_vector(vec_json: Any, expected_dim: int) -> bool:
+def is_stale_vector(stored: Any, expected_dim: int) -> bool:
     """True when a stored vector cannot be compared with current query vectors.
 
-    Unparseable JSON and non-list values count as stale (the re-embed job has
-    always rebuilt those). The legacy "list of vectors" message format also
-    counts as stale: its outer length is the chunk count, not the dimension,
-    and re-embedding rewrites it as one row per chunk.
+    Only a byte-format value (``sai_memory.vector_codec``) of ``expected_dim``
+    is fresh. Everything else is stale:
 
-    Only the length is looked at, so a vector of another model with the same
-    dimension is not stale here; a re-embed catches that case through the
-    model label (:func:`model_label_changed`), which rebuilds everything.
+    - a byte-format value of another dimension;
+    - a JSON-format row, whatever its length (docs/intent/vector_binary_storage.md
+      §5; search skips JSON-format rows, so they cannot be compared). This
+      includes the legacy "list of vectors" message format;
+    - the empty vector row of a deferred embedding (``storage.DEFERRED_VECTOR``),
+      as before;
+    - an unreadable value.
+
+    Only the dimension is looked at, so a vector of another model with the
+    same dimension is not stale here; a re-embed catches that case through
+    the model label (:func:`model_label_changed`), which rebuilds everything.
     """
-    try:
-        vec = json.loads(vec_json)
-    except (json.JSONDecodeError, TypeError):
-        return True
-    return not isinstance(vec, list) or len(vec) != expected_dim
+    return stored_vector_dim(stored) != expected_dim
 
 
 def _relation_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -275,21 +277,20 @@ def purge_stale_legacy_embeddings(
 
 
 def highest_vector_dim(conn: sqlite3.Connection) -> int:
-    """Largest stored vector length across the four vector tables (full scan).
+    """Largest stored vector dimension across the four vector tables (full scan).
 
     The CLI uses it to refuse an accidental re-embed to a smaller dimension.
+    Only byte-format values count (``sai_memory.vector_codec.stored_vector_dim``);
+    JSON-format rows, the empty vector row and unreadable values are ignored.
     """
     highest = 0
     for table in VECTOR_TABLES:
         if not _relation_exists(conn, table):
             continue
-        for (vec_json,) in conn.execute(f"SELECT vector FROM {table}"):
-            try:
-                vec = json.loads(vec_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(vec, list) and len(vec) > highest:
-                highest = len(vec)
+        for (stored,) in conn.execute(f"SELECT vector FROM {table}"):
+            dim = stored_vector_dim(stored)
+            if dim is not None and dim > highest:
+                highest = dim
     return highest
 
 

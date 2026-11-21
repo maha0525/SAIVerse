@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.logging_utils import debug
+from sai_memory.vector_codec import StoredVectorRows, encode_vector, read_vector_rows
 
 #: The vector stored for a message whose embedding is deferred (a chat-log
 #: import embeds in the background after storing the text). Its length (0)
@@ -755,9 +756,9 @@ def replace_message_embeddings(
     again and the vectors stored without letting another writer in between).
     """
     conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))
-    payload: List[Tuple[str, int, str]] = []
+    payload: List[Tuple[str, int, bytes]] = []
     for idx, vec in enumerate(vectors):
-        payload.append((message_id, idx, json.dumps(list(map(float, vec)))))
+        payload.append((message_id, idx, encode_vector(list(vec))))
     if payload:
         conn.executemany(
             "INSERT INTO message_embeddings(message_id, chunk_index, vector) VALUES(?, ?, ?)",
@@ -998,11 +999,21 @@ def get_embeddings_for_scope(
     resource_id: Optional[str] = None,
     required_tags: Optional[List[str]] = None,
     exclude_tags: Optional[List[str]] = None,
-) -> List[Tuple[Message, List[float], int]]:
-    """意味検索の候補 (行と埋め込み)。
+    *,
+    dim: int,
+) -> StoredVectorRows:
+    """意味検索の候補 (メッセージの ID とベクトル)。
 
     書き手が決まっていない行 (:func:`author_settled_sql`) は候補に入れない —
     順位付けの前に外す (semantic_recall / semantic_recall_groups の唯一の候補元)。
+
+    返り値の ``rows[i]`` は ``(message_id, chunk_index)`` で、``matrix[i]`` が
+    そのチャンクのベクトル (正典順 created_at, rowid, chunk_index)。メッセージの
+    本文は読まない — 呼び出し側が、上位に残ったメッセージだけを
+    :func:`get_messages_by_ids` で読む。次元が ``dim`` と違うバイト列形式の行は
+    ``mismatched``、空のベクトル行は ``deferred``、JSON 形式の行と読み解けない
+    値は ``unreadable`` に数え、``matrix`` には入れない
+    (``sai_memory.vector_codec.read_vector_rows``)。
     """
     # Build tags filter clause
     tags_clause = f" AND {author_settled_sql('m.metadata')}"
@@ -1026,7 +1037,7 @@ def get_embeddings_for_scope(
             params.append(tag)
 
     base_query = """
-        SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
+        SELECT e.vector, m.id, e.chunk_index
         FROM messages m JOIN message_embeddings e ON m.id = e.message_id
     """
 
@@ -1040,20 +1051,11 @@ def get_embeddings_for_scope(
         query = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
         cur = conn.execute(query, tuple(params))
 
-    rows = cur.fetchall()
-    out: List[Tuple[Message, List[float], int]] = []
-    for row in rows:
-        msg = _row_to_message(row[:7])
-        vec_raw = json.loads(row[7])
-        if isinstance(vec_raw, list) and vec_raw and isinstance(vec_raw[0], list):
-            # Legacy multi-vector stored in legacy embeddings table.
-            for idx, entry in enumerate(vec_raw):
-                vec = [float(v) for v in entry]
-                out.append((msg, vec, idx))
-        else:
-            vec = [float(v) for v in vec_raw]
-            chunk_index = int(row[8]) if len(row) > 8 else 0
-            out.append((msg, vec, chunk_index))
+    out = read_vector_rows(cur, dim=dim)
+    out.rows = [
+        (mid, int(chunk_index) if chunk_index is not None else 0)
+        for mid, chunk_index in out.rows
+    ]
     return out
 
 

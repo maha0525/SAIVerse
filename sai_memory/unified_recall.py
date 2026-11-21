@@ -7,7 +7,6 @@ Provides:
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -15,6 +14,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
+from sai_memory.vector_codec import (
+    StoredVectorRows,
+    cosine_scores,
+    encode_vector,
+    read_vector_rows,
+)
 from saiverse.references import to_uri
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +68,7 @@ def store_chronicle_embedding(
     """Store or replace an embedding for a Chronicle entry."""
     conn.execute(
         "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
-        (entry_id, json.dumps(vector)),
+        (entry_id, encode_vector(vector)),
     )
     if commit:
         conn.commit()
@@ -72,16 +77,21 @@ def store_chronicle_embedding(
 def get_chronicle_embeddings(
     conn: sqlite3.Connection,
     level: Optional[int] = None,
-) -> List[tuple]:
-    """Get all Chronicle embeddings, optionally filtered by level.
+    *,
+    dim: int,
+) -> StoredVectorRows:
+    """Get all Chronicle embeddings of dimension ``dim``, optionally filtered by level.
 
     Returns:
-        List of (entry_id, vector, level, content, start_time, end_time, message_count)
+        ``StoredVectorRows`` whose ``rows[i]`` is
+        (entry_id, level, content, start_time, end_time, message_count) and
+        ``matrix[i]`` its vector. Rows that are not byte-format vectors of
+        ``dim`` are left out (``sai_memory.vector_codec.read_vector_rows``).
     """
     if level is not None:
         cur = conn.execute(
             """
-            SELECT e.entry_id, e.vector, a.level, a.content, a.start_time, a.end_time, a.message_count
+            SELECT e.vector, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
             FROM arasuji_embeddings e
             JOIN arasuji_entries a ON e.entry_id = a.id
             WHERE a.level = ?
@@ -91,19 +101,12 @@ def get_chronicle_embeddings(
     else:
         cur = conn.execute(
             """
-            SELECT e.entry_id, e.vector, a.level, a.content, a.start_time, a.end_time, a.message_count
+            SELECT e.vector, e.entry_id, a.level, a.content, a.start_time, a.end_time, a.message_count
             FROM arasuji_embeddings e
             JOIN arasuji_entries a ON e.entry_id = a.id
             """,
         )
-    result = []
-    for row in cur.fetchall():
-        try:
-            vec = json.loads(row[1])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6]))
-    return result
+    return read_vector_rows(cur, dim=dim)
 
 
 def count_chronicle_embeddings(conn: sqlite3.Connection) -> int:
@@ -147,13 +150,13 @@ def store_memopedia_embedding(
     """Store or replace an embedding for a Memopedia page."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_embeddings (page_id, vector) VALUES (?, ?)",
-        (page_id, json.dumps(vector)),
+        (page_id, encode_vector(vector)),
     )
     if commit:
         conn.commit()
 
 
-def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+def get_memopedia_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVectorRows:
     """Get all Memopedia embeddings.
 
     Chronicle エントリ (P3b の物理統合で memopedia_pages に同居) は除外する —
@@ -163,25 +166,20 @@ def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     Codex 第五巡 #3 — 二重拾い自体は物理統合以来の既存挙動)。
 
     Returns:
-        List of (page_id, vector, title, summary, category, short_id)
+        ``StoredVectorRows`` whose ``rows[i]`` is
+        (page_id, title, summary, category, short_id) and ``matrix[i]`` its
+        vector (byte-format vectors of ``dim`` only).
     """
     cur = conn.execute(
         """
-        SELECT e.page_id, e.vector, p.title, p.summary, p.category, p.short_id
+        SELECT e.vector, e.page_id, p.title, p.summary, p.category, p.short_id
         FROM memopedia_embeddings e
         JOIN memopedia_pages p ON e.page_id = p.id
         WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
           AND (p.category IS NULL OR p.category != 'chronicle')
         """,
     )
-    result = []
-    for row in cur.fetchall():
-        try:
-            vec = json.loads(row[1])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        result.append((row[0], vec, row[2], row[3], row[4], row[5]))
-    return result
+    return read_vector_rows(cur, dim=dim)
 
 
 def count_memopedia_embeddings(conn: sqlite3.Connection) -> int:
@@ -239,13 +237,13 @@ def store_fragment_embedding(
     """Store or replace an embedding for a Memopedia fragment."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
-        (fragment_id, json.dumps(vector)),
+        (fragment_id, encode_vector(vector)),
     )
     if commit:
         conn.commit()
 
 
-def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+def get_fragment_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVectorRows:
     """Get fragment embeddings with metadata for unified search.
 
     可視性 (2026-07-12 監査 P1): 親ページが soft-delete 済み (ごみ箱) の Fragment
@@ -253,12 +251,14 @@ def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     ごみ箱へ移した知識が自動想起でペルソナの tail へ再注入されるのを防ぐ。
 
     Returns:
-        List of (fragment_id, vector, content, entity_id, chronicle_entry_id,
-                 source_date, entity_title, entity_category, entity_short_id)
+        ``StoredVectorRows`` whose ``rows[i]`` is
+        (fragment_id, content, entity_id, chronicle_entry_id, source_date,
+        entity_title, entity_category, entity_short_id) and ``matrix[i]`` its
+        vector (byte-format vectors of ``dim`` only).
     """
     cur = conn.execute(
         f"""
-        SELECT e.fragment_id, e.vector, f.content, f.entity_id,
+        SELECT e.vector, e.fragment_id, f.content, f.entity_id,
                f.chronicle_entry_id, f.source_date, p.title, p.category, p.short_id
         FROM memopedia_fragment_embeddings e
         JOIN memopedia_fragments f ON e.fragment_id = f.id
@@ -266,14 +266,7 @@ def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
         WHERE {_FRAGMENT_VISIBILITY_WHERE}
         """,
     )
-    result = []
-    for row in cur.fetchall():
-        try:
-            vec = json.loads(row[1])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        result.append((row[0], vec, row[2], row[3], row[4], row[5], row[6], row[7], row[8]))
-    return result
+    return read_vector_rows(cur, dim=dim)
 
 
 def count_fragment_embeddings(conn: sqlite3.Connection) -> int:
@@ -304,7 +297,7 @@ def get_fragments_without_embeddings(conn: sqlite3.Connection) -> List[tuple]:
 # Embedding retrieval: Messages (read-only, embeddings created elsewhere)
 # ---------------------------------------------------------------------------
 
-def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
+def get_message_embeddings(conn: sqlite3.Connection, *, dim: int) -> StoredVectorRows:
     """Get message embeddings of real conversation rows for unified search.
 
     取得時フィルタ (2026-07-12 監査 P1): 「実会話」のみ返す —
@@ -315,34 +308,32 @@ def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
     保持のまま (他用途) — 境界は取得時に引く。
 
     Returns best-scoring chunk per message later; here we return all chunks.
+    The message text is not read here (``unified_recall`` reads it only for
+    the messages left at the top).
 
     Returns:
-        List of (message_id, vector, chunk_index, content, role, created_at)
+        ``StoredVectorRows`` whose ``rows[i]`` is (message_id, chunk_index)
+        and ``matrix[i]`` that chunk's vector (byte-format vectors of ``dim``
+        only).
     """
     from sai_memory.memory.storage import real_conversation_filter
 
     clause, params = real_conversation_filter()
     cur = conn.execute(
         f"""
-        SELECT e.message_id, e.vector, e.chunk_index, m.content, m.role, m.created_at
+        SELECT e.vector, e.message_id, e.chunk_index
         FROM message_embeddings e
         JOIN messages m ON e.message_id = m.id
         WHERE {clause}
         """,
         params,
     )
-    result = []
-    for row in cur.fetchall():
-        try:
-            vec = json.loads(row[1])
-            if isinstance(vec, list) and vec and isinstance(vec[0], list):
-                for idx, entry in enumerate(vec):
-                    result.append((row[0], [float(v) for v in entry], idx, row[3], row[4], row[5]))
-            else:
-                result.append((row[0], [float(v) for v in vec], int(row[2]), row[3], row[4], row[5]))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return result
+    out = read_vector_rows(cur, dim=dim)
+    out.rows = [
+        (mid, int(chunk_index) if chunk_index is not None else 0)
+        for mid, chunk_index in out.rows
+    ]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -595,13 +586,6 @@ def embed_memopedia_fragments(
 # ---------------------------------------------------------------------------
 # Unified search
 # ---------------------------------------------------------------------------
-
-def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
-    if denom == 0:
-        return 0.0
-    return float(np.dot(a, b) / denom)
-
 
 # ---------------------------------------------------------------------------
 # マッチ箇所抜粋 (rev4)
@@ -1217,16 +1201,20 @@ def unified_recall(
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 
+    # 4 つの読み込みは、バイト列形式で次元がクエリと同じ行だけを返す
+    # (次元の合わない行・空のベクトル行・JSON 形式の行・読み解けない値は飛ばす)。
+    # 類似度は全行に対して一度に計算する。
+    skipped_unreadable = 0
+
     if search_chronicle:
-        corpus = get_chronicle_embeddings(conn, level=chronicle_level)
+        corpus = get_chronicle_embeddings(conn, level=chronicle_level, dim=vector_dim)
+        skipped_unreadable += corpus.unreadable
+        corpus_scores = cosine_scores(corpus.matrix, q)
         scored: list[tuple[str, float, RecallHit]] = []
-        for entry_id, vec, level, content, start_time, end_time, msg_count in corpus:
-            if len(vec) != vector_dim:
-                continue
+        for i, (entry_id, level, content, start_time, end_time, msg_count) in enumerate(corpus.rows):
             if excluded_keys and ("chronicle", str(entry_id)) in excluded_keys:
                 continue
-            v = np.array(vec, dtype=np.float32)
-            score = _cosine_sim(q, v)
+            score = float(corpus_scores[i])
             embed_all_scores[("chronicle", entry_id)] = score
             time_range = _format_time_range(start_time, end_time)
             scored.append((entry_id, score, RecallHit(
@@ -1247,15 +1235,14 @@ def unified_recall(
             embedding_hits[("chronicle", sid)] = hit
 
     if search_memopedia:
-        corpus = get_memopedia_embeddings(conn)
+        corpus = get_memopedia_embeddings(conn, dim=vector_dim)
+        skipped_unreadable += corpus.unreadable
+        corpus_scores = cosine_scores(corpus.matrix, q)
         scored = []
-        for page_id, vec, title, summary, category, short_id in corpus:
-            if len(vec) != vector_dim:
-                continue
+        for i, (page_id, title, summary, category, short_id) in enumerate(corpus.rows):
             if excluded_keys and ("memopedia", str(page_id)) in excluded_keys:
                 continue
-            v = np.array(vec, dtype=np.float32)
-            score = _cosine_sim(q, v)
+            score = float(corpus_scores[i])
             embed_all_scores[("memopedia", page_id)] = score
             scored.append((page_id, score, RecallHit(
                 source_type="memopedia",
@@ -1273,15 +1260,14 @@ def unified_recall(
             embedding_hits[("memopedia", sid)] = hit
 
     if search_fragments:
-        corpus = get_fragment_embeddings(conn)
+        corpus = get_fragment_embeddings(conn, dim=vector_dim)
+        skipped_unreadable += corpus.unreadable
+        corpus_scores = cosine_scores(corpus.matrix, q)
         scored = []
-        for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort in corpus:
-            if len(vec) != vector_dim:
-                continue
+        for i, (frag_id, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort) in enumerate(corpus.rows):
             if excluded_keys and ("fragment", str(frag_id)) in excluded_keys:
                 continue
-            v = np.array(vec, dtype=np.float32)
-            score = _cosine_sim(q, v)
+            score = float(corpus_scores[i])
             embed_all_scores[("fragment", frag_id)] = score
             scored.append((frag_id, score, RecallHit(
                 source_type="fragment",
@@ -1301,24 +1287,25 @@ def unified_recall(
             embedding_hits[("fragment", sid)] = hit
 
     if search_messages:
-        corpus = get_message_embeddings(conn)
-        # message_id ごとに best (score, chunk_index, full_content, role, created_at) を
-        # 保持する。表示 content は最後にまとめて再構築する (rev4: 先頭200字固定をやめ、
+        corpus = get_message_embeddings(conn, dim=vector_dim)
+        skipped_unreadable += corpus.unreadable
+        corpus_scores = cosine_scores(corpus.matrix, q)
+        # message_id ごとに best (score, chunk_index) を保持する。本文・role・
+        # created_at は上位に残ったメッセージのぶんだけ、あとから読む。表示
+        # content は最後にまとめて再構築する (rev4: 先頭200字固定をやめ、
         # ベストマッチ chunk_index の周辺を抜粋する)。
-        best_by_message: dict[str, tuple[float, int, str, str, int]] = {}
-        for msg_id, vec, chunk_index, content, role, created_at in corpus:
-            if len(vec) != vector_dim:
-                continue
+        best_by_message: dict[str, tuple[float, int]] = {}
+        for i, (msg_id, chunk_index) in enumerate(corpus.rows):
             # 収集段階で除外する (キーワード経路と同じ境界)。
             if excluded_msg_ids and str(msg_id) in excluded_msg_ids:
                 continue
             if excluded_keys and ("message", str(msg_id)) in excluded_keys:
                 continue
-            v = np.array(vec, dtype=np.float32)
-            score = _cosine_sim(q, v)
+            score = float(corpus_scores[i])
             prev = best_by_message.get(msg_id)
             if prev is None or score > prev[0]:
-                best_by_message[msg_id] = (score, chunk_index, content, role, created_at)
+                best_by_message[msg_id] = (score, chunk_index)
+        del corpus, corpus_scores
 
         for msg_id, best in best_by_message.items():
             # message は chunk 単位で走査するので、全件マップには message ごとの
@@ -1326,7 +1313,21 @@ def unified_recall(
             embed_all_scores[("message", msg_id)] = best[0]
 
         scored_list = sorted(best_by_message.items(), key=lambda kv: kv[1][0], reverse=True)
-        for msg_id, (score, chunk_index, content, role, created_at) in scored_list[:total_cap * 2]:
+        top_messages = scored_list[:total_cap * 2]
+        message_rows: dict[str, tuple] = {}
+        if top_messages:
+            top_ids = [msg_id for msg_id, _ in top_messages]
+            placeholders = ",".join("?" for _ in top_ids)
+            for mid, mcontent, mrole, mcreated in conn.execute(
+                f"SELECT id, content, role, created_at FROM messages WHERE id IN ({placeholders})",
+                top_ids,
+            ):
+                message_rows[mid] = (mcontent, mrole, mcreated)
+        for msg_id, (score, chunk_index) in top_messages:
+            row = message_rows.get(msg_id)
+            if row is None:
+                continue  # deleted after the vectors were read
+            content, role, created_at = row
             title = f"{role} @ {_format_timestamp(created_at)}"
             excerpt, used_chunk_index = reconstruct_message_excerpt(
                 conn, msg_id, chunk_index, content or "",
@@ -1342,6 +1343,12 @@ def unified_recall(
                 start_time=created_at,
                 chunk_index=used_chunk_index,
             )
+
+    if skipped_unreadable:
+        LOGGER.debug(
+            "[unified_recall] skipped %d vector row(s) not in the byte format",
+            skipped_unreadable,
+        )
 
     # --- RRF fusion ---
     RRF_K = 60  # Standard RRF constant
