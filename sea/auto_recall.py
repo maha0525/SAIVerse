@@ -786,6 +786,42 @@ _KEYWORD_MAX_COUNT = 4
 _ENHANCED_SOURCE_ALLOCATIONS = {"fragment": 5, "memopedia": 1, "message": 3}
 
 
+def _count_messages_containing(conn, words: List[str]) -> Dict[str, int]:
+    """``messages`` の本文に各語が出てくる行の数を、表を一回読むだけで数える。
+
+    以前は語ごとに ``SELECT COUNT(*) ... WHERE content LIKE '%語%'`` を実行していて、
+    語の数だけ全行の本文を読み直していた (60 語なら 60 回)。部屋の様子や通知の本文から
+    も語を抜くので、語が 100 を超える回があり、返事の前にこの数え上げだけで 6〜16 秒
+    かかっていた (測った数字は docs/intent/auto_recall_jev_rerank.md の「拾い上げの拡張」)。
+
+    数え方は SQLite の ``LIKE '%語%'`` と同じにしてある。語を本文の部分文字列として
+    探し、英字 (ASCII の A〜Z) の大文字と小文字だけを区別しない。本文と語を UTF-8 の
+    バイト列のまま比べるのは、``bytes.lower()`` が ASCII の英字だけを小文字にするから
+    (``str.lower()`` は全角の英字なども変えてしまい、LIKE と件数がずれる)。UTF-8 は
+    文字の途中から別の文字が始まって見えることが無いので、バイト列で一致した位置は
+    必ず文字の区切りに合う。
+
+    LIKE と違うのは、本文の途中に NUL 文字があるときだけ。LIKE は NUL より後ろを
+    見ないが、こちらは本文の最後まで見る。
+    """
+    counts: Dict[str, int] = dict.fromkeys(words, 0)
+    needles = [(word, word.encode("utf-8").lower()) for word in words if word]
+    if not needles:
+        return counts
+
+    cur = conn.execute(
+        "SELECT CAST(content AS BLOB) FROM messages WHERE content IS NOT NULL"
+    )
+    for (blob,) in cur:
+        if not blob:
+            continue
+        lowered = bytes(blob).lower()
+        for word, needle in needles:
+            if needle in lowered:
+                counts[word] += 1
+    return counts
+
+
 def _extract_recall_keywords(
     conn, query: str, *, observations: Optional[List[str]] = None,
 ) -> List[str]:
@@ -810,8 +846,6 @@ def _extract_recall_keywords(
         return []
 
     try:
-        from sai_memory.unified_recall import _escape_like
-
         words: List[str] = []
         seen: set = set()
         for source in sources:
@@ -824,15 +858,12 @@ def _extract_recall_keywords(
         if not words:
             return []
 
+        counts = _count_messages_containing(conn, words)
+
         kept: List[Tuple[str, int]] = []
         dropped: List[Tuple[str, int]] = []
         for word in words:
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE content LIKE ? ESCAPE '\\'",
-                (f"%{_escape_like(word)}%",),
-            )
-            row = cur.fetchone()
-            count = int(row[0]) if row else 0
+            count = counts[word]
             if 1 <= count <= _KEYWORD_COMMON_LIMIT:
                 kept.append((word, count))
             else:
