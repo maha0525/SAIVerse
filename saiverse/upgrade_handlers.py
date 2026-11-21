@@ -1536,4 +1536,31 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.32 -> 0.3.33 (no schema or world-data changes).",
     ),
+    # ---- v0.3.34 ----
+    # 記憶の検索用のベクトルの保存形式の変更 (JSON 形式 → バイト列形式)、自動想起の
+    # キーワードの抽出の高速化、バックエンドの受付が止まったときの 500 の解消と記録、
+    # エラーで発言が生まれなかった回を部屋の記録に残す、動作中の警告を画面右下に残す、
+    # 自端末の Tailscale IP の Origin 許可、お知らせと更新確認の GitHub 待ちの修正。
+    # このバージョンで保存済みのデータが変わる所は二つあるが、どちらもこの鎖の外で行う。
+    #   - saiverse.db の ``runtime_alerts`` 表の追加: 起動時の軽量な移行
+    #     (database/migrate.py の ``ensure_runtime_alerts_table``)。
+    #   - 各ペルソナの memory.db の検索用ベクトルの変換: ``SAIMemoryAdapter`` の初期化
+    #     (docs/intent/vector_binary_storage.md の §4)。
+    # 世界のデータを書き換える処理は無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_34",
+        scope="city",
+        from_version="0.3.33",
+        to_version="0.3.34",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.33 -> 0.3.34 (no world-data changes in the chain).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_34",
+        scope="ai",
+        from_version="0.3.33",
+        to_version="0.3.34",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.33 -> 0.3.34 (no world-data changes in the chain).",
+    ),
 ]
