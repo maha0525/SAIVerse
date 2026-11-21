@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟠 実装中 | 記憶の検索用のベクトルの保存形式を変える (返事の前の記憶の検索を速く・軽くする) | 設計はまはーの判断で確定し、実装に入っている。次 = 実装を検収し、本番と分けたテスト環境で変換と会話一回を通して確かめ、レビューを通す。そのあと、まはーが本番環境で更新して確かめる。 | Claude (実装と検収) | [intent](../intent/vector_binary_storage.md) | 2026-11-21 |
+| 🟣 検証待ち | 記憶の検索用のベクトルの保存形式を変える (返事の前の記憶の検索を速く・軽くする) | 実装とレビューが済み、PR を出してある。次 = まはーが PR を確認し、本番環境で更新して、起動時の変換の所要時間と、返事が始まるまでの時間を見る。 | まはー (PR の確認・本番環境での更新) | [intent](../intent/vector_binary_storage.md) | 2026-11-22 |
 | 🟣 検証待ち | 「通信が途中で切れました」と 500 がまとまって出る件 (バックエンドの受付が断続的に止まる) | 500 を止める設定と、イベントループが止まったときに各スレッドの実行位置を残す記録が、PR に入っている。次 = まはーが PR を確認する。止めている原因は未特定で、この記録が入ったバージョンで同じ報告が来たら、利用者の timeout_diagnostics.log から調べる。 | まはー (PR の確認) | [intent](../intent/backend_stall_handling.md) / [issue](../issues/chat_stream_cut_and_relay_500_on_backend_stall.md) | 2026-11-21 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |
