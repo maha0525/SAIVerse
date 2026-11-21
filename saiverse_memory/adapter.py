@@ -132,6 +132,7 @@ class SAIMemoryAdapter:
         settings: Optional[Settings] = None,
         startup_backup: bool = False,
         recover_orphaned_thread: bool = False,
+        convert_stored_vectors: bool = False,
     ) -> None:
         """Create an adapter bound to ``personas/<persona_id>/memory.db``.
 
@@ -149,6 +150,14 @@ class SAIMemoryAdapter:
         検出して親 thread へ復元する。startup_backup と同じくペルソナ登録経路
         だけが True を渡す。ツール・API の使い捨て adapter が「走行中の
         Stelis」を誤って巻き戻さないための門。
+
+        ``convert_stored_vectors``: opt-in for rewriting JSON-format vector
+        rows in the byte format (``sai_memory.embedding_migration.
+        convert_json_vectors``, docs/intent/vector_binary_storage.md §4)。
+        startup_backup と同じくペルソナ登録経路だけが True を渡す。変換は
+        memory.db の表の用意の後、起動時の検査 (``_check_embed_model_change``)
+        とバックアップのスレッドの開始より前に行う。変換が例外で失敗しても
+        初期化は続け、残った JSON 形式の行は検査で古いベクトルとして数える。
         """
         base_settings = settings or load_settings()
         self.persona_id = persona_id
@@ -295,6 +304,11 @@ class SAIMemoryAdapter:
             )
             self.embedder = None
 
+        # JSON-format vector rows -> byte format, before the check below (rows
+        # converted here are not stale) and before the startup backup thread.
+        if convert_stored_vectors and self.conn is not None:
+            self._convert_stored_vectors()
+
         # Detect embedding model changes. The check needs only the DB and the
         # stored dimension (EMBED_DIM), so it runs whether or not the model
         # loaded.
@@ -320,6 +334,74 @@ class SAIMemoryAdapter:
 
         if startup_backup and _auto_backup_enabled():
             threading.Thread(target=self._run_startup_backup, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Stored vector format conversion
+    # ------------------------------------------------------------------
+    #: Rows between two progress lines of the conversion log.
+    _CONVERSION_LOG_EVERY = 10_000
+
+    def _convert_stored_vectors(self) -> None:
+        """Rewrite JSON-format vector rows in the byte format; never raises.
+
+        Logs the start, the progress (every ``_CONVERSION_LOG_EVERY`` rows)
+        and the end at INFO when there is something to convert; a memory.db
+        with nothing to convert logs one DEBUG line. A failure is logged as a
+        WARNING and the adapter carries on: the rows left in the JSON format
+        are counted as stale vectors by the startup check.
+        """
+        from sai_memory.embedding_migration import convert_json_vectors
+
+        started = time.monotonic()
+        logged = {"rows": 0}
+
+        def _progress(table: str, done: int, total: int) -> None:
+            if done == 0:
+                LOGGER.info(
+                    "Persona %s: converting %d stored vector(s) of %s "
+                    "from the JSON format to the byte format...",
+                    self.persona_id, total, table,
+                )
+                logged["rows"] = 0
+                return
+            if done - logged["rows"] >= self._CONVERSION_LOG_EVERY or done == total:
+                logged["rows"] = done
+                LOGGER.info(
+                    "Persona %s: %s: %d / %d vector row(s) looked at (%.1fs)",
+                    self.persona_id, table, done, total, time.monotonic() - started,
+                )
+
+        try:
+            result = convert_json_vectors(
+                self.conn, progress=_progress, db_lock=self._db_lock,
+            )
+        except Exception:
+            LOGGER.warning(
+                "Persona %s: converting stored vectors to the byte format failed "
+                "after %.1fs; the rows left in the JSON format are counted as "
+                "stale vectors.",
+                self.persona_id, time.monotonic() - started,
+                exc_info=True,
+            )
+            return
+        elapsed = time.monotonic() - started
+        if not result.did_anything:
+            LOGGER.debug(
+                "Persona %s: no stored vector to convert (%.2fs)",
+                self.persona_id, elapsed,
+            )
+            return
+        per_table = ", ".join(
+            f"{table}: converted {c['converted']}, kept {c['kept']}"
+            for table, c in result.tables.items()
+            if c["converted"] or c["kept"]
+        )
+        LOGGER.info(
+            "Persona %s: stored vector conversion finished in %.1fs (%s; "
+            "legacy embeddings rows deleted: %d)",
+            self.persona_id, elapsed, per_table or "no JSON-format rows",
+            result.legacy_deleted,
+        )
 
     # ------------------------------------------------------------------
     # Embedding model change detection
@@ -2380,7 +2462,10 @@ class SAIMemoryAdapter:
         出るだけ)。古いモデルのベクトルが残っているペルソナでは、それらの
         メッセージも現行モデルで作り直す (Chronicle 等と名札は再計算の仕事)。
 
-        対象の一覧づくりや埋め込みの例外はそのまま投げる (呼び出し側が状態に
+        対象を調べる前に ``convert_json_vectors`` で JSON 形式の行をバイト列
+        形式へ書き換える (変換できる行を作り直さないため)。
+
+        変換・対象の一覧づくり・埋め込みの例外はそのまま投げる (呼び出し側が状態に
         残す)。埋め込みモデルが無いときは RuntimeError。空のベクトル行は
         残るので、次の起動時の検査と警告バナーの再計算が拾う。
 
@@ -2388,10 +2473,18 @@ class SAIMemoryAdapter:
             ``reembed_messages`` の集計 {"embedded", "dropped", "changed", "total"}。
         """
         from sai_memory.config import EMBED_DIM
-        from sai_memory.embedding_migration import message_reembed_targets, reembed_messages
+        from sai_memory.embedding_migration import (
+            convert_json_vectors,
+            message_reembed_targets,
+            reembed_messages,
+        )
 
         if not self._ready:
             raise RuntimeError("SAIMemory is not ready")
+        # JSON-format rows that hold one vector are rewritten in the byte
+        # format first, so they are not rebuilt below
+        # (docs/intent/vector_binary_storage.md §4).
+        convert_json_vectors(self.conn, db_lock=self._db_lock)
         with self._db_lock:
             targets = message_reembed_targets(
                 self.conn, EMBED_DIM, force=False, include_missing=False,

@@ -33,6 +33,16 @@ _DTYPE = np.dtype("<f4")
 _ITEM_SIZE = _DTYPE.itemsize  # 4
 
 
+#: SQL expression that reads the ``vector`` column for code that only needs
+#: :func:`stored_vector_dim` (the stale-vector checks). A text value is never a
+#: byte-format vector, so it is read as ``NULL``: the result of
+#: :func:`stored_vector_dim` is the same (``None``), and a text value that is
+#: not valid UTF-8 cannot make the read raise (Python decodes TEXT values on
+#: fetch). Code that must tell the empty vector row apart reads the column
+#: itself.
+VECTOR_FOR_DIM_SQL = "CASE WHEN typeof(vector) = 'text' THEN NULL ELSE vector END"
+
+
 def encode_vector(vector: Any) -> bytes:
     """Return the stored value (byte format) of ``vector`` (list / tuple / ndarray)."""
     return np.asarray(vector, dtype=_DTYPE).reshape(-1).tobytes()
