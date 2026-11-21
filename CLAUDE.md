@@ -252,7 +252,7 @@ Session logs live under `~/.saiverse/user_data/logs/{YYYYMMDD_HHMMSS}/`:
 | `backend.log` | root | Application-wide log + console mirror |
 | `llm_io.log` | `saiverse.llm` | LLM API request/response I/O (JSON) |
 | `sea_trace.log` | `saiverse.sea_trace` | SEA playbook node execution trace |
-| `timeout_diagnostics.log` | `saiverse.timeout` | Timeout event diagnostics |
+| `timeout_diagnostics.log` | `saiverse.timeout` | Timeout event diagnostics; also every thread's call position when the backend event loop stalls for 5 s or more (`saiverse/loop_stall_watch.py`) |
 
 Per-persona: `~/.saiverse/personas/<id>/log.json`, `conscious_log.json`. Set `SAIVERSE_LOG_LEVEL=DEBUG` and `SAIVERSE_SEA_TRACE=1` for verbose output.
 
