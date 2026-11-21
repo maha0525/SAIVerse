@@ -23,12 +23,11 @@ from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
     Message,
     canonical_position_keys,
-    get_embeddings_for_scope,
     get_messages_by_ids,
     get_messages_last,
     get_window_with_anchor,
+    score_embeddings_for_scope,
 )
-from sai_memory.vector_codec import cosine_scores
 
 LOGGER = logging.getLogger(__name__)
 
@@ -238,18 +237,19 @@ def _pick_scored_messages(
     """Top ``topk`` messages by their best chunk's cosine, as (message, score, chunk_index).
 
     Shared by :func:`semantic_recall` and :func:`semantic_recall_groups`
-    (``label`` names the caller in the log lines). The cosine is computed for
-    every candidate row at once; message rows are read only for the picked
-    ids.
+    (``label`` names the caller in the log lines). The cosine of every
+    candidate row is computed while the rows are read, a fixed number of rows
+    at a time (:func:`score_embeddings_for_scope`); message rows are read only
+    for the picked ids.
     """
     vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags, dim=vector_dim)
+        corpus = score_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags, query=q)
     else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags, dim=vector_dim)
+        corpus = score_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags, query=q)
 
     def _excluded(mid: str) -> bool:
         return bool(exclude_message_ids) and mid in exclude_message_ids
@@ -274,7 +274,7 @@ def _pick_scored_messages(
             "%s: skipped %d vector row(s) not in the byte format", label, corpus.unreadable,
         )
 
-    scores = cosine_scores(corpus.matrix, q)
+    scores = corpus.scores
     best: dict[str, Tuple[float, int]] = {}
     for i, (mid, chunk_index) in enumerate(corpus.rows):
         if _excluded(mid):

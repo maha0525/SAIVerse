@@ -944,12 +944,12 @@ def test_unified_recall_skips_invalid_utf8_text_rows(tmp_path, table):
         from sai_memory import unified_recall as ur
 
         reader = {
-            "message": ur.get_message_embeddings,
-            "chronicle": lambda c, dim: ur.get_chronicle_embeddings(c, level=1, dim=dim),
-            "memopedia": ur.get_memopedia_embeddings,
-            "fragment": ur.get_fragment_embeddings,
+            "message": ur.score_message_embeddings,
+            "chronicle": lambda c, query: ur.score_chronicle_embeddings(c, level=1, query=query),
+            "memopedia": ur.score_memopedia_embeddings,
+            "fragment": ur.score_fragment_embeddings,
         }[source]
-        corpus = reader(conn, dim=EMBED_DIM)
+        corpus = reader(conn, query=[1.0] * EMBED_DIM)
         assert {row[0] for row in corpus.rows} == good
         assert corpus.unreadable == 1
     finally:
@@ -1072,6 +1072,59 @@ def test_json_rows_that_raise_are_kept_and_the_run_ends(tmp_path, batch_size):
         # もう一度実行しても、残した行は残したまま
         again = convert_json_vectors(conn, batch_size=batch_size)
         assert again.tables["message_embeddings"] == {"converted": 0, "kept": len(bad)}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("patched", ["encode_vector", "_json_vector_or_none"])
+def test_memory_error_stops_the_conversion_and_keeps_the_legacy_table(tmp_path, patched):
+    """メモリ不足は行の値の異常ではない。変換は止まり、その束は巻き戻され、
+    旧形式の表 ``embeddings`` は消されない。"""
+    import sai_memory.embedding_migration as em
+    import sai_memory.vector_codec as vc
+
+    db_path = tmp_path / "memory.db"
+    conn = _open(db_path)
+    try:
+        ids = _add_messages(conn, 4)
+        values = {}
+        for i, mid in enumerate(ids):
+            values[(mid, 0)] = _rand_vec(700 + i)
+            _set_json(conn, mid, values[(mid, 0)])
+        conn.execute(
+            "INSERT INTO embeddings(message_id, vector) VALUES(?, ?)",
+            (ids[0], json.dumps(values[(ids[0], 0)])),
+        )
+        conn.commit()
+
+        target = vc if patched == "encode_vector" else em
+        original = getattr(target, patched)
+        calls = {"n": 0}
+
+        def _raise_on_third(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 3:  # 二つ目の束 (batch_size=2) の最初の行
+                raise MemoryError("test")
+            return original(*args, **kwargs)
+
+        with patch.object(target, patched, _raise_on_third):
+            with pytest.raises(MemoryError):
+                convert_json_vectors(conn, batch_size=2)
+
+        assert not conn.in_transaction
+        rows = dict(
+            (mid, (kind, value)) for mid, kind, value in conn.execute(
+                "SELECT message_id, typeof(vector), vector FROM message_embeddings "
+                "ORDER BY rowid"
+            )
+        )
+        # 一つ目の束は確定し、二つ目の束は JSON 形式のまま残る
+        for mid in ids[:2]:
+            assert rows[mid][0] == "blob"
+        for mid in ids[2:]:
+            assert rows[mid] == ("text", json.dumps(values[(mid, 0)]))
+        # 旧形式の表は消されない
+        assert conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0] == 1
     finally:
         conn.close()
 

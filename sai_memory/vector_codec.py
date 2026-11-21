@@ -48,9 +48,9 @@ def vector_read_sql(column: str) -> str:
 
     Unlike :data:`VECTOR_FOR_DIM_SQL`, the search must tell the empty vector
     row of a deferred embedding (``storage.DEFERRED_VECTOR``, ``'[]'``) apart
-    (:func:`read_vector_rows` counts it in ``deferred``), so that one text
+    (:func:`score_vector_rows` counts it in ``deferred``), so that one text
     value is kept. Every other text value (JSON-format rows, text that is not
-    valid UTF-8) is read as ``NULL``, which :func:`read_vector_rows` counts in
+    valid UTF-8) is read as ``NULL``, which :func:`score_vector_rows` counts in
     ``unreadable``: Python decodes TEXT values on fetch, and one value that is
     not valid UTF-8 would otherwise make the whole read raise. Byte-format
     values are read as they are.
@@ -105,18 +105,25 @@ def decode_vector(value: Any) -> Optional[np.ndarray]:
     return np.frombuffer(raw, dtype=_DTYPE).astype(np.float32, copy=True)
 
 
-@dataclass
-class StoredVectorRows:
-    """Rows read by :func:`read_vector_rows`.
+#: Default number of rows put into one block by :func:`score_vector_rows`
+#: (768 dims: 4,096 rows = about 12.6 MB).
+DEFAULT_BLOCK_ROWS = 4096
 
-    ``rows[i]`` holds the other columns of the row whose vector is
-    ``matrix[i]``, in cursor order. Rows that are not part of the matrix are
-    only counted (or, for ``mismatched``, listed by their other columns).
+
+@dataclass
+class ScoredVectorRows:
+    """Rows read by :func:`score_vector_rows`.
+
+    ``rows[i]`` holds the other columns of the row whose cosine similarity
+    with the query is ``scores[i]``, in cursor order. Rows that are not
+    scored are only counted (or, for ``mismatched``, listed by their other
+    columns).
     """
 
     rows: List[Tuple[Any, ...]]
-    matrix: np.ndarray  # float32, shape (len(rows), dim)
-    # (other columns, stored dim) of byte-format rows whose dim is not ``dim``.
+    scores: np.ndarray  # float32, shape (len(rows),)
+    # (other columns, stored dim) of byte-format rows whose dim is not the
+    # query's.
     mismatched: List[Tuple[Tuple[Any, ...], int]] = field(default_factory=list)
     # Other columns of the rows holding the empty vector row of a deferred
     # embedding ('[]').
@@ -129,23 +136,35 @@ class StoredVectorRows:
         return len(self.rows)
 
 
-def read_vector_rows(cursor: Iterable[Sequence[Any]], *, dim: int) -> StoredVectorRows:
-    """Read rows ``(vector, *other columns)`` one at a time into a float32 matrix.
+def score_vector_rows(
+    cursor: Iterable[Sequence[Any]],
+    query: Any,
+    *,
+    block_rows: int = DEFAULT_BLOCK_ROWS,
+) -> ScoredVectorRows:
+    """Read rows ``(vector, *other columns)`` and score each against ``query``.
 
-    Only byte-format rows of dimension ``dim`` enter the matrix. The cursor
-    is consumed row by row; no list of every row's stored value is built.
+    Only byte-format rows whose dimension is the length of ``query`` are
+    scored (:func:`cosine_scores`). The cursor is consumed row by row; the
+    vectors are put into one float32 array of ``block_rows`` rows, which is
+    scored and reused for the next rows when it is full. So the vectors of
+    every row are never held at once: besides that one array, only the other
+    columns and one float32 score per row are kept, whatever the number of
+    rows.
     """
     # storage imports this module at load time, so its constant is read here.
     from sai_memory.memory.storage import DEFERRED_VECTOR
 
-    dim = int(dim)
-    capacity = 1024
-    buf = np.empty((capacity, dim), dtype=np.float32)
+    q = np.asarray(query, dtype=np.float32).reshape(-1)
+    dim = int(q.shape[0])
+    block_rows = max(1, int(block_rows))
+    block = np.empty((block_rows, dim), dtype=np.float32)
+    score_parts: List[np.ndarray] = []
     rows: List[Tuple[Any, ...]] = []
     mismatched: List[Tuple[Tuple[Any, ...], int]] = []
     deferred: List[Tuple[Any, ...]] = []
     unreadable = 0
-    n = 0
+    n = 0  # rows in ``block``
     for row in cursor:
         value = row[0]
         other = tuple(row[1:])
@@ -159,17 +178,20 @@ def read_vector_rows(cursor: Iterable[Sequence[Any]], *, dim: int) -> StoredVect
         if stored_dim != dim:
             mismatched.append((other, stored_dim))
             continue
-        if n == capacity:
-            capacity *= 2
-            grown = np.empty((capacity, dim), dtype=np.float32)
-            grown[:n] = buf[:n]
-            buf = grown
-        buf[n] = np.frombuffer(_as_bytes(value), dtype=_DTYPE)
+        block[n] = np.frombuffer(_as_bytes(value), dtype=_DTYPE)
         rows.append(other)
         n += 1
-    return StoredVectorRows(
+        if n == block_rows:
+            score_parts.append(cosine_scores(block, q))
+            n = 0
+    if n:
+        score_parts.append(cosine_scores(block[:n], q))
+    scores = (
+        np.concatenate(score_parts) if score_parts else np.zeros(0, dtype=np.float32)
+    )
+    return ScoredVectorRows(
         rows=rows,
-        matrix=buf[:n],
+        scores=scores,
         mismatched=mismatched,
         deferred=deferred,
         unreadable=unreadable,

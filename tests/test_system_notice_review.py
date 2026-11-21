@@ -1014,13 +1014,15 @@ def _assert_no_unsettled_text(text):
 
 
 def test_search_candidates_leave_out_rows_whose_author_is_unsettled(recall_db):
-    from sai_memory.memory.storage import get_all_messages_for_search, get_embeddings_for_scope
+    from sai_memory.memory.storage import get_all_messages_for_search, score_embeddings_for_scope
 
     conn = recall_db.conn
     found = {m.id for m in get_all_messages_for_search(conn, required_tags=["conversation"])}
     assert found == _SETTLED_IDS
     assert {m.id for m in get_all_messages_for_search(conn)} == _SETTLED_IDS
-    corpus = get_embeddings_for_scope(conn, thread_id="t1", required_tags=["conversation"], dim=2)
+    corpus = score_embeddings_for_scope(
+        conn, thread_id="t1", required_tags=["conversation"], query=[1.0, 0.0],
+    )
     assert {mid for mid, _c in corpus.rows} == _SETTLED_IDS
 
 

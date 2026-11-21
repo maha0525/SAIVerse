@@ -5,6 +5,9 @@
 - ``sai_memory.vector_codec`` の読み書き: バイト列形式は往復で float32 の値が
   完全に一致する。空のベクトル行 ``'[]'``・JSON 形式の値・``None``・長さが合わない
   バイト列は「ベクトル無し」になり、例外にならない。
+- 検索の読み込み (``score_vector_rows``) は、一定の行数ごとに類似度を計算し、
+  全行を一つの配列にした場合と結果が同じで、行数に比例する大きさの配列を
+  確保しない。
 - 書き込みの経路 (メッセージ・Chronicle・ページ・Fragment) はバイト列形式で書き、
   空のベクトル行は文字列の ``'[]'`` のまま。
 - 検索の結果が変わらない: 作り物のデータに対して、一行ずつ cosine を計算する
@@ -33,9 +36,11 @@ from sai_memory.memory.storage import (
     write_deferred_message_embedding,
 )
 from sai_memory.vector_codec import (
+    DEFAULT_BLOCK_ROWS,
+    cosine_scores,
     decode_vector,
     encode_vector,
-    read_vector_rows,
+    score_vector_rows,
     stored_vector_dim,
 )
 
@@ -112,37 +117,137 @@ def test_stored_vector_dim_of_byte_format():
     assert stored_vector_dim(encode_vector([1.0])) == 1
 
 
-def test_read_vector_rows_sorts_rows_into_matrix_and_counts():
+def test_score_vector_rows_scores_rows_and_counts_the_others():
     rows = [
         (encode_vector([1.0, 0.0]), "a"),
         ("[]", "deferred"),
         (json.dumps([1.0, 0.0]), "json"),
         (encode_vector([1.0, 0.0, 0.0]), "other-dim"),
         (b"\x01\x02\x03", "broken"),
+        (None, "null"),
         (encode_vector([0.0, 2.0]), "b"),
+        (encode_vector([0.0, 0.0]), "zero"),
     ]
-    got = read_vector_rows(iter(rows), dim=2)
-    assert got.rows == [("a",), ("b",)]
-    assert got.matrix.dtype == np.float32
-    assert np.array_equal(got.matrix, np.array([[1.0, 0.0], [0.0, 2.0]], dtype=np.float32))
+    got = score_vector_rows(iter(rows), [1.0, 1.0])
+    assert got.rows == [("a",), ("b",), ("zero",)]
+    assert got.scores.dtype == np.float32
+    assert got.scores.shape == (3,)
+    inv_sqrt2 = np.float32(1.0 / np.sqrt(2.0))
+    assert np.allclose(got.scores, [inv_sqrt2, inv_sqrt2, 0.0], atol=1e-7)
+    assert got.scores[2] == 0.0  # ノルムが 0 の行は 0.0
     assert got.mismatched == [(("other-dim",), 3)]
     assert got.deferred == [("deferred",)]
-    assert got.unreadable == 2
+    assert got.unreadable == 3  # JSON 形式・長さの合わないバイト列・NULL
 
 
-def test_read_vector_rows_grows_past_initial_capacity():
-    rows = [(encode_vector([float(i), 1.0]), i) for i in range(3000)]
-    got = read_vector_rows(iter(rows), dim=2)
-    assert len(got) == 3000
-    assert got.matrix.shape == (3000, 2)
-    assert got.matrix[2999, 0] == 2999.0
-    assert [r[0] for r in got.rows] == list(range(3000))
+def test_score_vector_rows_zero_query_scores_zero():
+    rows = [(encode_vector([1.0, 2.0]), "a"), (encode_vector([3.0, 4.0]), "b")]
+    got = score_vector_rows(iter(rows), [0.0, 0.0])
+    assert np.array_equal(got.scores, np.zeros(2, dtype=np.float32))
 
 
-def test_read_vector_rows_with_no_rows():
-    got = read_vector_rows(iter([]), dim=4)
-    assert got.rows == []
-    assert got.matrix.shape == (0, 4)
+def _mixed_rows(n_good: int, rng):
+    """次元 DIM の行 n_good 本の間に、数えるだけの行をかたまりの途中・境目に混ぜる。
+
+    返り値は (カーソルに渡す行, 次元 DIM の行のベクトル, 期待する rows,
+    期待する mismatched, 期待する deferred, 期待する unreadable)。
+    """
+    rows = []
+    good_vecs = []
+    expected_rows = []
+    mismatched = []
+    deferred = []
+    unreadable = 0
+    for i in range(n_good):
+        # 2 本おきに、数えるだけの行を 1 本挟む (種類は順に回す)
+        if i % 2 == 1:
+            kind = (i // 2) % 4
+            if kind == 0:
+                rows.append((encode_vector(rng.standard_normal(OTHER_DIM)), f"mis{i}", i))
+                mismatched.append(((f"mis{i}", i), OTHER_DIM))
+            elif kind == 1:
+                rows.append((DEFERRED_VECTOR, f"def{i}", i))
+                deferred.append((f"def{i}", i))
+            elif kind == 2:
+                rows.append((json.dumps(rng.standard_normal(DIM).tolist()), f"json{i}", i))
+                unreadable += 1
+            else:
+                rows.append((None, f"null{i}", i))
+                unreadable += 1
+        v = rng.standard_normal(DIM).astype(np.float32)
+        if i == 3:
+            v = np.zeros(DIM, dtype=np.float32)  # ノルムが 0 の行
+        rows.append((encode_vector(v), f"m{i}", i))
+        good_vecs.append(v)
+        expected_rows.append((f"m{i}", i))
+    # 最後にも数えるだけの行を置く (最後のかたまりの後ろ)
+    rows.append((None, "tail", -1))
+    unreadable += 1
+    return rows, good_vecs, expected_rows, mismatched, deferred, unreadable
+
+
+@pytest.mark.parametrize("n_good", [0, 1, 7, 8, 20])
+def test_score_vector_rows_across_block_boundaries_matches_one_matrix(n_good):
+    """かたまりに分けて計算しても、全行を一つの配列にした cosine_scores と一致する。"""
+    rng = np.random.default_rng(1000 + n_good)
+    rows, good_vecs, expected_rows, mismatched, deferred, unreadable = _mixed_rows(n_good, rng)
+    query = rng.standard_normal(DIM).astype(np.float32)
+
+    got = score_vector_rows(iter(rows), query, block_rows=7)
+
+    assert got.rows == expected_rows  # カーソルの順番のまま
+    assert got.scores.dtype == np.float32
+    assert got.scores.shape == (n_good,)
+    whole = np.array(good_vecs, dtype=np.float32).reshape(n_good, DIM)
+    expected = cosine_scores(whole, query)
+    assert np.all(np.abs(got.scores - expected) < 1e-6)
+    if n_good > 3:
+        assert got.scores[3] == 0.0
+    assert got.mismatched == mismatched
+    assert got.deferred == deferred
+    assert got.unreadable == unreadable
+
+
+def test_score_vector_rows_default_block_matches_one_matrix():
+    """既定のかたまりの行数 (DEFAULT_BLOCK_ROWS) をまたぐ行数でも一致する。"""
+    rng = np.random.default_rng(7)
+    n = DEFAULT_BLOCK_ROWS * 2 + 5
+    vecs = rng.standard_normal((n, DIM)).astype(np.float32)
+    query = rng.standard_normal(DIM).astype(np.float32)
+    got = score_vector_rows(((encode_vector(v), i) for i, v in enumerate(vecs)), query)
+    assert [r[0] for r in got.rows] == list(range(n))
+    assert np.all(np.abs(got.scores - cosine_scores(vecs, query)) < 1e-6)
+
+
+def test_score_vector_rows_memory_does_not_grow_with_rows():
+    """全行のベクトルを一つの配列に溜めない (docs/intent/vector_binary_storage.md)。
+
+    30 万行 (768 次元) を、ベクトルを作りながら返すジェネレーターから読ませる。
+    全行ぶんの配列なら 300,000 × 768 × 4 バイト = 約 920 MB になる。読み込みの
+    最大のメモリ (tracemalloc) が、それよりずっと小さい 150 MB 未満であること。
+    """
+    import tracemalloc
+
+    n_rows = 300_000
+    dim = 768
+    vec = np.random.default_rng(3).standard_normal(dim).astype(np.float32)
+    query = np.random.default_rng(4).standard_normal(dim).astype(np.float32)
+
+    def rows():
+        for i in range(n_rows):
+            yield (vec.tobytes(), i)
+
+    tracemalloc.start()
+    try:
+        got = score_vector_rows(rows(), query)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(got) == n_rows
+    assert got.scores.shape == (n_rows,)
+    full_matrix_bytes = n_rows * dim * 4
+    assert peak < 150 * 1024 * 1024, f"peak {peak / 1e6:.1f} MB"
+    assert peak < full_matrix_bytes / 5
 
 
 # ---------------------------------------------------------------------------

@@ -356,6 +356,11 @@ def _json_vector_or_none(raw: Any) -> Optional[List[float]]:
 
 _JSON_ROW_CONDITION = "typeof(vector) = 'text' AND vector != ?"
 
+#: Exceptions that a stored value itself can cause while it is parsed or
+#: encoded by :func:`convert_json_vectors`. Only these make a row "kept";
+#: every other exception propagates.
+_VALUE_ERRORS = (TypeError, ValueError, RecursionError, OverflowError)
+
 
 def convert_json_vectors(
     conn: sqlite3.Connection,
@@ -385,8 +390,10 @@ def convert_json_vectors(
       list of numbers), encoded with ``vector_codec.encode_vector``. Its
       dimension is not checked (an old dimension is the stale-vector check's
       business). Other rows (broken values, the legacy "list of vectors"
-      format, values whose parse or encoding raises) are left as they are and
-      counted in ``kept``.
+      format, values whose parse or encoding raises ``TypeError``,
+      ``ValueError``, ``RecursionError`` or ``OverflowError``) are left as
+      they are and counted in ``kept``. Any other exception raised while a
+      row is processed (``MemoryError``, for one) propagates.
     - Only the ``vector`` column is written. ``embed_metadata`` (the model
       label, the in-progress mark) is neither read nor written.
     - When every table was processed without an exception, the legacy
@@ -436,13 +443,18 @@ def convert_json_vectors(
                 for rowid, value in rows:
                     # A value can make the parse or the encoding raise (deeply
                     # nested JSON: RecursionError; an integer too large for
-                    # float32: OverflowError). Such a row is kept like any
-                    # other row that is not one vector, so that it cannot stop
-                    # every later run (and the re-embed, which runs this first).
+                    # float32: OverflowError; text that is not JSON or not
+                    # UTF-8: ValueError; a value of an unexpected type:
+                    # TypeError). Such a row is kept like any other row that
+                    # is not one vector, so that it cannot stop every later
+                    # run (and the re-embed, which runs this first). Any other
+                    # exception (MemoryError included) is a failure of the run,
+                    # not of the row's value: it propagates, the batch is
+                    # rolled back, and the legacy table is left as it is.
                     try:
                         vector = _json_vector_or_none(value)
                         encoded = None if vector is None else encode_vector(vector)
-                    except Exception:
+                    except _VALUE_ERRORS:
                         encoded = None
                     if encoded is None:
                         counts["kept"] += 1

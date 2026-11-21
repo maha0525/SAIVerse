@@ -11,9 +11,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.logging_utils import debug
 from sai_memory.vector_codec import (
-    StoredVectorRows,
+    ScoredVectorRows,
     encode_vector,
-    read_vector_rows,
+    score_vector_rows,
     vector_read_sql,
 )
 
@@ -998,27 +998,27 @@ def get_all_messages_for_search(
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
-def get_embeddings_for_scope(
+def score_embeddings_for_scope(
     conn: sqlite3.Connection,
     thread_id: Optional[str] = None,
     resource_id: Optional[str] = None,
     required_tags: Optional[List[str]] = None,
     exclude_tags: Optional[List[str]] = None,
     *,
-    dim: int,
-) -> StoredVectorRows:
-    """意味検索の候補 (メッセージの ID とベクトル)。
+    query: Any,
+) -> ScoredVectorRows:
+    """意味検索の候補 (メッセージの ID と、クエリ ``query`` との類似度)。
 
     書き手が決まっていない行 (:func:`author_settled_sql`) は候補に入れない —
     順位付けの前に外す (semantic_recall / semantic_recall_groups の唯一の候補元)。
 
-    返り値の ``rows[i]`` は ``(message_id, chunk_index)`` で、``matrix[i]`` が
-    そのチャンクのベクトル (正典順 created_at, rowid, chunk_index)。メッセージの
-    本文は読まない — 呼び出し側が、上位に残ったメッセージだけを
-    :func:`get_messages_by_ids` で読む。次元が ``dim`` と違うバイト列形式の行は
-    ``mismatched``、空のベクトル行は ``deferred``、JSON 形式の行と読み解けない
-    値は ``unreadable`` に数え、``matrix`` には入れない
-    (``sai_memory.vector_codec.read_vector_rows``)。
+    返り値の ``rows[i]`` は ``(message_id, chunk_index)`` で、``scores[i]`` が
+    そのチャンクのベクトルとクエリの cosine 類似度 (正典順 created_at, rowid,
+    chunk_index)。メッセージの本文は読まない — 呼び出し側が、上位に残った
+    メッセージだけを :func:`get_messages_by_ids` で読む。次元がクエリと違う
+    バイト列形式の行は ``mismatched``、空のベクトル行は ``deferred``、JSON 形式の
+    行と読み解けない値は ``unreadable`` に数え、``scores`` には入れない
+    (``sai_memory.vector_codec.score_vector_rows``)。
     """
     # Build tags filter clause
     tags_clause = f" AND {author_settled_sql('m.metadata')}"
@@ -1047,16 +1047,16 @@ def get_embeddings_for_scope(
     """
 
     if thread_id:
-        query = base_query + f"WHERE m.thread_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
-        cur = conn.execute(query, (thread_id, *params))
+        sql = base_query + f"WHERE m.thread_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
+        cur = conn.execute(sql, (thread_id, *params))
     elif resource_id:
-        query = base_query + f"WHERE m.resource_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
-        cur = conn.execute(query, (resource_id, *params))
+        sql = base_query + f"WHERE m.resource_id=?{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
+        cur = conn.execute(sql, (resource_id, *params))
     else:
-        query = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
-        cur = conn.execute(query, tuple(params))
+        sql = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, m.rowid ASC, e.chunk_index ASC"
+        cur = conn.execute(sql, tuple(params))
 
-    out = read_vector_rows(cur, dim=dim)
+    out = score_vector_rows(cur, query)
     out.rows = [
         (mid, int(chunk_index) if chunk_index is not None else 0)
         for mid, chunk_index in out.rows
@@ -1420,7 +1420,7 @@ def author_settled_sql(metadata_column: str = "metadata") -> str:
     渡さないため (docs/intent/system_notice_delivery.md「追補」の確認待ちの行の確定)。
     「実会話」(:func:`_conversation_exclusion`) を通る経路は既に同じ条件で外れて
     いて、この関数はそれを通らない検索の経路 (:func:`get_all_messages_for_search`・
-    :func:`get_embeddings_for_scope`・:func:`get_messages_around` の
+    :func:`score_embeddings_for_scope`・:func:`get_messages_around` の
     ``settled_only``・:func:`filter_author_settled_ids`) が共有する一か所。
 
     metadata が JSON として読めない行 (``json_extract`` が例外を投げる) と NULL の

@@ -1484,10 +1484,12 @@ def test_cli_refusing_smaller_dimension_does_not_mark(tmp_path, monkeypatch):
 def test_force_rebuild_drops_vectors_the_generators_never_recreate(tmp_path):
     from sai_memory.embedding_migration import rebuild_recall_source_embeddings
     from sai_memory.unified_recall import (
-        get_chronicle_embeddings,
-        get_fragment_embeddings,
-        get_memopedia_embeddings,
+        score_chronicle_embeddings,
+        score_fragment_embeddings,
+        score_memopedia_embeddings,
     )
+
+    query = [1.0] * EMBED_DIM
 
     conn = _open(tmp_path / "memory.db")
     try:
@@ -1502,8 +1504,8 @@ def test_force_rebuild_drops_vectors_the_generators_never_recreate(tmp_path):
         store_memopedia_embedding(conn, trunk.id, _OLD_SPACE_VALUES)
         store_fragment_embedding(conn, "gone-fragment", _OLD_SPACE_VALUES)
         # 修正前は検索の getter がこれらを除外せず返していた
-        assert "chr2" in {r[0] for r in get_chronicle_embeddings(conn, dim=EMBED_DIM).rows}
-        assert trunk.id in {r[0] for r in get_memopedia_embeddings(conn, dim=EMBED_DIM).rows}
+        assert "chr2" in {r[0] for r in score_chronicle_embeddings(conn, query=query).rows}
+        assert trunk.id in {r[0] for r in score_memopedia_embeddings(conn, query=query).rows}
 
         result = rebuild_recall_source_embeddings(conn, FakeEmbedder(), force=True)
 
@@ -1511,9 +1513,9 @@ def test_force_rebuild_drops_vectors_the_generators_never_recreate(tmp_path):
         assert result["memopedia"]["deleted"] == 2 and result["memopedia"]["done"] == 1
         assert result["fragment"]["deleted"] == 2 and result["fragment"]["done"] == 1
         assert _old_space_left(conn)["arasuji_embeddings"] == 0
-        assert {r[0] for r in get_chronicle_embeddings(conn, dim=EMBED_DIM).rows} == {ids["chronicle"]}
-        assert {r[0] for r in get_memopedia_embeddings(conn, dim=EMBED_DIM).rows} == {ids["page"]}
-        assert {r[0] for r in get_fragment_embeddings(conn, dim=EMBED_DIM).rows} == {ids["fragment"]}
+        assert {r[0] for r in score_chronicle_embeddings(conn, query=query).rows} == {ids["chronicle"]}
+        assert {r[0] for r in score_memopedia_embeddings(conn, query=query).rows} == {ids["page"]}
+        assert {r[0] for r in score_fragment_embeddings(conn, query=query).rows} == {ids["fragment"]}
         assert conn.execute(
             "SELECT COUNT(*) FROM memopedia_fragment_embeddings WHERE fragment_id = 'gone-fragment'"
         ).fetchone()[0] == 0
