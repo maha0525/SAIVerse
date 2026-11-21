@@ -1012,6 +1012,114 @@ def test_like_metacharacters_in_a_keyword_are_escaped(memory_conn, monkeypatch):
     assert words == ["a_b"]
 
 
+def _like_count(conn, word):
+    """変更の前の数え方 (語ごとに LIKE で全行を数える)。件数が変わらないことの基準に使う。"""
+    escaped = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    row = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE content LIKE ? ESCAPE '\\'",
+        (f"%{escaped}%",),
+    ).fetchone()
+    return int(row[0])
+
+
+def test_counts_match_the_previous_like_based_counts(memory_conn):
+    """一回読んで数えた件数が、語ごとに LIKE で数えた件数と一致する。
+
+    LIKE は英字 (ASCII) の大文字と小文字だけを区別しない。全角の英字やウムラウトは
+    区別する。ここがずれると、珍しい語とありふれた語の判定が変わり、選ばれる
+    キーワードが変わってしまう。
+    """
+    _fill(memory_conn, "PostgreSQL の設定を直した", times=2)
+    _fill(memory_conn, "postgresql を再起動した")
+    _fill(memory_conn, "ＰｏｓｔｇｒｅＳＱＬ と全角で書いた")      # 全角の英字は別の語
+    _fill(memory_conn, "Äpfel を買った")
+    _fill(memory_conn, "äpfel を食べた")                            # ASCII 以外は区別する
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)
+    _fill(memory_conn, "十条十条と二回書いても一行は一件")
+    _fill(memory_conn, "100% の確率で a_b を使う")
+    _fill(memory_conn, "axb と 100x は別物")
+    _fill(memory_conn, "")
+    _fill(memory_conn, "あとで本文を NULL にする行")
+    memory_conn.execute(
+        "UPDATE messages SET content = NULL WHERE content = 'あとで本文を NULL にする行'"
+    )
+    memory_conn.execute(
+        "INSERT INTO messages (id, thread_id, role, content) VALUES ('num', 't1', 'user', 12345)"
+    )
+    memory_conn.commit()
+
+    words = [
+        "PostgreSQL", "POSTGRESQL", "postgresql", "ＰｏｓｔｇｒｅＳＱＬ", "Äpfel", "äpfel",
+        "十条", "商店街", "赤羽", "a_b", "100%", "100", "234", "x",
+    ]
+    counts = auto_recall._count_messages_containing(memory_conn, words)
+
+    assert counts == {word: _like_count(memory_conn, word) for word in words}
+    # 基準そのものが期待どおりであることも固定する (両方が同じ間違いをしていないこと)。
+    assert counts["PostgreSQL"] == counts["postgresql"] == 3
+    assert counts["ＰｏｓｔｇｒｅＳＱＬ"] == 1
+    assert counts["Äpfel"] == 1 and counts["äpfel"] == 1   # 区別しないなら両方 2 になる
+    assert counts["十条"] == 4
+    assert counts["赤羽"] == 0
+    assert counts["a_b"] == 1 and counts["100%"] == 1
+    assert counts["234"] == 1
+
+
+def test_messages_are_read_once_however_many_words(memory_conn):
+    """語が何個あっても、messages を読む SQL は一回だけ。
+
+    語ごとに全行を読み直すと、語が 100 を超える回に返事の前の待ちが十数秒になる。
+    """
+    _fill(memory_conn, "十条へ行った")
+
+    class _CountingConn:
+        def __init__(self, conn):
+            self._conn = conn
+            self.statements = []
+
+        def execute(self, sql, *args):
+            self.statements.append(sql)
+            return self._conn.execute(sql, *args)
+
+    conn = _CountingConn(memory_conn)
+    observations = [" ".join(f"語{chr(0x4E00 + i)}{chr(0x4E00 + i)}" for i in range(120))]
+    words = auto_recall._extract_recall_keywords(
+        conn, "十条と赤羽へ行った", observations=observations,
+    )
+
+    assert words == ["十条"]
+    assert len(conn.statements) == 1
+
+
+def test_content_that_is_not_valid_utf8_does_not_stop_the_count(memory_conn):
+    """本文に UTF-8 として読めないバイトが入った行があっても、ほかの行は数えられる。"""
+    _fill(memory_conn, "十条へ行った")
+    memory_conn.execute(
+        "INSERT INTO messages (id, thread_id, role, content) "
+        "VALUES ('broken', 't1', 'user', CAST(x'e58d81e69da1ff' AS TEXT))"
+    )
+    memory_conn.commit()
+
+    counts = auto_recall._count_messages_containing(memory_conn, ["十条"])
+    assert counts == {"十条": 2}
+    assert counts["十条"] == _like_count(memory_conn, "十条")
+
+
+def test_text_after_a_nul_character_is_counted(memory_conn):
+    """LIKE と件数が違う、ただ一つの場合を固定する。
+
+    本文の途中に NUL 文字 (文字コード 0) があると、LIKE を使った検索では NUL 文字より
+    後ろが対象にならなかった。一回読んで数える形では、本文の最後まで対象になる。
+    """
+    _fill(memory_conn, "前半\x00十条へ行った")
+
+    assert _like_count(memory_conn, "前半") == 1
+    assert _like_count(memory_conn, "十条") == 0
+    assert auto_recall._count_messages_containing(memory_conn, ["前半", "十条"]) == {
+        "前半": 1, "十条": 1,
+    }
+
+
 def test_extraction_failure_returns_empty_list(caplog):
     """DB 障害でも会話は止めない (呼び出し側は従来の split 経路へ戻る)。"""
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
