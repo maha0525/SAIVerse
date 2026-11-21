@@ -84,4 +84,5 @@ python sai_memory/scripts/diag.py
 ## 補足
 - ツール/関数呼び出し（function calling）は未実装。必要に応じて拡張可能。
 - 埋め込みは EmbeddingGemma 2 の 4bit 量子化 ONNX を `onnxruntime` (CPU) と `tokenizers` で直接動かす (`memory/recall.py` の `Embedder`、モデルは固定)。類似度はPython側で計算（可搬性重視）。
+- 埋め込みの4つの表の `vector` 列には、ベクトルを float32 (リトルエンディアン) のバイト列で入れる。読み書きは必ず `sai_memory/vector_codec.py` を通す。ベクトルをまだ作っていないメッセージの印は文字列の `[]`。
 - `.env` の配置場所に関わらず、`SAIMEMORY_DB_PATH` 未指定時は実行ディレクトリ（CWD）に `memory.db` が作られます。

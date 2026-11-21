@@ -51,6 +51,11 @@ Rules on top of the dimension check:
   is warned about at startup and finished by the banner's re-embed, with no
   bookkeeping of its own.
 
+The module also holds :func:`convert_json_vectors`, which rewrites stored
+JSON-format rows in the byte format (docs/intent/vector_binary_storage.md
+§4). It runs before the startup check and at the start of every re-embed, so
+that rows it can convert are not counted as stale and rebuilt.
+
 Every "read the text again, then store the vector" step runs inside
 ``sai_memory.db_locks.immediate_transaction``, so no other connection can
 edit the row between the comparison and the INSERT.
@@ -67,6 +72,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from sai_memory.db_locks import immediate_transaction
+from sai_memory.vector_codec import VECTOR_FOR_DIM_SQL as _VEC
+from sai_memory.vector_codec import stale_vector_sql, stored_vector_dim
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,9 +93,6 @@ VECTOR_TABLES = (
     "memopedia_fragment_embeddings",
 )
 
-#: Rows sampled from each end (oldest / newest by rowid) of each table at startup.
-STARTUP_SAMPLE_PER_END = 8
-
 #: The three recall sources rebuilt by :func:`rebuild_recall_source_embeddings`,
 #: in processing order.
 RECALL_SOURCES = ("chronicle", "memopedia", "fragment")
@@ -96,23 +100,25 @@ RECALL_SOURCES = ("chronicle", "memopedia", "fragment")
 ProgressCallback = Callable[[str, int, int], None]
 
 
-def is_stale_vector(vec_json: Any, expected_dim: int) -> bool:
+def is_stale_vector(stored: Any, expected_dim: int) -> bool:
     """True when a stored vector cannot be compared with current query vectors.
 
-    Unparseable JSON and non-list values count as stale (the re-embed job has
-    always rebuilt those). The legacy "list of vectors" message format also
-    counts as stale: its outer length is the chunk count, not the dimension,
-    and re-embedding rewrites it as one row per chunk.
+    Only a byte-format value (``sai_memory.vector_codec``) of ``expected_dim``
+    is fresh. Everything else is stale:
 
-    Only the length is looked at, so a vector of another model with the same
-    dimension is not stale here; a re-embed catches that case through the
-    model label (:func:`model_label_changed`), which rebuilds everything.
+    - a byte-format value of another dimension;
+    - a JSON-format row, whatever its length (docs/intent/vector_binary_storage.md
+      §5; search skips JSON-format rows, so they cannot be compared). This
+      includes the legacy "list of vectors" message format;
+    - the empty vector row of a deferred embedding (``storage.DEFERRED_VECTOR``),
+      as before;
+    - an unreadable value.
+
+    Only the dimension is looked at, so a vector of another model with the
+    same dimension is not stale here; a re-embed catches that case through
+    the model label (:func:`model_label_changed`), which rebuilds everything.
     """
-    try:
-        vec = json.loads(vec_json)
-    except (json.JSONDecodeError, TypeError):
-        return True
-    return not isinstance(vec, list) or len(vec) != expected_dim
+    return stored_vector_dim(stored) != expected_dim
 
 
 def _relation_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -186,54 +192,54 @@ def reembed_in_progress(conn: sqlite3.Connection) -> Optional[str]:
     return get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
 
 
-def sample_stale_vector_tables(
+def scan_stale_vector_tables(
     conn: sqlite3.Connection,
     expected_dim: int,
     *,
-    per_end: int = STARTUP_SAMPLE_PER_END,
+    skip_deferred: bool = False,
 ) -> List[str]:
-    """Return the vector tables in which a sampled row is stale.
+    """Return the vector tables that hold at least one stale row (every row).
 
-    This is a sample, not a full scan: from each table only the ``per_end``
-    oldest and ``per_end`` newest rows (by rowid) are parsed, so the check
-    stays cheap at startup even for memory.db files with tens of thousands of
-    chunks. A migration replaces every row of a table, so a table that is
-    only partly migrated shows stale rows at the old end; a table that is
-    fully stale shows them everywhere. A stale row in the middle of an
-    otherwise fresh table is not guaranteed to be found.
+    Every row of the four tables is checked, inside SQLite, with
+    ``vector_codec.stale_vector_sql`` (the same rule as :func:`is_stale_vector`:
+    only a byte-format value of ``expected_dim`` is fresh; ``NULL``, JSON-format
+    rows, the empty vector row, unreadable values and other dimensions are
+    stale). Only ``typeof`` and ``length`` of each value are looked at, so no
+    value is parsed in Python, and the search of a table stops at its first
+    stale row.
+
+    Used by the startup check (saiverse_memory/adapter.py) and the final check
+    of a re-embed (:func:`finish_reembed`); neither may miss a stale row in
+    the middle of a table, since search skips such a row without a warning.
+
+    ``skip_deferred=True`` does not count the empty vector row of a deferred
+    embedding (``storage.DEFERRED_VECTOR``) in ``message_embeddings``. The
+    startup check counts and reports those rows on their own
+    (``count_deferred_message_embeddings``), so it passes this to keep them
+    out of the "length differs" report. Only ``message_embeddings`` holds
+    deferred embeddings; ``'[]'`` in any other table is always counted.
     """
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    stale_condition = stale_vector_sql(expected_dim)
     stale: List[str] = []
     for table in VECTOR_TABLES:
         if not _relation_exists(conn, table):
             continue
-        rows = conn.execute(
-            f"SELECT vector FROM {table} ORDER BY rowid ASC LIMIT ?", (per_end,)
-        ).fetchall()
-        rows += conn.execute(
-            f"SELECT vector FROM {table} ORDER BY rowid DESC LIMIT ?", (per_end,)
-        ).fetchall()
-        if any(is_stale_vector(r[0], expected_dim) for r in rows):
+        condition = stale_condition
+        params: tuple = ()
+        # The empty vector row is a deferred embedding only in
+        # message_embeddings, the one table count_deferred_message_embeddings
+        # counts. In the other tables '[]' is a stale value nothing else
+        # reports, so it is never skipped there.
+        if skip_deferred and table == "message_embeddings":
+            condition += " AND NOT (typeof(vector) = 'text' AND vector = ?)"
+            params = (DEFERRED_VECTOR,)
+        row = conn.execute(
+            f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {condition})", params
+        ).fetchone()
+        if row and row[0]:
             stale.append(table)
-    return stale
-
-
-def scan_stale_vector_tables(conn: sqlite3.Connection, expected_dim: int) -> List[str]:
-    """Return the vector tables that hold at least one stale row (full scan).
-
-    Unlike :func:`sample_stale_vector_tables`, every row of the four tables is
-    parsed. The final check of a re-embed (:func:`finish_reembed`) runs only
-    once per job and decides whether the startup warning is lifted, so it
-    must not miss a stale row in the middle of a table; the cost of one full
-    pass is acceptable there, unlike at every startup.
-    """
-    stale: List[str] = []
-    for table in VECTOR_TABLES:
-        if not _relation_exists(conn, table):
-            continue
-        for (vec_json,) in conn.execute(f"SELECT vector FROM {table}"):
-            if is_stale_vector(vec_json, expected_dim):
-                stale.append(table)
-                break
     return stale
 
 
@@ -242,6 +248,7 @@ def purge_stale_legacy_embeddings(
     expected_dim: int,
     *,
     everything: bool = False,
+    db_lock: Optional[Any] = None,
 ) -> int:
     """Delete stale rows from the legacy ``embeddings`` table.
 
@@ -251,45 +258,240 @@ def purge_stale_legacy_embeddings(
     its old-model vector copied back on the next open and keep tripping the
     startup check.
 
-    ``everything=True`` (a ``force``-grade re-embed, which includes a changed
-    model label) empties the table: a same-dimension model change cannot be
-    told apart by length, and after a full rebuild ``message_embeddings`` is
-    authoritative — rows left here would only be copied back as vectors of
-    the old model.
+    Every value of this table is in the JSON format (nothing writes to it any
+    more), and a JSON-format row is stale (:func:`is_stale_vector`), so
+    without ``everything`` every row with a vector is deleted too.
+
+    ``everything=True`` empties the table. Two callers use it:
+
+    - a ``force``-grade re-embed (which includes a changed model label): a
+      same-dimension model change cannot be told apart by length, and after a
+      full rebuild ``message_embeddings`` is authoritative — rows left here
+      would only be copied back as vectors of the old model;
+    - :func:`convert_json_vectors`, once every table has been converted: the
+      rows here were already copied into ``message_embeddings`` by ``init_db``
+      and converted there, and rows left here would be copied back in the
+      JSON format on the next open (docs/intent/vector_binary_storage.md §4).
+
+    The deletion runs inside ``immediate_transaction``.
     """
     if not _relation_exists(conn, "embeddings"):
         return 0
     if everything:
-        cur = conn.execute("DELETE FROM embeddings")
-        conn.commit()
+        with immediate_transaction(conn, db_lock):
+            cur = conn.execute("DELETE FROM embeddings")
         return cur.rowcount
-    stale_ids = [
-        mid
-        for mid, vec_json in conn.execute("SELECT message_id, vector FROM embeddings")
-        if is_stale_vector(vec_json, expected_dim)
-    ]
-    if stale_ids:
-        conn.executemany("DELETE FROM embeddings WHERE message_id = ?", [(m,) for m in stale_ids])
-        conn.commit()
+    with immediate_transaction(conn, db_lock):
+        stale_ids = [
+            mid
+            for mid, stored in conn.execute(f"SELECT message_id, {_VEC} FROM embeddings")
+            if is_stale_vector(stored, expected_dim)
+        ]
+        if stale_ids:
+            conn.executemany(
+                "DELETE FROM embeddings WHERE message_id = ?", [(m,) for m in stale_ids]
+            )
     return len(stale_ids)
 
 
+# ---------------------------------------------------------------------------
+# JSON format -> byte format (docs/intent/vector_binary_storage.md §4)
+# ---------------------------------------------------------------------------
+
+#: Rows converted per transaction by :func:`convert_json_vectors`.
+CONVERSION_BATCH_SIZE = 1000
+
+
+@dataclass
+class VectorConversionResult:
+    """What :func:`convert_json_vectors` did.
+
+    ``tables`` maps each vector table present in the memory.db to
+    ``{"converted": n, "kept": n}``: ``converted`` rows were rewritten in the
+    byte format; ``kept`` rows were JSON-format rows that are not one vector
+    (broken values, the legacy "list of vectors" message format) and were
+    left as they are. ``legacy_deleted`` is the number of rows deleted from
+    the legacy ``embeddings`` table.
+    """
+
+    tables: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    legacy_deleted: int = 0
+
+    @property
+    def converted(self) -> int:
+        return sum(c["converted"] for c in self.tables.values())
+
+    @property
+    def kept(self) -> int:
+        return sum(c["kept"] for c in self.tables.values())
+
+    @property
+    def did_anything(self) -> bool:
+        return bool(self.converted or self.kept or self.legacy_deleted)
+
+
+def _json_vector_or_none(raw: Any) -> Optional[List[float]]:
+    """The vector a JSON-format value holds, or None when it is not one vector.
+
+    ``raw`` is the value read as bytes (``CAST(vector AS BLOB)``), so a text
+    value that is not valid UTF-8 is left as it is instead of making the read
+    raise. One vector is a non-empty flat list of numbers. Booleans are not
+    numbers here (``json.loads`` gives ``True`` for ``true``).
+    """
+    try:
+        text = bytes(raw).decode("utf-8")
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    for item in parsed:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+    return parsed
+
+
+_JSON_ROW_CONDITION = "typeof(vector) = 'text' AND vector != ?"
+
+#: Exceptions that a stored value itself can cause while it is parsed or
+#: encoded by :func:`convert_json_vectors`. Only these make a row "kept";
+#: every other exception propagates.
+_VALUE_ERRORS = (TypeError, ValueError, RecursionError, OverflowError)
+
+
+def convert_json_vectors(
+    conn: sqlite3.Connection,
+    *,
+    batch_size: int = CONVERSION_BATCH_SIZE,
+    progress: Optional[ProgressCallback] = None,
+    db_lock: Optional[Any] = None,
+) -> VectorConversionResult:
+    """Rewrite the JSON-format rows of the four vector tables in the byte format.
+
+    docs/intent/vector_binary_storage.md §4. Run when a persona starts
+    (saiverse_memory/adapter.py, ``convert_stored_vectors``) and at the start
+    of every re-embed, before the targets are looked at.
+
+    - Target rows: ``typeof(vector) = 'text'`` and not the empty vector row
+      (``storage.DEFERRED_VECTOR``, which stays as it is).
+    - A table with no target row is skipped after one read-only count, with
+      no write lock taken.
+    - Rows are processed ``batch_size`` at a time in rowid order; the next
+      batch starts after the last rowid of the previous one, so rows that are
+      left as they are are never read again. Each batch is read and written
+      inside one ``immediate_transaction`` and committed on its own, so a
+      stop half way keeps every committed batch, and the next run converts
+      the rest. Each UPDATE also requires the row to still be in the JSON
+      format.
+    - A row is rewritten only when its value is one vector (a non-empty flat
+      list of numbers), encoded with ``vector_codec.encode_vector``. Its
+      dimension is not checked (an old dimension is the stale-vector check's
+      business). Other rows (broken values, the legacy "list of vectors"
+      format, values whose parse or encoding raises ``TypeError``,
+      ``ValueError``, ``RecursionError`` or ``OverflowError``) are left as
+      they are and counted in ``kept``. Any other exception raised while a
+      row is processed (``MemoryError``, for one) propagates.
+    - Only the ``vector`` column is written. ``embed_metadata`` (the model
+      label, the in-progress mark) is neither read nor written.
+    - When every table was processed without an exception, the legacy
+      ``embeddings`` table is emptied (:func:`purge_stale_legacy_embeddings`
+      with ``everything=True``). An exception propagates and leaves it as it is.
+
+    ``progress(table, done, total)`` is called when a table with target rows
+    starts (``done=0``) and after every committed batch; ``done`` counts the
+    rows looked at (converted + kept), ``total`` the target rows counted at
+    the start.
+    """
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+    from sai_memory.vector_codec import encode_vector
+
+    batch_size = max(1, int(batch_size))
+    result = VectorConversionResult()
+    for table in VECTOR_TABLES:
+        if not _relation_exists(conn, table):
+            continue
+        counts = {"converted": 0, "kept": 0}
+        result.tables[table] = counts
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {_JSON_ROW_CONDITION}",
+            (DEFERRED_VECTOR,),
+        ).fetchone()[0]
+        if not total:
+            continue
+        if progress is not None:
+            progress(table, 0, total)
+        last_rowid = None
+        while True:
+            with immediate_transaction(conn, db_lock):
+                if last_rowid is None:
+                    rows = conn.execute(
+                        f"SELECT rowid, CAST(vector AS BLOB) FROM {table} "
+                        f"WHERE {_JSON_ROW_CONDITION} ORDER BY rowid LIMIT ?",
+                        (DEFERRED_VECTOR, batch_size),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"SELECT rowid, CAST(vector AS BLOB) FROM {table} "
+                        f"WHERE rowid > ? AND {_JSON_ROW_CONDITION} "
+                        "ORDER BY rowid LIMIT ?",
+                        (last_rowid, DEFERRED_VECTOR, batch_size),
+                    ).fetchall()
+                updates = []
+                for rowid, value in rows:
+                    # A value can make the parse or the encoding raise (deeply
+                    # nested JSON: RecursionError; an integer too large for
+                    # float32: OverflowError; text that is not JSON or not
+                    # UTF-8: ValueError; a value of an unexpected type:
+                    # TypeError). Such a row is kept like any other row that
+                    # is not one vector, so that it cannot stop every later
+                    # run (and the re-embed, which runs this first). Any other
+                    # exception (MemoryError included) is a failure of the run,
+                    # not of the row's value: it propagates, the batch is
+                    # rolled back, and the legacy table is left as it is.
+                    try:
+                        vector = _json_vector_or_none(value)
+                        encoded = None if vector is None else encode_vector(vector)
+                    except _VALUE_ERRORS:
+                        encoded = None
+                    if encoded is None:
+                        counts["kept"] += 1
+                    else:
+                        updates.append((encoded, rowid))
+                if updates:
+                    conn.executemany(
+                        f"UPDATE {table} SET vector = ? "
+                        "WHERE rowid = ? AND typeof(vector) = 'text'",
+                        updates,
+                    )
+                    counts["converted"] += len(updates)
+            if not rows:
+                break
+            last_rowid = rows[-1][0]
+            if progress is not None:
+                progress(table, counts["converted"] + counts["kept"], total)
+            if len(rows) < batch_size:
+                break
+    result.legacy_deleted = purge_stale_legacy_embeddings(
+        conn, 0, everything=True, db_lock=db_lock,
+    )
+    return result
+
+
 def highest_vector_dim(conn: sqlite3.Connection) -> int:
-    """Largest stored vector length across the four vector tables (full scan).
+    """Largest stored vector dimension across the four vector tables (full scan).
 
     The CLI uses it to refuse an accidental re-embed to a smaller dimension.
+    Only byte-format values count (``sai_memory.vector_codec.stored_vector_dim``);
+    JSON-format rows, the empty vector row and unreadable values are ignored.
     """
     highest = 0
     for table in VECTOR_TABLES:
         if not _relation_exists(conn, table):
             continue
-        for (vec_json,) in conn.execute(f"SELECT vector FROM {table}"):
-            try:
-                vec = json.loads(vec_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(vec, list) and len(vec) > highest:
-                highest = len(vec)
+        for (stored,) in conn.execute(f"SELECT {_VEC} FROM {table}"):
+            dim = stored_vector_dim(stored)
+            if dim is not None and dim > highest:
+                highest = dim
     return highest
 
 
@@ -317,9 +519,9 @@ def message_reembed_targets(
         return ids
     targets = set()
     embedded = set()
-    for mid, vec_json in conn.execute("SELECT message_id, vector FROM message_embeddings"):
+    for mid, stored in conn.execute(f"SELECT message_id, {_VEC} FROM message_embeddings"):
         embedded.add(mid)
-        if is_stale_vector(vec_json, expected_dim):
+        if is_stale_vector(stored, expected_dim):
             targets.add(mid)
     if include_missing:
         targets |= {r[0] for r in conn.execute("SELECT id FROM messages")} - embedded
@@ -457,9 +659,9 @@ def finish_reembed(
 
     The job is complete when (:class:`ReembedOutcome`):
 
-    - a full scan (:func:`scan_stale_vector_tables`, not the startup sample)
-      finds no stale vector in the four tables (the empty row of a deferred
-      embedding is stale too);
+    - a check of every row (:func:`scan_stale_vector_tables`) finds no stale
+      vector in the four tables (the empty row of a deferred embedding is
+      stale too);
     - ``skipped``, the messages the job left with their old vector because
       their text was edited while being embedded (``changed`` of
       :func:`reembed_messages`), is zero. After a ``force`` rebuild those old
@@ -551,8 +753,8 @@ def _delete_source_vectors(
             return conn.execute(f"DELETE FROM {table}").rowcount
         targets = [
             row_id
-            for row_id, vec_json in conn.execute(f"SELECT {id_col}, vector FROM {table}")
-            if is_stale_vector(vec_json, expected_dim)
+            for row_id, stored in conn.execute(f"SELECT {id_col}, {_VEC} FROM {table}")
+            if is_stale_vector(stored, expected_dim)
         ]
         if targets:
             conn.executemany(

@@ -35,6 +35,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 from sai_memory.config import load_settings
 from sai_memory.embedding_migration import (
     begin_reembed,
+    convert_json_vectors,
     finish_reembed,
     highest_vector_dim,
     message_reembed_targets,
@@ -80,6 +81,17 @@ def _reembed_persona(
         return
 
     try:
+        # Rewrite JSON-format rows in the byte format first: the rows that hold
+        # one vector are then not rebuilt, and highest_vector_dim (which counts
+        # byte-format rows only) sees them for the smaller-dimension guard
+        # (docs/intent/vector_binary_storage.md §4).
+        conversion = convert_json_vectors(conn)
+        if conversion.did_anything:
+            print(
+                f"[convert] {persona_id}: converted {conversion.converted} stored vectors "
+                f"to the byte format (kept {conversion.kept} that are not one vector; "
+                f"legacy rows deleted: {conversion.legacy_deleted})"
+            )
         if not force:
             highest_dim = highest_vector_dim(conn)
             if highest_dim > expected_dim:

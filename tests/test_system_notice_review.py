@@ -55,6 +55,7 @@ from sai_memory.memory.storage import (
     is_author_unsettled,
     is_system_notice,
 )
+from sai_memory.vector_codec import encode_vector
 from saiverse import system_notice_review as review
 from saiverse_memory.adapter import SAIMemoryAdapter
 
@@ -1001,7 +1002,7 @@ def recall_db(tmp_path):
     for mid, _role, _content, _meta, vec in _RECALL_ROWS:
         conn.execute(
             "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
-            (mid, json.dumps(vec)),
+            (mid, encode_vector(vec)),
         )
     conn.commit()
     yield SimpleNamespace(db=db, conn=conn)
@@ -1013,14 +1014,16 @@ def _assert_no_unsettled_text(text):
 
 
 def test_search_candidates_leave_out_rows_whose_author_is_unsettled(recall_db):
-    from sai_memory.memory.storage import get_all_messages_for_search, get_embeddings_for_scope
+    from sai_memory.memory.storage import get_all_messages_for_search, score_embeddings_for_scope
 
     conn = recall_db.conn
     found = {m.id for m in get_all_messages_for_search(conn, required_tags=["conversation"])}
     assert found == _SETTLED_IDS
     assert {m.id for m in get_all_messages_for_search(conn)} == _SETTLED_IDS
-    corpus = get_embeddings_for_scope(conn, thread_id="t1", required_tags=["conversation"])
-    assert {m.id for m, _v, _c in corpus} == _SETTLED_IDS
+    corpus = score_embeddings_for_scope(
+        conn, thread_id="t1", required_tags=["conversation"], query=[1.0, 0.0],
+    )
+    assert {mid for mid, _c in corpus.rows} == _SETTLED_IDS
 
 
 def test_semantic_recall_leaves_out_unsettled_rows_before_ranking_and_after_expanding(recall_db):
@@ -1354,7 +1357,7 @@ def _same_second_db(tmp_path, rows):
         _insert(conn, mid, role, content, meta, 5000)
         conn.execute(
             "INSERT INTO message_embeddings (message_id, chunk_index, vector) VALUES (?, 0, ?)",
-            (mid, json.dumps(vec)),
+            (mid, encode_vector(vec)),
         )
     conn.commit()
     return db, conn
