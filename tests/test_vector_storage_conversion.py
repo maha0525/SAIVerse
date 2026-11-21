@@ -38,7 +38,7 @@ from sai_memory.embedding_migration import (
     VECTOR_TABLES,
     convert_json_vectors,
     highest_vector_dim,
-    sample_stale_vector_tables,
+    scan_stale_vector_tables,
 )
 from sai_memory.memory.storage import (
     DEFERRED_VECTOR,
@@ -788,7 +788,7 @@ def test_unreadable_values_do_not_break_opening(tmp_path, table, label, convert)
     try:
         assert adapter.is_ready()
         assert adapter.embed_model_changed is True
-        assert sample_stale_vector_tables(adapter.conn, EMBED_DIM) == [table]
+        assert scan_stale_vector_tables(adapter.conn, EMBED_DIM) == [table]
     finally:
         adapter.close()
 
@@ -811,7 +811,7 @@ def test_null_vector_does_not_break_opening(tmp_path, convert):
     adapter = _adapter(tmp_path, convert_stored_vectors=convert)
     try:
         assert adapter.embed_model_changed is True
-        assert sample_stale_vector_tables(adapter.conn, EMBED_DIM) == ["message_embeddings"]
+        assert scan_stale_vector_tables(adapter.conn, EMBED_DIM) == ["message_embeddings"]
     finally:
         adapter.close()
 
@@ -1156,10 +1156,8 @@ def test_reembed_rebuilds_json_rows_that_raise(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _byte_db_with_middle_row(tmp_path, middle_value) -> None:
-    """バイト列形式の行を、起動時の検査が見る件数より十分多く入れ、真ん中に一行置く。"""
-    from sai_memory.embedding_migration import STARTUP_SAMPLE_PER_END
-
-    n = STARTUP_SAMPLE_PER_END * 2 * 3 + 1
+    """バイト列形式の行を前後に十分な数だけ入れ、真ん中に一行置く。"""
+    n = 2 * _ROWS_PER_SIDE + 1
     conn = _open(tmp_path / "memory.db")
     try:
         _seed(conn, EMBED_DIM)
@@ -1175,7 +1173,6 @@ def _byte_db_with_middle_row(tmp_path, middle_value) -> None:
                 conn.commit()
             else:
                 replace_message_embeddings(conn, mid, [_rand_vec(i)])
-        assert sample_stale_vector_tables(conn, EMBED_DIM) == []
     finally:
         conn.close()
 
@@ -1208,7 +1205,26 @@ def test_adapter_does_not_flag_when_nothing_was_kept(tmp_path):
         adapter.close()
 
 
-def test_adapter_flags_a_failed_conversion_even_when_the_sample_is_fresh(tmp_path, monkeypatch):
+def test_adapter_flags_rows_left_by_a_failed_conversion(tmp_path, monkeypatch):
+    """変換が失敗して、正常な行に挟まれた JSON 形式の行が残っても、起動時の検査が旗を立てる。"""
+    import sai_memory.embedding_migration as migration
+
+    _byte_db_with_middle_row(tmp_path, json.dumps(_rand_vec(3)))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("conversion exploded")
+
+    monkeypatch.setattr(migration, "convert_json_vectors", _boom)
+    adapter = _adapter(tmp_path, convert_stored_vectors=True)
+    try:
+        assert "text" in _types(adapter.conn, "message_embeddings")  # 変換されずに残った
+        assert adapter.embed_model_changed is True
+    finally:
+        adapter.close()
+
+
+def test_adapter_does_not_flag_a_failed_conversion_that_left_no_json_row(tmp_path, monkeypatch):
+    """変換が失敗しても、検索に使えない行が無ければ旗は立たない (失敗そのものは WARNING のログだけ)。"""
     import sai_memory.embedding_migration as migration
 
     _byte_db_with_middle_row(tmp_path, None)
@@ -1219,7 +1235,7 @@ def test_adapter_flags_a_failed_conversion_even_when_the_sample_is_fresh(tmp_pat
     monkeypatch.setattr(migration, "convert_json_vectors", _boom)
     adapter = _adapter(tmp_path, convert_stored_vectors=True)
     try:
-        assert adapter.embed_model_changed is True
+        assert adapter.embed_model_changed is False
     finally:
         adapter.close()
 
@@ -1253,3 +1269,143 @@ def test_rebuild_after_unreadable_values_leaves_every_row_in_the_byte_format(tmp
         assert _check(conn) is False
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 起動時の検査は全行を見る: 正常な行に挟まれた、検索に使えない行
+# ---------------------------------------------------------------------------
+
+#: 真ん中の行の前と後ろに置く、正常なバイト列形式の行の数。
+_ROWS_PER_SIDE = 20
+
+#: 真ん中に置く、検索に使えない値。値が SQL の式のものは ``("sql", 式)``。
+_MIDDLE_VALUES = {
+    "NULL": None,
+    "other dimension": encode_vector([0.1] * 384),
+    "length not a multiple of 4": b"\x00" * (EMBED_DIM * 4 - 1),
+    "unconvertible JSON": json.dumps([[0.1, 0.2], [0.3, 0.4]]),
+    "invalid UTF-8 text": ("sql", "CAST(x'fffe41' AS TEXT)"),
+}
+
+#: ``vector`` 列に NULL を入れられる表 (ほかの 3 つは ``NOT NULL``)。
+_NULLABLE_TABLES = {"message_embeddings"}
+
+_MIDDLE_CASES = [
+    (table, label)
+    for table in VECTOR_TABLES
+    for label in _MIDDLE_VALUES
+    if label != "NULL" or table in _NULLABLE_TABLES
+]
+
+
+def _insert_vector(conn, table: str, row_id: str, value) -> None:
+    """``table`` に、ID ``row_id`` の行を値 ``value`` で一行入れる。"""
+    columns = _ID_COLUMNS[table]
+    keys = (row_id, 0) if len(columns) == 2 else (row_id,)
+    placeholders = ", ".join("?" for _ in keys)
+    if isinstance(value, tuple) and value[0] == "sql":
+        conn.execute(
+            f"INSERT INTO {table}({', '.join(columns)}, vector) "
+            f"VALUES({placeholders}, {value[1]})",
+            keys,
+        )
+    else:
+        conn.execute(
+            f"INSERT INTO {table}({', '.join(columns)}, vector) VALUES({placeholders}, ?)",
+            (*keys, value),
+        )
+    conn.commit()
+
+
+def _new_source_row(conn, table: str, i: int) -> str:
+    """``table`` のベクトルの元になる行 (メッセージ・Chronicle・ページ・断片) を作って ID を返す。"""
+    from sai_memory.arasuji.storage import create_entry
+    from sai_memory.memopedia.storage import create_fragment, create_page
+
+    if table == "message_embeddings":
+        (mid,) = _add_messages(conn, 1, start=2000 + i)
+        return mid
+    if table == "arasuji_embeddings":
+        entry_id = f"chr_mid_{i:03d}"
+        create_entry(conn, level=1, content=f"あらすじ {i}", source_ids=[],
+                     start_time=5000 + i, end_time=6000 + i, source_count=1,
+                     message_count=1, entry_id=entry_id)
+        return entry_id
+    if table == "memopedia_embeddings":
+        return create_page(conn, parent_id="root_terms", title=f"ページ {i}",
+                           summary=f"要約 {i}", content="", category="terms").id
+    page_id = conn.execute(
+        "SELECT id FROM memopedia_pages WHERE title = '猫ロボット'"
+    ).fetchone()[0]
+    return create_fragment(conn, entity_id=page_id, content=f"断片 {i}").id
+
+
+def _db_with_middle_value(db_path: Path, table: str, middle) -> None:
+    """``table`` に正常なバイト列形式の行を前後 ``_ROWS_PER_SIDE`` 行ずつ置き、
+    その真ん中に ``middle`` の行を一行置く (``middle`` が ``"none"`` なら置かない)。
+    ほかの 3 つの表は ``_seed`` の正常な行だけ。埋め込みモデルの記録は現行のもの。"""
+    conn = _open(db_path)
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+        for i in range(2 * _ROWS_PER_SIDE + 1):
+            row_id = _new_source_row(conn, table, i)
+            if i == _ROWS_PER_SIDE and middle != "none":
+                _insert_vector(conn, table, row_id, middle)
+            else:
+                _insert_vector(conn, table, row_id, encode_vector(_rand_vec(i)))
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("convert", [True, False])
+@pytest.mark.parametrize(("table", "label"), _MIDDLE_CASES)
+def test_startup_check_finds_an_unsearchable_row_between_fresh_rows(
+    tmp_path, table, label, convert,
+):
+    _db_with_middle_value(tmp_path / "memory.db", table, _MIDDLE_VALUES[label])
+
+    kwargs = {"convert_stored_vectors": True} if convert else {}
+    adapter = _adapter(tmp_path, **kwargs)
+    try:
+        assert adapter.embed_model_changed is True
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("convert", [True, False])
+@pytest.mark.parametrize("table", VECTOR_TABLES)
+def test_startup_check_does_not_flag_when_every_row_is_searchable(tmp_path, table, convert):
+    _db_with_middle_value(tmp_path / "memory.db", table, "none")
+
+    kwargs = {"convert_stored_vectors": True} if convert else {}
+    adapter = _adapter(tmp_path, **kwargs)
+    try:
+        assert adapter.embed_model_changed is False
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize(("table", "label"), _MIDDLE_CASES)
+def test_reembed_rebuilds_an_unsearchable_row_between_fresh_rows(tmp_path, table, label):
+    db_path = tmp_path / "memory.db"
+    _db_with_middle_value(db_path, table, _MIDDLE_VALUES[label])
+
+    status = _run_api_job(db_path, force=False, manager=None)
+    assert status["running"] is False, status
+
+    conn = _open(db_path)
+    try:
+        assert _types(conn, table) == {"blob"}
+        assert _check(conn) is False
+    finally:
+        conn.close()
+    assert _adapter_flag(tmp_path) is False
+
+
+def _adapter_flag(tmp_path) -> bool:
+    adapter = _adapter(tmp_path, convert_stored_vectors=True)
+    try:
+        return adapter.embed_model_changed
+    finally:
+        adapter.close()

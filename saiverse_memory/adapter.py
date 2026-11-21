@@ -306,21 +306,17 @@ class SAIMemoryAdapter:
 
         # JSON-format vector rows -> byte format, before the check below (rows
         # converted here are not stale) and before the startup backup thread.
-        conversion_left_rows = False
+        # Rows the conversion leaves in the JSON format (or a failed conversion
+        # leaves) are stale, and the check below looks at every row, so it
+        # flags them.
         if convert_stored_vectors and self.conn is not None:
-            conversion_left_rows = self._convert_stored_vectors()
+            self._convert_stored_vectors()
 
         # Detect embedding model changes. The check needs only the DB and the
         # stored dimension (EMBED_DIM), so it runs whether or not the model
         # loaded.
         if self.conn is not None:
             self._check_embed_model_change()
-            if conversion_left_rows:
-                # The check only samples both ends of each table, so a row the
-                # conversion left in the JSON format between byte-format rows
-                # can pass it unseen. Such a row is not searchable, so the
-                # persona goes on the re-embed banner, which rebuilds it.
-                self.embed_model_changed = True
             if self.embedder is None:
                 # Recall stays off until the model loads. Raising the flag puts
                 # the persona on the re-embed banner; running the re-embed
@@ -348,7 +344,7 @@ class SAIMemoryAdapter:
     #: Rows between two progress lines of the conversion log.
     _CONVERSION_LOG_EVERY = 10_000
 
-    def _convert_stored_vectors(self) -> bool:
+    def _convert_stored_vectors(self) -> None:
         """Rewrite JSON-format vector rows in the byte format; never raises.
 
         Logs the start, the progress (every ``_CONVERSION_LOG_EVERY`` rows)
@@ -356,11 +352,10 @@ class SAIMemoryAdapter:
         with nothing to convert logs one DEBUG line. A failure is logged as a
         WARNING and the adapter carries on.
 
-        Returns True when rows may be left in the JSON format: the conversion
-        kept at least one row (``kept``, logged as a WARNING), or it failed.
-        Those rows are not searchable until a re-embed rebuilds them, and the
-        startup check (a sample of both ends of each table) may not see them,
-        so ``__init__`` raises ``embed_model_changed`` on True.
+        Rows left in the JSON format (the conversion kept them, logged as a
+        WARNING, or it failed) are not searchable until a re-embed rebuilds
+        them. The startup check that runs next looks at every row, so it
+        raises ``embed_model_changed`` for them.
         """
         from sai_memory.embedding_migration import convert_json_vectors
 
@@ -395,14 +390,14 @@ class SAIMemoryAdapter:
                 self.persona_id, time.monotonic() - started,
                 exc_info=True,
             )
-            return True
+            return
         elapsed = time.monotonic() - started
         if not result.did_anything:
             LOGGER.debug(
                 "Persona %s: no stored vector to convert (%.2fs)",
                 self.persona_id, elapsed,
             )
-            return False
+            return
         per_table = ", ".join(
             f"{table}: converted {c['converted']}, kept {c['kept']}"
             for table, c in result.tables.items()
@@ -421,8 +416,6 @@ class SAIMemoryAdapter:
                 "searchable until the re-embed rebuilds them.",
                 self.persona_id, result.kept,
             )
-            return True
-        return False
 
     # ------------------------------------------------------------------
     # Embedding model change detection
@@ -438,11 +431,13 @@ class SAIMemoryAdapter:
         - ``embed_metadata.embed_model`` is missing or differs from the
           current model identity (``settings.embed_model``, the same value as
           ``Embedder.model_name``), or
-        - a sampled vector's length differs from the stored dimension
-          (``EMBED_DIM``, the value ``Embedder.embedding_size`` returns).
-          This is a sample, not a full scan: only the oldest and newest rows
-          of each table are parsed (``sample_stale_vector_tables``), to keep
-          startup cheap.
+        - a row holds a vector search cannot use: anything but a byte-format
+          value of the stored dimension (``EMBED_DIM``, the value
+          ``Embedder.embedding_size`` returns), such as ``NULL``, a JSON-format
+          row, an unreadable value or another dimension. Every row of the
+          four tables is checked inside SQLite (``scan_stale_vector_tables``,
+          which looks only at each value's type and length), since search
+          skips such a row without a warning wherever it sits.
 
         A memory.db with no vectors at all has nothing to migrate: no flag,
         and the current model is recorded.
@@ -457,10 +452,10 @@ class SAIMemoryAdapter:
         Also flagged: messages still holding an empty vector row
         (``storage.DEFERRED_VECTOR``: written by a chat-log import that
         defers its embeddings, and by every message write or edit whose
-        vectors could not be made). Such a row is a stale vector like any other, but
-        once part of an import has been embedded the empty rows sit in the
-        middle of the table, out of reach of the sample, so they are counted
-        exactly (a partial index keeps that cheap). The re-embed the banner
+        vectors could not be made). Such a row is a stale vector like any
+        other; it is counted and reported on its own (a partial index keeps
+        the count cheap), and left out of the "length differs" report
+        (``skip_deferred``). The re-embed the banner
         starts fills them in. A background embedding still running at this
         moment also raises the flag; running the re-embed then is only
         redundant work.
@@ -469,7 +464,7 @@ class SAIMemoryAdapter:
         from sai_memory.embedding_migration import (
             has_any_vectors,
             reembed_in_progress,
-            sample_stale_vector_tables,
+            scan_stale_vector_tables,
         )
         from sai_memory.memory.storage import (
             count_deferred_message_embeddings,
@@ -506,8 +501,6 @@ class SAIMemoryAdapter:
                 set_embed_metadata(self.conn, "embed_model", current_model)
             return
 
-        stale_tables = sample_stale_vector_tables(self.conn, EMBED_DIM)
-
         if recorded_model is None:
             # Upgraded from old version: no metadata recorded but embeddings exist
             self.embed_model_changed = True
@@ -525,7 +518,9 @@ class SAIMemoryAdapter:
                 recorded_model,
                 current_model,
             )
-        elif stale_tables:
+        elif stale_tables := scan_stale_vector_tables(
+            self.conn, EMBED_DIM, skip_deferred=True,
+        ):
             self.embed_model_changed = True
             LOGGER.warning(
                 "Persona %s: vectors whose length differs from %d found in %s. "

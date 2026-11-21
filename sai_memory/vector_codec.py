@@ -43,6 +43,28 @@ _ITEM_SIZE = _DTYPE.itemsize  # 4
 VECTOR_FOR_DIM_SQL = "CASE WHEN typeof(vector) = 'text' THEN NULL ELSE vector END"
 
 
+def stale_vector_sql(expected_dim: int, column: str = "vector") -> str:
+    """SQL condition that is true for the rows whose vector is stale.
+
+    The same rule as ``stored_vector_dim(value) != expected_dim`` (used by
+    ``embedding_migration.is_stale_vector``), evaluated inside SQLite: only a
+    BLOB of exactly ``expected_dim * 4`` bytes is fresh. ``NULL``, every text
+    value (JSON-format rows, the empty vector row ``'[]'``, text that is not
+    valid UTF-8), numbers, and BLOBs of another length are stale. The values
+    are never read into Python, and ``typeof`` / ``length`` need no decoding,
+    so the whole table can be checked cheaply.
+
+    ``expected_dim`` below 1 makes every row stale, as
+    :func:`stored_vector_dim` never returns a dimension below 1.
+    """
+    dim = int(expected_dim)
+    if dim < 1:
+        return "1"
+    return (
+        f"NOT (typeof({column}) = 'blob' AND length({column}) = {dim * _ITEM_SIZE})"
+    )
+
+
 def vector_read_sql(column: str) -> str:
     """SQL expression that reads the vector column ``column`` for search.
 

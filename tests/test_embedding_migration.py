@@ -209,16 +209,23 @@ def test_old_dimension_in_any_table_flags_even_with_current_name(tmp_path, table
         conn.close()
 
 
-def test_sample_finds_stale_rows_at_either_end(tmp_path):
-    from sai_memory.embedding_migration import sample_stale_vector_tables
+@pytest.mark.parametrize("position", [0, 20, 39])
+def test_scan_finds_a_stale_row_at_any_position(tmp_path, position):
+    """起動時の検査が使う走査は、表の先頭・真ん中・末尾のどこにある古い行も見つける。"""
+    from sai_memory.embedding_migration import scan_stale_vector_tables
 
     conn = _open(tmp_path / "memory.db")
     try:
         for i in range(40):
             store_chronicle_embedding(conn, f"e{i:02d}", _vec(EMBED_DIM))
-        assert sample_stale_vector_tables(conn, EMBED_DIM) == []
-        store_chronicle_embedding(conn, "e_new", _vec(OLD_DIM))  # 最新端
-        assert sample_stale_vector_tables(conn, EMBED_DIM) == ["arasuji_embeddings"]
+        assert scan_stale_vector_tables(conn, EMBED_DIM) == []
+        # UPDATE なので行の位置 (rowid) は変わらない
+        conn.execute(
+            "UPDATE arasuji_embeddings SET vector = ? WHERE entry_id = ?",
+            (encode_vector(_vec(OLD_DIM)), f"e{position:02d}"),
+        )
+        conn.commit()
+        assert scan_stale_vector_tables(conn, EMBED_DIM) == ["arasuji_embeddings"]
     finally:
         conn.close()
 
@@ -576,19 +583,17 @@ def test_official_import_embeds_after_import_in_background():
 
 
 # ---------------------------------------------------------------------------
-# 最終確認は全行を見る (起動時の標本では中央の古い行を見落とす)
+# 最終確認は全行を見る (表の真ん中の古い行も見落とさない)
 # ---------------------------------------------------------------------------
 
 def test_finish_reembed_finds_stale_row_in_the_middle(tmp_path):
-    from sai_memory.embedding_migration import finish_reembed, sample_stale_vector_tables
+    from sai_memory.embedding_migration import finish_reembed
 
     conn = _open(tmp_path / "memory.db")
     try:
         for i in range(40):
             dim = OLD_DIM if i == 20 else EMBED_DIM
             store_chronicle_embedding(conn, f"e{i:02d}", _vec(dim))
-        # 標本 (両端 8 件ずつ) には入らない位置
-        assert sample_stale_vector_tables(conn, EMBED_DIM) == []
         outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=None)
         assert outcome.stale_tables == ["arasuji_embeddings"]
         assert outcome.complete is False
@@ -1875,7 +1880,7 @@ def test_import_interrupted_midway_keeps_an_empty_row_per_saved_message(tmp_path
 
 def test_empty_rows_in_the_middle_still_flag_at_startup(tmp_path):
     """裏が走らずに終わり、空の行が表の真ん中に埋もれても起動時の検査は旗を立てる。"""
-    from sai_memory.embedding_migration import sample_stale_vector_tables
+    from sai_memory.embedding_migration import scan_stale_vector_tables
 
     _reset_import_embedding_state()
     try:
@@ -1896,7 +1901,9 @@ def test_empty_rows_in_the_middle_still_flag_at_startup(tmp_path):
 
         conn = _open(tmp_path / "memory.db")
         try:
-            assert sample_stale_vector_tables(conn, EMBED_DIM) == []  # 標本では見えない位置
+            # 空の行を除けば古い行は無い: 旗は空の行の件数から立つ
+            assert scan_stale_vector_tables(conn, EMBED_DIM, skip_deferred=True) == []
+            assert scan_stale_vector_tables(conn, EMBED_DIM) == ["message_embeddings"]
         finally:
             conn.close()
         assert _deferred_count(tmp_path / "memory.db") == 3

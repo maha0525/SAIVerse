@@ -73,7 +73,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sai_memory.db_locks import immediate_transaction
 from sai_memory.vector_codec import VECTOR_FOR_DIM_SQL as _VEC
-from sai_memory.vector_codec import stored_vector_dim
+from sai_memory.vector_codec import stale_vector_sql, stored_vector_dim
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,9 +92,6 @@ VECTOR_TABLES = (
     "memopedia_embeddings",
     "memopedia_fragment_embeddings",
 )
-
-#: Rows sampled from each end (oldest / newest by rowid) of each table at startup.
-STARTUP_SAMPLE_PER_END = 8
 
 #: The three recall sources rebuilt by :func:`rebuild_recall_source_embeddings`,
 #: in processing order.
@@ -195,54 +192,47 @@ def reembed_in_progress(conn: sqlite3.Connection) -> Optional[str]:
     return get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
 
 
-def sample_stale_vector_tables(
+def scan_stale_vector_tables(
     conn: sqlite3.Connection,
     expected_dim: int,
     *,
-    per_end: int = STARTUP_SAMPLE_PER_END,
+    skip_deferred: bool = False,
 ) -> List[str]:
-    """Return the vector tables in which a sampled row is stale.
+    """Return the vector tables that hold at least one stale row (every row).
 
-    This is a sample, not a full scan: from each table only the ``per_end``
-    oldest and ``per_end`` newest rows (by rowid) are parsed, so the check
-    stays cheap at startup even for memory.db files with tens of thousands of
-    chunks. A migration replaces every row of a table, so a table that is
-    only partly migrated shows stale rows at the old end; a table that is
-    fully stale shows them everywhere. A stale row in the middle of an
-    otherwise fresh table is not guaranteed to be found.
+    Every row of the four tables is checked, inside SQLite, with
+    ``vector_codec.stale_vector_sql`` (the same rule as :func:`is_stale_vector`:
+    only a byte-format value of ``expected_dim`` is fresh; ``NULL``, JSON-format
+    rows, the empty vector row, unreadable values and other dimensions are
+    stale). Only ``typeof`` and ``length`` of each value are looked at, so no
+    value is parsed in Python, and the search of a table stops at its first
+    stale row.
+
+    Used by the startup check (saiverse_memory/adapter.py) and the final check
+    of a re-embed (:func:`finish_reembed`); neither may miss a stale row in
+    the middle of a table, since search skips such a row without a warning.
+
+    ``skip_deferred=True`` does not count the empty vector row of a deferred
+    embedding (``storage.DEFERRED_VECTOR``). The startup check counts and
+    reports those rows on their own (``count_deferred_message_embeddings``),
+    so it passes this to keep them out of the "length differs" report.
     """
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    condition = stale_vector_sql(expected_dim)
+    params: tuple = ()
+    if skip_deferred:
+        condition += " AND NOT (typeof(vector) = 'text' AND vector = ?)"
+        params = (DEFERRED_VECTOR,)
     stale: List[str] = []
     for table in VECTOR_TABLES:
         if not _relation_exists(conn, table):
             continue
-        rows = conn.execute(
-            f"SELECT {_VEC} FROM {table} ORDER BY rowid ASC LIMIT ?", (per_end,)
-        ).fetchall()
-        rows += conn.execute(
-            f"SELECT {_VEC} FROM {table} ORDER BY rowid DESC LIMIT ?", (per_end,)
-        ).fetchall()
-        if any(is_stale_vector(r[0], expected_dim) for r in rows):
+        row = conn.execute(
+            f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {condition})", params
+        ).fetchone()
+        if row and row[0]:
             stale.append(table)
-    return stale
-
-
-def scan_stale_vector_tables(conn: sqlite3.Connection, expected_dim: int) -> List[str]:
-    """Return the vector tables that hold at least one stale row (full scan).
-
-    Unlike :func:`sample_stale_vector_tables`, every row of the four tables is
-    parsed. The final check of a re-embed (:func:`finish_reembed`) runs only
-    once per job and decides whether the startup warning is lifted, so it
-    must not miss a stale row in the middle of a table; the cost of one full
-    pass is acceptable there, unlike at every startup.
-    """
-    stale: List[str] = []
-    for table in VECTOR_TABLES:
-        if not _relation_exists(conn, table):
-            continue
-        for (stored,) in conn.execute(f"SELECT {_VEC} FROM {table}"):
-            if is_stale_vector(stored, expected_dim):
-                stale.append(table)
-                break
     return stale
 
 
@@ -662,9 +652,9 @@ def finish_reembed(
 
     The job is complete when (:class:`ReembedOutcome`):
 
-    - a full scan (:func:`scan_stale_vector_tables`, not the startup sample)
-      finds no stale vector in the four tables (the empty row of a deferred
-      embedding is stale too);
+    - a check of every row (:func:`scan_stale_vector_tables`) finds no stale
+      vector in the four tables (the empty row of a deferred embedding is
+      stale too);
     - ``skipped``, the messages the job left with their old vector because
       their text was edited while being embedded (``changed`` of
       :func:`reembed_messages`), is zero. After a ``force`` rebuild those old

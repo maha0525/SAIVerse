@@ -326,11 +326,73 @@ def test_is_stale_vector(value, stale):
     assert is_stale_vector(value, DIM) is stale
 
 
+#: ``stale_vector_sql`` と ``is_stale_vector`` を突き合わせる値。SQL の式で入れる値は
+#: ``("sql", 式)``。
+_STALE_RULE_VALUES = [
+    encode_vector([0.1] * DIM),
+    encode_vector([0.5] * DIM),
+    encode_vector([0.1] * OTHER_DIM),
+    encode_vector([0.1] * (DIM + 1)),
+    encode_vector([0.1]),
+    b"",
+    b"\x00\x01\x02",
+    b"\x00" * (DIM * 4 - 1),
+    b"\x00" * (DIM * 4 + 1),
+    b"\x00" * (DIM * 4),
+    json.dumps([0.1] * DIM),
+    json.dumps([0.1] * OTHER_DIM),
+    "[[0.1, 0.2]]",
+    DEFERRED_VECTOR,
+    "",
+    "not json",
+    "x" * (DIM * 4),  # 長さだけは合う文字列
+    None,
+    42,
+    4.5,
+    ("sql", "CAST(x'fffe41' AS TEXT)"),
+    ("sql", "CAST(x'fffe41' AS BLOB)"),
+    ("sql", f"zeroblob({DIM * 4})"),
+]
+
+
+@pytest.mark.parametrize("dim", [DIM, OTHER_DIM, 1, 0])
+def test_stale_vector_sql_agrees_with_is_stale_vector(dim):
+    """SQL で数えた古い行の件数と、Python で全行に ``is_stale_vector`` を当てた件数が同じ。"""
+    from sai_memory.embedding_migration import is_stale_vector
+    from sai_memory.vector_codec import VECTOR_FOR_DIM_SQL, stale_vector_sql
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, vector TEXT)")
+        for i, value in enumerate(_STALE_RULE_VALUES):
+            if isinstance(value, tuple):
+                conn.execute(f"INSERT INTO t(id, vector) VALUES(?, {value[1]})", (i,))
+            else:
+                conn.execute("INSERT INTO t(id, vector) VALUES(?, ?)", (i, value))
+        by_sql = {
+            i for (i,) in conn.execute(f"SELECT id FROM t WHERE {stale_vector_sql(dim)}")
+        }
+        by_python = {
+            i for i, stored in conn.execute(f"SELECT id, {VECTOR_FOR_DIM_SQL} FROM t")
+            if is_stale_vector(stored, dim)
+        }
+        assert by_sql == by_python
+        # 一行ずつの一致に加えて、件数も同じ
+        (count,) = conn.execute(
+            f"SELECT COUNT(*) FROM t WHERE {stale_vector_sql(dim)}"
+        ).fetchone()
+        assert count == len(by_python)
+        if dim == DIM:
+            # 次元の合うバイト列 4 行 (0 だけのバイト列と zeroblob を含む) だけが古くない
+            assert len(_STALE_RULE_VALUES) - count == 4
+    finally:
+        conn.close()
+
+
 def test_stale_checks_count_json_rows_and_skip_nothing_else(tmp_path):
     from sai_memory.embedding_migration import (
         highest_vector_dim,
         message_reembed_targets,
-        sample_stale_vector_tables,
         scan_stale_vector_tables,
     )
 
@@ -340,7 +402,6 @@ def test_stale_checks_count_json_rows_and_skip_nothing_else(tmp_path):
         fresh = add_message(conn, thread_id="t1", role="user", content="新", resource_id="p")
         replace_message_embeddings(conn, fresh, [[0.1] * DIM])
         assert scan_stale_vector_tables(conn, DIM) == []
-        assert sample_stale_vector_tables(conn, DIM) == []
         assert message_reembed_targets(conn, DIM, force=False, include_missing=False) == set()
         assert highest_vector_dim(conn) == DIM
 
