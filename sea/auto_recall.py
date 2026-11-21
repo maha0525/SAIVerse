@@ -815,7 +815,7 @@ def _count_messages_containing(conn, words: List[str]) -> Dict[str, int]:
     for (blob,) in cur:
         if not blob:
             continue
-        lowered = bytes(blob).lower()
+        lowered = blob.lower()
         for word, needle in needles:
             if needle in lowered:
                 counts[word] += 1

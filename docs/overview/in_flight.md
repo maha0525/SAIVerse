@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | 自動想起のキーワードを数える検索を軽くする (返事の前の待ちを数秒減らす) | 修正を実装し、開発者の環境のペルソナの記憶で件数が変わらないことを確かめてある。次 = まはーが PR を確認して本番環境を更新し、メティスが backend.log の所要時間の行で、キーワードを数える時間を確かめる。 | まはー (PR の確認・本番環境の更新) | [issue](../issues/auto_recall_keyword_count_scans_all_messages_per_word.md) / [intent](../intent/auto_recall_jev_rerank.md) | 2026-11-22 |
+| 🟣 検証待ち | 自動想起のキーワードの抽出を軽くする (返事の前の待ちを数秒減らす) | 修正を実装し、まはーの本番環境のペルソナの記憶 (読み取り専用) で件数が変わらないことを確かめてある。次 = まはーが PR を確認して本番環境を更新し、メティスが backend.log の所要時間の行で、キーワードの抽出の時間を確かめる。 | まはー (PR の確認・本番環境の更新) | [issue](../issues/auto_recall_keyword_count_scans_all_messages_per_word.md) / [intent](../intent/auto_recall_jev_rerank.md) | 2026-11-22 |
 | 🟣 検証待ち | 「通信が途中で切れました」と 500 がまとまって出る件 (バックエンドの受付が断続的に止まる) | 500 を止める設定と、止まったときの実行位置を残す記録は develop にある。利用者の環境で止まるのは記憶検索の処理の区間で、その処理が一時的に使うメモリが PC の空きを上回るという見積もりがある (仮説で、利用者の環境では未確認)。記憶検索の処理を軽くする変更は develop にある。次 = この変更をリリースに入れ、利用者の環境で止まらなくなるかを確かめる。 | まはー (利用者への返信・リリースの範囲) / 利用者 (更新後の確認) | [intent](../intent/backend_stall_handling.md) / [issue](../issues/chat_stream_cut_and_relay_500_on_backend_stall.md) | 2026-11-22 |
 | 🟣 検証待ち | ペルソナ削除の残骸掃除と連番 ID の再利用防止 | develop にマージ済み。次 = まはーが実機で削除→作り直しを一度通す。 | まはー (実機確認) | [issue](../issues/persona_delete_leaves_orphans_and_reuses_ids.md) | 2026-11-08 |
 | 🟣 検証待ち | GPT Image 2.6 対応 (flare / sunburst) | develop に入り、v0.3.30 に載る。次 = まはーが実機で gpt_image_2_6_flare / sunburst の生成と xhigh / max の効きを確認する。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) | 2026-11-10 |

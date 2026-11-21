@@ -1105,6 +1105,21 @@ def test_content_that_is_not_valid_utf8_does_not_stop_the_count(memory_conn):
     assert counts["十条"] == _like_count(memory_conn, "十条")
 
 
+def test_text_after_a_nul_character_is_counted(memory_conn):
+    """LIKE と件数が違う、ただ一つの場合を固定する。
+
+    本文の途中に NUL 文字 (文字コード 0) があると、LIKE を使った検索では NUL 文字より
+    後ろが対象にならなかった。一回読んで数える形では、本文の最後まで対象になる。
+    """
+    _fill(memory_conn, "前半\x00十条へ行った")
+
+    assert _like_count(memory_conn, "前半") == 1
+    assert _like_count(memory_conn, "十条") == 0
+    assert auto_recall._count_messages_containing(memory_conn, ["前半", "十条"]) == {
+        "前半": 1, "十条": 1,
+    }
+
+
 def test_extraction_failure_returns_empty_list(caplog):
     """DB 障害でも会話は止めない (呼び出し側は従来の split 経路へ戻る)。"""
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
