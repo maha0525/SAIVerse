@@ -824,3 +824,14 @@ def test_post_vrm_adoption_failed_alert_swallows_errors(monkeypatch):
 
     monkeypatch.setattr(runtime_alerts, "post_runtime_alert", broken)
     persona_avatar_vrm.post_vrm_adoption_failed_alert(PERSONA_ID, "アオイ", "C:/vrm/aoi.vrm", "not_vrm")
+
+
+@pytest.mark.parametrize("persona_id", ["", ".", "..", "../outside", "a/b", "a" + chr(92) + "b"])
+def test_ensure_avatar_dir_refuses_ids_that_are_not_one_folder_name(tmp_path, persona_id):
+    """persona_id に区切りや ``..`` が入っていたら、avatar フォルダを作らない。"""
+    home = tmp_path / "home"
+    (home / "personas").mkdir(parents=True)
+    with pytest.raises(persona_avatar_vrm.AvatarFolderOutsideError):
+        persona_avatar_vrm.ensure_avatar_dir(persona_id, home)
+    assert list((home / "personas").iterdir()) == []
+    assert not (tmp_path / "outside").exists()

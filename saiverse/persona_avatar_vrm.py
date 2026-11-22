@@ -293,6 +293,11 @@ def ensure_avatar_dir(persona_id: str, home: Optional[Path] = None) -> Path:
         OSError: フォルダを作れなかった。
     """
     base = Path(home) if home is not None else get_saiverse_home()
+    # persona_id はフォルダの名前一つ分として使う。区切りや ``..`` を含む値だと、下の
+    # 「ペルソナのフォルダの中か」の検査は、ペルソナのフォルダごと外へ出た場所でも通ってしまう。
+    if not persona_id or persona_id in (".", "..") or Path(persona_id).name != persona_id:
+        LOGGER.warning("Refusing to create an avatar folder for an unsafe persona id: %r", persona_id)
+        raise AvatarFolderOutsideError(f"The persona id {persona_id!r} cannot be used as a folder name")
     folder = avatar_dir(persona_id, base)
     folder.mkdir(parents=True, exist_ok=True)
     persona_root = (base / "personas" / persona_id).resolve()
