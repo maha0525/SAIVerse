@@ -172,6 +172,8 @@ function createHarness(component, props = {}, relativePath = path.relative) {
                 USER_SCROLL_KEYS: new Set(),
                 isUserScrollInputActive: () => false,
                 nextScrolledBack: () => false,
+                resolveRoomViewSpeakerId: (streaming, audio, last) => streaming ?? audio ?? last,
+                keepRoomViewPick: pick => pick,
             };
             if (name.startsWith('@/lib/')) return {};
             if (name.startsWith('.') || name.startsWith('@/')) {

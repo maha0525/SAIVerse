@@ -177,6 +177,32 @@ export function nextRoomViewAutoSwitchState(
     }
 }
 
+/** ルームビューに出すペルソナ (docs/intent/screen_avatar.md 設計 2)。文字が流れている
+ * 吹き出しの持ち主、読み上げの音声が鳴っている吹き出しの持ち主、末尾の assistant の
+ * 吹き出しの持ち主の順に選ぶ。字幕 (page.tsx の roomViewCaptionContent) と同じ順なので、
+ * 鳴っている声・字幕と、映る姿が別のペルソナにならない。 */
+export function resolveRoomViewSpeakerId(
+    streamingSpeakerId: string | undefined,
+    audioSpeakerId: string | undefined,
+    lastSpeakerId: string | undefined,
+): string | undefined {
+    return streamingSpeakerId ?? audioSpeakerId ?? lastSpeakerId;
+}
+
+/** ルームビューで利用者が押して選んだペルソナと、選んだ時点の speakerId。 */
+export interface RoomViewPick {
+    personaId: string;
+    speakerAtPick: string | undefined;
+}
+
+/** 押して選んだペルソナを、いまの speakerId のもとで保つか。speakerId が選んだ時点から
+ * 変わったら null を返して選択を捨てる。捨てた選択は、speakerId が元の人に戻っても
+ * 復活しない (呼び出し側が、返り値で state を置き換える)。 */
+export function keepRoomViewPick(pick: RoomViewPick | null, speakerId: string | undefined): RoomViewPick | null {
+    if (pick === null) return null;
+    return pick.speakerAtPick === speakerId ? pick : null;
+}
+
 /** 「{名前} が喋っています」の印を出すか (決まり 2)。 */
 export function showSpeakingIndicator(state: RoomViewAutoSwitchState): boolean {
     return state.enabled && state.speaking && state.view === 'log';

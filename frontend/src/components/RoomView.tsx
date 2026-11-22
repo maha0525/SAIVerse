@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import styles from './RoomView.module.css';
 import type { BuildingDetails, Occupant } from '@/lib/useBuildingDetails';
 import type { RoomViewPlacement } from '@/lib/roomViewPlacement';
+import { keepRoomViewPick, type RoomViewPick } from '@/lib/roomViewAutoSwitch';
 
 interface RoomViewProps {
     /** 閲覧中の部屋の詳細 (useBuildingDetails の結果)。まだ無い間は null。 */
@@ -36,14 +37,17 @@ export default function RoomView({ details, speakerId, placement, caption }: Roo
         return () => observer.disconnect();
     }, [hasCaption]);
     // 押して選んだペルソナ。選んだ時点の speakerId を添えて持ち、speakerId が
-    // 別の人に変わったら選択は効かなくなる (喋っているペルソナへ戻る)。
-    const [picked, setPicked] = useState<{ personaId: string; speakerAtPick: string | undefined } | null>(null);
+    // 別の人に変わったら選択を捨てる (喋っているペルソナへ戻る)。捨てた選択は、
+    // speakerId が元の人に戻っても復活しない。
+    const [picked, setPicked] = useState<RoomViewPick | null>(null);
+    const keptPick = keepRoomViewPick(picked, speakerId);
+    if (keptPick !== picked) setPicked(keptPick);
     // 読み込めなかった内装画像の URL。URL ごとに持つので、部屋が変われば新しい画像を試す。
     const [failedBackgrounds, setFailedBackgrounds] = useState<Set<string>>(new Set());
 
     const occupants = details?.occupants ?? [];
-    const pickedOccupant = picked && picked.speakerAtPick === speakerId
-        ? occupants.find(o => o.id === picked.personaId)
+    const pickedOccupant = keptPick
+        ? occupants.find(o => o.id === keptPick.personaId)
         : undefined;
     const shown: Occupant | undefined = pickedOccupant
         ?? (speakerId ? occupants.find(o => o.id === speakerId) : undefined)

@@ -32,7 +32,7 @@ import RoomView from '@/components/RoomView';
 import { useBuildingDetails } from '@/lib/useBuildingDetails';
 import { useRightSidebarBesideWidth, useRoomViewColumn, useRoomViewOverlayWidth } from '@/lib/roomViewPlacement';
 import { useRoomViewAutoSwitch } from '@/lib/useRoomViewAutoSwitch';
-import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack } from '@/lib/roomViewAutoSwitch';
+import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId } from '@/lib/roomViewAutoSwitch';
 import { getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot, subscribeAudioPlayback } from '@/lib/clientActions/playAudio';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -708,20 +708,19 @@ export default function Home() {
         pollActive: isInfoOpen || isRoomViewColumn || showRoomOverlay,
     });
     // ルームビューに出すペルソナ: 生成中の assistant の吹き出しがあればその持ち主、
-    // 無ければ末尾から見て最初の assistant の吹き出しの持ち主。
+    // 無ければ読み上げの音声が鳴っている吹き出し (audioSpeech) の持ち主、それも無ければ
+    // 末尾から見て最初の assistant の吹き出しの持ち主 (resolveRoomViewSpeakerId)。
     const roomViewSpeakerId = useMemo(() => {
-        for (let i = messages.length - 1; i >= 0; i--) {
-            if (messages[i]._streaming) {
-                const id = bubbleSpeakerId(messages[i]);
-                if (id) return id;
-            }
+        let streamingSpeakerId: string | undefined;
+        for (let i = messages.length - 1; i >= 0 && !streamingSpeakerId; i--) {
+            if (messages[i]._streaming) streamingSpeakerId = bubbleSpeakerId(messages[i]);
         }
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const id = bubbleSpeakerId(messages[i]);
-            if (id) return id;
+        let lastSpeakerId: string | undefined;
+        for (let i = messages.length - 1; i >= 0 && !lastSpeakerId; i--) {
+            lastSpeakerId = bubbleSpeakerId(messages[i]);
         }
-        return undefined;
-    }, [messages]);
+        return resolveRoomViewSpeakerId(streamingSpeakerId, bubbleSpeakerId(audioSpeech), lastSpeakerId);
+    }, [messages, audioSpeech]);
     // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
     // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
     const roomViewSpeakerName = useMemo(() => {

@@ -17,6 +17,8 @@ const {
     isUtteranceActive,
     RETURN_DELAY_AFTER_AUDIO_MS,
     RETURN_DELAY_AFTER_TEXT_MS,
+    resolveRoomViewSpeakerId,
+    keepRoomViewPick,
 } = mod.exports;
 
 assert.equal(RETURN_DELAY_AFTER_AUDIO_MS, 400);
@@ -237,6 +239,31 @@ const idle = () => next(initialRoomViewAutoSwitchState(), signal());
     assert.equal(scrolledBack, true);
     scrolledBack = nextScrolledBack(scrolledBack, 10, isUserScrollInputActive({ pointerDown: false, lastInputAt: 20_000, now: 26_000 }));
     assert.equal(scrolledBack, false);
+}
+
+// ルームビューに出すペルソナ: 文字が流れている吹き出しの持ち主、音声が鳴っている吹き出しの
+// 持ち主、末尾の assistant の吹き出しの持ち主の順。A の音声が鳴っている間に B の発言が
+// 末尾に確定しても、出るのは A (声・字幕と同じ人)。
+{
+    assert.equal(resolveRoomViewSpeakerId(undefined, 'A', 'B'), 'A');
+    assert.equal(resolveRoomViewSpeakerId('C', 'A', 'B'), 'C');
+    assert.equal(resolveRoomViewSpeakerId(undefined, undefined, 'B'), 'B');
+    assert.equal(resolveRoomViewSpeakerId(undefined, undefined, undefined), undefined);
+}
+
+// 押して選んだペルソナは、speakerId が変わった時点で捨てる。A が喋っている間に B を選び、
+// 喋る人が B → A と変わっても、選択は復活しない。
+{
+    let pick = { personaId: 'B', speakerAtPick: 'A' };
+    assert.equal(keepRoomViewPick(pick, 'A'), pick);
+    pick = keepRoomViewPick(pick, 'B');
+    assert.equal(pick, null);
+    pick = keepRoomViewPick(pick, 'A');
+    assert.equal(pick, null);
+    // 誰も喋っていない間 (speakerId が undefined) に選んだ場合も同じ
+    const idlePick = { personaId: 'B', speakerAtPick: undefined };
+    assert.equal(keepRoomViewPick(idlePick, undefined), idlePick);
+    assert.equal(keepRoomViewPick(idlePick, 'A'), null);
 }
 
 console.log('Room view auto switch: switches on speaking, stays on the log while typing or reading back (indicator instead), returns after 400ms/1500ms, keeps manual choices, resets on room or width change, and marks reading back only on the reader\'s own scrolls.');
