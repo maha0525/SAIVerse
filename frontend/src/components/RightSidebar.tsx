@@ -51,7 +51,7 @@ interface RightSidebarProps {
     details: BuildingDetails | null;
     /** 部屋の詳細を取り直す (useBuildingDetails の refetchDetails)。 */
     refetchDetails: () => void;
-    /** ルームビューをこのサイドバーの中に出すか。区画 ('column') に出している幅では false。 */
+    /** ルームビューをこのサイドバーの中に出すか。UI区画 ('column') に出している幅では false。 */
     showRoomView: boolean;
     /** ルームビューに出すペルソナを選ぶための、喋っている (最後に喋った) ペルソナ。 */
     speakerId?: string;
@@ -322,7 +322,7 @@ export default function RightSidebar({ isOpen, onClose, currentBuildingId, detai
                             </div>
                         </div>
 
-                        {/* ルームビュー (内装画像と、部屋にいるペルソナの姿)。区画に出している
+                        {/* ルームビュー (内装画像と、部屋にいるペルソナの姿)。UI区画に出している
                             幅 (showRoomView=false) では二重に出さない。内装画像もペルソナも
                             無ければ節ごと出さない (docs/intent/screen_avatar.md 設計 1)。 */}
                         {showRoomView && (details.image_path || details.occupants.length > 0) && (

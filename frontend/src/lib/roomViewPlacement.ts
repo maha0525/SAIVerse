@@ -1,13 +1,13 @@
 import { useSyncExternalStore } from 'react';
 
 /** ルームビューの置き場所 (docs/intent/screen_avatar.md 設計 1)。
- * - 'column': チャットの右・右サイドバーの左の、独立した縦の区画
+ * - 'column': チャットの右・右サイドバーの左の、独立した縦のUI区画
  * - 'sidebar': 右サイドバーの、Building の名前と説明のすぐ下
  * - 'overlay': 右サイドバーを出せない幅で、ログの上に重ねてログと切り替える置き方
  */
 export type RoomViewPlacement = 'sidebar' | 'column' | 'overlay';
 
-/** この幅以上なら、ルームビューを独立した縦の区画 ('column') として置く。 */
+/** この幅以上なら、ルームビューを独立した縦のUI区画 ('column') として置く。 */
 export const ROOM_VIEW_COLUMN_MIN_WIDTH = 2000;
 
 /** この幅未満で、右サイドバーがチャットの横に出ていなければ、ログとルームビューを
@@ -46,7 +46,7 @@ const columnStore = minWidthStore(ROOM_VIEW_COLUMN_MIN_WIDTH, false);
 const overlayWideStore = minWidthStore(ROOM_VIEW_OVERLAY_BELOW_WIDTH, true);
 const sidebarBesideStore = minWidthStore(RIGHT_SIDEBAR_BESIDE_MIN_WIDTH, true);
 
-/** 画面の幅がルームビューの区画 ('column') を置ける幅か。幅が変わると追従する。 */
+/** 画面の幅がルームビューのUI区画 ('column') を置ける幅か。幅が変わると追従する。 */
 export function useRoomViewColumn(): boolean {
     return useSyncExternalStore(columnStore.subscribe, columnStore.getSnapshot, columnStore.getServerSnapshot);
 }

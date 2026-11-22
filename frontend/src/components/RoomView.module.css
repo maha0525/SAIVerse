@@ -15,9 +15,9 @@
     aspect-ratio: 4 / 3;
 }
 
-/* 'column' は幅 2000px 以上の区画 (page.module.css の .roomViewColumn) の中の置き方。
-   縦横比を 3:4 (幅 3・高さ 4) にし、幅は区画いっぱい。区画の高さが足りないときは、
-   高さに合わせて縮める (100cqw・100cqh は区画の中身の幅と高さ)。 */
+/* 'column' は幅 2000px 以上のUI区画 (page.module.css の .roomViewColumn) の中の置き方。
+   縦横比を 3:4 (幅 3・高さ 4) にし、幅はUI区画いっぱい。UI区画の高さが足りないときは、
+   高さに合わせて縮める (100cqw・100cqh はUI区画の中身の幅と高さ)。 */
 .column {
     aspect-ratio: 3 / 4;
     width: min(100cqw, 75cqh);

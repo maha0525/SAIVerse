@@ -26,10 +26,10 @@
     margin: 0 auto;
 }
 
-/* ルームビューの区画 (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上でだけ置かれ、
-   チャットの右・右サイドバーの左に、上から下までの縦の区画として並ぶ。幅は画面に合わせて
-   420px〜600px。ルームビューの枠 (RoomView の .column) は、この区画の中で上下の中央に置く。
-   枠の大きさを区画の幅と高さから決めるため、区画を container-type: size にする。 */
+/* ルームビューのUI区画 (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上でだけ置かれ、
+   チャットの右・右サイドバーの左に、上から下までの縦のUI区画として並ぶ。幅は画面に合わせて
+   420px〜600px。ルームビューの枠 (RoomView の .column) は、このUI区画の中で上下の中央に置く。
+   枠の大きさをUI区画の幅と高さから決めるため、UI区画を container-type: size にする。 */
 .roomViewColumn {
     flex: 0 0 clamp(420px, 22vw, 600px);
     height: 100%;

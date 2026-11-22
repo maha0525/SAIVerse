@@ -659,7 +659,7 @@ export default function Home() {
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
     // ルームビュー (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上では
-    // チャットの右に独立した区画として置き、それ未満では右サイドバーの中に置く。
+    // チャットの右に独立したUI区画として置き、それ未満では右サイドバーの中に置く。
     const isRoomViewColumn = useRoomViewColumn();
     // 右サイドバーを出せない幅 (overlayMode) では、ログとルームビューを切り替える
     // (設計 1、必ず守ること 8)。幅 1100px 未満で、右サイドバーがチャットの横に
@@ -700,7 +700,7 @@ export default function Home() {
     const showRoomOverlay = overlayMode && roomViewSwitch.view === 'room';
     // 部屋の詳細 (GET /api/info/details) は右サイドバーとルームビューの両方が使うので、
     // ここで一度だけ取得する。10 秒ごとの取り直しは、右サイドバーが開いているか、
-    // ルームビューが画面に出ている間 (区画か、ログに重ねている間) だけ動く。
+    // ルームビューが画面に出ている間 (UI区画か、ログに重ねている間) だけ動く。
     const { details: buildingDetails, refetchDetails: refetchBuildingDetails } = useBuildingDetails({
         currentBuildingId,
         refreshTrigger: moveTrigger,
@@ -4727,7 +4727,7 @@ export default function Home() {
                 </div>
             </main>
 
-            {/* ルームビューの区画 (幅 2000px 以上)。右サイドバーを閉じていても出る。 */}
+            {/* ルームビューのUI区画 (幅 2000px 以上)。右サイドバーを閉じていても出る。 */}
             {isRoomViewColumn && (
                 <aside className={styles.roomViewColumn}>
                     <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} placement="column" />
