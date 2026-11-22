@@ -12,6 +12,10 @@
 - ``/api/info/details`` の ``avatar_vrm_url`` は「VRM あり かつ 3D が False でない」ときだけ入る。
 - ペルソナを消すと avatar フォルダが消え、ペルソナまるごとパックには VRM が入らない。
 - 列の無い古い DB には、追加系のマイグレーションで二つの列が足される。
+- Godot のアドオンから呼ぶ ``current_vrm_file`` は、avatar フォルダの中の実際にあるファイル
+  だけを返す。``adopt_local_vrm`` は、VRM の無いペルソナにだけ、同じ PC の上の VRM を中身を
+  変えずに写し、写せないときは理由の status を返して何も変えない (source も変えない)。
+  ``post_vrm_adoption_failed_alert`` は、ペルソナごとの key で警告の知らせを出し、例外を上げない。
 
 ``SAIVERSE_HOME`` は一時フォルダ、DB は一時の SQLite にする (本番のデータに触れない)。
 """
@@ -236,11 +240,9 @@ def test_same_name_reupload_never_reports_failure_after_replacing_the_file(world
     前の VRM と同じ名前なら DB の値は変わらないので、DB には書かない。ファイルを
     置き換えた後に失敗しうる処理が残っていないこと (置き換えが最後の一手) を固定する。
     """
-    from api.routes.people import avatar_vrm as route
-
     assert world.upload("same.vrm").status_code == 200
     stored_before = world.stored().AVATAR_VRM_PATH
-    monkeypatch.setattr(route, "_write_stored_path", _failing_db_write)
+    monkeypatch.setattr(persona_avatar_vrm, "write_stored_vrm_path", _failing_db_write)
 
     second = VRM_BYTES + b"second"
     response = world.upload("same.vrm", second)
@@ -252,15 +254,13 @@ def test_same_name_reupload_never_reports_failure_after_replacing_the_file(world
 
 def test_same_name_reupload_keeps_the_old_file_when_the_replace_fails(world, monkeypatch):
     """同じ名前で入れ替えるとき、置き換えに失敗したら、前の VRM がそのまま残る。"""
-    from api.routes.people import avatar_vrm as route
-
     assert world.upload("same.vrm").status_code == 200
     stored_before = world.stored().AVATAR_VRM_PATH
 
     def failing_replace(src, dst):
         raise PermissionError("the file is in use")
 
-    monkeypatch.setattr(route.os, "replace", failing_replace)
+    monkeypatch.setattr(persona_avatar_vrm.os, "replace", failing_replace)
     response = world.upload("same.vrm", VRM_BYTES + b"second")
     assert response.status_code == 500
     assert "in use" in response.json()["detail"]
@@ -271,11 +271,9 @@ def test_same_name_reupload_keeps_the_old_file_when_the_replace_fails(world, mon
 
 def test_different_name_reupload_keeps_the_old_file_when_the_db_write_fails(world, monkeypatch):
     """別の名前で入れ替えるとき、DB に書けなかったら、前の VRM と DB の値がそのまま残る。"""
-    from api.routes.people import avatar_vrm as route
-
     assert world.upload("first.vrm").status_code == 200
     stored_before = world.stored().AVATAR_VRM_PATH
-    monkeypatch.setattr(route, "_write_stored_path", _failing_db_write)
+    monkeypatch.setattr(persona_avatar_vrm, "write_stored_vrm_path", _failing_db_write)
 
     with pytest.raises(RuntimeError):
         world.upload("second.vrm", VRM_BYTES + b"second")
@@ -544,3 +542,285 @@ def test_additive_migration_adds_the_columns_to_an_old_db(tmp_path):
         assert col in info
         assert info[col][3] == 0  # nullable
     assert os.path.getsize(db_path) > 0
+
+
+# --- Godot のアドオンから呼ぶ関数 (docs/intent/screen_avatar.md の段階 2 の (3)) ---
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_current_vrm_file_returns_the_absolute_path_after_upload(world):
+    assert persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID) is None
+    assert world.upload().status_code == 200
+    path = persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID)
+    assert path is not None and path.is_absolute()
+    assert path == (world.avatar_dir / "Aoi.vrm").resolve()
+    assert path.read_bytes() == VRM_BYTES
+
+
+def test_current_vrm_file_is_none_after_delete(world):
+    assert world.upload().status_code == 200
+    assert world.client.delete(f"/api/people/{PERSONA_ID}/avatar-vrm").status_code == 200
+    assert persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID) is None
+
+
+def test_current_vrm_file_is_none_when_the_file_was_removed_outside(world):
+    assert world.upload().status_code == 200
+    (world.avatar_dir / "Aoi.vrm").unlink()
+    assert world.stored().AVATAR_VRM_PATH is not None
+    assert persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID) is None
+
+
+def test_current_vrm_file_is_none_for_a_path_outside_the_avatar_folder(world):
+    other = world.home / "personas" / OTHER_ID / "avatar"
+    other.mkdir(parents=True)
+    (other / "kai.vrm").write_bytes(VRM_BYTES)
+    secret = world.home / "secret.vrm"
+    secret.write_bytes(VRM_BYTES)
+    for stored in (
+        f"personas/{OTHER_ID}/avatar/kai.vrm",
+        f"personas/{PERSONA_ID}/avatar/../../{OTHER_ID}/avatar/kai.vrm",
+        "secret.vrm",
+        str(secret),
+    ):
+        world.set_columns(AVATAR_VRM_PATH=stored)
+        assert persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID) is None, stored
+
+
+def test_current_vrm_file_is_none_for_an_unknown_persona(world):
+    assert persona_avatar_vrm.current_vrm_file(world.manager, "nobody") is None
+
+
+def test_current_vrm_file_is_none_when_the_db_cannot_be_read(world):
+    def broken_session():
+        raise RuntimeError("the database is locked")
+
+    manager = SimpleNamespace(SessionLocal=broken_session)
+    assert persona_avatar_vrm.current_vrm_file(manager, PERSONA_ID) is None
+
+
+@pytest.fixture
+def source_dir(tmp_path):
+    folder = tmp_path / "godot_addon_settings"
+    folder.mkdir()
+    return folder
+
+
+def test_adopt_local_vrm_copies_the_file_unchanged(world, source_dir):
+    source = source_dir / "Aoi Godot.vrm"
+    data = VRM_BYTES + b"from-godot"
+    source.write_bytes(data)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_ADOPTED
+    assert result.path == world.avatar_dir / "Aoi Godot.vrm"
+    assert _sha256(result.path) == _sha256(source)
+    assert world.stored().AVATAR_VRM_PATH == f"personas/{PERSONA_ID}/avatar/Aoi Godot.vrm"
+    assert source.read_bytes() == data  # source は残り、変わらない
+    assert world.leftover_temp_files() == []
+    assert persona_avatar_vrm.current_vrm_file(world.manager, PERSONA_ID) == result.path.resolve()
+    assert world.client.get(f"/api/people/{PERSONA_ID}/avatar-vrm").content == data
+
+
+def test_adopt_local_vrm_does_nothing_when_the_persona_already_has_a_vrm(world, source_dir):
+    assert world.upload("keep.vrm").status_code == 200
+    stored_before = world.stored().AVATAR_VRM_PATH
+    source = source_dir / "other.vrm"
+    source.write_bytes(VRM_BYTES + b"other")
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_ALREADY_HAS_VRM
+    assert result.path is None
+    assert world.stored().AVATAR_VRM_PATH == stored_before
+    assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["keep.vrm"]
+    assert (world.avatar_dir / "keep.vrm").read_bytes() == VRM_BYTES
+    assert source.read_bytes() == VRM_BYTES + b"other"
+
+
+def test_adopt_local_vrm_adopts_when_the_stored_file_is_gone(world, source_dir):
+    """DB に値はあるがファイルが無いときは、VRM が無いものとして写す。"""
+    assert world.upload("gone.vrm").status_code == 200
+    (world.avatar_dir / "gone.vrm").unlink()
+    source = source_dir / "new.vrm"
+    source.write_bytes(VRM_BYTES)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_ADOPTED
+    assert world.stored().AVATAR_VRM_PATH == f"personas/{PERSONA_ID}/avatar/new.vrm"
+
+
+def _assert_nothing_changed(world):
+    assert world.stored().AVATAR_VRM_PATH is None
+    assert world.leftover_temp_files() == []
+    if world.avatar_dir.is_dir():
+        assert list(world.avatar_dir.iterdir()) == []
+
+
+def _missing(folder: Path) -> Path:
+    return folder / "absent.vrm"
+
+
+def _a_folder(folder: Path) -> Path:
+    path = folder / "folder.vrm"
+    path.mkdir()
+    return path
+
+
+def _file(name: str, data: bytes):
+    def make(folder: Path) -> Path:
+        path = folder / name
+        path.write_bytes(data)
+        return path
+
+    return make
+
+
+@pytest.mark.parametrize(
+    "make_source, status",
+    [
+        (_missing, persona_avatar_vrm.VRM_ADOPT_SOURCE_MISSING),
+        (_a_folder, persona_avatar_vrm.VRM_ADOPT_SOURCE_MISSING),
+        (_file("avatar.glb", VRM_BYTES), persona_avatar_vrm.VRM_ADOPT_NOT_VRM),
+        (_file("zip.vrm", b"PK\x03\x04 not a glb"), persona_avatar_vrm.VRM_ADOPT_NOT_VRM),
+        (_file("short.vrm", b"gl"), persona_avatar_vrm.VRM_ADOPT_NOT_VRM),
+    ],
+    ids=["missing", "folder", "not_vrm_suffix", "wrong_header", "too_short"],
+)
+def test_adopt_local_vrm_refuses_unusable_sources(world, source_dir, make_source, status):
+    source = make_source(source_dir)
+    before = source.read_bytes() if source.is_file() else None
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == status
+    assert result.path is None
+    _assert_nothing_changed(world)
+    if before is not None:
+        assert source.read_bytes() == before
+
+
+def test_adopt_local_vrm_refuses_a_file_over_the_limit(world, source_dir, monkeypatch):
+    monkeypatch.setattr(persona_avatar_vrm, "MAX_VRM_BYTES", 16)
+    source = source_dir / "big.vrm"
+    source.write_bytes(VRM_BYTES)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_TOO_LARGE
+    _assert_nothing_changed(world)
+    assert source.read_bytes() == VRM_BYTES
+
+
+def test_adopt_local_vrm_reports_an_unknown_persona(world, source_dir):
+    source = source_dir / "a.vrm"
+    source.write_bytes(VRM_BYTES)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, "nobody", source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_PERSONA_MISSING
+    assert not (world.home / "personas" / "nobody").exists()
+
+
+def test_adopt_local_vrm_removes_the_placed_file_when_the_db_write_fails(world, source_dir, monkeypatch):
+    source = source_dir / "a.vrm"
+    source.write_bytes(VRM_BYTES)
+    monkeypatch.setattr(persona_avatar_vrm, "write_stored_vrm_path", _failing_db_write)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_FAILED
+    assert result.path is None
+    assert result.detail
+    _assert_nothing_changed(world)
+    assert source.read_bytes() == VRM_BYTES
+
+
+def test_adopt_local_vrm_keeps_a_vrm_uploaded_while_copying(world, source_dir, monkeypatch):
+    """写している間にアップロードで VRM が入ったら、そちらを残し、写したものは消す。"""
+    source = source_dir / "a.vrm"
+    source.write_bytes(VRM_BYTES + b"godot")
+    original_copy = persona_avatar_vrm.shutil.copyfile
+
+    def copy_then_upload(src, dst):
+        copied = original_copy(src, dst)
+        assert world.upload("uploaded.vrm").status_code == 200
+        return copied
+
+    monkeypatch.setattr(persona_avatar_vrm.shutil, "copyfile", copy_then_upload)
+
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_ALREADY_HAS_VRM
+    assert world.stored().AVATAR_VRM_PATH == f"personas/{PERSONA_ID}/avatar/uploaded.vrm"
+    assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["uploaded.vrm"]
+    assert (world.avatar_dir / "uploaded.vrm").read_bytes() == VRM_BYTES
+
+
+def test_adopt_local_vrm_reports_failed_instead_of_raising(world, source_dir, monkeypatch):
+    source = source_dir / "a.vrm"
+    source.write_bytes(VRM_BYTES)
+
+    def broken_copy(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(persona_avatar_vrm.shutil, "copyfile", broken_copy)
+    result = persona_avatar_vrm.adopt_local_vrm(world.manager, PERSONA_ID, source)
+    assert result.status == persona_avatar_vrm.VRM_ADOPT_FAILED
+    assert "disk full" in result.detail
+    _assert_nothing_changed(world)
+
+
+@pytest.mark.parametrize(
+    "status, message_key",
+    [
+        (persona_avatar_vrm.VRM_ADOPT_SOURCE_MISSING, "api.runtimeAlerts.vrmAdoptionFailed.sourceMissing"),
+        (persona_avatar_vrm.VRM_ADOPT_NOT_VRM, "api.runtimeAlerts.vrmAdoptionFailed.notVrm"),
+        (persona_avatar_vrm.VRM_ADOPT_TOO_LARGE, "api.runtimeAlerts.vrmAdoptionFailed.tooLarge"),
+        (persona_avatar_vrm.VRM_ADOPT_FAILED, "api.runtimeAlerts.vrmAdoptionFailed.failed"),
+        ("unexpected", "api.runtimeAlerts.vrmAdoptionFailed.failed"),
+    ],
+)
+def test_post_vrm_adoption_failed_alert_posts_a_warning(monkeypatch, status, message_key):
+    from saiverse import runtime_alerts
+
+    calls = []
+
+    def recording_post(key, level, title, message, details=None):
+        calls.append((key, level, title, message, details))
+
+    monkeypatch.setattr(runtime_alerts, "post_runtime_alert", recording_post)
+
+    persona_avatar_vrm.post_vrm_adoption_failed_alert(PERSONA_ID, "アオイ", "C:/vrm/aoi.vrm", status)
+
+    assert calls == [(
+        f"vrm_adoption_failed:{PERSONA_ID}",
+        "warning",
+        {"$ui": "api.runtimeAlerts.vrmAdoptionFailed.title", "params": {}},
+        {"$ui": message_key, "params": {"persona": "アオイ"}},
+        {"persona_id": PERSONA_ID, "source": "C:/vrm/aoi.vrm", "status": status},
+    )]
+
+
+def test_post_vrm_adoption_failed_alert_message_keys_exist_in_both_languages():
+    messages = Path(__file__).resolve().parents[1] / "frontend" / "src" / "i18n" / "messages.json"
+    table = json.loads(messages.read_text(encoding="utf-8"))
+    keys = {"api.runtimeAlerts.vrmAdoptionFailed.title", *persona_avatar_vrm._ADOPTION_FAILED_MESSAGE_KEYS.values()}
+    for key in keys:
+        assert table[key]["ja"] and table[key]["en"], key
+
+
+def test_post_vrm_adoption_failed_alert_swallows_errors(monkeypatch):
+    from saiverse import runtime_alerts
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("alerts are broken")
+
+    monkeypatch.setattr(runtime_alerts, "post_runtime_alert", broken)
+    persona_avatar_vrm.post_vrm_adoption_failed_alert(PERSONA_ID, "アオイ", "C:/vrm/aoi.vrm", "not_vrm")

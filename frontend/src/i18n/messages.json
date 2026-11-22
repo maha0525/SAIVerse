@@ -8747,6 +8747,26 @@
     "ja": "{persona} の記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
     "en": "Saving {persona}'s memory failed. The conversation may not have been recorded."
   },
+  "api.runtimeAlerts.vrmAdoptionFailed.title": {
+    "ja": "VRM を引き継げませんでした",
+    "en": "Could not carry over the VRM"
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.sourceMissing": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (ファイルが見つかりません)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (the file was not found). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.notVrm": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (VRM のファイルではありません)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (the file is not a VRM). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.tooLarge": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (300MB を超えています)。ペルソナ設定の「3D アバター (VRM)」で、300MB までの VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (it is larger than 300 MB). Please add a VRM of up to 300 MB under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.failed": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (保存に失敗しました)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (saving failed). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
+  },
   "api.runtimeAlerts.chronicleSkipped.title": {
     "ja": "Chronicle の生成をスキップしました",
     "en": "Chronicle generation skipped"
