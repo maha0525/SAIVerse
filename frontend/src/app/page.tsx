@@ -32,7 +32,7 @@ import RoomView from '@/components/RoomView';
 import { useBuildingDetails } from '@/lib/useBuildingDetails';
 import { useRightSidebarBesideWidth, useRoomViewColumn, useRoomViewOverlayWidth } from '@/lib/roomViewPlacement';
 import { useRoomViewAutoSwitch } from '@/lib/useRoomViewAutoSwitch';
-import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId } from '@/lib/roomViewAutoSwitch';
+import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId, resolveRoomViewVoicedId } from '@/lib/roomViewAutoSwitch';
 import { getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot, subscribeAudioPlayback } from '@/lib/clientActions/playAudio';
 import { getVoicedMessageId, getVoicedMessageIdServerSnapshot, subscribeVoicePlayback } from '@/lib/voiceLevelMeter';
 import CityMap from '@/components/CityMap';
@@ -734,10 +734,17 @@ export default function Home() {
     const voicedMessageId = useSyncExternalStore(
         subscribeVoicePlayback, getVoicedMessageId, getVoicedMessageIdServerSnapshot,
     );
-    const roomViewVoicedId = useMemo(
-        () => (voicedMessageId ? bubbleSpeakerId(messages.find(m => m.id === voicedMessageId)) : undefined),
-        [voicedMessageId, messages],
-    );
+    const roomViewVoicedId = useMemo(() => {
+        if (!voicedMessageId) return undefined;
+        const bubble = messages.find(m => m.id === voicedMessageId);
+        // 流し込みの途中の吹き出しは、発言が保存されるまで id を持たない。音声のアドオンは
+        // その前から声を鳴らし始めるので、id の合う吹き出しが無い間は、まだ id を持たない
+        // 流し込み中の吹き出しを、その声の吹き出しとして扱う (resolveRoomViewVoicedId)。
+        return resolveRoomViewVoicedId(
+            bubble ? { speakerId: bubbleSpeakerId(bubble) } : undefined,
+            streamingSpeech && !streamingSpeech.id ? bubbleSpeakerId(streamingSpeech) : undefined,
+        );
+    }, [voicedMessageId, messages, streamingSpeech]);
     // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
     // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
     const roomViewSpeakerName = useMemo(() => {
