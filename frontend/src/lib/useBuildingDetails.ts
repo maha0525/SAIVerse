@@ -8,6 +8,10 @@ export interface Occupant {
     /** ペルソナの見た目の画像 (`APPEARANCE_IMAGE_PATH`) の URL。無ければ null。
      * ルームビューの立ち絵に使う (docs/intent/screen_avatar.md 設計 2)。 */
     appearance_image?: string | null;
+    /** ペルソナの VRM を返す API の URL (`/api/people/<id>/avatar-vrm?v=<更新時刻>`)。
+     * VRM があり、3D の表示が切でないときだけ入る。それ以外は null で、古いバックエンドでは
+     * 項目自体が無い (null と同じに扱う)。ルームビューの 3D アバターに使う (設計 3)。 */
+    avatar_vrm_url?: string | null;
     // ⚠ 暮らし系の表示 (話しかけやすさ / いま何をしているか / 自律 OFF) は
     // v0.3 で隠した (autonomous_behavior_v3.md §11「運転 UI は隠す」)。供給する
     // 運転そのものが v0.4 なので、動いていない状態を UI に出さない。

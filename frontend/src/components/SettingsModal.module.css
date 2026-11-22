@@ -147,6 +147,93 @@
     cursor: not-allowed;
 }
 
+/* 3D アバター (VRM) の欄 */
+.vrmFile {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    min-width: 0;
+    font-size: 0.9rem;
+}
+
+.vrmFileName {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.vrmFileSize {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.vrmActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.vrmButton {
+    padding: 0.4rem 0.9rem;
+    border: 1px solid #ddd;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    color: inherit;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.vrmButton:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.vrmButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.vrmProgress {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: #666;
+}
+
+.vrmProgressBar {
+    width: 100%;
+    height: 6px;
+    accent-color: #2563eb;
+}
+
+.vrmError {
+    font-size: 0.8rem;
+    color: #b91c1c;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+:global([data-theme="dark"]) .vrmButton {
+    border-color: #444;
+}
+
+:global([data-theme="dark"]) .vrmButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .vrmProgress {
+    color: #aaa;
+}
+
+:global([data-theme="dark"]) .vrmError {
+    color: #fca5a5;
+}
+
 :global([data-theme="dark"]) .modal {
     background: #1e1e1e;
     color: #fff;

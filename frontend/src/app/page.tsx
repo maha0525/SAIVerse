@@ -722,6 +722,9 @@ export default function Home() {
         }
         return resolveRoomViewSpeakerId(bubbleSpeakerId(streamingSpeech), bubbleSpeakerId(audioSpeech), lastSpeakerId);
     }, [messages, streamingSpeech, audioSpeech]);
+    // いま喋っているペルソナ: speaking の間の roomViewSpeakerId。ルームビューの 3D アバターは、
+    // このペルソナのときだけ口を開け閉めする (docs/intent/screen_avatar.md 設計 3)。
+    const roomViewSpeakingId = speaking ? roomViewSpeakerId : undefined;
     // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
     // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
     const roomViewSpeakerName = useMemo(() => {
@@ -4526,6 +4529,7 @@ export default function Home() {
                         <RoomView
                             details={buildingDetails}
                             speakerId={roomViewSpeakerId}
+                            speakingId={roomViewSpeakingId}
                             placement="overlay"
                             caption={roomViewCaptionContent
                                 ? <MessageMarkdown content={roomViewCaptionContent} components={markdownComponents} />
@@ -4730,7 +4734,7 @@ export default function Home() {
             {/* ルームビューのUI区画 (幅 2000px 以上)。右サイドバーを閉じていても出る。 */}
             {isRoomViewColumn && (
                 <aside className={styles.roomViewColumn}>
-                    <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} placement="column" />
+                    <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} speakingId={roomViewSpeakingId} placement="column" />
                 </aside>
             )}
 
@@ -4760,6 +4764,7 @@ export default function Home() {
                 refetchDetails={refetchBuildingDetails}
                 showRoomView={!isRoomViewColumn}
                 speakerId={roomViewSpeakerId}
+                speakingId={roomViewSpeakingId}
                 onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
                 onStartVoiceCall={voiceCallAvailable
                     ? (personaId, personaName, buildingId) =>

@@ -1,5 +1,5 @@
 
-import { apiFetch } from '@/i18n/api';
+import { apiFetch, decodeUIMessages } from '@/i18n/api';
 
 import { getFormatLocale } from '@/i18n/core';
 
@@ -20,6 +20,62 @@ interface SettingsModalProps {
     isOpen: boolean;
     onClose: () => void;
     personaId: string;
+    /** VRM を入れた・外した・3D の表示を切り替えて保存した後に呼ぶ。部屋の詳細を取り直して、
+     * いま開いているチャット画面のルームビューへ反映するためのもの。渡されない画面では、
+     * 次に部屋の詳細が取り直されたときに反映される。 */
+    onAvatarChanged?: () => void;
+}
+
+/** ペルソナの VRM (`GET /api/people/{id}/config` の avatar_vrm)。無ければ null。 */
+interface AvatarVrmInfo {
+    filename: string;
+    size_bytes: number;
+    updated_at: string | number | null;
+    url: string;
+}
+
+/** 入れられる VRM の大きさの上限 (バックエンドの 413 と同じ 300MB)。選んだ時点で断って、
+ * 送り切ってから断られる無駄を避ける。 */
+const VRM_MAX_BYTES = 300 * 1024 * 1024;
+
+/** `{ detail }` の形の失敗の応答から、利用者向けの理由を取り出す。 */
+function errorDetailText(body: unknown): string | null {
+    if (!body || typeof body !== 'object') return null;
+    const detail = (body as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail) return detail;
+    if (detail != null) {
+        try { return JSON.stringify(detail); } catch { return null; }
+    }
+    return null;
+}
+
+function formatVrmSize(bytes: number): string {
+    const mb = bytes / (1024 * 1024);
+    return `${mb.toLocaleString(getFormatLocale(), { maximumFractionDigits: 1, minimumFractionDigits: mb < 10 ? 1 : 0 })} MB`;
+}
+
+/** VRM を multipart (フィールド名 `file`) で送る。送った割合を知らせるために XMLHttpRequest を使う
+ * (fetch では送る側の進み具合が取れない)。応答の JSON は apiFetch と同じく画面の文言の包みを解く。 */
+function postAvatarVrm(personaId: string, file: File, onProgress: (percent: number) => void): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api/people/${encodeURIComponent(personaId)}/avatar-vrm`);
+        xhr.upload.onprogress = event => {
+            if (event.lengthComputable && event.total > 0) {
+                onProgress(Math.min(100, Math.floor((event.loaded / event.total) * 100)));
+            }
+        };
+        xhr.onload = () => {
+            let body: unknown = null;
+            try { body = decodeUIMessages(JSON.parse(xhr.responseText)); } catch { body = null; }
+            resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, body });
+        };
+        xhr.onerror = () => reject(new Error('network'));
+        xhr.onabort = () => reject(new Error('aborted'));
+        const form = new FormData();
+        form.append('file', file);
+        xhr.send(form);
+    });
 }
 
 interface MetaJudgmentConfig {
@@ -91,7 +147,7 @@ interface UserChoice {
     name: string;
 }
 
-export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
+export default function SettingsModal({ isOpen, onClose, personaId, onAvatarChanged }: SettingsModalProps) {
     useLocale();
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<PickerModel[]>([]);
@@ -153,6 +209,19 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
     const [linkedUserId, setLinkedUserId] = useState<string>('');
+    // 3D アバター (VRM) — docs/intent/screen_avatar.md 設計 2・設計 4。
+    // VRM の入れる・外すは、その場で専用の API へ送る (保存ボタンを待たない)。
+    // 3D の表示の切り替えは、ほかの欄と同じく保存ボタンで送る。
+    const [avatarVrm, setAvatarVrm] = useState<AvatarVrmInfo | null>(null);
+    const [avatar3dEnabled, setAvatar3dEnabled] = useState(true);
+    // 開いたときの 3D の表示の控え。保存では、開いてから変えたときだけ送る (モデル欄と同じ理由)。
+    const loadedAvatar3dRef = useRef<boolean>(true);
+    const [vrmBusy, setVrmBusy] = useState<{ kind: 'upload'; progress: number } | { kind: 'remove' } | null>(null);
+    const [vrmError, setVrmError] = useState<string | null>(null);
+    const vrmFileInputRef = useRef<HTMLInputElement>(null);
+    // VRM の操作の世代番号。ペルソナが切り替わったら進めて、前のペルソナへの操作の応答が、
+    // 切り替え先のペルソナの欄を書き換えないようにする (下の personaIdRef と同じ守り)。
+    const vrmOpGenRef = useRef(0);
 
     // 2026-04-30 エリス上書き事故の再発防止 (feedback_modal_id_integrity.md):
     // ロード元 personaId と保存時 personaId の整合性を検証するための state。
@@ -183,6 +252,21 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             loadConfig();
         }
     }, [isOpen, personaId, availableModels]); // dependent on availableModels to safely set default
+
+    // ペルソナが切り替わったら (モーダルを開き直したときも)、VRM の操作の途中の表示を
+    // 前のペルソナから持ち越さず、前のペルソナへの操作の応答も捨てる (世代番号を進める)。
+    // 上の読み込みはモデル一覧が届いたときにも走り直すので、こちらは personaId と開閉だけで
+    // 動かす — 同じペルソナで送っている最中の VRM を止めない。
+    const vrmScopeKey = `${isOpen ? 'open' : 'closed'}|${personaId}`;
+    const [vrmScope, setVrmScope] = useState(vrmScopeKey);
+    if (vrmScope !== vrmScopeKey) {
+        setVrmScope(vrmScopeKey);
+        setVrmBusy(null);
+        setVrmError(null);
+    }
+    useEffect(() => {
+        vrmOpGenRef.current++;
+    }, [vrmScopeKey]);
 
     // モデルの一覧は、どの画面も同じ GET /api/config/models を使う。API キーが無くて
     // 使えないモデルは一覧に載らないので、保存済みの値がそれに当たるときは
@@ -315,6 +399,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
                 setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
+                // 古いバックエンドでは avatar_vrm / avatar_3d_enabled が返らない (VRM 無しとして扱う)。
+                setAvatarVrm(data.avatar_vrm ?? null);
+                setAvatar3dEnabled(data.avatar_3d_enabled ?? true);
+                loadedAvatar3dRef.current = data.avatar_3d_enabled ?? true;
                 // フォーム state が targetPersonaId のもので埋まったので、ここで「ロード成功」マーク。
                 // handleSave はこの値が現 prop と一致することを確認する。
                 setLoadedPersonaId(targetPersonaId);
@@ -371,6 +459,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         // 開いてから変わっていないモデル欄は undefined (= 送らない)。
         const modelFieldIfChanged = (field: string, value: string): string | undefined =>
             loadedModelsRef.current[field] === value ? undefined : value;
+        // 3D の表示は、VRM があって (切り替えが画面に出ていて)、開いてから変えたときだけ送る。
+        const avatar3dChanged = !!avatarVrm && avatar3dEnabled !== loadedAvatar3dRef.current;
 
         setIsSaving(true);
         try {
@@ -420,6 +510,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     realtime_last_utterance_enabled: realtimeLastUtteranceEnabled,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
+                    avatar_3d_enabled: avatar3dChanged ? avatar3dEnabled : undefined,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
                     // Phase 4-e: 各値が空文字列なら null = 既定値使用。
                     // 本モーダルが編集しないキー (periodic_interval_minutes 等) は
@@ -456,6 +547,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 if (data.warning) {
                     alert(uiText("components.SettingsModal.text006", { p1: data.warning }));
                 }
+                if (avatar3dChanged) onAvatarChanged?.();
                 onClose();
             } else {
                 const err = await res.json();
@@ -466,6 +558,94 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             alert(uiText("components.SettingsModal.text008"));
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    // VRM の入れる・外すは、開いたペルソナの設定を読み終えていて、それが保存先の
+    // ペルソナと一致するときだけ許す (handleSave と同じ守り)。
+    const vrmActionsAllowed = !isLoading && !!loadedPersonaId && loadedPersonaId === personaId && !vrmBusy;
+
+    const handleVrmFileChosen = async (file: File) => {
+        if (!vrmActionsAllowed) return;
+        setVrmError(null);
+        if (!file.name.toLowerCase().endsWith('.vrm')) {
+            setVrmError(uiText("components.SettingsModal.vrmNotVrmFile"));
+            return;
+        }
+        if (file.size > VRM_MAX_BYTES) {
+            setVrmError(uiText("components.SettingsModal.vrmTooLarge"));
+            return;
+        }
+        const targetPersonaId = personaId;
+        const generation = ++vrmOpGenRef.current;
+        const isCurrent = () => generation === vrmOpGenRef.current && targetPersonaId === personaIdRef.current;
+        setVrmBusy({ kind: 'upload', progress: 0 });
+        try {
+            const res = await postAvatarVrm(targetPersonaId, file, progress => {
+                if (isCurrent()) setVrmBusy({ kind: 'upload', progress });
+            });
+            if (!res.ok) {
+                if (isCurrent()) {
+                    setVrmError(uiText("components.SettingsModal.vrmUploadFailed", {
+                        p1: errorDetailText(res.body) ?? `HTTP ${res.status}`,
+                    }));
+                }
+                return;
+            }
+            // 入った VRM は、モーダルを閉じた後でもルームビューへ反映する。
+            onAvatarChanged?.();
+            if (!isCurrent()) return;
+            setAvatarVrm(res.body as AvatarVrmInfo);
+            // 初めて入れたときの 3D の表示の既定はバックエンドが決めるので、読み直す。
+            // ただし、開いてから利用者が切り替えを触っていたら、その値を残す。
+            try {
+                const cfgRes = await apiFetch(`/api/people/${targetPersonaId}/config`);
+                if (cfgRes.ok && isCurrent()) {
+                    const cfg = await cfgRes.json();
+                    if (!isCurrent()) return;
+                    const enabled: boolean = cfg.avatar_3d_enabled ?? true;
+                    const loadedBefore = loadedAvatar3dRef.current;
+                    setAvatar3dEnabled(prev => (prev === loadedBefore ? enabled : prev));
+                    loadedAvatar3dRef.current = enabled;
+                }
+            } catch {
+                // 読み直せなくても、入れた VRM そのものは入っている。
+            }
+        } catch (error) {
+            console.error(error);
+            if (isCurrent()) setVrmError(uiText("components.SettingsModal.vrmUploadFailed", { p1: uiText("components.SettingsModal.vrmNetworkError") }));
+        } finally {
+            if (isCurrent()) setVrmBusy(null);
+        }
+    };
+
+    const handleVrmRemove = async () => {
+        if (!vrmActionsAllowed || !avatarVrm) return;
+        if (!window.confirm(uiText("components.SettingsModal.vrmRemoveConfirm", { p1: avatarVrm.filename }))) return;
+        setVrmError(null);
+        const targetPersonaId = personaId;
+        const generation = ++vrmOpGenRef.current;
+        const isCurrent = () => generation === vrmOpGenRef.current && targetPersonaId === personaIdRef.current;
+        setVrmBusy({ kind: 'remove' });
+        try {
+            const res = await apiFetch(`/api/people/${targetPersonaId}/avatar-vrm`, { method: 'DELETE' });
+            if (!res.ok) {
+                let body: unknown = null;
+                try { body = await res.json(); } catch { body = null; }
+                if (isCurrent()) {
+                    setVrmError(uiText("components.SettingsModal.vrmRemoveFailed", {
+                        p1: errorDetailText(body) ?? `HTTP ${res.status}`,
+                    }));
+                }
+                return;
+            }
+            onAvatarChanged?.();
+            if (isCurrent()) setAvatarVrm(null);
+        } catch (error) {
+            console.error(error);
+            if (isCurrent()) setVrmError(uiText("components.SettingsModal.vrmRemoveFailed", { p1: uiText("components.SettingsModal.vrmNetworkError") }));
+        } finally {
+            if (isCurrent()) setVrmBusy(null);
         }
     };
 
@@ -1025,6 +1205,79 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={setAppearanceImagePath}
                                 />
                                 <div data-i18n="components.SettingsModal.text101" className={styles.description}>{uiText("components.SettingsModal.text101")}</div>
+                            </div>
+
+                            {/* 3D アバター (VRM)。docs/intent/screen_avatar.md 設計 2・設計 4。
+                                3D の表示の切り替えは、VRM があるときだけ出す。 */}
+                            <div className={styles.fieldGroup}>
+                                <label data-i18n="components.SettingsModal.vrmLabel" className={styles.label}>{uiText("components.SettingsModal.vrmLabel")}</label>
+                                <input
+                                    ref={vrmFileInputRef}
+                                    type="file"
+                                    accept=".vrm"
+                                    hidden
+                                    onChange={e => {
+                                        const file = e.target.files?.[0];
+                                        // 同じファイルをもう一度選べるように、選んだ値はすぐ空にする。
+                                        e.target.value = '';
+                                        if (file) void handleVrmFileChosen(file);
+                                    }}
+                                />
+                                {avatarVrm && (
+                                    <div className={styles.vrmFile}>
+                                        <span className={styles.vrmFileName}>{avatarVrm.filename}</span>
+                                        <span className={styles.vrmFileSize}>{formatVrmSize(avatarVrm.size_bytes)}</span>
+                                    </div>
+                                )}
+                                <div className={styles.vrmActions}>
+                                    <button
+                                        type="button"
+                                        className={styles.vrmButton}
+                                        disabled={!vrmActionsAllowed}
+                                        onClick={() => vrmFileInputRef.current?.click()}
+                                    >
+                                        {avatarVrm
+                                            ? uiText("components.SettingsModal.vrmReplace")
+                                            : uiText("components.SettingsModal.vrmChoose")}
+                                    </button>
+                                    {avatarVrm && (
+                                        <button
+                                            type="button"
+                                            className={styles.vrmButton}
+                                            disabled={!vrmActionsAllowed}
+                                            onClick={() => void handleVrmRemove()}
+                                        >
+                                            {uiText("components.SettingsModal.vrmRemove")}
+                                        </button>
+                                    )}
+                                    {vrmBusy && (
+                                        <span className={styles.vrmProgress} role="status">
+                                            <Loader2 size={14} className="spin" />
+                                            {vrmBusy.kind === 'upload'
+                                                ? (vrmBusy.progress < 100
+                                                    ? uiText("components.SettingsModal.vrmUploading", { p1: String(vrmBusy.progress) })
+                                                    : uiText("components.SettingsModal.vrmProcessing"))
+                                                : uiText("components.SettingsModal.vrmRemoving")}
+                                        </span>
+                                    )}
+                                </div>
+                                {vrmBusy?.kind === 'upload' && (
+                                    <progress className={styles.vrmProgressBar} max={100} value={vrmBusy.progress} />
+                                )}
+                                {vrmError && (
+                                    <div className={styles.vrmError} role="alert">{vrmError}</div>
+                                )}
+                                {avatarVrm && (
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={avatar3dEnabled}
+                                            onChange={(e) => setAvatar3dEnabled(e.target.checked)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.vrmShow3d">{uiText("components.SettingsModal.vrmShow3d")}</span>
+                                    </label>
+                                )}
+                                <div data-i18n="components.SettingsModal.vrmDescription" className={styles.description}>{uiText("components.SettingsModal.vrmDescription")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
