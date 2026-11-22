@@ -68,6 +68,13 @@ class AI(Base):
     LANGUAGE = Column(String(16), default=None, nullable=True)  # Persona language (None falls back to City.LANGUAGE)
     AVATAR_IMAGE = Column(String(255))  # UI icon
     APPEARANCE_IMAGE_PATH = Column(String(512), nullable=True)  # Persona appearance image for LLM visual context
+    # ペルソナの VRM (docs/intent/screen_avatar.md 設計 4)。SAIVERSE_HOME からの相対パス
+    # (区切りは "/")。置き場は personas/<AIID>/avatar/ の下に一つだけで、その外を指す
+    # 値は返さない (saiverse/persona_avatar_vrm.py)。NULL = VRM なし。
+    AVATAR_VRM_PATH = Column(String(512), nullable=True)
+    # ルームビューに 3D アバターを出すか (screen_avatar.md 設計 2)。NULL と True は
+    # 「出す」、False は「出さない」。VRM が無ければ値に関わらず出ない。
+    AVATAR_3D_ENABLED = Column(Boolean, nullable=True)
     EMOTION = Column(String(1024))  # JSON形式で保存
     AUTO_COUNT = Column(Integer, default=0, nullable=False)
     LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存

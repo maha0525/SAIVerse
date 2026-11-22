@@ -5,6 +5,7 @@ import logging
 from api.deps import get_manager, avatar_path_to_url
 from manager.admin import UNSET
 from database.models import UserAiLink
+from saiverse.persona_avatar_vrm import existing_vrm_info
 from saiverse.persona_language import get_city_language
 from .models import AIConfigResponse, MetaJudgmentConfig, UpdateAIConfigRequest
 
@@ -72,6 +73,8 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         user_conv_timeout_minutes=details.get("USER_CONV_TIMEOUT_MINUTES"),
         language=details.get("LANGUAGE"),
         home_city_language=get_city_language(details.get("HOME_CITYID"), db_path=getattr(manager, "db_path", None)),
+        avatar_vrm=existing_vrm_info(persona_id, details.get("AVATAR_VRM_PATH")),
+        avatar_3d_enabled=details.get("AVATAR_3D_ENABLED") is not False,
     )
 
 @router.patch("/{persona_id}/config")
@@ -153,6 +156,8 @@ def update_persona_config(
         meta_judgment_config=meta_cfg_dict,
         user_conv_timeout_minutes=req.user_conv_timeout_minutes,
         language=req.language,
+        # 送られてこなかったら UNSET (= 触らない)。モデル欄と同じ扱い。
+        avatar_3d_enabled=req.avatar_3d_enabled if req.avatar_3d_enabled is not None else UNSET,
     )
 
     if result.startswith("Error:"):

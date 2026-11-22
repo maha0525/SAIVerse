@@ -144,6 +144,14 @@ class MetaJudgmentConfig(BaseModel):
     force_fail: Optional[bool] = None  # default False
 
 
+class AvatarVrmInfo(BaseModel):
+    """ペルソナの VRM の情報 (POST /{persona_id}/avatar-vrm の返り、config の avatar_vrm)。"""
+    filename: str
+    size_bytes: int
+    updated_at: int  # ファイルの更新時刻 (POSIX 秒)
+    url: str  # /api/people/<persona_id>/avatar-vrm?v=<updated_at>
+
+
 class AIConfigResponse(BaseModel):
     name: str
     description: str
@@ -178,6 +186,10 @@ class AIConfigResponse(BaseModel):
     user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
     language: Optional[str] = None
     home_city_language: Optional[str] = "ja"
+    # ペルソナの VRM (docs/intent/screen_avatar.md 設計 4)。無ければ None。
+    avatar_vrm: Optional[AvatarVrmInfo] = None
+    # ルームビューに 3D アバターを出すか (AI.AVATAR_3D_ENABLED。NULL は True として返す)
+    avatar_3d_enabled: bool = True
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -216,6 +228,8 @@ class UpdateAIConfigRequest(BaseModel):
     #   positive int = override.
     user_conv_timeout_minutes: Optional[int] = None
     language: Optional[str] = None
+    # ルームビューに 3D アバターを出すか。None (送られてこなかった) = 触らない。
+    avatar_3d_enabled: Optional[bool] = None
 
 
 # -----------------------------------------------------------------------------

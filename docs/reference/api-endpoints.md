@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 402（tag グループ: 26）
+**エンドポイント数**: 405（tag グループ: 26）
 
 ## addon
 
@@ -279,6 +279,9 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/fragments` | Get Memopedia fragments generated from a Chronicle entry. |
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/messages` | Get the source raw messages for a Level 1 Chronicle entry. |
 | POST | `/api/people/{persona_id}/arasuji/{entry_id}/regenerate` | Regenerate a specific Chronicle entry while preserving parent relationship. |
+| POST | `/api/people/{persona_id}/avatar-vrm` | VRM を一つ受け取り、そのペルソナの VRM として置く (前の VRM は保存が済んでから消す)。 |
+| GET | `/api/people/{persona_id}/avatar-vrm` | そのペルソナの VRM のファイルを返す。 |
+| DELETE | `/api/people/{persona_id}/avatar-vrm` | VRM を消し、``AVATAR_VRM_PATH`` を NULL にする。VRM が無くても成功を返す。 |
 | POST | `/api/people/{persona_id}/cache-config` | persona の cache 設定 ("off"/"5m"/"1h") を設定する (Phase 2、in-memory・非永続)。 |
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/clips` | メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。 |

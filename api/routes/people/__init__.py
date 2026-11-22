@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from . import summon, memory, recall, config
+from . import summon, memory, recall, config, avatar_vrm
 from . import import_chatlog, import_claude, import_muse, reembed, memopedia, native_export_import, persona_pack
 from . import schedule, inventory, arasuji
 from . import pulse_logs, memory_notes, working_memory
@@ -45,6 +45,7 @@ router.include_router(summon.router, tags=["people"])
 router.include_router(memory.router, tags=["people"])
 router.include_router(recall.router, tags=["people"])
 router.include_router(config.router, tags=["people"])
+router.include_router(avatar_vrm.router, tags=["people"])
 router.include_router(import_chatlog.router, tags=["people"])
 router.include_router(import_claude.router, tags=["people"])
 router.include_router(import_muse.router, tags=["people"])
