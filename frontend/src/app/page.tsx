@@ -707,20 +707,20 @@ export default function Home() {
         sidebarOpen: isInfoOpen,
         pollActive: isInfoOpen || isRoomViewColumn || showRoomOverlay,
     });
-    // ルームビューに出すペルソナ: 生成中の assistant の吹き出しがあればその持ち主、
+    // ルームビューに出すペルソナ: 文字が流れている吹き出し (streamingSpeech) の持ち主、
     // 無ければ読み上げの音声が鳴っている吹き出し (audioSpeech) の持ち主、それも無ければ
     // 末尾から見て最初の assistant の吹き出しの持ち主 (resolveRoomViewSpeakerId)。
+    // 字幕と speaking が使うのと同じ streamingSpeech / audioSpeech から決める —
+    // 本文の無い生成中の吹き出し (考えている途中・スペルの実行中) は、ここでも
+    // 「文字が流れている」に数えない。数えると、A の音声が鳴っている間に B が
+    // 考え始めただけで、A の声・字幕に B の姿が組み合わさる。
     const roomViewSpeakerId = useMemo(() => {
-        let streamingSpeakerId: string | undefined;
-        for (let i = messages.length - 1; i >= 0 && !streamingSpeakerId; i--) {
-            if (messages[i]._streaming) streamingSpeakerId = bubbleSpeakerId(messages[i]);
-        }
         let lastSpeakerId: string | undefined;
         for (let i = messages.length - 1; i >= 0 && !lastSpeakerId; i--) {
             lastSpeakerId = bubbleSpeakerId(messages[i]);
         }
-        return resolveRoomViewSpeakerId(streamingSpeakerId, bubbleSpeakerId(audioSpeech), lastSpeakerId);
-    }, [messages, audioSpeech]);
+        return resolveRoomViewSpeakerId(bubbleSpeakerId(streamingSpeech), bubbleSpeakerId(audioSpeech), lastSpeakerId);
+    }, [messages, streamingSpeech, audioSpeech]);
     // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
     // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
     const roomViewSpeakerName = useMemo(() => {
