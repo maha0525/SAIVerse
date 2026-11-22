@@ -167,7 +167,7 @@ def test_upload_returns_info_and_get_returns_the_same_bytes(world):
     assert info["filename"] == "Aoi.vrm"
     assert info["size_bytes"] == len(VRM_BYTES)
     assert info["updated_at"] == int(path.stat().st_mtime)
-    assert info["url"] == f"/api/people/{PERSONA_ID}/avatar-vrm?v={info['updated_at']}"
+    assert info["url"] == f"/api/people/{PERSONA_ID}/avatar-vrm?v={path.stat().st_mtime_ns}-{len(VRM_BYTES)}"
     assert world.stored().AVATAR_VRM_PATH == f"personas/{PERSONA_ID}/avatar/Aoi.vrm"
 
     got = world.client.get(f"/api/people/{PERSONA_ID}/avatar-vrm")
@@ -197,6 +197,33 @@ def test_reupload_with_the_same_name_keeps_the_new_file(world):
     assert world.upload("same.vrm", second).status_code == 200
     assert (world.avatar_dir / "same.vrm").read_bytes() == second
     assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["same.vrm"]
+
+
+def test_url_changes_when_the_file_is_replaced_within_the_same_second(world):
+    """同じ一秒の中で入れ替えても、URL が変わる。
+
+    画面は URL が同じなら読み込み済みの VRM を使い続け、読み込めなかった URL は
+    読み直さないので、入れ替えたのに URL が同じだと、前の姿のままになる。
+    """
+    assert world.upload("same.vrm").status_code == 200
+    path = world.avatar_dir / "same.vrm"
+    second_start = 1_700_000_000 * 1_000_000_000
+    os.utime(path, ns=(second_start, second_start + 1_000))
+    first = persona_avatar_vrm.vrm_info(PERSONA_ID, path)
+
+    assert world.upload("same.vrm", VRM_BYTES + b"second").status_code == 200
+    os.utime(path, ns=(second_start, second_start + 2_000))
+    second = persona_avatar_vrm.vrm_info(PERSONA_ID, path)
+
+    assert first["updated_at"] == second["updated_at"]
+    assert first["url"] != second["url"]
+
+    # 大きさが同じでも、更新時刻が一秒より細かく違えば URL が変わる
+    path.write_bytes(VRM_BYTES + b"SECOND")
+    os.utime(path, ns=(second_start, second_start + 3_000))
+    third = persona_avatar_vrm.vrm_info(PERSONA_ID, path)
+    assert third["size_bytes"] == second["size_bytes"]
+    assert third["url"] != second["url"]
 
 
 def _failing_db_write(*args, **kwargs):

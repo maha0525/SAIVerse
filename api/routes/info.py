@@ -27,7 +27,7 @@ class OccupantInfo(BaseModel):
     appearance_image: Optional[str] = None
     # ルームビューの 3D アバター (screen_avatar.md 設計 2・4)。VRM があり、
     # AI.AVATAR_3D_ENABLED が False でないときだけ
-    # "/api/people/<id>/avatar-vrm?v=<更新時刻>"。users 配列では常に None。
+    # "/api/people/<id>/avatar-vrm?v=<入れ替えるたびに変わる文字列>"。users 配列では常に None。
     avatar_vrm_url: Optional[str] = None
 
 class ItemInfo(BaseModel):

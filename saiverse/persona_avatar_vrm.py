@@ -96,19 +96,33 @@ def safe_vrm_filename(filename: Optional[str]) -> str:
     return stem + suffix
 
 
-def vrm_url(persona_id: str, updated_at: int) -> str:
-    return f"/api/people/{persona_id}/avatar-vrm?v={int(updated_at)}"
+def vrm_url(persona_id: str, version: str) -> str:
+    """VRM を返す API の URL。``version`` は、ファイルを入れ替えるたびに変わる文字列。
+
+    画面は URL が同じなら読み込み済みの VRM を使い続け、読み込めなかった URL は読み直さない
+    (frontend/src/lib/vrmAvatarEngine.ts)。だから、入れ替えたのに URL が同じだと、画面は
+    前の姿のままになる。
+    """
+    return f"/api/people/{persona_id}/avatar-vrm?v={version}"
+
+
+def vrm_version(stat_result: os.stat_result) -> str:
+    """URL の ``v`` に入れる文字列。更新時刻 (ナノ秒) と大きさを並べたもの。
+
+    秒に丸めた更新時刻だけでは、同じ一秒の中で入れ替えたときに同じ値になる。
+    更新時刻の刻みが粗いファイルシステムのために、大きさも並べる。
+    """
+    return f"{stat_result.st_mtime_ns}-{stat_result.st_size}"
 
 
 def vrm_info(persona_id: str, path: Path) -> Dict[str, Any]:
     """VRM の情報 (``filename`` / ``size_bytes`` / ``updated_at`` / ``url``)。ファイルが無ければ OSError。"""
-    stat = Path(path).stat()
-    updated_at = int(stat.st_mtime)
+    stat_result = Path(path).stat()
     return {
         "filename": Path(path).name,
-        "size_bytes": int(stat.st_size),
-        "updated_at": updated_at,
-        "url": vrm_url(persona_id, updated_at),
+        "size_bytes": int(stat_result.st_size),
+        "updated_at": int(stat_result.st_mtime),
+        "url": vrm_url(persona_id, vrm_version(stat_result)),
     }
 
 

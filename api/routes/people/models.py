@@ -149,7 +149,7 @@ class AvatarVrmInfo(BaseModel):
     filename: str
     size_bytes: int
     updated_at: int  # ファイルの更新時刻 (POSIX 秒)
-    url: str  # /api/people/<persona_id>/avatar-vrm?v=<updated_at>
+    url: str  # /api/people/<persona_id>/avatar-vrm?v=<入れ替えるたびに変わる文字列>
 
 
 class AIConfigResponse(BaseModel):
