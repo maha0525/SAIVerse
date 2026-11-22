@@ -25,6 +25,10 @@ class OccupantInfo(BaseModel):
     # ルームビューの立ち絵 (docs/intent/screen_avatar.md)。AI.APPEARANCE_IMAGE_PATH を
     # avatar_path_to_url に通した値。設定が無ければ None。users 配列では常に None。
     appearance_image: Optional[str] = None
+    # ルームビューの 3D アバター (screen_avatar.md 設計 2・4)。VRM があり、
+    # AI.AVATAR_3D_ENABLED が False でないときだけ
+    # "/api/people/<id>/avatar-vrm?v=<入れ替えるたびに変わる文字列>"。users 配列では常に None。
+    avatar_vrm_url: Optional[str] = None
 
 class ItemInfo(BaseModel):
     id: str
@@ -260,24 +264,36 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
     except Exception as e:
         LOGGER.warning("Failed to get building image for %s: %s", building_id, e, exc_info=True)
 
-    # 部屋にいるペルソナの AI.APPEARANCE_IMAGE_PATH を一度の問い合わせで読む。
+    # 部屋にいるペルソナの AI.APPEARANCE_IMAGE_PATH と VRM の列を一度の問い合わせで読む。
     occupant_persona_ids = [o["id"] for o in occupants_list]
     if occupant_persona_ids:
         try:
             from database.session import SessionLocal
             from database.models import AI as AIModel
+            from saiverse.persona_avatar_vrm import existing_vrm_info
             session = SessionLocal()
             try:
-                rows = session.query(AIModel.AIID, AIModel.APPEARANCE_IMAGE_PATH).filter(
+                rows = session.query(
+                    AIModel.AIID,
+                    AIModel.APPEARANCE_IMAGE_PATH,
+                    AIModel.AVATAR_VRM_PATH,
+                    AIModel.AVATAR_3D_ENABLED,
+                ).filter(
                     AIModel.AIID.in_(occupant_persona_ids)
                 ).all()
             finally:
                 session.close()
-            appearance_by_id = {aid: path for aid, path in rows}
+            row_by_id = {row[0]: row for row in rows}
             for occupant in occupants_list:
-                occupant["appearance_image"] = avatar_path_to_url(
-                    appearance_by_id.get(occupant["id"])
-                )
+                row = row_by_id.get(occupant["id"])
+                occupant["appearance_image"] = avatar_path_to_url(row[1] if row else None)
+                vrm_url = None
+                if row is not None and row[2] and row[3] is not False:
+                    # 値はあるのにファイルが無い・avatar フォルダの外のときは
+                    # existing_vrm_info が WARNING を出して None を返す
+                    info = existing_vrm_info(occupant["id"], row[2])
+                    vrm_url = info["url"] if info else None
+                occupant["avatar_vrm_url"] = vrm_url
         except Exception as e:
             LOGGER.warning(
                 "Failed to get persona appearance images for %s: %s",

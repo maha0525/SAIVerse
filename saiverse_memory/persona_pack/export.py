@@ -85,6 +85,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, TextIO, Tuple
 
 from sai_memory.room_state import ROOM_STATE_META_KEY
+from saiverse.persona_avatar_vrm import AVATAR_DIR_NAME
 
 from .chatgpt_compat import is_conversation_message, write_conversation
 from .format import (
@@ -245,6 +246,12 @@ _MEMORY_DB_FILES = frozenset({
 # 書き出さず、取り込みでもペルソナフォルダへ復元しない。
 WORLD_PENDING_MARKER = "persona_pack_world_pending.json"
 _DAY_REPORTS_DIR = "day_reports"
+# ペルソナの VRM の置き場 (personas/<id>/avatar/、docs/intent/screen_avatar.md 設計 4)。
+# 再配布を禁じている VRM があるので、パックには入れない (初期設定では入れない、という
+# 設計の決定)。ai.AVATAR_VRM_PATH も profile.json に書かない — 取り込み先に無い
+# ファイルを指す値を運ばないため (取り込み側は ai に無い列を触らない)。
+_AVATAR_DIR = AVATAR_DIR_NAME
+_PROFILE_OMITTED_COLUMNS = frozenset({"AVATAR_VRM_PATH"})
 
 # メッセージ metadata の添付の置き場 (api/routes/chat.py の /chat/send が書く 3 つ)。
 _ATTACHMENT_KEYS = ("images", "documents", "media")
@@ -829,7 +836,7 @@ def _write_profile(
             continue
         files[column] = writer.copy_file("profile", src, f"profile/{subdir}/{src.name}")
     writer.write_json("profile", "profile/profile.json", {
-        "ai": _encode_row(ai_row),
+        "ai": _encode_row({k: v for k, v in ai_row.items() if k not in _PROFILE_OMITTED_COLUMNS}),
         "files": files,
     })
 
@@ -1320,7 +1327,7 @@ def _own_message_rows(
 def _write_persona_dir_files(
     writer: _PackWriter, persona_dir: Path, result: PersonaPackExportResult
 ) -> None:
-    """ペルソナフォルダのファイルをそのまま写す (memory.db 一式・取り込み途中の印・day_reports/ を除く)。"""
+    """ペルソナフォルダのファイルをそのまま写す (memory.db 一式・取り込み途中の印・day_reports/・avatar/ を除く)。"""
     if not persona_dir.is_dir():
         return
     count = 0
@@ -1330,6 +1337,8 @@ def _write_persona_dir_files(
             continue
         if rel.parts[0] == _DAY_REPORTS_DIR:
             continue  # _write_journal_files が扱う (symlink の記録も向こうで行う)
+        if rel.parts[0] == _AVATAR_DIR:
+            continue  # VRM はパックに入れない (_AVATAR_DIR の注記)
         if not _copyable_persona_file(path, persona_dir, result):
             continue
         writer.copy_file(

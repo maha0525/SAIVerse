@@ -283,6 +283,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `LANGUAGE` | VARCHAR(16) | — |  |
 | `AVATAR_IMAGE` | VARCHAR(255) | — |  |
 | `APPEARANCE_IMAGE_PATH` | VARCHAR(512) | — |  |
+| `AVATAR_VRM_PATH` | VARCHAR(512) | — |  |
+| `AVATAR_3D_ENABLED` | BOOLEAN | — |  |
 | `EMOTION` | VARCHAR(1024) | — |  |
 | `AUTO_COUNT` | INTEGER | NOT NULL, default=0 |  |
 | `LAST_AUTO_PROMPT_TIMES` | VARCHAR(2048) | — |  |

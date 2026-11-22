@@ -1616,6 +1616,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "DESCRIPTION": ai.DESCRIPTION,
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
                 "APPEARANCE_IMAGE_PATH": ai.APPEARANCE_IMAGE_PATH,
+                "AVATAR_VRM_PATH": ai.AVATAR_VRM_PATH,
+                "AVATAR_3D_ENABLED": ai.AVATAR_3D_ENABLED,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
@@ -1724,6 +1726,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
         language: Optional[str] = None,
+        # ルームビューに 3D アバターを出すか (AI.AVATAR_3D_ENABLED)。モデル欄と同じく
+        # 既定は UNSET (= 送られてこなかったら触らない)。bool を渡したときだけ保存する。
+        avatar_3d_enabled: Any = UNSET,
     ) -> str:
         # 例外経路 (下の except) でも読む値は try の外で用意しておく — commit より
         # 前に転んだ回に、まだ代入されていない名前を触って NameError にしないため。
@@ -1939,6 +1944,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     else:
                         from saiverse.persona_language import validate_language
                         ai.LANGUAGE = validate_language(clean_lang)
+                if avatar_3d_enabled is not UNSET and avatar_3d_enabled is not None:
+                    ai.AVATAR_3D_ENABLED = bool(avatar_3d_enabled)
                 autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
                 committed = True
@@ -2058,7 +2065,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         現在の状態として読まれる行 (purge_persona_state_rows — user_ai_link・
         予定・anchor など) もここで**削除**する (残置ではなく削除 — FK は宣言のみで
         DB は強制しないアプリ層検査の方針のため、消さないと孤児行が残り、
-        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない。
+        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない
+        (その中の avatar/ の VRM だけは commit の後に消す)。
 
         注意: 本メソッドは PersonaMixin 側の同名定義 (manager/persona.py) と
         行単位の複製関係にある — 片方を変えたらもう片方も揃えること。
@@ -2088,6 +2096,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.delete(ai)
             db.commit()
             logging.info("Deleted the state rows of AI '%s': %s", ai_id, purged)
+            # 記憶フォルダは消さないが、VRM (personas/<id>/avatar/) は消す
+            # (docs/intent/screen_avatar.md 設計 4。同じ ID で作り直したペルソナに
+            # 前の VRM が残らないように)。失敗は WARNING に残り、削除は成功のまま。
+            from saiverse.persona_avatar_vrm import remove_avatar_files
+
+            remove_avatar_files(ai_id, getattr(self, "saiverse_home", None))
 
             if ai_id in self.personas:
                 persona_name = self.personas[ai_id].persona_name

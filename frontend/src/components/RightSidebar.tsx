@@ -55,6 +55,8 @@ interface RightSidebarProps {
     showRoomView: boolean;
     /** ルームビューに出すペルソナを選ぶための、喋っている (最後に喋った) ペルソナ。 */
     speakerId?: string;
+    /** いま喋っているペルソナ (RoomView の speakingId)。誰も喋っていなければ undefined。 */
+    speakingId?: string;
     /** PersonaMenu からの dismiss 等で滞在状況が変わったときに親 (ChatPage) へ通知し、
      * moveTrigger 等を bump して Sidebar 側も同期させるための callback。 */
     onPersonaChanged?: () => void;
@@ -64,7 +66,7 @@ interface RightSidebarProps {
     onStartVoiceCall?: (personaId: string, personaName: string, buildingId: string) => void;
 }
 
-export default function RightSidebar({ isOpen, onClose, currentBuildingId, details, refetchDetails, showRoomView, speakerId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
+export default function RightSidebar({ isOpen, onClose, currentBuildingId, details, refetchDetails, showRoomView, speakerId, speakingId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
     useLocale();
     // details は page.tsx の useBuildingDetails が「閲覧中の部屋の応答」だけを渡す
     // (前の部屋の応答が残って描かれる事故の守りは、フックの側にある)。
@@ -329,7 +331,7 @@ export default function RightSidebar({ isOpen, onClose, currentBuildingId, detai
                             <div className={styles.section}>
                                 <h3 data-i18n="components.RightSidebar.roomViewHeading" className={styles.heading}>
                                     <ImageIcon size={16} />{uiText("components.RightSidebar.roomViewHeading")}</h3>
-                                <RoomView details={details} speakerId={speakerId} placement="sidebar" />
+                                <RoomView details={details} speakerId={speakerId} speakingId={speakingId} placement="sidebar" />
                             </div>
                         )}
 
@@ -547,6 +549,9 @@ export default function RightSidebar({ isOpen, onClose, currentBuildingId, detai
                             isOpen={showSettings}
                             onClose={() => setShowSettings(false)}
                             personaId={activeModalPersonaId}
+                            // VRM の入れる・外す・3D の表示の切り替えの後に、部屋の詳細を
+                            // 取り直して、ルームビューへすぐ反映する。
+                            onAvatarChanged={fetchDetails}
                         />
                         <InventoryModal
                             isOpen={showInventory}

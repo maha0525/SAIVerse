@@ -955,7 +955,8 @@ class PersonaMixin:
         現在の状態として読まれる行 (purge_persona_state_rows — user_ai_link・
         予定・anchor など) もここで**削除**する (残置ではなく削除 — FK は宣言のみで
         DB は強制しないアプリ層検査の方針のため、消さないと孤児行が残り、
-        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない。
+        同じ ID での作成が UNIQUE 制約で落ちる)。記憶フォルダは消さない
+        (その中の avatar/ の VRM だけは commit の後に消す)。
 
         注意: 本メソッドは AdminService 側の同名定義 (manager/admin.py) と
         行単位の複製関係にある — 片方を変えたらもう片方も揃えること。
@@ -985,6 +986,12 @@ class PersonaMixin:
             db.delete(ai)
             db.commit()
             logging.info("Deleted the state rows of AI '%s': %s", ai_id, purged)
+            # 記憶フォルダは消さないが、VRM (personas/<id>/avatar/) は消す
+            # (docs/intent/screen_avatar.md 設計 4。同じ ID で作り直したペルソナに
+            # 前の VRM が残らないように)。失敗は WARNING に残り、削除は成功のまま。
+            from saiverse.persona_avatar_vrm import remove_avatar_files
+
+            remove_avatar_files(ai_id, getattr(self, "saiverse_home", None))
 
             if ai_id in self.personas:
                 persona_name = self.personas[ai_id].persona_name

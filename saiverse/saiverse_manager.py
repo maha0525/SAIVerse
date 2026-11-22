@@ -2066,6 +2066,7 @@ class SAIVerseManager(
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
         language: Optional[str] = None,
+        avatar_3d_enabled: Any = UNSET,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -2099,6 +2100,7 @@ class SAIVerseManager(
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
             language=language,
+            avatar_3d_enabled=avatar_3d_enabled,
         )
 
     def delete_ai(self, ai_id: str) -> str:
