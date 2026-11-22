@@ -10,7 +10,7 @@ SAIVerse のペルソナが「身体を持つ」ための基盤を、コア側�
 
 - [`stackchan_vessel.md`](stackchan_vessel.md) — StackChan Vessel 統合 (v0.14)。現行の `Building.PHYSICAL_VESSEL_ID` の出自
 - [`virtual_embodiment_godot.md`](virtual_embodiment_godot.md) — Godot / ARDY 仮想身体 (v0.17)
-- [`screen_avatar.md`](screen_avatar.md) — 画面内アバター (v0.3 draft)
+- [`screen_avatar.md`](screen_avatar.md) — チャット画面にペルソナの姿と部屋を映す設計 (2026-11-22 に全面的に書き直し、設計中)。アバターの実物のデータの置き場所について、この文書の下書きと逆向きの決定を含む (同 設計 4)
 - [`embodied_expression.md`](embodied_expression.md) — 発話同期表現層。Vessel 種別横断の `/emote` 機構
 - [`addon_extension_points.md`](addon_extension_points.md) — アドオン拡張点
 

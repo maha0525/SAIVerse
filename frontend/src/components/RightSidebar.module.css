@@ -109,21 +109,6 @@
     line-height: 1.5;
 }
 
-.buildingImage {
-    border-radius: 8px;
-    overflow: hidden;
-    background: #1f2937;
-    border: 1px solid #374151;
-}
-
-.buildingImage img {
-    width: 100%;
-    height: auto;
-    display: block;
-    object-fit: cover;
-    max-height: 200px;
-}
-
 .occupantList {
     display: flex;
     flex-direction: column;
@@ -323,6 +308,42 @@
     background: rgba(16, 185, 129, 0.3);
 }
 
+/* 埋もれたアイテムの山 (docs/intent/screen_avatar.md 設計 5)。並びの最後に一行ぶん使って置き、
+   押すとその下に埋もれたアイテムのカードが並ぶ。 */
+.pileCard {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    font: inherit;
+    text-align: left;
+    color: #9ca3af;
+    border-style: dashed;
+    box-sizing: border-box;
+}
+
+.pileCard[aria-expanded="true"] {
+    border-color: #60a5fa;
+}
+
+.pileText {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.85rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* 埋もれたアイテムのカード: 見えるアイテムと見分けが付くよう、少し薄くする */
+.buriedCard {
+    opacity: 0.6;
+}
+
+.buriedCard:hover {
+    opacity: 0.9;
+}
+
 /* Mobile Overlay Styles */
 .overlay {
     position: fixed;
@@ -428,11 +449,6 @@
     color: #64748b;
 }
 
-:global([data-theme="light"]) .buildingImage {
-    background: #f1f5f9;
-    border-color: #e2e8f0;
-}
-
 :global([data-theme="light"]) .occupant {
     background: #f8fafc;
     border-color: #e2e8f0;
@@ -497,4 +513,12 @@
 
 :global([data-theme="light"]) .toggleOpenBtn.isOpen:hover {
     background: rgba(16, 185, 129, 0.25);
+}
+
+:global([data-theme="light"]) .pileCard {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pileCard[aria-expanded="true"] {
+    border-color: #3b82f6;
 }

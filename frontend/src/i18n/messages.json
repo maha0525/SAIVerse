@@ -519,6 +519,30 @@
     "ja": "建物が選ばれていません",
     "en": "No building selected"
   },
+  "app.page.roomViewToggleRoom": {
+    "ja": "ルームビュー",
+    "en": "Room view"
+  },
+  "app.page.roomViewToggleRoomTitle": {
+    "ja": "ルームビューに切り替える",
+    "en": "Switch to the room view"
+  },
+  "app.page.roomViewToggleLog": {
+    "ja": "ログ",
+    "en": "Log"
+  },
+  "app.page.roomViewToggleLogTitle": {
+    "ja": "ログに切り替える",
+    "en": "Switch to the chat log"
+  },
+  "app.page.roomViewSpeaking": {
+    "ja": "{p1} が喋っています",
+    "en": "{p1} is speaking"
+  },
+  "app.page.roomViewSpeakingNoName": {
+    "ja": "ペルソナが喋っています",
+    "en": "A persona is speaking"
+  },
   "app.phenomena.page.text001": {
     "ja": "編集内容が保存されていません。閉じてよろしいですか？",
     "en": "You have unsaved changes. Close anyway?"
@@ -5967,9 +5991,9 @@
     "ja": "説明がありません",
     "en": "No description"
   },
-  "components.RightSidebar.text004": {
-    "ja": " インテリア",
-    "en": " Interior"
+  "components.RightSidebar.roomViewHeading": {
+    "ja": " ルームビュー",
+    "en": " Room view"
   },
   "components.RightSidebar.text005": {
     "ja": " 滞在ユーザー (",
@@ -6138,6 +6162,30 @@
   "components.RightSidebar.text046": {
     "ja": "{p1} 件",
     "en": "{p1} items"
+  },
+  "components.RightSidebar.text047": {
+    "ja": "ほかに {p1} 個のアイテムが埋もれています",
+    "en": "{p1} more items are buried here"
+  },
+  "components.RoomView.label001": {
+    "ja": "ルームビュー",
+    "en": "Room view"
+  },
+  "components.RoomView.alt001": {
+    "ja": "{p1} の内装",
+    "en": "Interior of {p1}"
+  },
+  "components.RoomView.alt002": {
+    "ja": "{p1} の姿",
+    "en": "{p1}"
+  },
+  "components.RoomView.text001": {
+    "ja": "{p1} を表示",
+    "en": "Show {p1}"
+  },
+  "components.RoomView.caption001": {
+    "ja": "いま喋っている内容",
+    "en": "What is being said now"
   },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",

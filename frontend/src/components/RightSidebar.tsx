@@ -5,7 +5,7 @@ import { getFormatLocale } from '@/i18n/core';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
-import { useCallback, useRef, useState, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import styles from './RightSidebar.module.css';
 import {
     Users,
@@ -22,7 +22,10 @@ import {
     Activity,
     Plus,
     X,
+    Layers,
 } from 'lucide-react';
+import RoomView from './RoomView';
+import type { BuildingDetails, Occupant, Item, Fixture } from '@/lib/useBuildingDetails';
 import ItemModal from './ItemModal';
 import ItemCreateModal from './ItemCreateModal';
 import PersonaMenu from './PersonaMenu';
@@ -39,12 +42,19 @@ import BuildingSettingsModal from './BuildingSettingsModal';
 interface RightSidebarProps {
     isOpen: boolean;
     onClose?: () => void;
-    refreshTrigger?: number;
-    /** 親 (ChatPage) が把握している現在 Building ID。fetch 時に必須で渡す。
-     * これを省略するとバックエンドが server-global の user_current_building_id にフォールバックし、
-     * マルチデバイスで他クライアントの操作に汚染される (2026-04-30 エリス上書き事故の遠因)。
+    /** 親 (ChatPage) が把握している現在 Building ID。モーダルの操作の宛先に使う。
+     * 部屋の詳細の取得 (useBuildingDetails) も、この ID を明示して行う。
      */
     currentBuildingId?: string | null;
+    /** 閲覧中の部屋の詳細。page.tsx の useBuildingDetails の結果で、
+     * 閲覧中の部屋の応答が届くまでは null。 */
+    details: BuildingDetails | null;
+    /** 部屋の詳細を取り直す (useBuildingDetails の refetchDetails)。 */
+    refetchDetails: () => void;
+    /** ルームビューをこのサイドバーの中に出すか。UI区画 ('column') に出している幅では false。 */
+    showRoomView: boolean;
+    /** ルームビューに出すペルソナを選ぶための、喋っている (最後に喋った) ペルソナ。 */
+    speakerId?: string;
     /** PersonaMenu からの dismiss 等で滞在状況が変わったときに親 (ChatPage) へ通知し、
      * moveTrigger 等を bump して Sidebar 側も同期させるための callback。 */
     onPersonaChanged?: () => void;
@@ -54,56 +64,14 @@ interface RightSidebarProps {
     onStartVoiceCall?: (personaId: string, personaName: string, buildingId: string) => void;
 }
 
-interface Occupant {
-    id: string;
-    name: string;
-    avatar?: string;
-    // ⚠ 暮らし系の表示 (話しかけやすさ / いま何をしているか / 自律 OFF) は
-    // v0.3 で隠した (autonomous_behavior_v3.md §11「運転 UI は隠す」)。供給する
-    // 運転そのものが v0.4 なので、動いていない状態を UI に出さない。
-}
-
-interface Item {
-    id: string;
-    name: string;
-    type: 'document' | 'picture' | 'bag' | 'audio' | 'video' | 'other';
-    description?: string;
-    is_open?: boolean;  // Whether item content is included in visual context
-    contained_items?: Item[];  // For bag type: items inside this bag
-    contained_count?: number;  // Number of items directly inside this bag
-}
-
-interface Fixture {
-    id: string;
-    name: string;
-    description: string;
-    type: string;
-    state_json: string | null;
-    has_observer: boolean;
-}
-
-interface BuildingDetails {
-    id: string;
-    name: string;
-    description: string;
-    image_path?: string | null;  // Building interior image
-    occupants: Occupant[];  // AI personas
-    users?: Occupant[];  // Users present in the building (intent §D-3)
-    items: Item[];
-    fixtures?: Fixture[];
-}
-
-export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
+export default function RightSidebar({ isOpen, onClose, currentBuildingId, details, refetchDetails, showRoomView, speakerId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
     useLocale();
-    // 応答は「どの部屋を要求して得たものか」を添えて保持する。閲覧中の部屋と
-    // 一致するときだけ details として使い、一致しない間 (部屋を切り替えてから
-    // 新しい応答が届くまで) は「まだ無い」扱いにする。こうしないと前の部屋の
-    // 名前・画像・滞在ペルソナ・アイテムが残ったまま描かれ、そこから開く
-    // モーダルの宛先も前の部屋になる (2026-04-30 エリス上書き事故と同型)。
-    const [loadedDetails, setLoadedDetails] = useState<{ buildingId: string; data: BuildingDetails } | null>(null);
-    const details = loadedDetails && loadedDetails.buildingId === currentBuildingId
-        ? loadedDetails.data
-        : null;
+    // details は page.tsx の useBuildingDetails が「閲覧中の部屋の応答」だけを渡す
+    // (前の部屋の応答が残って描かれる事故の守りは、フックの側にある)。
+    // 部屋の詳細を取り直す。アイテムの開閉やモーダルの保存の後に呼ぶ。
+    const fetchDetails = refetchDetails;
+    // 埋もれたアイテムの山を開いているか。別の部屋へ移ったら閉じる (下の Building 変化検知)。
+    const [buriedOpen, setBuriedOpen] = useState(false);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -131,43 +99,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // で操作が走ってしまうため、building 変更を検知したらすべて閉じる。
     const previousBuildingIdRef = useRef<string | null>(null);
 
-    // 閲覧中の部屋の最新値。fetch の応答が届いた時点でまだ同じ部屋を見ているかを
-    // 判定するために使う (応答の追い越し対策)。同期する useEffect は下の fetch 用
-    // useEffect より前に置くこと (React は宣言順に effect を走らせるので、
-    // fetch が始まる前にこの ref が新しい部屋になっている必要がある)。
-    const viewingBuildingIdRef = useRef<string | null>(null);
-
     const startX = useRef<number | null>(null);
     const startY = useRef<number | null>(null);
     const startTime = useRef<number | null>(null);
-
-
-
-    // ⚠ この関数は setInterval からも呼ぶので、必ず useCallback で
-    // currentBuildingId に紐付けたままにすること。依存から外すと、ポーリングが
-    // パネルを開いた時点の building_id を掴み続け、部屋を移動しても 10 秒後に
-    // 前の部屋の内容へ戻され続ける (v0.3.13 のユーザー報告)。
-    const fetchDetails = useCallback(async () => {
-        // currentBuildingId 未指定だと server-global の user_current_building_id に
-        // 汚染される (エリス上書き事故の遠因)。明示指定がない間は fetch しない。
-        const targetId = currentBuildingId;
-        if (!targetId) {
-            console.warn('[RightSidebar] fetchDetails skipped: currentBuildingId not provided yet');
-            return;
-        }
-        try {
-            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(targetId)}`);
-            if (res.ok) {
-                const data = await res.json();
-                // 応答が届くまでに別の部屋へ移っていたら捨てる。先に投げた古い部屋の
-                // 応答が後から届いて新しい部屋の内容を上書きするのを防ぐ。
-                if (viewingBuildingIdRef.current !== targetId) return;
-                setLoadedDetails({ buildingId: targetId, data });
-            }
-        } catch (err) {
-            console.error("Failed to fetch building details", err);
-        }
-    }, [currentBuildingId]);
 
     const handleToggleOpen = async (e: React.MouseEvent, item: Item) => {
         e.stopPropagation(); // Don't open the item modal
@@ -183,18 +117,6 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
             console.error("Failed to toggle item open state", err);
         }
     };
-
-    // ⚠ この effect は下の fetch 用 effect より前に置くこと (宣言順の理由は
-    // viewingBuildingIdRef の宣言箇所のコメント参照)。
-    useEffect(() => {
-        viewingBuildingIdRef.current = currentBuildingId ?? null;
-    }, [currentBuildingId]);
-
-    useEffect(() => {
-        // fetchDetails は currentBuildingId が変わったときだけ作り直されるので、
-        // これを deps に置くことが「部屋が変わったら再 fetch」を兼ねる。
-        fetchDetails();
-    }, [refreshTrigger, isOpen, fetchDetails]);
 
     // Building 変化検知: 開いているモーダル / メニューを強制クローズする。
     // - selectedPersona (PersonaMenu の表示元): 旧 building の occupant への参照
@@ -214,20 +136,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         setShowInventory(false);
         setShowBuildingSettings(false);
         setShowItemCreate(false);
+        setBuriedOpen(false);
     }, [details?.id]);
-
-    // Polling for real-time updates when sidebar is open
-    useEffect(() => {
-        if (!isOpen) return;
-
-        const pollInterval = setInterval(() => {
-            fetchDetails();
-        }, 10000); // Poll every 10 seconds
-
-        return () => clearInterval(pollInterval);
-        // fetchDetails を deps に含めること。外すとポーリングが古い部屋を
-        // 掴み続ける (上の fetchDetails のコメント参照)。
-    }, [isOpen, fetchDetails]);
 
     const handleTouchStart = (e: React.TouchEvent) => {
         e.stopPropagation();
@@ -307,6 +217,72 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         applyOpen();
     };
 
+    // アイテムの並び (docs/intent/screen_avatar.md 設計 5)。どれが見えてどれが
+    // 埋もれているかはバックエンドが決めたリストをそのまま使い、ここでは数え直さない。
+    // visible_item_ids を返さない古いバックエンドでは、全件を今の並びのまま見える扱いにする。
+    const { visibleItems, buriedItems } = useMemo(() => {
+        if (!details) return { visibleItems: [] as Item[], buriedItems: [] as Item[] };
+        if (!Array.isArray(details.visible_item_ids)) {
+            return { visibleItems: details.items, buriedItems: [] as Item[] };
+        }
+        const byId = new Map(details.items.map(item => [item.id, item]));
+        const pick = (ids: string[] | undefined) => (ids ?? [])
+            .map(id => byId.get(id))
+            .filter((item): item is Item => !!item);
+        return { visibleItems: pick(details.visible_item_ids), buriedItems: pick(details.buried_item_ids) };
+    }, [details]);
+
+    const renderItemCard = (item: Item, buried: boolean) => (
+        <div
+            key={item.id}
+            className={`${styles.card} ${styles[item.type]} ${item.is_open ? styles.itemOpen : ''} ${buried ? styles.buriedCard : ''}`}
+            onClick={() => setSelectedItem(item)}
+        >
+            {item.type === 'picture' && !thumbErrors.has(item.id) ? (
+                <div className={styles.cardThumb}>
+                    <img
+                        src={`/api/info/item/${item.id}?thumb=1`}
+                        alt={item.name}
+                        loading="lazy"
+                        onError={() => setThumbErrors(prev => {
+                            const next = new Set(prev);
+                            next.add(item.id);
+                            return next;
+                        })}
+                    />
+                </div>
+            ) : (
+                <div className={styles.cardIcon}>
+                    {item.type === 'picture' ? <ImageIcon size={20} />
+                        : item.type === 'bag' ? <Package size={20} />
+                        : item.type === 'audio' ? <Music size={20} />
+                        : item.type === 'video' ? <Video size={20} />
+                        : <File size={20} />}
+                </div>
+            )}
+            <div className={styles.cardInfo}>
+                <div className={styles.cardName}>
+                    {item.name}
+                    {item.type === 'bag' && item.contained_count != null && (
+                        <span className={styles.bagCount}> ({item.contained_count})</span>
+                    )}
+                </div>
+                {item.description && (
+                    <div className={styles.cardDesc}>{item.description}</div>
+                )}
+            </div>
+            {(item.type === 'picture' || item.type === 'document' || item.type === 'bag' || item.type === 'audio' || item.type === 'video') && (
+                <button data-i18n="components.RightSidebar.text009 components.RightSidebar.text010"
+                    className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
+                    onClick={(e) => handleToggleOpen(e, item)}
+                    title={item.is_open ? uiText("components.RightSidebar.text009") : uiText("components.RightSidebar.text010")}
+                >
+                    {item.is_open ? <Eye size={16} /> : <EyeOff size={16} />}
+                </button>
+            )}
+        </div>
+    );
+
     return (
         <>
             {/* Mobile Overlay */}
@@ -346,20 +322,14 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             </div>
                         </div>
 
-                        {/* Building Interior Image */}
-                        {details.image_path && (
+                        {/* ルームビュー (内装画像と、部屋にいるペルソナの姿)。UI区画に出している
+                            幅 (showRoomView=false) では二重に出さない。内装画像もペルソナも
+                            無ければ節ごと出さない (docs/intent/screen_avatar.md 設計 1)。 */}
+                        {showRoomView && (details.image_path || details.occupants.length > 0) && (
                             <div className={styles.section}>
-                                <h3 data-i18n="components.RightSidebar.text004" className={styles.heading}>
-                                    <ImageIcon size={16} />{uiText("components.RightSidebar.text004")}</h3>
-                                <div className={styles.buildingImage}>
-                                    <img
-                                        src={details.image_path}
-                                        alt={`${details.name} interior`}
-                                        onError={(e) => {
-                                            e.currentTarget.style.display = 'none';
-                                        }}
-                                    />
-                                </div>
+                                <h3 data-i18n="components.RightSidebar.roomViewHeading" className={styles.heading}>
+                                    <ImageIcon size={16} />{uiText("components.RightSidebar.roomViewHeading")}</h3>
+                                <RoomView details={details} speakerId={speakerId} placement="sidebar" />
                             </div>
                         )}
 
@@ -441,56 +411,23 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             </h3>
                             <div className={styles.grid}>
                                 {details.items.length > 0 ? (
-                                    details.items.map(item => (
-                                        <div
-                                            key={item.id}
-                                            className={`${styles.card} ${styles[item.type]} ${item.is_open ? styles.itemOpen : ''}`}
-                                            onClick={() => setSelectedItem(item)}
-                                        >
-                                            {item.type === 'picture' && !thumbErrors.has(item.id) ? (
-                                                <div className={styles.cardThumb}>
-                                                    <img
-                                                        src={`/api/info/item/${item.id}?thumb=1`}
-                                                        alt={item.name}
-                                                        loading="lazy"
-                                                        onError={() => setThumbErrors(prev => {
-                                                            const next = new Set(prev);
-                                                            next.add(item.id);
-                                                            return next;
-                                                        })}
-                                                    />
+                                    <>
+                                        {visibleItems.map(item => renderItemCard(item, false))}
+                                        {buriedItems.length > 0 && (
+                                            <button
+                                                type="button"
+                                                className={`${styles.card} ${styles.pileCard}`}
+                                                onClick={() => setBuriedOpen(prev => !prev)}
+                                                aria-expanded={buriedOpen}
+                                            >
+                                                <div className={styles.cardIcon}><Layers size={20} /></div>
+                                                <div className={styles.pileText}>
+                                                    {uiText("components.RightSidebar.text047", { p1: buriedItems.length })}
                                                 </div>
-                                            ) : (
-                                                <div className={styles.cardIcon}>
-                                                    {item.type === 'picture' ? <ImageIcon size={20} />
-                                                        : item.type === 'bag' ? <Package size={20} />
-                                                        : item.type === 'audio' ? <Music size={20} />
-                                                        : item.type === 'video' ? <Video size={20} />
-                                                        : <File size={20} />}
-                                                </div>
-                                            )}
-                                            <div className={styles.cardInfo}>
-                                                <div className={styles.cardName}>
-                                                    {item.name}
-                                                    {item.type === 'bag' && item.contained_count != null && (
-                                                        <span className={styles.bagCount}> ({item.contained_count})</span>
-                                                    )}
-                                                </div>
-                                                {item.description && (
-                                                    <div className={styles.cardDesc}>{item.description}</div>
-                                                )}
-                                            </div>
-                                            {(item.type === 'picture' || item.type === 'document' || item.type === 'bag' || item.type === 'audio' || item.type === 'video') && (
-                                                <button data-i18n="components.RightSidebar.text009 components.RightSidebar.text010"
-                                                    className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
-                                                    onClick={(e) => handleToggleOpen(e, item)}
-                                                    title={item.is_open ? uiText("components.RightSidebar.text009") : uiText("components.RightSidebar.text010")}
-                                                >
-                                                    {item.is_open ? <Eye size={16} /> : <EyeOff size={16} />}
-                                                </button>
-                                            )}
-                                        </div>
-                                    ))
+                                            </button>
+                                        )}
+                                        {buriedOpen && buriedItems.map(item => renderItemCard(item, true))}
+                                    </>
                                 ) : (
                                     <div data-i18n="components.RightSidebar.text011" className={styles.empty}>{uiText("components.RightSidebar.text011")}</div>
                                 )}
