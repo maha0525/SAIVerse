@@ -199,6 +199,64 @@ def test_reupload_with_the_same_name_keeps_the_new_file(world):
     assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["same.vrm"]
 
 
+def _failing_db_write(*args, **kwargs):
+    raise RuntimeError("the database could not be written")
+
+
+def test_same_name_reupload_never_reports_failure_after_replacing_the_file(world, monkeypatch):
+    """同じ名前で入れ替えるとき、失敗を返したのに中身だけ替わっている、を起こさない。
+
+    前の VRM と同じ名前なら DB の値は変わらないので、DB には書かない。ファイルを
+    置き換えた後に失敗しうる処理が残っていないこと (置き換えが最後の一手) を固定する。
+    """
+    from api.routes.people import avatar_vrm as route
+
+    assert world.upload("same.vrm").status_code == 200
+    stored_before = world.stored().AVATAR_VRM_PATH
+    monkeypatch.setattr(route, "_write_stored_path", _failing_db_write)
+
+    second = VRM_BYTES + b"second"
+    response = world.upload("same.vrm", second)
+    assert response.status_code == 200, response.text
+    assert (world.avatar_dir / "same.vrm").read_bytes() == second
+    assert world.stored().AVATAR_VRM_PATH == stored_before
+    assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["same.vrm"]
+
+
+def test_same_name_reupload_keeps_the_old_file_when_the_replace_fails(world, monkeypatch):
+    """同じ名前で入れ替えるとき、置き換えに失敗したら、前の VRM がそのまま残る。"""
+    from api.routes.people import avatar_vrm as route
+
+    assert world.upload("same.vrm").status_code == 200
+    stored_before = world.stored().AVATAR_VRM_PATH
+
+    def failing_replace(src, dst):
+        raise PermissionError("the file is in use")
+
+    monkeypatch.setattr(route.os, "replace", failing_replace)
+    response = world.upload("same.vrm", VRM_BYTES + b"second")
+    assert response.status_code == 500
+    assert "in use" in response.json()["detail"]
+    assert (world.avatar_dir / "same.vrm").read_bytes() == VRM_BYTES
+    assert world.stored().AVATAR_VRM_PATH == stored_before
+    assert world.leftover_temp_files() == []
+
+
+def test_different_name_reupload_keeps_the_old_file_when_the_db_write_fails(world, monkeypatch):
+    """別の名前で入れ替えるとき、DB に書けなかったら、前の VRM と DB の値がそのまま残る。"""
+    from api.routes.people import avatar_vrm as route
+
+    assert world.upload("first.vrm").status_code == 200
+    stored_before = world.stored().AVATAR_VRM_PATH
+    monkeypatch.setattr(route, "_write_stored_path", _failing_db_write)
+
+    with pytest.raises(RuntimeError):
+        world.upload("second.vrm", VRM_BYTES + b"second")
+    assert (world.avatar_dir / "first.vrm").read_bytes() == VRM_BYTES
+    assert world.stored().AVATAR_VRM_PATH == stored_before
+    assert sorted(p.name for p in world.avatar_dir.iterdir()) == ["first.vrm"]
+
+
 def test_unsafe_filename_is_made_safe(world):
     response = world.upload("..\\..\\evil/../x.vrm")
     assert response.status_code == 200, response.text

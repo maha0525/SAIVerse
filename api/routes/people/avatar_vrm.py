@@ -103,6 +103,10 @@ async def upload_avatar_vrm(
 
         temp_path = folder / f"{UPLOAD_TEMP_PREFIX}{uuid.uuid4().hex}.part"
         final_path = folder / safe_vrm_filename(original_name)
+        old_path = resolve_stored_vrm(persona_id, old_stored, home)
+        # 前の VRM と同じ名前で入れ替えるか。このときは、置き換えた時点で前の中身が
+        # 無くなるので、置き換えを最後の一手にする (下の「同じ名前のとき」)。
+        replaces_old_file = old_path is not None and old_path == final_path.resolve()
         try:
             size = await write_upload_bounded(file, temp_path, MAX_VRM_BYTES)
             with temp_path.open("rb") as stream:
@@ -112,26 +116,38 @@ async def upload_avatar_vrm(
                     status_code=400,
                     detail="This file is not a VRM (it does not start with the glTF binary header)",
                 )
-            os.replace(temp_path, final_path)
+            try:
+                os.replace(temp_path, final_path)
+            except OSError as exc:
+                # Windows では、ブラウザへ返している最中のファイルは置き換えられない。
+                # 置き換えは一度に切り替わるので、失敗したときは前のファイルがそのまま残る。
+                LOGGER.warning(
+                    "Could not put the VRM of %s in place at %s", persona_id, final_path, exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not put the VRM file in place (the previous file may be in use). Try again.",
+                ) from exc
         except BaseException:
             _unlink_quietly(temp_path, persona_id)
             raise
 
         new_stored = to_stored_path(final_path, home)
-        try:
-            _write_stored_path(manager, persona_id, new_stored)
-        except BaseException:
-            # DB が前の値のままなら、置いたばかりのファイルは誰も指さない。前の VRM と
-            # 同じ名前で上書きした場合は消さない (DB が指しているのはそのファイル)。
-            old_path = resolve_stored_vrm(persona_id, old_stored, home)
-            if old_path is None or old_path != final_path.resolve():
+        if not replaces_old_file:
+            # 別の名前のとき: 前の VRM はまだ残っている。DB を新しいファイルへ向け、
+            # 向け終わってから前の VRM を消す。DB に書けなかったら、置いたばかりの
+            # ファイル (誰も指していない) を消して、前の VRM と DB の値をそのまま残す。
+            try:
+                _write_stored_path(manager, persona_id, new_stored)
+            except BaseException:
                 _unlink_quietly(final_path, persona_id)
-            LOGGER.warning("Could not save AVATAR_VRM_PATH for %s", persona_id, exc_info=True)
-            raise
-
-        old_path = resolve_stored_vrm(persona_id, old_stored, home)
-        if old_path is not None and old_path != final_path.resolve():
-            _unlink_quietly(old_path, persona_id)
+                LOGGER.warning("Could not save AVATAR_VRM_PATH for %s", persona_id, exc_info=True)
+                raise
+            if old_path is not None:
+                _unlink_quietly(old_path, persona_id)
+        # 同じ名前のとき: DB はもうこのファイルを指しているので、DB には書かない。
+        # 上の置き換えの後に失敗しうる処理を残さない — 置き換えた後で失敗を返すと、
+        # 「失敗と言われたのに中身は新しい VRM に替わっていて、前の VRM は戻らない」になる。
 
     LOGGER.info(
         "Stored the VRM of %s at %s (%d bytes; previous=%r)",
