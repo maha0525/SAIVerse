@@ -56,6 +56,24 @@
   **自分の dict を作る** (`persona/core.py`)。参照共有ではないので、in-place に
   してもここには届かない。既存ペルソナからは新しい建物が見えず、削除された建物が
   残り続ける。**未解決** — 建物の増減を既存 PersonaCore へ伝える経路が無い。
+- **2026-11-22 に分かったこと (ルームビューの実装中)**: 届かないのは建物の増減だけ
+  ではない。`_reload_buildings` は Building オブジェクトを作り直すので、一度でも
+  走った後は `persona.buildings[bid]` と `manager.building_map[bid]` が別の
+  オブジェクトになる。`update_building` が書くのは `building_map` の側だけなので、
+  `persona.buildings` を先に読む箇所は、その後に設定画面で変えた Building の
+  名前とシステムプロンプトを、古いオブジェクトから読み続ける。コードで確認した
+  読み手は、head の `sea/head_pipeline/sections/building.py` (`_resolve_building` —
+  `persona.buildings` に ID があればそちらを使い、無いときだけ `building_map`)、
+  `sections/common_prompt.py` (`persona.buildings` だけを読む。無ければ名前は ID、
+  システムプロンプトは空)、`builtin_data/tools/get_system_prompt.py`・
+  `get_building_messages.py`・`get_visual_context.py` の `_read_world`。
+  実際にペルソナへ届く文章がどう変わるかは、実機では確かめていない。
+  このうち `item_display_limit` (部屋の様子に出すアイテムの個数) だけは、
+  同じ日に `get_visual_context.py` の `_read_item_display_limit` が
+  `manager.building_map` から読む形に直した (画面とペルソナで見える範囲を
+  食い違わせないため。`docs/intent/screen_avatar.md` 設計 5)。名前と
+  システムプロンプトは**未解決のまま** — ペルソナに送る文章が変わる直しなので、
+  ルームビューの変更には混ぜなかった。
 
 この二つは「作成」ではなく「世界状態の正本と同期」の話だが、根は同じ (共有状態の
 オーナーシップが決まっていない) なのでここに併記する。

@@ -652,6 +652,31 @@ def _coerce_display_limit(value: Any) -> Optional[int]:
     return limit
 
 
+def _read_item_display_limit(
+    manager: Any, persona: Any, building_id: str,
+) -> Optional[int]:
+    """Building の ``item_display_limit`` を読む (読む場所はここ一つ)。
+
+    ``manager.building_map`` にその Building があればそこから読む — 利用者が
+    設定画面で変えた値を ``update_building`` が書くのはこちらで、
+    ``_reload_buildings`` の後は ``persona.buildings`` の Building と別の
+    オブジェクトになるため。``building_map`` に無ければ (テスト用の manager
+    など) ``persona.buildings`` から読み、persona が無い呼び出しでは None
+    (= 既定の個数)。値は :func:`_coerce_display_limit` を通す。
+    """
+    building_obj = None
+    building_map = getattr(manager, "building_map", None)
+    if isinstance(building_map, dict) and building_id in building_map:
+        building_obj = building_map[building_id]
+    elif persona is not None:
+        building_obj = (getattr(persona, "buildings", None) or {}).get(building_id)
+    if building_obj is None:
+        return None
+    return _coerce_display_limit(
+        getattr(building_obj, "item_display_limit", None),
+    )
+
+
 def _touched_epoch(value: Any) -> float:
     """更新時刻を比較できる POSIX 秒にする (読めなければ -inf = 一番古い)。
 
@@ -713,9 +738,9 @@ def _read_world(
     if building_obj:
         base_sys = getattr(building_obj, "base_system_instruction", "") or ""
         world.base_system_instruction = base_sys.strip()
-        world.item_display_limit = _coerce_display_limit(
-            getattr(building_obj, "item_display_limit", None),
-        )
+    world.item_display_limit = _read_item_display_limit(
+        manager, persona, building_id,
+    )
 
     # ========== Section 1: ペルソナ ==========
     all_occupants = manager.occupants.get(building_id, [])
@@ -944,24 +969,44 @@ def _render_fixture(f: Any) -> _RenderedFixture:
     return rendered
 
 
+def _item_ref(item: Dict[str, Any]) -> Optional[str]:
+    """AI 可視の item アドレス (``item:{short_id}``)。short_id が無ければ None。"""
+    short_id = item.get("short_id")
+    return f"item:{short_id}" if short_id is not None else None
+
+
+def _item_selection_fields(item: Dict[str, Any]) -> Tuple[str, float]:
+    """表示上限の選別に使う ``(key, touched_at)`` を決める。
+
+    key は ``item:{short_id}``、short_id が無ければ ``item:{item_id}``。
+    touched_at は :func:`_entry_touched_at`。:func:`_render_item_entry` と
+    :func:`select_displayed_building_item_ids` の両方がここを通る — 描画する
+    束と、描画しない選別 (``/api/info/details``) が同じ物を同じキー・同じ時刻で
+    数えるため。
+    """
+    ref = _item_ref(item)
+    key = ref if ref is not None else f"item:{item.get('item_id', '?')}"
+    return key, _entry_touched_at(item)
+
+
 def _render_item_entry(item: Dict[str, Any], manager: Any) -> _RenderedItem:
     """アイテム 1 件を描く (読みと同じく一度だけ — パッケージの材料になる)。"""
-    short_id = item.get("short_id")
-    ref = f"item:{short_id}" if short_id is not None else None
+    ref = _item_ref(item)
     item_type = (item.get("type") or "").lower()
     state = item.get("state", {})
     is_open = isinstance(state, dict) and state.get("is_open", False)
+    # 「最近触られた」= アイテム自身の更新 (開閉・説明や中身の書き換え) と
+    # 置き場所の更新 (設置・移動・拾得) の新しい方。入れ物の中身の上限も
+    # 同じ一枚 (:func:`_entry_touched_at`) を通る。
+    key, touched_at = _item_selection_fields(item)
     entry = _RenderedItem(
-        key=ref if ref is not None else f"item:{item.get('item_id', '?')}",
+        key=key,
         name=str(item.get("name") or ""),
         state=(
             ("open" if is_open else "closed")
             if item_type in _OPENABLE_ITEM_TYPES else None
         ),
-        # 「最近触られた」= アイテム自身の更新 (開閉・説明や中身の書き換え) と
-        # 置き場所の更新 (設置・移動・拾得) の新しい方。入れ物の中身の上限も
-        # 同じ一枚 (:func:`_entry_touched_at`) を通る。
-        touched_at=_entry_touched_at(item),
+        touched_at=touched_at,
     )
     _render_item(item, entry.lines, entry.media, manager, ref=ref)
     # 末尾の空行はパッケージには持たせない (結合側が区切りを足す)。
@@ -1012,19 +1057,71 @@ def _select_displayed_items(
     if len(entries) <= limit:
         return list(entries), []
 
-    def _rank(index: int) -> Tuple[float, int, int, str]:
-        entry = entries[index]
-        order, ref = _sort_key_for_item(entry)
-        unnumbered = 1 if order == (1 << 30) else 0
-        # 時刻の降順 → SHORT_ID の降順。番号を引けないキーは末尾へ回し、
-        # その中はキー文字列の昇順で決める (どちらも決定論)。
-        return (-entry.touched_at, unnumbered, -order, ref)
-
-    ranked = sorted(range(len(entries)), key=_rank)
+    ranked = sorted(
+        range(len(entries)), key=lambda index: _display_rank(entries[index]),
+    )
     displayed = set(ranked[:limit])
     kept = [entries[i] for i in range(len(entries)) if i in displayed]
     capped = [entries[i].key for i in range(len(entries)) if i not in displayed]
     return kept, capped
+
+
+def _display_rank(entry: _RenderedItem) -> Tuple[float, int, int, str]:
+    """建物直下のアイテムの「最近触られた順」の順位 (小さいほど新しい)。
+
+    :func:`_select_displayed_items` の選別と
+    :func:`select_displayed_building_item_ids` の並べ直しが同じものを使う。
+    """
+    order, ref = _sort_key_for_item(entry)
+    unnumbered = 1 if order == (1 << 30) else 0
+    # 時刻の降順 → SHORT_ID の降順。番号を引けないキーは末尾へ回し、
+    # その中はキー文字列の昇順で決める (どちらも決定論)。
+    return (-entry.touched_at, unnumbered, -order, ref)
+
+
+def select_displayed_building_item_ids(
+    manager: Any, building_id: str,
+) -> Tuple[List[str], List[str]]:
+    """建物に直接置かれたアイテムを、ペルソナに見えるものと埋もれたものに分ける。
+
+    返りは ``(見えるアイテムの item_id, 埋もれたアイテムの item_id)`` で、
+    どちらも「最近触られた順」(先頭が一番新しい)。``/api/info/details`` が
+    使う (docs/intent/screen_avatar.md 設計 5)。
+
+    選別は部屋の様子の束と同じ :func:`_select_displayed_items` をそのまま通す —
+    材料の並び (:func:`_sort_key_for_item`)・キーと ``touched_at``
+    (:func:`_item_selection_fields`)・上限 (:func:`_read_item_display_limit`) も
+    :func:`_read_world` と同じ。描画 (:func:`_render_item`) はしない。
+    選別の結果は item_id への対応をオブジェクトそのもの (``id()``) で取る
+    (同じキーの物が二つあっても取り違えない)。manager が ``get_all_items_in_building`` を持たない回は
+    ``([], [])``。
+    """
+    if not hasattr(manager, "get_all_items_in_building"):
+        return [], []
+    pairs: List[Tuple[_RenderedItem, Any]] = []
+    for item in manager.get_all_items_in_building(building_id):
+        key, touched_at = _item_selection_fields(item)
+        pairs.append(
+            (_RenderedItem(key=key, touched_at=touched_at), item.get("item_id")),
+        )
+    pairs.sort(key=lambda pair: _sort_key_for_item(pair[0]))
+
+    entries = [entry for entry, _ in pairs]
+    kept, _capped_keys = _select_displayed_items(
+        entries, _read_item_display_limit(manager, None, building_id),
+    )
+    kept_ids = {id(entry) for entry in kept}
+
+    visible: List[Tuple[_RenderedItem, Any]] = []
+    buried: List[Tuple[_RenderedItem, Any]] = []
+    for pair in pairs:
+        (visible if id(pair[0]) in kept_ids else buried).append(pair)
+    visible.sort(key=lambda pair: _display_rank(pair[0]))
+    buried.sort(key=lambda pair: _display_rank(pair[0]))
+    return (
+        [str(item_id) for _, item_id in visible if item_id is not None],
+        [str(item_id) for _, item_id in buried if item_id is not None],
+    )
 
 
 def _bundle_from_world(world: _WorldRead) -> Dict[str, Any]:

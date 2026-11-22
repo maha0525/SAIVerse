@@ -26,6 +26,24 @@
     margin: 0 auto;
 }
 
+/* ルームビューの区画 (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上でだけ置かれ、
+   チャットの右・右サイドバーの左に、上から下までの縦の区画として並ぶ。幅は画面に合わせて
+   420px〜600px。ルームビューの枠 (RoomView の .column) は、この区画の中で上下の中央に置く。
+   枠の大きさを区画の幅と高さから決めるため、区画を container-type: size にする。 */
+.roomViewColumn {
+    flex: 0 0 clamp(420px, 22vw, 600px);
+    height: 100%;
+    padding: 1rem;
+    box-sizing: border-box;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    container-type: size;
+}
+
 .header {
     display: flex;
     justify-content: space-between;
@@ -262,6 +280,99 @@
 
 .chatArea > * + .continuedBubble {
     margin-top: 0.3rem;
+}
+
+/* ログ (.chatArea) を包む要素。並び方は .chatArea を直接置いていたときと同じで、
+   ルームビューをログの上に重ねるときの基準になるだけ (docs/intent/screen_avatar.md 設計 1)。 */
+.chatStage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    width: 100%;
+}
+
+/* overlayMode でログに重ねるルームビュー。ログの領域いっぱいに広げ、ログは見えず押せない。
+   下は入力欄 (.inputArea、z-index 10) の高さの分を空ける (実際の高さは page.tsx が測って渡す)。 */
+.roomViewOverlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    padding: 0.75rem 1rem 120px;
+    box-sizing: border-box;
+    background: var(--background);
+}
+
+/* ヘッダーの、ログとルームビューの切り替えのボタン (印と文字) */
+.roomViewToggle {
+    gap: 0.3rem;
+    border-radius: 999px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.roomViewToggleActive {
+    opacity: 1;
+    background: rgba(59, 130, 246, 0.12);
+    color: #2563eb;
+}
+
+@media (max-width: 480px) {
+    .roomViewToggle {
+        padding: 0.5rem;
+        border-radius: 50%;
+    }
+
+    .roomViewToggleLabel {
+        display: none;
+    }
+}
+
+/* 「{名前} が喋っています」の印。入力欄のすぐ上に浮かせる小さな札。 */
+.roomViewSpeakingBadge {
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    max-width: 100%;
+    padding: 0.3rem 0.8rem;
+    border-radius: 999px;
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(8px);
+    color: #1d4ed8;
+    font-size: 0.8rem;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.roomViewSpeakingBadge span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.roomViewSpeakingBadge:hover {
+    background: rgba(239, 246, 255, 0.95);
+}
+
+:global([data-theme="dark"]) .roomViewToggleActive {
+    background: rgba(96, 165, 250, 0.18);
+    color: #93c5fd;
+}
+
+:global([data-theme="dark"]) .roomViewSpeakingBadge {
+    background: rgba(30, 30, 30, 0.9);
+    border-color: rgba(96, 165, 250, 0.45);
+    color: #bfdbfe;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+:global([data-theme="dark"]) .roomViewSpeakingBadge:hover {
+    background: rgba(40, 40, 40, 0.95);
 }
 
 .message {

@@ -175,6 +175,8 @@ api/
 
 返事を待つ間のスピナーの文言は `src/lib/chatProgress.ts` だけが持ち、バックエンドの status イベントの段階 (`phase`、`sea/progress_events.py`) と画面の節目から決める。Playbook・ノードの名前は表示しない（[intent](../intent/chat_progress_display.md)）。
 
+ルームビュー（いまいる Building の内装とペルソナの姿を映す枠）の描画は `src/components/RoomView.tsx` にある。置き場所を切り替える画面の幅の数値は `src/lib/roomViewPlacement.ts` にだけ定義してある（2000px 以上は `src/app/page.tsx` でチャットの横に独立して置き、それ未満は `RightSidebar.tsx` の中、1100px 未満で右サイドバーが横に出ていない間はログに重ねて切り替える）。自動で切り替える条件は React に依らない `src/lib/roomViewAutoSwitch.ts` に書いてあり、`useRoomViewAutoSwitch.ts` には、喋り始め・喋り終わり・利用者の操作をその関数へ渡す処理と、待ち時間のタイマーだけを置いている。部屋の詳細 (`GET /api/info/details`) の取得は `src/lib/useBuildingDetails.ts` に一本化してあり、`page.tsx` で一度だけ取得した結果を `RightSidebar` とルームビューへ渡す。右サイドバーのアイテム欄の「見える / 埋もれた」の分け方は、API から返る `visible_item_ids` / `buried_item_ids` をそのまま表示し、画面の側では数え直さない（[intent](../intent/screen_avatar.md)）。
+
 `next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 
 ### scripts/

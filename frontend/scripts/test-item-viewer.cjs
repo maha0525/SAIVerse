@@ -106,6 +106,8 @@ function createHarness(component, props = {}, relativePath = path.relative) {
             return active.slots[index].value;
         },
         useCallback(fn, deps) { return hooks.useMemo(() => fn, deps); },
+        // External stores (audio playback) are stubbed above; read the current value.
+        useSyncExternalStore(subscribe, getSnapshot) { return getSnapshot(); },
         useEffect(fn, deps) {
             const instance = active, index = cursor++;
             // Home's unrelated server polling, presence, and addon subscriptions
@@ -151,6 +153,26 @@ function createHarness(component, props = {}, relativePath = path.relative) {
             };
             if (name === '@/lib/messageMarkdown') return { prepareMessageMarkdown: value => value };
             if (name === '@/lib/movementNotices') return { shouldShowMovementMessage: () => true };
+            // Room view (docs/intent/screen_avatar.md): narrow layout, no room details.
+            if (name === '@/lib/roomViewPlacement') return {
+                useRoomViewColumn: () => false,
+                // Right sidebar beside the chat: the log/room view switch stays off.
+                useRoomViewOverlayWidth: () => false,
+                useRightSidebarBesideWidth: () => true,
+            };
+            if (name === '@/lib/useBuildingDetails') return { useBuildingDetails: () => ({ details: null, refetchDetails() {} }) };
+            if (name === '@/lib/useRoomViewAutoSwitch') return {
+                useRoomViewAutoSwitch: () => ({ view: 'log', showIndicator: false, utteranceActive: false, toggle() {}, pressIndicator() {} }),
+            };
+            if (name === '@/lib/clientActions/playAudio') return {
+                subscribeAudioPlayback: () => () => {}, getPlayingAudioMessageId: () => null, getPlayingAudioMessageIdServerSnapshot: () => null,
+            };
+            // Scrolled-back judgment for the room view switch: never scrolled back here.
+            if (name === '@/lib/roomViewAutoSwitch') return {
+                USER_SCROLL_KEYS: new Set(),
+                isUserScrollInputActive: () => false,
+                nextScrolledBack: () => false,
+            };
             if (name.startsWith('@/lib/')) return {};
             if (name.startsWith('.') || name.startsWith('@/')) {
                 const resolved = name.startsWith('@/') ? path.join(source, `${name.slice(2)}.tsx`) : path.resolve(path.dirname(file), `${name}.tsx`);
