@@ -659,7 +659,8 @@ export default function Home() {
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
     // ルームビュー (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上では
-    // チャットの右に独立したUI区画として置き、それ未満では右サイドバーの中に置く。
+    // チャットのすぐ右にくっつけたUI区画として置き (チャットと合わせて中央に揃える)、
+    // それ未満では右サイドバーの中に置く。
     const isRoomViewColumn = useRoomViewColumn();
     // 右サイドバーを出せない幅 (overlayMode) では、ログとルームビューを切り替える
     // (設計 1、必ず守ること 8)。幅 1100px 未満で、右サイドバーがチャットの横に
@@ -3893,7 +3894,7 @@ export default function Home() {
                 onClose={() => setIsLeftOpen(false)}
             />
 
-            <main className={styles.contentWrapper}>
+            <main className={`${styles.contentWrapper} ${isRoomViewColumn ? styles.contentWrapperBesideRoomView : ''}`}>
                 <header className={styles.header}>
                     <div className={styles.headerLeft}>
                         <button

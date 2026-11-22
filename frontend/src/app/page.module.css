@@ -26,8 +26,18 @@
     margin: 0 auto;
 }
 
+/* ルームビューのUI区画を横に置いている間 (幅 2000px 以上) の .contentWrapper。
+   チャットとUI区画をくっつけて並べ、二つ合わせて左右の中央に揃える — 喋っている間に
+   見ているのはチャットなので、ペルソナの姿はそのすぐ隣に置く (2026-11-22 まはー)。
+   チャットの左の余白と、UI区画 (.roomViewColumn) の右の余白を auto にして、
+   残った幅を両側へ同じだけ分ける。 */
+.contentWrapperBesideRoomView {
+    flex: 0 1 900px;
+    margin: 0 0 0 auto;
+}
+
 /* ルームビューのUI区画 (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上でだけ置かれ、
-   チャットの右・右サイドバーの左に、上から下までの縦のUI区画として並ぶ。幅は画面に合わせて
+   チャットのすぐ右に、上から下までの縦のUI区画として並ぶ。幅は画面に合わせて
    420px〜600px。ルームビューの枠 (RoomView の .column) は、このUI区画の中で上下の中央に置く。
    枠の大きさをUI区画の幅と高さから決めるため、UI区画を container-type: size にする。 */
 .roomViewColumn {
@@ -37,7 +47,7 @@
     box-sizing: border-box;
     min-height: 0;
     overflow: hidden;
-    border-left: 1px solid var(--border-color);
+    margin-right: auto;
     display: flex;
     align-items: center;
     justify-content: center;

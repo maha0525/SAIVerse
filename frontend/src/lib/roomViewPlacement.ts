@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
 /** ルームビューの置き場所 (docs/intent/screen_avatar.md 設計 1)。
- * - 'column': チャットの右・右サイドバーの左の、独立した縦のUI区画
+ * - 'column': チャットのすぐ右にくっつけて置く、独立した縦のUI区画 (チャットと合わせて中央に揃える)
  * - 'sidebar': 右サイドバーの、Building の名前と説明のすぐ下
  * - 'overlay': 右サイドバーを出せない幅で、ログの上に重ねてログと切り替える置き方
  */
