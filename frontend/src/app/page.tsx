@@ -34,6 +34,7 @@ import { useRightSidebarBesideWidth, useRoomViewColumn, useRoomViewOverlayWidth 
 import { useRoomViewAutoSwitch } from '@/lib/useRoomViewAutoSwitch';
 import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId } from '@/lib/roomViewAutoSwitch';
 import { getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot, subscribeAudioPlayback } from '@/lib/clientActions/playAudio';
+import { getVoicedMessageId, getVoicedMessageIdServerSnapshot, subscribeVoicePlayback } from '@/lib/voiceLevelMeter';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
 import PeopleModal from '@/components/PeopleModal';
@@ -725,6 +726,18 @@ export default function Home() {
     // いま喋っているペルソナ: speaking の間の roomViewSpeakerId。ルームビューの 3D アバターは、
     // このペルソナのときだけ口を開け閉めする (docs/intent/screen_avatar.md 設計 3)。
     const roomViewSpeakingId = speaking ? roomViewSpeakerId : undefined;
+    // 声が鳴っているペルソナ: 自動で鳴る声 (playAudio.ts) と、吹き出しの「音声を再生」ボタンで
+    // 鳴らした声のうち、最後に鳴り始めたものの吹き出しの持ち主 (lib/voiceLevelMeter.ts)。
+    // ルームビューの 3D アバターは、このペルソナのときだけ口の開きを声の音量に合わせる
+    // (docs/intent/screen_avatar.md 設計 3)。ルームビューの切り替えと speaking は、今までどおり
+    // audioSpeech から決めるので、この値では変わらない。
+    const voicedMessageId = useSyncExternalStore(
+        subscribeVoicePlayback, getVoicedMessageId, getVoicedMessageIdServerSnapshot,
+    );
+    const roomViewVoicedId = useMemo(
+        () => (voicedMessageId ? bubbleSpeakerId(messages.find(m => m.id === voicedMessageId)) : undefined),
+        [voicedMessageId, messages],
+    );
     // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
     // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
     const roomViewSpeakerName = useMemo(() => {
@@ -4530,6 +4543,7 @@ export default function Home() {
                             details={buildingDetails}
                             speakerId={roomViewSpeakerId}
                             speakingId={roomViewSpeakingId}
+                            voicedId={roomViewVoicedId}
                             placement="overlay"
                             caption={roomViewCaptionContent
                                 ? <MessageMarkdown content={roomViewCaptionContent} components={markdownComponents} />
@@ -4734,7 +4748,7 @@ export default function Home() {
             {/* ルームビューのUI区画 (幅 2000px 以上)。右サイドバーを閉じていても出る。 */}
             {isRoomViewColumn && (
                 <aside className={styles.roomViewColumn}>
-                    <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} speakingId={roomViewSpeakingId} placement="column" />
+                    <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} speakingId={roomViewSpeakingId} voicedId={roomViewVoicedId} placement="column" />
                 </aside>
             )}
 
@@ -4765,6 +4779,7 @@ export default function Home() {
                 showRoomView={!isRoomViewColumn}
                 speakerId={roomViewSpeakerId}
                 speakingId={roomViewSpeakingId}
+                voicedId={roomViewVoicedId}
                 onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
                 onStartVoiceCall={voiceCallAvailable
                     ? (personaId, personaName, buildingId) =>

@@ -39,6 +39,7 @@ import {
     type LucideIcon,
 } from 'lucide-react';
 import styles from './AddonBubbleButtons.module.css';
+import { attachVoiceLevelMeter } from '@/lib/voiceLevelMeter';
 
 // addon.json の "icon" 文字列を lucide コンポーネントへ解決するホワイトリスト。
 // addon.json で安全に指定できる name の集合を絞り、未知の値は Play にフォールバック。
@@ -105,13 +106,18 @@ function PlayAudioButton({
     audioUrl,
     label,
     icon,
+    messageId,
 }: {
     audioUrl: string;
     label: string;
     icon: string;
+    /** この吹き出しの id。鳴っている間、ルームビューの 3D アバターの口がこの声に合わせて動く。 */
+    messageId: string;
 }) {
     useLocale();
     const audioRef = useRef<HTMLAudioElement | null>(null);
+    // attachVoiceLevelMeter が返した、見張りをやめる関数。
+    const detachMeterRef = useRef<(() => void) | null>(null);
     const [playing, setPlaying] = React.useState(false);
     const [error, setError] = React.useState(false);
 
@@ -123,9 +129,17 @@ function PlayAudioButton({
             try { audioRef.current.pause(); } catch { /* noop */ }
             audioRef.current = null;
         }
+        detachMeterRef.current?.();
+        detachMeterRef.current = null;
         setPlaying(false);
         setError(false);
     }, [audioUrl]);
+
+    // 部品が外れるときは、音量の見張りだけをやめる (再生の扱いは今までどおり変えない)。
+    useEffect(() => () => {
+        detachMeterRef.current?.();
+        detachMeterRef.current = null;
+    }, []);
 
     const handleClick = async () => {
         if (error) {
@@ -133,6 +147,8 @@ function PlayAudioButton({
         }
         if (!audioRef.current) {
             audioRef.current = new Audio(audioUrl);
+            detachMeterRef.current?.();
+            detachMeterRef.current = attachVoiceLevelMeter(audioRef.current, () => messageId);
             audioRef.current.onended = () => setPlaying(false);
             audioRef.current.onerror = (e) => {
                 const mediaErr = audioRef.current?.error;
@@ -360,6 +376,7 @@ export default function AddonBubbleButtons({
                                 audioUrl={audioUrl}
                                 label={btn.label}
                                 icon={btn.icon}
+                                messageId={messageId}
                             />
                         );
                     }

@@ -35,6 +35,7 @@
  */
 import type { ClientActionExecutor } from "@/lib/clientActionRegistry";
 import { resolveActionValue } from "@/lib/clientActionRegistry";
+import { attachVoiceLevelMeter } from "@/lib/voiceLevelMeter";
 
 // ---------- 共有 <audio> 要素と iOS gesture unlock --------------------
 
@@ -77,6 +78,14 @@ function getSharedAudio(): HTMLAudioElement {
     sharedAudio = new Audio();
     sharedAudio.preload = "auto";
     attachAudioListeners(sharedAudio);
+    // ルームビューの 3D アバターの口のために、鳴っている声と音量を読む
+    // (docs/intent/screen_avatar.md 設計 3)。audio 要素のイベントを聞くだけで、再生には
+    // 手を出さない。失敗しても声の再生を止めないよう、ここで握りつぶす。
+    try {
+        attachVoiceLevelMeter(sharedAudio, () => currentItem?.messageId);
+    } catch (err) {
+        console.warn("[play_audio] voice level meter could not be attached", err);
+    }
     return sharedAudio;
 }
 
@@ -166,8 +175,9 @@ function preemptCurrentPulse(reason: string): void {
         audio.pause();
         // src="" で empty にすると ended は発火せず、 直後の startNext での
         // src 差し替え時に Audio element の状態がリセットされた状態で開始
-        // できる。 emptied イベントは発火するが listener を付けていないので
-        // 副作用なし。
+        // できる。 emptied イベントは発火するが、 このファイルの listener は
+        // 付いていない。 聞いているのは lib/voiceLevelMeter.ts だけで、 そちらは
+        // 「この声は鳴り終わった」 と記録するだけなので、 再生には副作用なし。
         audio.src = "";
     }
     diag(`preempt fired (${reason})`, {

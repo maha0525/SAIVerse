@@ -17,6 +17,9 @@ interface RoomViewProps {
     /** いま喋っているペルソナ (speaking の間の speakerId)。誰も喋っていなければ undefined。
      * 3D アバターの口を、このペルソナのときだけ開け閉めする (設計 3)。 */
     speakingId?: string;
+    /** 声が鳴っているペルソナ。鳴っていなければ undefined。3D アバターは、このペルソナのとき、
+     * 口の開きを声の音量に合わせる (設計 3)。 */
+    voicedId?: string;
     placement: RoomViewPlacement;
     /** 枠の下側に重ねて出す中身。'overlay' の置き方でログが見えない間に、
      * ペルソナがいま喋っている内容を読めるようにするためのもの (呼び出し側が渡す)。 */
@@ -25,7 +28,7 @@ interface RoomViewProps {
 
 /** ルームビュー: いまいる Building の内装画像を背景に、そこにいるペルソナ一人の姿を立てる
  * (docs/intent/screen_avatar.md 設計 1・設計 2 の「内装画像と立ち絵」)。 */
-export default function RoomView({ details, speakerId, speakingId, placement, caption }: RoomViewProps) {
+export default function RoomView({ details, speakerId, speakingId, voicedId, placement, caption }: RoomViewProps) {
     useLocale();
     const hasCaption = caption !== undefined && caption !== null && caption !== false;
     const captionBoxRef = useRef<HTMLDivElement>(null);
@@ -90,6 +93,7 @@ export default function RoomView({ details, speakerId, speakingId, placement, ca
                     occupant={shown}
                     framing={placement === 'column' ? 'full' : 'upper'}
                     speaking={!!speakingId && speakingId === shown.id}
+                    voiced={!!voicedId && voicedId === shown.id}
                 />
             )}
 
@@ -131,10 +135,11 @@ export default function RoomView({ details, speakerId, speakingId, placement, ca
  * 3D アバター (設計 3)、無ければ立ち絵のカード。
  * 3D の canvas はルームビューの枠の全体を覆い (VrmAvatar)、立ち絵のカードは枠の下側の中央に
  * 立てる (FigureArea)。名前の札は、どちらでも FigureArea の下の行 (同じ場所) に出す。 */
-function PersonaFigure({ occupant, framing, speaking }: {
+function PersonaFigure({ occupant, framing, speaking, voiced }: {
     occupant: Occupant;
     framing: AvatarFramingMode;
     speaking: boolean;
+    voiced: boolean;
 }) {
     const cardArea = (
         <FigureArea name={occupant.name}>
@@ -148,6 +153,7 @@ function PersonaFigure({ occupant, framing, speaking }: {
             name={occupant.name}
             framing={framing}
             speaking={speaking}
+            voiced={voiced}
             fallback={cardArea}
             overlay={<FigureArea name={occupant.name} />}
         />
