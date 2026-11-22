@@ -15,6 +15,15 @@
 
 | 🟠 実装中 | Godot / ARDY 仮想身体デモ | 発話の声を voice-tts から一切れずつ受け取り VR だけで鳴らす形がアドオン PR #1 と voice-tts PR #7 に揃い、まはーの確認待ち。次 = 両 PR をマージし、Quest 2で表示・移動・マイク入力・全身エモートと VR の声を確認。残 = player歩行アニメーション、瞬き・視線、Idle scheduler。 | まはー(PR の確認と Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-15 |
 
+### 2026-11-23: ペルソナのVRMをSAIVerse本体から読む (アドオン0.6.0)
+
+- まはーの決定 (2026-11-22 と 2026-11-23、[screen_avatar.md](screen_avatar.md) の設計 4 と「Godot のアドオンが本体の VRM を使う」): VRMはペルソナの持ち物として、SAIVerse本体のペルソナ設定の「3D アバター (VRM)」で入れる。アドオンのペルソナ別設定「このペルソナのVRMファイル」(`avatar_vrm_path`) はなくす。
+- Godotへ送る、部屋にいるペルソナの一覧 (`world.roster`。上の 2026-10-10 の節で「在室者の一覧」と書いているもの) の `avatar_path` には、本体が持っているVRMのファイルの場所 (`<SAIVERSE_HOME>/personas/<ペルソナのID>/avatar/` の中) を入れる。GodotとSAIVerseを繋ぐWebSocketでは同じPCからの接続だけが許可されているので、Godotの側では今までと同じ処理でそのファイルを開く。Godotの側のスクリプトで変えたのは、アバターが一体も無いときの案内の文だけ。
+- 既にある `avatar_vrm_path` は、新しいアドオンの中で初めて本体のVRMが参照されるときに、一度だけ本体へ写される。済ませたペルソナは、アドオンのデータのフォルダの `vrm_migration.json` に記録する。写せなかったペルソナは、画面の右下の知らせに出す。
+- 本体の側の関数は `saiverse/persona_avatar_vrm.py` の `current_vrm_file` / `adopt_local_vrm` / `post_vrm_adoption_failed_alert`。新しいアドオンは、この関数のある本体を必要とする。
+- 本番と分けたテスト環境で、Godotの代わりにWebSocketで繋ぐスクリプトを使い、本体のVRMの場所が一覧に届くこと・古い設定が一度だけ引き継がれること・写せなかったときに知らせが出ることを確かめた。Godotを動かした確認はまだ。
+- この日より前の節に出てくる「このペルソナのVRMファイル」「`avatar_vrm_path`」は、当時の作りの記録として残してある。
+
 ### 2026-10-10: ペルソナ別のVRM設定と複数ペルソナの同時表示
 
 - まはーの依頼: 複数のペルソナを同時にGodot内へ表示し、それぞれがアバターのVRMファイルを持つようにする。Godot用Buildingの在室者を同期する構成で実装した。
