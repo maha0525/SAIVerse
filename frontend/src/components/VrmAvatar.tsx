@@ -35,6 +35,8 @@ interface VrmAvatarProps {
     framing: AvatarFramingMode;
     /** このペルソナがいま喋っているか。喋っている間だけ口を開け閉めする。 */
     speaking: boolean;
+    /** このペルソナの声が鳴っているか。鳴っている間は、口の開きを声の音量に合わせる。 */
+    voiced: boolean;
     /** 3D が見えていない間 (読み込み中・失敗・別の部品が canvas を持っている) に出す立ち絵。 */
     fallback: ReactNode;
     /** 3D が見えている間に、canvas の上に重ねて出すもの (名前の札)。 */
@@ -45,7 +47,7 @@ interface VrmAvatarProps {
  * 読み込んだ VRM は lib/vrmAvatarEngine が一組だけ持ち、この部品はそれを借りて、
  * 自分の枠の中に canvas を置く。この部品の枠は、置かれた親 (ルームビューの枠) の全体を覆う。
  * canvas を持てない間は fallback (立ち絵のカード) を出す。 */
-export default function VrmAvatar({ url, name, framing, speaking, fallback, overlay }: VrmAvatarProps) {
+export default function VrmAvatar({ url, name, framing, speaking, voiced, fallback, overlay }: VrmAvatarProps) {
     useLocale();
     const rootRef = useRef<HTMLDivElement>(null);
     const hostRef = useRef<HTMLDivElement>(null);
@@ -94,8 +96,8 @@ export default function VrmAvatar({ url, name, framing, speaking, fallback, over
 
     // この部品の様子を知らせる (借りた直後にも一度知らせる — 上の effect の後に走る)。
     useEffect(() => {
-        leaseRef.current?.update({ host: hostRef.current, visible, framing, speaking });
-    }, [engine, url, visible, framing, speaking]);
+        leaseRef.current?.update({ host: hostRef.current, visible, framing, speaking, voiced });
+    }, [engine, url, visible, framing, speaking, voiced]);
 
     const status: VrmAvatarStatus = engineError !== null
         ? { phase: 'failed', reason: 'engine', detail: engineError || undefined }

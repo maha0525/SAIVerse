@@ -18,6 +18,7 @@ const {
     RETURN_DELAY_AFTER_AUDIO_MS,
     RETURN_DELAY_AFTER_TEXT_MS,
     resolveRoomViewSpeakerId,
+    resolveRoomViewVoicedId,
     keepRoomViewPick,
 } = mod.exports;
 
@@ -249,6 +250,15 @@ const idle = () => next(initialRoomViewAutoSwitchState(), signal());
     assert.equal(resolveRoomViewSpeakerId('C', 'A', 'B'), 'C');
     assert.equal(resolveRoomViewSpeakerId(undefined, undefined, 'B'), 'B');
     assert.equal(resolveRoomViewSpeakerId(undefined, undefined, undefined), undefined);
+
+    // 鳴っている声の持ち主: 同じ id の吹き出しがあればその持ち主。無ければ、まだ id を持たない
+    // 流し込み中の吹き出しの持ち主 (音声のアドオンは、発言が保存される前から声を鳴らし始める)。
+    assert.equal(resolveRoomViewVoicedId({ speakerId: 'A' }, undefined), 'A');
+    assert.equal(resolveRoomViewVoicedId({ speakerId: 'A' }, 'B'), 'A');
+    assert.equal(resolveRoomViewVoicedId(undefined, 'B'), 'B');
+    assert.equal(resolveRoomViewVoicedId(undefined, undefined), undefined);
+    // 同じ id の吹き出しはあるが持ち主が分からないときは、流し込み中の吹き出しへ逃がさない
+    assert.equal(resolveRoomViewVoicedId({ speakerId: undefined }, 'B'), undefined);
 }
 
 // 押して選んだペルソナは、speakerId が変わった時点で捨てる。A が喋っている間に B を選び、

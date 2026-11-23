@@ -167,6 +167,10 @@ function createHarness(component, props = {}, relativePath = path.relative) {
             if (name === '@/lib/clientActions/playAudio') return {
                 subscribeAudioPlayback: () => () => {}, getPlayingAudioMessageId: () => null, getPlayingAudioMessageIdServerSnapshot: () => null,
             };
+            // Voice level for the room view avatar's mouth: no voice is playing here.
+            if (name === '@/lib/voiceLevelMeter') return {
+                subscribeVoicePlayback: () => () => {}, getVoicedMessageId: () => null, getVoicedMessageIdServerSnapshot: () => null,
+            };
             // Scrolled-back judgment for the room view switch: never scrolled back here.
             if (name === '@/lib/roomViewAutoSwitch') return {
                 USER_SCROLL_KEYS: new Set(),

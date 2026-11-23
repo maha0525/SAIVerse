@@ -33,6 +33,10 @@ const {
     stripNameNumberSuffix,
     FOLLOWER_BONE_MAX_REST_DISTANCE_M,
     FOLLOWER_MIN_PAIRS,
+    VOICE_LEVEL_SILENT_RMS,
+    VOICE_LEVEL_FULL_RMS,
+    mouthOpennessFromVoiceLevel,
+    decideMouthTarget,
 } = mod.exports;
 
 // ── canvas を持つ借り手の決め方 ──
@@ -169,6 +173,43 @@ assert.equal(avatarPixelRatio(0), 1);
         else if (peak > 0) { peaks.push(peak); peak = 0; }
     }
     assert.ok(Math.max(...peaks) - Math.min(...peaks) > 0.2, 'openness varies between syllables');
+}
+
+// ── 声の音量から口の開きへ ──
+{
+    assert.equal(VOICE_LEVEL_SILENT_RMS, 0.015);
+    assert.equal(VOICE_LEVEL_FULL_RMS, 0.15);
+    assert.equal(mouthOpennessFromVoiceLevel(0), 0);
+    assert.equal(mouthOpennessFromVoiceLevel(0.015), 0, 'at the silent threshold the mouth is closed');
+    assert.equal(mouthOpennessFromVoiceLevel(0.15), 1);
+    assert.equal(mouthOpennessFromVoiceLevel(0.9), 1);
+    const mid = mouthOpennessFromVoiceLevel((0.015 + 0.15) / 2);
+    assert.ok(Math.abs(mid - 0.5) < 1e-9, `linear in between: ${mid}`);
+    assert.ok(mouthOpennessFromVoiceLevel(0.05) < mouthOpennessFromVoiceLevel(0.1), 'louder opens wider');
+    for (const bad of [NaN, -1, Infinity, -Infinity]) {
+        const v = mouthOpennessFromVoiceLevel(bad);
+        assert.ok(v >= 0 && v <= 1, `bad input ${bad} -> ${v}`);
+    }
+    assert.equal(mouthOpennessFromVoiceLevel(NaN), 0);
+}
+
+// ── 口の開きの目標の決め方 ──
+{
+    const t = 1.23;
+    // 1. 声が鳴っていて音量が読めた → 音量から決める (speaking に関係なく)
+    assert.equal(decideMouthTarget({ voiced: true, speaking: false, voiceLevel: 0.15, timeSec: t }), 1);
+    assert.equal(decideMouthTarget({ voiced: true, speaking: true, voiceLevel: 0, timeSec: t }), 0,
+        'a silent moment in the voice closes the mouth even while speaking');
+    // 2. 声が鳴っているが音量が読めない → 時間で開け閉め
+    assert.equal(decideMouthTarget({ voiced: true, speaking: false, voiceLevel: null, timeSec: t }), mouthOpenness(t));
+    // 2. 文字だけの発話 → 時間で開け閉め (voiceLevel があっても voiced でなければ使わない)
+    assert.equal(decideMouthTarget({ voiced: false, speaking: true, voiceLevel: null, timeSec: t }), mouthOpenness(t));
+    assert.equal(decideMouthTarget({ voiced: false, speaking: true, voiceLevel: 0.15, timeSec: t }), mouthOpenness(t));
+    // 3. どちらでもない → 閉じる
+    assert.equal(decideMouthTarget({ voiced: false, speaking: false, voiceLevel: 0.15, timeSec: t }), 0);
+    assert.equal(decideMouthTarget({ voiced: false, speaking: false, voiceLevel: null, timeSec: t }), 0);
+    // 数でない音量は、読めなかったものとして扱う
+    assert.equal(decideMouthTarget({ voiced: true, speaking: false, voiceLevel: NaN, timeSec: t }), mouthOpenness(t));
 }
 
 // ── 近づける速さ ──

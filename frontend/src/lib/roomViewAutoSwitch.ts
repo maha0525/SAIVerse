@@ -189,6 +189,28 @@ export function resolveRoomViewSpeakerId(
     return streamingSpeakerId ?? audioSpeakerId ?? lastSpeakerId;
 }
 
+/** 鳴っている声の持ち主のペルソナ (docs/intent/screen_avatar.md 「口を声の音量に合わせる」)。
+ *
+ * 声の messageId と同じ id の吹き出しがあれば、その持ち主。無ければ、文字が流れている途中で
+ * まだ id を持たない吹き出しの持ち主。
+ *
+ * 流し込みの途中の吹き出しは、発言が保存された合図 (page.tsx の `speak_persisted`) が届くまで
+ * id を持たない。音声のアドオン (saiverse-voice-tts) は、その前から、同じ発言の声を一切れずつ
+ * 鳴らし始める (audio_ready の message_id は、保存される行の id)。id が同じ吹き出しだけを
+ * 探すと、文字が流れ終わるまで声の持ち主が見つからず、その間は口が音量に合わない。
+ *
+ * @param matchedBubble 声の messageId と同じ id の吹き出し。無ければ undefined。
+ *   speakerId は、その吹き出しの持ち主 (分からなければ undefined)。
+ * @param unsavedStreamingSpeakerId 文字が流れている途中で、まだ id を持たない吹き出しの持ち主。
+ *   そういう吹き出しが無ければ undefined。 */
+export function resolveRoomViewVoicedId(
+    matchedBubble: { speakerId: string | undefined } | undefined,
+    unsavedStreamingSpeakerId: string | undefined,
+): string | undefined {
+    if (matchedBubble) return matchedBubble.speakerId;
+    return unsavedStreamingSpeakerId;
+}
+
 /** ルームビューで利用者が押して選んだペルソナと、選んだ時点の speakerId。 */
 export interface RoomViewPick {
     personaId: string;

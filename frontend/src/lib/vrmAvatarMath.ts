@@ -203,6 +203,39 @@ export function smoothToward(current: number, target: number, dtSec: number, tim
 export const MOUTH_OPEN_TIME_CONSTANT_SEC = 0.04;
 export const MOUTH_CLOSE_TIME_CONSTANT_SEC = 0.08;
 
+/** 声の音量 (RMS) がこの値以下なら、口を閉じる。 */
+export const VOICE_LEVEL_SILENT_RMS = 0.015;
+/** 声の音量 (RMS) がこの値以上なら、口をいっぱいに開く。
+ * 二つの値は、人の声の RMS がおおよそ 0.03〜0.2 に入るという見立てで置いた仮の値で、
+ * 実機で調整する前提。 */
+export const VOICE_LEVEL_FULL_RMS = 0.15;
+
+/** 声の音量 (RMS、0〜1) から口の開き (0〜1) を決める。VOICE_LEVEL_SILENT_RMS 以下は 0、
+ * VOICE_LEVEL_FULL_RMS 以上は 1、その間はまっすぐ。数でない値は 0。 */
+export function mouthOpennessFromVoiceLevel(rms: number): number {
+    if (!Number.isFinite(rms) || rms <= VOICE_LEVEL_SILENT_RMS) return 0;
+    if (rms >= VOICE_LEVEL_FULL_RMS) return 1;
+    return (rms - VOICE_LEVEL_SILENT_RMS) / (VOICE_LEVEL_FULL_RMS - VOICE_LEVEL_SILENT_RMS);
+}
+
+/** 口の開きの目標 (0〜1) を決める。
+ * 1. 声が鳴っていて (voiced)、音量が読めた (voiceLevel が数) → 音量から決める。
+ * 2. そうでなく、声が鳴っているか喋っている (speaking) → 時間で開け閉めする (mouthOpenness)。
+ *    音量を読めないブラウザや、声の無い発話 (文字だけ) のとき。
+ * 3. どちらでもない → 0 (閉じる)。 */
+export function decideMouthTarget(input: {
+    voiced: boolean;
+    speaking: boolean;
+    voiceLevel: number | null;
+    timeSec: number;
+}): number {
+    if (input.voiced && typeof input.voiceLevel === 'number' && Number.isFinite(input.voiceLevel)) {
+        return mouthOpennessFromVoiceLevel(input.voiceLevel);
+    }
+    if (input.voiced || input.speaking) return mouthOpenness(input.timeSec);
+    return 0;
+}
+
 /** まばたきの長さ (秒): 閉じる → 閉じたまま → 開く。 */
 export const BLINK_CLOSE_SEC = 0.06;
 export const BLINK_HOLD_SEC = 0.03;

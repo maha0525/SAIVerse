@@ -26,8 +26,8 @@ import {
     breathingSway,
     chooseAvatarHolder,
     computeAvatarFraming,
+    decideMouthTarget,
     matchFollowerBones,
-    mouthOpenness,
     nextBlinkDelaySec,
     restArmRotationZ,
     smoothToward,
@@ -40,6 +40,8 @@ import {
     type VrmAvatarStatus,
     type VrmAvatarView,
 } from './vrmAvatarMath';
+// three に依らない小さなモジュール。鳴っている声の音量を読む。
+import { getVoiceLevel } from './voiceLevelMeter';
 
 export interface VrmAvatarBorrowerState {
     /** canvas を置く要素。持ち主になったら、canvas をこの中へ移す。 */
@@ -49,6 +51,9 @@ export interface VrmAvatarBorrowerState {
     framing: AvatarFramingMode;
     /** このペルソナがいま喋っているか。持ち主の値だけを口に使う。 */
     speaking: boolean;
+    /** このペルソナの声が鳴っているか。持ち主の値だけを口に使う。鳴っていて音量が読めれば、
+     * 口の開きを音量に合わせる。 */
+    voiced: boolean;
 }
 
 export interface VrmAvatarLease {
@@ -119,7 +124,7 @@ export function borrowVrmAvatar(url: string, onChange: (view: VrmAvatarView) => 
     const id = nextBorrowerId++;
     const borrower: Borrower = {
         id, url, onChange, lastView: null,
-        host: null, visible: false, visibleSince: 0, framing: 'upper', speaking: false,
+        host: null, visible: false, visibleSince: 0, framing: 'upper', speaking: false, voiced: false,
     };
     borrowers.set(id, borrower);
     recompute();
@@ -132,6 +137,7 @@ export function borrowVrmAvatar(url: string, onChange: (view: VrmAvatarView) => 
             b.visible = state.visible;
             b.framing = state.framing;
             b.speaking = state.speaking;
+            b.voiced = state.voiced;
             recompute();
         },
         release() {
@@ -466,6 +472,7 @@ function animate(e: Entry, dt: number) {
     e.time += dt;
     const holder = holderId !== null ? borrowers.get(holderId) : undefined;
     const speaking = !!holder?.speaking;
+    const voiced = !!holder?.voiced;
 
     // まばたき (不規則な間隔)
     if (e.blinkElapsed === null) {
@@ -482,8 +489,11 @@ function animate(e: Entry, dt: number) {
         }
     }
 
-    // 口: 喋っている間だけ時間で開け閉めし、喋り終わったら閉じる。
-    const mouthTarget = speaking ? mouthOpenness(e.time) : 0;
+    // 口: 声が鳴っていて音量が読めれば音量に合わせ、読めなければ (または文字だけの発話なら)
+    // 時間で開け閉めし、どちらでもなければ閉じる (decideMouthTarget)。
+    const mouthTarget = decideMouthTarget({
+        voiced, speaking, voiceLevel: voiced ? getVoiceLevel() : null, timeSec: e.time,
+    });
     e.mouth = smoothToward(
         e.mouth, mouthTarget, dt,
         mouthTarget > e.mouth ? MOUTH_OPEN_TIME_CONSTANT_SEC : MOUTH_CLOSE_TIME_CONSTANT_SEC,
