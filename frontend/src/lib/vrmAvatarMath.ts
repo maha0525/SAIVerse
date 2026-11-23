@@ -112,6 +112,49 @@ const VERTICAL_MARGIN_RATIO = 0.05;
  * (RoomView.module.css の .figureArea と .nameTag)、足が札に隠れないよう、上より広く取る。 */
 const FULL_BOTTOM_MARGIN_RATIO = 0.13;
 
+/** 骨の位置から測った、体の大きさ。computeAvatarFraming と computeAvatarOrbitLimits が使う。 */
+interface AvatarBodyMeasures {
+    /** 腰のボーンから頭のボーンまでの長さ。 */
+    torso: number;
+    /** 頭のてっぺん (頭のボーンの上に、髪の盛りの分を足した所) の高さ。 */
+    top: number;
+    /** 足首のボーンの高さ (左右の低いほう)。 */
+    footY: number;
+    /** 腰のボーンから足首のボーンまでの長さ。 */
+    legs: number;
+    /** 足の裏 (と床) の高さ。'full' で映す範囲の下端と同じ。 */
+    sole: number;
+    /** 左右の上腕のボーンの間の幅 (肩幅)。 */
+    shoulderWidth: number;
+    /** 体の左右の中央 (左右の上腕のボーンの真ん中、無ければ腰のボーン) の x。 */
+    centerX: number;
+}
+
+function measureAvatarBody(bones: AvatarBonePositions): AvatarBodyMeasures {
+    const { hips, head } = bones;
+    const torso = Math.max(head.y - hips.y, 0.05);
+    const top = head.y + torso * HEAD_TOP_RATIO;
+    const feet = [bones.leftFoot, bones.rightFoot].filter((v): v is Vec3 => !!v);
+    const footY = feet.length > 0 ? Math.min(...feet.map(f => f.y)) : hips.y - torso * 1.6;
+    const legs = Math.max(hips.y - footY, 0.05);
+    const sole = footY - legs * FULL_BOTTOM_BELOW_FEET_RATIO;
+    const shoulderWidth = bones.leftUpperArm && bones.rightUpperArm
+        ? Math.abs(bones.leftUpperArm.x - bones.rightUpperArm.x)
+        : torso * 0.8;
+    const centerX = (bones.leftUpperArm && bones.rightUpperArm)
+        ? (bones.leftUpperArm.x + bones.rightUpperArm.x) / 2
+        : hips.x;
+    return { torso, top, footY, legs, sole, shoulderWidth, centerX };
+}
+
+function tanHalfFov(fovDeg: number): number {
+    return Math.tan((fovDeg * Math.PI / 180) / 2);
+}
+
+function safeAspectOf(aspect: number): number {
+    return Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+}
+
 /** 映す範囲から、カメラの位置と向きを決める。範囲の縦が枠の縦に収まるように、また
  * 体の幅 (腕を下ろした肩幅と手) が枠の横に収まるように、遠いほうの距離を採る。
  *
@@ -124,28 +167,21 @@ export function computeAvatarFraming(
     aspect: number,
     fovDeg: number = AVATAR_CAMERA_FOV_DEG,
 ): AvatarCameraFraming {
-    const { hips, head } = bones;
-    const torso = Math.max(head.y - hips.y, 0.05);
-    const top = head.y + torso * HEAD_TOP_RATIO;
-    const feet = [bones.leftFoot, bones.rightFoot].filter((v): v is Vec3 => !!v);
-    const footY = feet.length > 0 ? Math.min(...feet.map(f => f.y)) : hips.y - torso * 1.6;
-    const legs = Math.max(hips.y - footY, 0.05);
+    const { hips } = bones;
+    const { torso, top, sole, shoulderWidth, centerX } = measureAvatarBody(bones);
     const bottom = mode === 'full'
-        ? footY - legs * FULL_BOTTOM_BELOW_FEET_RATIO
+        ? sole
         : hips.y - torso * UPPER_BOTTOM_BELOW_HIPS_RATIO;
     const span = Math.max(top - bottom, 0.1);
     const marginTop = span * VERTICAL_MARGIN_RATIO;
     const marginBottom = span * (mode === 'full' ? FULL_BOTTOM_MARGIN_RATIO : VERTICAL_MARGIN_RATIO);
     const height = span + marginTop + marginBottom;
 
-    const shoulderWidth = bones.leftUpperArm && bones.rightUpperArm
-        ? Math.abs(bones.leftUpperArm.x - bones.rightUpperArm.x)
-        : torso * 0.8;
     // 腕を下ろすと、手は肩の付け根より少し外に出る。
     const halfWidth = Math.max(shoulderWidth, 0.05) * 0.95;
 
-    const tanHalf = Math.tan((fovDeg * Math.PI / 180) / 2);
-    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+    const tanHalf = tanHalfFov(fovDeg);
+    const safeAspect = safeAspectOf(aspect);
     const distanceForHeight = (height / 2) / tanHalf;
     const distanceForWidth = (halfWidth * 1.1) / (safeAspect * tanHalf);
     const distance = Math.max(distanceForHeight, distanceForWidth);
@@ -155,11 +191,129 @@ export function computeAvatarFraming(
         ? (bottom - marginBottom) + visibleHalfHeight
         : (top + marginTop) - visibleHalfHeight;
 
-    const centerX = (bones.leftUpperArm && bones.rightUpperArm)
-        ? (bones.leftUpperArm.x + bones.rightUpperArm.x) / 2
-        : hips.x;
     const target = { x: centerX, y: centerY, z: hips.z };
     return { position: { x: centerX, y: centerY, z: hips.z + distance }, target };
+}
+
+/** カメラを回す縦の範囲 (OrbitControls の polar angle。真上が 0、水平が π/2)。
+ * 水平から 60 度上 (見下ろす) から、水平から 10 度下 (見上げる) まで
+ * (docs/intent/screen_avatar.md「カメラを回す・寄せる」)。 */
+export const ORBIT_MIN_POLAR_RAD = (90 - 60) * Math.PI / 180;
+export const ORBIT_MAX_POLAR_RAD = (90 + 10) * Math.PI / 180;
+
+/** いちばん寄ったときに、枠の縦と横の短いほうに映す長さを、頭のボーンから頭のてっぺんまでの
+ * 長さの何倍にするか。頭のボーンは首の付け根あたりにあるので、1 倍だと顎が切れる。
+ * 顎の下が少し入り、顔が枠いっぱいになるくらい。 */
+const CLOSEST_VISIBLE_HEAD_RATIO = 1.25;
+/** いちばん引いたときの距離を、'full' の構図の距離の何倍にするか (全身の周りに少し余裕を足す)。 */
+const FARTHEST_FULL_DISTANCE_RATIO = 1.15;
+
+export interface AvatarOrbitLimits {
+    /** カメラから回る中心までの距離の下限 (いちばん寄ったとき)。 */
+    minDistance: number;
+    /** カメラから回る中心までの距離の上限 (いちばん引いたとき)。 */
+    maxDistance: number;
+    /** 回る中心を置いてよい範囲。体の縦の軸 (x = axisX, z = axisZ) から水平に radius 以内、
+     * 高さは minY から maxY まで。 */
+    targetBounds: { axisX: number; axisZ: number; radius: number; minY: number; maxY: number };
+}
+
+/** カメラを回す・寄せるときの、距離の上下限と、回る中心を置いてよい範囲を、骨の位置から決める。
+ * 'upper' と 'full' のどちらの構図でも同じ範囲になる (構図によらない)。
+ * - いちばん寄った距離: 頭のボーンから頭のてっぺんまでの長さの CLOSEST_VISIBLE_HEAD_RATIO 倍が、
+ *   枠の縦と横の両方に収まる距離。
+ * - いちばん引いた距離: 'full' の構図の距離の FARTHEST_FULL_DISTANCE_RATIO 倍。
+ * - 回る中心: 体の範囲 (足の裏から頭のてっぺんまで、肩幅の内側)。
+ * defaultFraming (最初の構図) の位置と中心は、必ず範囲に入れる (最初の構図に戻したときに、
+ * 上下限で押し戻されて構図が変わらないように)。ごく細い枠では、最初の構図の中心が体の範囲の
+ * 上下に出ることがあるので、そのときは範囲の側を広げる。 */
+export function computeAvatarOrbitLimits(
+    bones: AvatarBonePositions,
+    defaultFraming: AvatarCameraFraming,
+    aspect: number,
+    fovDeg: number = AVATAR_CAMERA_FOV_DEG,
+): AvatarOrbitLimits {
+    const { hips, head } = bones;
+    const { top, sole, shoulderWidth, centerX } = measureAvatarBody(bones);
+    const tanHalf = tanHalfFov(fovDeg);
+    const safeAspect = safeAspectOf(aspect);
+
+    const headSpan = Math.max(top - head.y, 0.02) * CLOSEST_VISIBLE_HEAD_RATIO;
+    const closestForHeight = (headSpan / 2) / tanHalf;
+    const closestForWidth = (headSpan / 2) / (safeAspect * tanHalf);
+    const fullDistance = framingDistance(computeAvatarFraming(bones, 'full', aspect, fovDeg));
+    const defaultDistance = framingDistance(defaultFraming);
+    const minDistance = Math.min(Math.max(closestForHeight, closestForWidth), defaultDistance);
+    const maxDistance = Math.max(fullDistance * FARTHEST_FULL_DISTANCE_RATIO, defaultDistance);
+
+    const axisX = centerX;
+    const axisZ = hips.z;
+    const t = defaultFraming.target;
+    const radius = Math.max(Math.max(shoulderWidth, 0.05) / 2, Math.hypot(t.x - axisX, t.z - axisZ));
+    return {
+        minDistance,
+        maxDistance,
+        targetBounds: { axisX, axisZ, radius, minY: Math.min(sole, t.y), maxY: Math.max(top, t.y) },
+    };
+}
+
+function framingDistance(f: AvatarCameraFraming): number {
+    return Math.hypot(f.position.x - f.target.x, f.position.y - f.target.y, f.position.z - f.target.z);
+}
+
+/** 回る中心 target を、範囲 (AvatarOrbitLimits.targetBounds) の中へ押し戻した点を返す。
+ * 高さは上下の端へ、水平は体の縦の軸からの向きを保ったまま半径の上へ寄せる。範囲の中なら
+ * 同じ値を返す。 */
+export function clampOrbitTarget(target: Vec3, bounds: AvatarOrbitLimits['targetBounds']): Vec3 {
+    const y = Math.min(Math.max(target.y, bounds.minY), bounds.maxY);
+    const dx = target.x - bounds.axisX;
+    const dz = target.z - bounds.axisZ;
+    const r = Math.hypot(dx, dz);
+    if (!(r > bounds.radius)) return { x: target.x, y, z: target.z };
+    const k = bounds.radius / r;
+    return { x: bounds.axisX + dx * k, y, z: bounds.axisZ + dz * k };
+}
+
+// 指の短いタップ二回を、ダブルタップとみなす条件。タッチの dblclick は端末によって来ないので、
+// pointerType が 'touch' の pointerdown / pointerup から自前で判定する。
+
+/** 指が触れてから離れるまでの時間の上限 (ミリ秒)。これより長いと、タップではない。 */
+export const TAP_MAX_DURATION_MS = 250;
+/** 指が触れてから離れるまでに動いてよい距離 (CSS の px)。これより動くと、ドラッグ。 */
+export const TAP_MAX_MOVE_PX = 10;
+/** 一回目のタップの指が離れてから、二回目のタップの指が触れるまでの時間の上限 (ミリ秒)。 */
+export const DOUBLE_TAP_MAX_INTERVAL_MS = 300;
+/** 一回目と二回目のタップの位置の離れ具合の上限 (CSS の px)。 */
+export const DOUBLE_TAP_MAX_DISTANCE_PX = 30;
+
+export interface PointerSample {
+    /** 時刻 (ミリ秒。PointerEvent.timeStamp)。 */
+    timeMs: number;
+    x: number;
+    y: number;
+}
+
+export interface Tap {
+    downMs: number;
+    upMs: number;
+    x: number;
+    y: number;
+}
+
+/** 指が触れた所 (down) と離れた所 (up) から、短いタップならそのタップを返し、そうでなければ null。 */
+export function tapFromPress(down: PointerSample, up: PointerSample): Tap | null {
+    const duration = up.timeMs - down.timeMs;
+    if (!(duration >= 0) || duration > TAP_MAX_DURATION_MS) return null;
+    if (Math.hypot(up.x - down.x, up.y - down.y) > TAP_MAX_MOVE_PX) return null;
+    return { downMs: down.timeMs, upMs: up.timeMs, x: down.x, y: down.y };
+}
+
+/** 一つ前のタップ previous と、いまのタップ tap が、ダブルタップになるか。 */
+export function isDoubleTap(previous: Tap | null, tap: Tap): boolean {
+    if (!previous) return false;
+    const gap = tap.downMs - previous.upMs;
+    if (!(gap >= 0) || gap > DOUBLE_TAP_MAX_INTERVAL_MS) return false;
+    return Math.hypot(tap.x - previous.x, tap.y - previous.y) <= DOUBLE_TAP_MAX_DISTANCE_PX;
 }
 
 /** 腕を下ろす角度 (ラジアン)。真横 (T ポーズ) から真下へ向けて、これだけ回す。

@@ -11,31 +11,44 @@
  * (lib/vrmAvatarMath.ts) で決める。
  * - 持ち主の URL の VRM を持つ。別の URL の借り手が持ち主になったら、古い VRM は捨てる。
  * - その URL の借り手が一人もいなくなっても、VRM_KEEP_AFTER_RELEASE_MS の間は持っておく。
- * - 描画のループは、持ち主が画面に見えていて、タブが表に出ている間だけ回す。 */
+ * - 描画のループは、持ち主が画面に見えていて、タブが表に出ている間だけ回す。
+ * - 利用者は canvas の上で、カメラを回したり寄ったり引いたりできる (OrbitControls。
+ *   docs/intent/screen_avatar.md「カメラを回す・寄せる」)。canvas は 3D が見えている間だけ
+ *   ポインターの操作を受ける (VrmAvatar.module.css の .canvasShown)。 */
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRMHumanBoneList, VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName } from '@pixiv/three-vrm';
 import {
     AVATAR_CAMERA_FOV_DEG,
     MOUTH_CLOSE_TIME_CONSTANT_SEC,
     MOUTH_OPEN_TIME_CONSTANT_SEC,
+    ORBIT_MAX_POLAR_RAD,
+    ORBIT_MIN_POLAR_RAD,
     VRM_KEEP_AFTER_RELEASE_MS,
     avatarPixelRatio,
     blinkWeight,
     BLINK_TOTAL_SEC,
     breathingSway,
     chooseAvatarHolder,
+    clampOrbitTarget,
     computeAvatarFraming,
+    computeAvatarOrbitLimits,
     decideMouthTarget,
+    isDoubleTap,
     matchFollowerBones,
     nextBlinkDelaySec,
     restArmRotationZ,
     smoothToward,
     stripNameNumberSuffix,
+    tapFromPress,
     type AvatarBonePositions,
     type AvatarFramingMode,
+    type AvatarOrbitLimits,
     type FollowerCandidate,
     type FollowerSourceBone,
+    type PointerSample,
+    type Tap,
     type VrmAvatarFailure,
     type VrmAvatarStatus,
     type VrmAvatarView,
@@ -98,6 +111,26 @@ interface Entry {
     framing: AvatarFramingMode | null;
     size: { width: number; height: number };
     onContextLost: (event: Event) => void;
+    // カメラの操作 (docs/intent/screen_avatar.md「カメラを回す・寄せる」)
+    controls: OrbitControls;
+    /** 距離の上下限と、回る中心を置いてよい範囲。骨の位置が読めるまでは null。 */
+    orbit: AvatarOrbitLimits | null;
+    /** 最初の構図に置いた後で、利用者がカメラを動かしたか。動かしていなければ、枠の大きさが
+     * 変わったときに、大きさに合わせて最初の構図を計算し直す。 */
+    userMoved: boolean;
+    /** resetCamera の中でカメラを置き直している間は true (その間の 'change' は利用者の操作ではない)。 */
+    placingCamera: boolean;
+    /** 指が触れている pointer (pointerId → 触れた所)。ダブルタップの判定に使う。 */
+    touchPresses: Map<number, PointerSample>;
+    /** 指が二本以上触れた後、全部離れるまでは true (指二本の操作をタップと数えない)。 */
+    touchMulti: boolean;
+    /** 一つ前のタップ。 */
+    lastTap: Tap | null;
+    onControlsChange: () => void;
+    onDoubleClick: (event: MouseEvent) => void;
+    onPointerDown: (event: PointerEvent) => void;
+    onPointerUp: (event: PointerEvent) => void;
+    onPointerCancel: (event: PointerEvent) => void;
     // 動きの状態
     time: number;
     mouth: number;
@@ -174,9 +207,10 @@ function recompute() {
         if (holder && holder.url === e.url && holder.host) {
             if (e.canvas.parentElement !== holder.host) holder.host.appendChild(e.canvas);
             observeHost(e, holder.host);
+            // 構図 ('upper' と 'full') が替わったら、利用者が動かしたカメラも最初の構図に戻す。
             if (e.framing !== holder.framing) {
                 e.framing = holder.framing;
-                updateCamera(e);
+                resetCamera(e);
             }
         }
         // その URL の借り手が一人もいなければ、しばらく持ってから捨てる。
@@ -243,13 +277,20 @@ function createEntry(url: string): Entry | null {
     canvas.style.display = 'block';
 
     const scene = new THREE.Scene();
-    // three-vrm の例と同じ明るさの平行光。MToon の影の色は VRM の側に入っている。
-    const light = new THREE.DirectionalLight(0xffffff, Math.PI);
-    light.position.set(1, 1, 1).normalize();
-    scene.add(light);
     const camera = new THREE.PerspectiveCamera(AVATAR_CAMERA_FOV_DEG, 1, 0.05, 50);
     camera.position.set(0, 1.3, 3);
     scene.add(camera);
+    // three-vrm の例と同じ明るさの平行光。MToon の影の色は VRM の側に入っている。
+    // 光はカメラの子にして、カメラと一緒に回す (後ろへ回っても、見ている側が照らされる)。
+    // 光の向きは、光の位置から光の target へ向かう向きで、どちらもカメラから見た座標で置く。
+    // 最初の構図のカメラは回転していない (正面から水平に向いている) ので、カメラから見た
+    // (1, 1, 1) は、以前の world に固定していた (1, 1, 1) と同じ向きになる。
+    const light = new THREE.DirectionalLight(0xffffff, Math.PI);
+    light.position.set(1, 1, 1).normalize();
+    camera.add(light);
+    camera.add(light.target);
+
+    const controls = createControls(camera, canvas);
 
     const e: Entry = {
         url, status: 'loading', progress: null, abort: new AbortController(),
@@ -257,6 +298,13 @@ function createEntry(url: string): Entry | null {
         lastFrameAt: null, raf: null, resizeObserver: null, observedHost: null,
         framing: null, size: { width: 0, height: 0 },
         onContextLost: () => {},
+        controls, orbit: null, userMoved: false, placingCamera: false,
+        touchPresses: new Map(), touchMulti: false, lastTap: null,
+        onControlsChange: () => {},
+        onDoubleClick: () => {},
+        onPointerDown: () => {},
+        onPointerUp: () => {},
+        onPointerCancel: () => {},
         time: 0, mouth: 0, blinkElapsed: null, blinkWait: nextBlinkDelaySec(Math.random()),
     };
     e.onContextLost = (event: Event) => {
@@ -264,8 +312,115 @@ function createEntry(url: string): Entry | null {
         fail(e, 'contextLost');
     };
     canvas.addEventListener('webglcontextlost', e.onContextLost);
+    installCameraListeners(e);
     void loadInto(e);
     return e;
+}
+
+/** canvas の上の操作でカメラを動かす OrbitControls を作る。骨の位置が読めて最初の構図に
+ * 置くまでは、操作を受けない (enabled = false)。
+ * - 回す: 左ドラッグ / 指一本。縦は ORBIT_MIN_POLAR_RAD から ORBIT_MAX_POLAR_RAD まで。
+ * - 寄る・引く: ホイール / 指二本。寄る先はポインターの位置 (指二本なら二本の指の間)。
+ * - 横へずらす操作 (パン) は付けない。右ボタン・中ボタン・Ctrl などを押しながらのドラッグは何もしない。
+ * ホイールは OrbitControls が preventDefault するので、canvas の上では右サイドバーもページも
+ * スクロールしない。指の操作も、OrbitControls が canvas に touch-action: none を付けるので、
+ * canvas の上からはページをスクロールしない。 */
+function createControls(camera: THREE.PerspectiveCamera, canvas: HTMLCanvasElement): OrbitControls {
+    const controls = new OrbitControls(camera, canvas);
+    // OrbitControls は作った時点で、カメラを target (原点) へ向ける。読み込みの前の向き
+    // (正面から水平) を変えないよう、target をカメラの正面に置き直す。
+    controls.target.set(camera.position.x, camera.position.y, 0);
+    controls.update();
+    controls.enabled = false;
+    controls.enablePan = false;
+    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: null, RIGHT: null };
+    controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+    controls.zoomToCursor = true;
+    controls.minPolarAngle = ORBIT_MIN_POLAR_RAD;
+    controls.maxPolarAngle = ORBIT_MAX_POLAR_RAD;
+    // 指を離した後も少しだけ動き続けて止まる。描画のループの中で controls.update() を呼ぶ。
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.15;
+    // canvas の上のカーソルを、つかむ形 (ドラッグ中はつかんでいる形) にする。
+    controls.cursorStyle = 'grab';
+    return controls;
+}
+
+/** カメラの操作にかかわる聞き手を付ける。
+ * - 'change' (OrbitControls がカメラを動かしたとき): 回る中心を体の範囲へ押し戻し、
+ *   利用者が動かしたことを覚える。
+ * - ダブルクリック (マウス) と、指の短いタップ二回: 最初の構図に戻す。 */
+function installCameraListeners(e: Entry) {
+    e.onControlsChange = () => {
+        if (e.orbit) keepTargetInBounds(e, e.orbit);
+        if (!e.placingCamera) e.userMoved = true;
+    };
+    e.onDoubleClick = (event: MouseEvent) => {
+        if (!e.controls.enabled) return;
+        event.preventDefault();
+        resetCamera(e);
+    };
+    e.onPointerDown = (event: PointerEvent) => {
+        if (event.pointerType !== 'touch') return;
+        e.touchPresses.set(event.pointerId, { timeMs: event.timeStamp, x: event.clientX, y: event.clientY });
+        if (e.touchPresses.size > 1) {
+            e.touchMulti = true;
+            e.lastTap = null;
+        }
+    };
+    e.onPointerUp = (event: PointerEvent) => {
+        if (event.pointerType !== 'touch') return;
+        const down = e.touchPresses.get(event.pointerId);
+        e.touchPresses.delete(event.pointerId);
+        if (down && !e.touchMulti) {
+            const tap = tapFromPress(down, { timeMs: event.timeStamp, x: event.clientX, y: event.clientY });
+            if (tap && isDoubleTap(e.lastTap, tap)) {
+                e.lastTap = null;
+                if (e.controls.enabled) resetCamera(e);
+            } else {
+                e.lastTap = tap;
+            }
+        }
+        if (e.touchPresses.size === 0) e.touchMulti = false;
+    };
+    e.onPointerCancel = (event: PointerEvent) => {
+        if (event.pointerType !== 'touch') return;
+        e.touchPresses.delete(event.pointerId);
+        e.lastTap = null;
+        if (e.touchPresses.size === 0) e.touchMulti = false;
+    };
+    e.controls.addEventListener('change', e.onControlsChange);
+    e.canvas.addEventListener('dblclick', e.onDoubleClick);
+    e.canvas.addEventListener('pointerdown', e.onPointerDown);
+    e.canvas.addEventListener('pointerup', e.onPointerUp);
+    e.canvas.addEventListener('pointercancel', e.onPointerCancel);
+}
+
+function removeCameraListeners(e: Entry) {
+    e.controls.removeEventListener('change', e.onControlsChange);
+    e.canvas.removeEventListener('dblclick', e.onDoubleClick);
+    e.canvas.removeEventListener('pointerdown', e.onPointerDown);
+    e.canvas.removeEventListener('pointerup', e.onPointerUp);
+    e.canvas.removeEventListener('pointercancel', e.onPointerCancel);
+}
+
+/** 回る中心 (controls.target) が体の範囲の外へ出ていたら、範囲の中へ押し戻す。カメラも同じだけ
+ * 動かして、カメラから中心への向きと距離を保つ (向きを変えずに、横へずらして戻す)。 */
+const _clampShift = new THREE.Vector3();
+function keepTargetInBounds(e: Entry, orbit: AvatarOrbitLimits) {
+    const target = e.controls.target;
+    const clamped = clampOrbitTarget({ x: target.x, y: target.y, z: target.z }, orbit.targetBounds);
+    if (clamped.x === target.x && clamped.y === target.y && clamped.z === target.z) return;
+    _clampShift.set(clamped.x - target.x, clamped.y - target.y, clamped.z - target.z);
+    target.add(_clampShift);
+    e.camera.position.add(_clampShift);
+    e.camera.lookAt(target);
+}
+
+function applyOrbitLimits(e: Entry, orbit: AvatarOrbitLimits) {
+    e.orbit = orbit;
+    e.controls.minDistance = orbit.minDistance;
+    e.controls.maxDistance = orbit.maxDistance;
 }
 
 async function loadInto(e: Entry) {
@@ -325,7 +480,7 @@ async function loadInto(e: Entry) {
     // 呼ぶ (updateVrm)。そうしないと、最初の一枚だけ服の armature が rest の姿勢で出る。
     updateVrm(e, vrm, 0);
     e.status = 'ready';
-    updateCamera(e);
+    resetCamera(e);
     recompute();
 }
 
@@ -406,7 +561,7 @@ function observeHost(e: Entry, host: HTMLElement) {
         e.size = { width, height };
         e.renderer.setPixelRatio(avatarPixelRatio(window.devicePixelRatio));
         e.renderer.setSize(width, height, false);
-        updateCamera(e);
+        resizeCamera(e);
     };
     if (typeof ResizeObserver !== 'undefined') {
         e.resizeObserver = new ResizeObserver(measure);
@@ -415,19 +570,66 @@ function observeHost(e: Entry, host: HTMLElement) {
     measure();
 }
 
-function updateCamera(e: Entry) {
+function syncAspect(e: Entry) {
     const { width, height } = e.size;
     if (width > 0 && height > 0) {
         e.camera.aspect = width / height;
     }
-    if (e.bones) {
-        const framing = computeAvatarFraming(e.bones, e.framing ?? 'upper', e.camera.aspect, AVATAR_CAMERA_FOV_DEG);
-        e.camera.position.set(framing.position.x, framing.position.y, framing.position.z);
-        e.camera.lookAt(framing.target.x, framing.target.y, framing.target.z);
-    }
     e.camera.updateProjectionMatrix();
-    // ループが止まっている間に大きさが変わっても、次に見えたときの最初の一枚が正しいように。
+}
+
+/** ループが止まっている間にカメラや大きさが変わっても、次に見えたときの最初の一枚が正しいように。 */
+function renderIfStopped(e: Entry) {
     if (e.status === 'ready' && e.raf === null) e.renderer.render(e.scene, e.camera);
+}
+
+/** カメラを最初の構図 (computeAvatarFraming) に置く。呼ぶのは、VRM を読み込んだとき
+ * (新しい Entry)、構図 ('upper' / 'full') が替わったとき、利用者がダブルクリック
+ * (指ではダブルタップ) したとき、利用者がまだカメラを動かしていない間に枠の大きさが
+ * 変わったときだけ。 */
+function resetCamera(e: Entry) {
+    syncAspect(e);
+    const bones = e.bones;
+    if (bones) {
+        const framing = computeAvatarFraming(bones, e.framing ?? 'upper', e.camera.aspect, AVATAR_CAMERA_FOV_DEG);
+        const controls = e.controls;
+        e.placingCamera = true;
+        try {
+            // 指を離した後の動きの残り (damping) を、置き直す前に使い切って捨てる。
+            // 残すと、最初の構図に戻した後もカメラが少し流れる。
+            controls.enableDamping = false;
+            controls.update();
+            applyOrbitLimits(e, computeAvatarOrbitLimits(bones, framing, e.camera.aspect, AVATAR_CAMERA_FOV_DEG));
+            e.camera.position.set(framing.position.x, framing.position.y, framing.position.z);
+            controls.target.set(framing.target.x, framing.target.y, framing.target.z);
+            controls.update();
+        } finally {
+            controls.enableDamping = true;
+            e.placingCamera = false;
+        }
+        e.userMoved = false;
+        controls.enabled = true;
+    }
+    renderIfStopped(e);
+}
+
+/** 枠の大きさが変わったとき。aspect と投影を直す。利用者がまだカメラを動かしていなければ、
+ * 大きさに合わせて最初の構図を計算し直す。動かした後なら、カメラの位置と回る中心は
+ * そのまま保ち、距離の上下限と回る中心の範囲だけを、新しい大きさで計算し直す
+ * (上下限は枠の縦横比で少し変わるので、ごく細い枠になったときは、次の更新で距離が上下限へ
+ * 寄せられることがある)。 */
+function resizeCamera(e: Entry) {
+    if (!e.userMoved) {
+        resetCamera(e);
+        return;
+    }
+    syncAspect(e);
+    const bones = e.bones;
+    if (bones) {
+        const framing = computeAvatarFraming(bones, e.framing ?? 'upper', e.camera.aspect, AVATAR_CAMERA_FOV_DEG);
+        applyOrbitLimits(e, computeAvatarOrbitLimits(bones, framing, e.camera.aspect, AVATAR_CAMERA_FOV_DEG));
+    }
+    renderIfStopped(e);
 }
 
 function shouldRun(): boolean {
@@ -455,6 +657,9 @@ function updateLoop() {
             const elapsed = e.lastFrameAt === null ? 0 : (now - e.lastFrameAt) / 1000;
             e.lastFrameAt = now;
             const dt = Math.min(Math.max(elapsed, 0), 1 / 20);
+            // 指を離した後の動きの残り (damping) を進める。視線 (vrm.lookAt) がこの一枚の
+            // カメラの位置を追うよう、VRM を進める (animate) より先に呼ぶ。
+            if (e.controls.enabled) e.controls.update();
             animate(e, dt);
             e.renderer.render(e.scene, e.camera);
         };
@@ -651,6 +856,8 @@ function disposeEntry(e: Entry) {
     e.observedHost = null;
     // forceContextLoss は webglcontextlost を起こすので、先に聞くのをやめる。
     e.canvas.removeEventListener('webglcontextlost', e.onContextLost);
+    removeCameraListeners(e);
+    e.controls.dispose();
     if (e.vrm) {
         e.scene.remove(e.vrm.scene);
         VRMUtils.deepDispose(e.vrm.scene);

@@ -2,8 +2,11 @@
    RoomView.module.css の .roomView の直下に置き、ルームビューの枠の全体を覆う。
    立ち絵のカード (fallback) と名前の札 (overlay) は、この中に RoomView の .figureArea として
    置かれるので、枠の中での位置は立ち絵だけのペルソナと同じになる。
-   この要素の上にある操作できるもの (在室者のアイコンなど) を隠さないよう、この要素と
-   canvas はポインターの操作を受けない (読み込めなかった理由の知らせだけは押せる)。
+   この要素はポインターの操作を受けない。受けるのは、3D が見えている間の canvas (カメラを
+   回す・寄せる操作。docs/intent/screen_avatar.md「カメラを回す・寄せる」) と、読み込めなかった
+   理由の知らせだけ。在室者を切り替えるアイコンと字幕は、DOM の上でこの要素より後ろにあって
+   canvas の上に重なるので、今までどおり押せる。名前の札 (.figureArea) は pointer-events: none
+   なので、札の上の操作は canvas へ届く。
    ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。 */
 .stage {
     position: absolute;
@@ -20,8 +23,13 @@
     pointer-events: none;
 }
 
+/* 3D が見えている間だけ、canvas がカメラの操作を受ける。pointer-events は子へ継承されるので、
+   ここで auto に戻すと、中の canvas も受ける。立ち絵のカードを出している間 (この class が無い間) は、
+   今までどおり何も受けない。カーソルの形 (grab / grabbing) と touch-action: none は、
+   lib/vrmAvatarEngine.ts の OrbitControls が canvas に付ける。 */
 .canvasShown {
     visibility: visible;
+    pointer-events: auto;
 }
 
 /* 進み具合と失敗の知らせは、立ち絵のカードを立てる範囲 (RoomView.module.css の .figureArea。
