@@ -140,6 +140,7 @@ LLM に毎回「左車輪と右車輪を同時に回して」と推論させる�
 #### 安全性
 
 - `calls[].tool` に指定できるのは、同じアドオンの `mcp_servers.json` に登録済みの MCP ツール名、または同じアドオン内の native tool 名に限定する。外部ツールの任意実行は許可しない
+  - native tool は、アクション定義には素の名前 (`move_head`) で書き、実行時は TOOL_REGISTRY の登録名 `<addon>__<tool>` (アドオンの native tool は 2026-07-19 からこの名前で登録される) で引く (`composite_actions._resolve_native_tool`)。登録名が無いときだけ素の名前 (builtin / user_data のツール) で引く。「末尾が `__<tool>` のものが一つだけならそれ」という探し方は使わない — 同じアドオンの MCP ツールも `<addon>__<server>__<tool>` で登録されていて、一つに決まらない。2026-07-19 から 2026-11-23 まで、実行時に素の名前のまま引いていたため、native tool を使う複合アクション (Stack-chan のうなずきなど) はすべて「見つかりません」で失敗していた
 - `wait` の `duration_ms` に上限を設ける (例: 10000ms)。無限待機や極端に長い待機は許可しない
 - steps 数に上限を設ける (例: 20 ステップ)
 

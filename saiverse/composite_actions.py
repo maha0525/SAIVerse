@@ -489,8 +489,33 @@ def _mcp_tool_names(conn) -> set:
     return names
 
 
+def _resolve_native_tool(addon_name: Optional[str], tool: str):
+    """アクションのステップに書かれたツール名から native tool の callable を引く。
+
+    アクション定義は、そのアドオンのツールを素の名前 (``move_head``) で書く
+    (選べる一覧 ``get_available_tool_schemas`` も ``schema.name`` の素の名前を
+    出す)。一方、アドオンの native tool は TOOL_REGISTRY に
+    ``<addon>__<tool>`` で登録される (tools/__init__.py の ``_registry_key``)。
+    だから先にアクションを持つアドオンの名前を付けて引き、無ければ素の名前
+    (builtin / user_data のツール) で引く。
+
+    ``canonicalize_tool_name`` の「末尾が ``__<tool>`` のものが一つだけなら
+    それ」は使わない。同じアドオンの MCP ツールも ``<addon>__<server>__<tool>``
+    で登録されていて末尾が一致し、一つに決まらないため (2026-11-23、うなずきの
+    複合アクションが move_head を見つけられなかった報告)。
+    """
+    from tools import TOOL_REGISTRY
+
+    if addon_name:
+        func = TOOL_REGISTRY.get(f"{addon_name}__{tool}")
+        if func is not None:
+            return func
+    return TOOL_REGISTRY.get(tool)
+
+
 def _make_call_awaitable(
     conn, mcp_names: set, tool: str, args: Dict[str, Any],
+    addon_name: Optional[str] = None,
 ):
     """1 件のツール呼び出しを awaitable にして返す (native 優先 → MCP fallback)。
 
@@ -511,9 +536,7 @@ def _make_call_awaitable(
     既に vessel building gate 済みで、 ワーカースレッドには persona context が
     伝播しないため、 内側で再度ゲートを通すと誤判定で弾かれる。
     """
-    from tools import TOOL_REGISTRY
-
-    func = TOOL_REGISTRY.get(tool)
+    func = _resolve_native_tool(addon_name, tool)
     if func is not None:
         target = (
             getattr(func, "__wrapped__", func)
@@ -620,7 +643,9 @@ async def _execute_action_async(
                 for call in step.calls
             ]
             coros = [
-                _make_call_awaitable(conn, mcp_names, tool, args)
+                _make_call_awaitable(
+                    conn, mcp_names, tool, args, addon_name=addon_name,
+                )
                 for tool, args in resolved
             ]
             step_results = await asyncio.gather(*coros, return_exceptions=True)
