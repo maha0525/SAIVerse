@@ -295,7 +295,15 @@ def ensure_avatar_dir(persona_id: str, home: Optional[Path] = None) -> Path:
     base = Path(home) if home is not None else get_saiverse_home()
     # persona_id はフォルダの名前一つ分として使う。区切りや ``..`` を含む値だと、下の
     # 「ペルソナのフォルダの中か」の検査は、ペルソナのフォルダごと外へ出た場所でも通ってしまう。
-    if not persona_id or persona_id in (".", "..") or Path(persona_id).name != persona_id:
+    # ``/`` と ``\`` は OS に依らず断る (Linux と macOS の Path は ``\`` を区切りと見ないので、
+    # ``Path(persona_id).name`` の比較だけでは、Windows で区切りになる値を通してしまう)。
+    if (
+        not persona_id
+        or persona_id in (".", "..")
+        or "/" in persona_id
+        or "\\" in persona_id
+        or Path(persona_id).name != persona_id
+    ):
         LOGGER.warning("Refusing to create an avatar folder for an unsafe persona id: %r", persona_id)
         raise AvatarFolderOutsideError(f"The persona id {persona_id!r} cannot be used as a folder name")
     folder = avatar_dir(persona_id, base)
