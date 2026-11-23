@@ -41,6 +41,11 @@ const {
     ORBIT_MAX_POLAR_RAD,
     computeAvatarOrbitLimits,
     clampOrbitTarget,
+    pointedHeightOnBodyPlane,
+    zoomTargetHeight,
+    dragTargetHeightDelta,
+    keepsZoomAim,
+    ZOOM_AIM_KEEP_PX,
     tapFromPress,
     isDoubleTap,
     TAP_MAX_DURATION_MS,
@@ -448,6 +453,141 @@ assert.equal(smoothToward(0.3, 0, 0.1, 0), 0, 'zero time constant jumps');
         }
         assert.ok(l.minDistance > 0 && l.minDistance < l.maxDistance);
     }
+    // 'full' の構図の中心の高さを持ち、それは範囲の中にある (細い枠で 'upper' が最初の構図でも)
+    for (const aspect of [3 / 4, 16 / 9, 0.45, 0.1, 0.05]) {
+        const full = computeAvatarFraming(bones, 'full', aspect);
+        for (const mode of ['upper', 'full']) {
+            const l = computeAvatarOrbitLimits(bones, computeAvatarFraming(bones, mode, aspect), aspect);
+            assert.equal(l.fullTargetY, full.target.y, `fullTargetY ${mode} ${aspect}`);
+            assert.ok(l.targetBounds.minY <= l.fullTargetY && l.fullTargetY <= l.targetBounds.maxY,
+                `fullTargetY inside the bounds ${mode} ${aspect}`);
+        }
+    }
+}
+
+// ── 寄る・引くで、回る中心の高さを動かす (指した高さが、いちばん寄ったときに真ん中へ来る) ──
+{
+    const bones = {
+        hips: { x: 0, y: 0.9, z: 0 },
+        head: { x: 0, y: 1.4, z: 0 },
+        leftFoot: { x: 0.1, y: 0.08, z: 0 },
+        rightFoot: { x: -0.1, y: 0.08, z: 0 },
+        leftUpperArm: { x: 0.17, y: 1.3, z: 0 },
+        rightUpperArm: { x: -0.17, y: 1.3, z: 0 },
+    };
+    const top = 1.4 + 0.5 * 0.45;
+    const faceY = (bones.head.y + top) / 2;
+    const tanHalf = Math.tan((AVATAR_CAMERA_FOV_DEG * Math.PI / 180) / 2);
+    const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
+
+    // 指している高さ: 正面から水平に見て、体の縦の面 (z = 0) と交わる高さ
+    const limits = computeAvatarOrbitLimits(bones, computeAvatarFraming(bones, 'full', 3 / 4), 3 / 4);
+    const b = limits.targetBounds;
+    const level = { x: 0, y: 0, z: -1 };
+    assert.ok(near(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0.1, y: 0.2, z: -1 }, level, b), 1.6));
+    // 範囲の外を指したら、端に収める
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 1, z: -1 }, level, b), b.maxY);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: -1, z: -1 }, level, b), b.minY);
+    // 斜め上から見下ろしても、向いている先の高さを指す (向きの長さは問わない)
+    const cam = { x: 0, y: 2.5, z: 2 };
+    const look = { x: 0, y: 1.2 - 2.5, z: -2 };
+    assert.ok(near(pointedHeightOnBodyPlane(cam, look, { x: 0, y: -0.65, z: -1 }, b), 1.2));
+    // 横から見ても (カメラが +X にいて -X を向く)、体の縦の軸を通る面で測る
+    assert.ok(near(pointedHeightOnBodyPlane({ x: 2, y: 1, z: 0.05 }, { x: -1, y: 0.25, z: 0 }, { x: -1, y: 0, z: 0 }, b), 1.5));
+    // 真下を向いている・線が面とほとんど平行・交わる点がカメラの後ろ → 決めない (null)
+    assert.equal(pointedHeightOnBodyPlane(cam, { x: 0, y: -1, z: 0 }, { x: 0, y: -1, z: 0 }, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 1, y: 0, z: -0.01 }, level, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 0, z: 1 }, level, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 0, z: 0 }, level, b), null);
+
+    // 一回分の高さの動かし方
+    const base = { currentY: 1.0, minDistance: 1, maxDistance: 5, pointedY: 1.5, fullTargetY: 0.8 };
+    // 寄る: 残りの距離の半分を寄ったら、指した高さとの差も半分詰める
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 2 }), 1.25));
+    // いちばん寄った距離に着いたら、指した高さちょうど
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 1 }), 1.5);
+    // もういちばん寄っている・指した高さが無い → 動かさない
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 1, newDistance: 0.9 }), 1.0);
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 2, pointedY: null }), 1.0);
+    // 引く: 残りの距離の半分を引いたら、'full' の構図の高さとの差も半分詰める。いちばん引いたら、その高さちょうど
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 4 }), 0.9));
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 5 }), 0.8);
+    // 引くときは、指した高さを使わない
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 4, pointedY: null }), 0.9));
+    // もういちばん引いている・距離が変わらない → 動かさない
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 5, newDistance: 5.1 }), 1.0);
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 3 }), 1.0);
+
+    // 寄る先を使い続けるか: ポインターがほとんど動いていない間だけ
+    assert.equal(ZOOM_AIM_KEEP_PX, 3);
+    assert.equal(keepsZoomAim(null, { x: 10, y: 10 }), false);
+    assert.equal(keepsZoomAim({ x: 10, y: 10 }, { x: 12, y: 12 }), true);
+    assert.equal(keepsZoomAim({ x: 10, y: 10 }, { x: 14, y: 10 }), false);
+
+    // 何回にも分けて顔へ寄る。'full' の構図から、ホイール一回で距離が 0.95 倍になるとして、
+    // いちばん寄った距離まで寄る。カメラは正面から水平に見ている (polar 90 度)。
+    for (const aspect of [16 / 9, 0.45]) {
+        const full = computeAvatarFraming(bones, 'full', aspect);
+        const l = computeAvatarOrbitLimits(bones, full, aspect);
+        const zoomInTo = (aimAt) => {
+            let y = full.target.y;
+            let d = full.position.z - full.target.z;
+            // 'full' の構図で、顔を指しているポインターの、枠の真ん中からの縦の位置 (-1〜1)
+            const cursor = (faceY - y) / (d * tanHalf);
+            let kept = null;
+            for (let i = 0; i < 500 && d > l.minDistance; i++) {
+                const camera = { x: full.target.x, y, z: full.target.z + d };
+                // 'face': ポインターを顔に合わせ続ける / 'still': ポインターを止めたまま回し続ける
+                const ray = aimAt === 'face'
+                    ? { x: 0, y: faceY - y, z: -d }
+                    : { x: 0, y: cursor * tanHalf, z: -1 };
+                const pointed = pointedHeightOnBodyPlane(camera, ray, level, l.targetBounds);
+                // ポインターが止まっている間は、最初に決めた高さを使い続ける (keepsZoomAim)
+                if (kept === null || aimAt === 'face') kept = pointed;
+                const next = Math.max(l.minDistance, d * 0.95);
+                y = zoomTargetHeight({
+                    currentY: y, prevDistance: d, newDistance: next,
+                    minDistance: l.minDistance, maxDistance: l.maxDistance,
+                    pointedY: kept, fullTargetY: l.fullTargetY,
+                });
+                d = next;
+            }
+            return { y, d };
+        };
+        for (const aimAt of ['face', 'still']) {
+            const { y, d } = zoomInTo(aimAt);
+            assert.equal(d, l.minDistance, `reached the closest (${aspect} ${aimAt})`);
+            const half = d * tanHalf;
+            // 顔 (頭のボーンから頭のてっぺんまで) が枠の中にあり、真ん中に来ている
+            assert.ok(y - half <= bones.head.y && top <= y + half, `face inside the frame (${aspect} ${aimAt})`);
+            assert.ok(near(y, faceY, 1e-6), `face centered (${aspect} ${aimAt}): ${y} vs ${faceY}`);
+
+            // そこからいちばん引くと、'full' の構図の高さに戻る (全身が枠に収まる)
+            let ty = y;
+            let td = d;
+            for (let i = 0; i < 500 && td < l.maxDistance; i++) {
+                const next = Math.min(l.maxDistance, td / 0.95);
+                ty = zoomTargetHeight({
+                    currentY: ty, prevDistance: td, newDistance: next,
+                    minDistance: l.minDistance, maxDistance: l.maxDistance,
+                    pointedY: null, fullTargetY: l.fullTargetY,
+                });
+                td = next;
+            }
+            assert.equal(td, l.maxDistance);
+            assert.ok(near(ty, full.target.y), `back to the full framing height (${aspect} ${aimAt})`);
+            const fullHalf = td * tanHalf;
+            assert.ok(ty - fullHalf < bones.leftFoot.y && top < ty + fullHalf, `whole body in the frame (${aspect})`);
+        }
+    }
+
+    // ドラッグ: canvas の縦一つ分で、いまの距離で映る縦の長さだけ動く。下へ動かすと中心は上へ。
+    const d = 2;
+    assert.ok(near(dragTargetHeightDelta(400, 400, d), 2 * d * tanHalf));
+    assert.ok(near(dragTargetHeightDelta(-100, 400, d), -0.5 * d * tanHalf));
+    assert.ok(dragTargetHeightDelta(10, 400, d) > 0, 'dragging down raises the target (the avatar moves down)');
+    assert.equal(dragTargetHeightDelta(10, 0, d), 0);
+    assert.equal(dragTargetHeightDelta(NaN, 400, d), 0);
 }
 
 // ── ダブルタップの判定 ──

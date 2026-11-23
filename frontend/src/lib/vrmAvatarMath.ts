@@ -216,6 +216,9 @@ export interface AvatarOrbitLimits {
     /** 回る中心を置いてよい範囲。体の縦の軸 (x = axisX, z = axisZ) から水平に radius 以内、
      * 高さは minY から maxY まで。 */
     targetBounds: { axisX: number; axisZ: number; radius: number; minY: number; maxY: number };
+    /** 'full' の構図の、カメラが向く点の高さ (computeAvatarFraming(bones, 'full', aspect).target.y)。
+     * 引くときは、回る中心の高さをこの高さへ戻していく (zoomTargetHeight)。 */
+    fullTargetY: number;
 }
 
 /** カメラを回す・寄せるときの、距離の上下限と、回る中心を置いてよい範囲を、骨の位置から決める。
@@ -226,7 +229,8 @@ export interface AvatarOrbitLimits {
  * - 回る中心: 体の範囲 (足の裏から頭のてっぺんまで、肩幅の内側)。
  * defaultFraming (最初の構図) の位置と中心は、必ず範囲に入れる (最初の構図に戻したときに、
  * 上下限で押し戻されて構図が変わらないように)。ごく細い枠では、最初の構図の中心が体の範囲の
- * 上下に出ることがあるので、そのときは範囲の側を広げる。 */
+ * 上下に出ることがあるので、そのときは範囲の側を広げる。'full' の構図の中心の高さ
+ * (fullTargetY) も、同じ理由で範囲に入れる (いちばん引いたときに、その高さへ戻すため)。 */
 export function computeAvatarOrbitLimits(
     bones: AvatarBonePositions,
     defaultFraming: AvatarCameraFraming,
@@ -241,7 +245,9 @@ export function computeAvatarOrbitLimits(
     const headSpan = Math.max(top - head.y, 0.02) * CLOSEST_VISIBLE_HEAD_RATIO;
     const closestForHeight = (headSpan / 2) / tanHalf;
     const closestForWidth = (headSpan / 2) / (safeAspect * tanHalf);
-    const fullDistance = framingDistance(computeAvatarFraming(bones, 'full', aspect, fovDeg));
+    const fullFraming = computeAvatarFraming(bones, 'full', aspect, fovDeg);
+    const fullDistance = framingDistance(fullFraming);
+    const fullTargetY = fullFraming.target.y;
     const defaultDistance = framingDistance(defaultFraming);
     const minDistance = Math.min(Math.max(closestForHeight, closestForWidth), defaultDistance);
     const maxDistance = Math.max(fullDistance * FARTHEST_FULL_DISTANCE_RATIO, defaultDistance);
@@ -253,7 +259,12 @@ export function computeAvatarOrbitLimits(
     return {
         minDistance,
         maxDistance,
-        targetBounds: { axisX, axisZ, radius, minY: Math.min(sole, t.y), maxY: Math.max(top, t.y) },
+        targetBounds: {
+            axisX, axisZ, radius,
+            minY: Math.min(sole, t.y, fullTargetY),
+            maxY: Math.max(top, t.y, fullTargetY),
+        },
+        fullTargetY,
     };
 }
 
@@ -272,6 +283,103 @@ export function clampOrbitTarget(target: Vec3, bounds: AvatarOrbitLimits['target
     if (!(r > bounds.radius)) return { x: target.x, y, z: target.z };
     const k = bounds.radius / r;
     return { x: bounds.axisX + dx * k, y, z: bounds.axisZ + dz * k };
+}
+
+/** ポインターから伸ばした線と、体の縦の面とが、これより浅い角度でしか交わらないときは
+ * (線と面の向きの内積の大きさが、この値より小さいときは)、指している高さを決めない。 */
+const POINTED_RAY_MIN_DOT = 0.05;
+
+/** 寄るときに、ポインター (指二本なら二本の指の間) が指している高さを決める。
+ * 体の縦の面 (体の縦の軸 x = axisX, z = axisZ を通り、カメラの向きの水平の成分に向き合う
+ * 縦の面) と、カメラからポインターの方へ伸ばした線 (rayOrigin から rayDirection の向き) とが
+ * 交わる点の高さを、範囲 (bounds.minY から bounds.maxY まで) に収めて返す。
+ * - viewDirection はカメラが向いている向き (カメラから回る中心への向き)。長さは問わない。
+ * - 真上か真下を向いていて向きの水平の成分が無いとき、線が面とほとんど平行なとき、
+ *   交わる点がカメラの後ろにあるときは、null を返す (呼ぶ側は、回る中心の今の高さを使う)。 */
+export function pointedHeightOnBodyPlane(
+    rayOrigin: Vec3,
+    rayDirection: Vec3,
+    viewDirection: Vec3,
+    bounds: AvatarOrbitLimits['targetBounds'],
+): number | null {
+    const horizontal = Math.hypot(viewDirection.x, viewDirection.z);
+    const rayLength = Math.hypot(rayDirection.x, rayDirection.y, rayDirection.z);
+    if (!(horizontal > 1e-9) || !(rayLength > 1e-9)) return null;
+    const nx = viewDirection.x / horizontal;
+    const nz = viewDirection.z / horizontal;
+    const dot = (nx * rayDirection.x + nz * rayDirection.z) / rayLength;
+    if (!(Math.abs(dot) >= POINTED_RAY_MIN_DOT)) return null;
+    const t = (nx * (bounds.axisX - rayOrigin.x) + nz * (bounds.axisZ - rayOrigin.z))
+        / (nx * rayDirection.x + nz * rayDirection.z);
+    if (!(t > 0)) return null;
+    const y = rayOrigin.y + rayDirection.y * t;
+    if (!Number.isFinite(y)) return null;
+    return Math.min(Math.max(y, bounds.minY), bounds.maxY);
+}
+
+/** ホイールの続けての回転で、指している高さを決め直さずに使い続ける、ポインターの動きの上限
+ * (CSS の px)。ポインターを止めたまま回し続ける間は、最初に指した高さを使い続ける。決め直すと、
+ * 指した所が枠の真ん中へ動いていく間も、止まったポインターはその上の所を指し直すことになり、
+ * 寄るほど上へずれていく。 */
+export const ZOOM_AIM_KEEP_PX = 3;
+
+/** 前に指している高さを決めたときのポインターの位置 previous と、いまの位置 now から、
+ * 前に決めた高さを使い続けてよいか。 */
+export function keepsZoomAim(previous: { x: number; y: number } | null, now: { x: number; y: number }): boolean {
+    if (!previous) return false;
+    return Math.hypot(now.x - previous.x, now.y - previous.y) <= ZOOM_AIM_KEEP_PX;
+}
+
+/** 寄ったり引いたりした一回分で、回る中心の高さをどこへ動かすか。
+ * - 寄ったとき (newDistance < prevDistance): 指している高さ pointedY との差を、
+ *   (prevDistance - newDistance) / (prevDistance - minDistance) の割合だけ詰める。
+ *   いちばん寄った距離に着いたときに、指している高さがちょうど枠の真ん中に来る。
+ *   pointedY が null のとき、もう minDistance 以下のときは動かさない。
+ * - 引いたとき (newDistance > prevDistance): 'full' の構図の中心の高さ fullTargetY との差を、
+ *   (newDistance - prevDistance) / (maxDistance - prevDistance) の割合だけ詰める。
+ *   いちばん引いた距離に着いたときに、全身の構図の高さに戻る。もう maxDistance 以上のときは動かさない。
+ * - 距離が変わらなければ動かさない。
+ * 返すのは、新しい高さ。水平の位置 (x と z) は、ここでは扱わない (変えない)。 */
+export function zoomTargetHeight(input: {
+    currentY: number;
+    prevDistance: number;
+    newDistance: number;
+    minDistance: number;
+    maxDistance: number;
+    pointedY: number | null;
+    fullTargetY: number;
+}): number {
+    const { currentY, prevDistance, newDistance, minDistance, maxDistance, pointedY, fullTargetY } = input;
+    if (newDistance < prevDistance) {
+        if (pointedY === null || !(prevDistance > minDistance)) return currentY;
+        const f = clamp01((prevDistance - newDistance) / (prevDistance - minDistance));
+        return currentY + (pointedY - currentY) * f;
+    }
+    if (newDistance > prevDistance) {
+        if (!(maxDistance > prevDistance)) return currentY;
+        const g = clamp01((newDistance - prevDistance) / (maxDistance - prevDistance));
+        return currentY + (fullTargetY - currentY) * g;
+    }
+    return currentY;
+}
+
+function clamp01(v: number): number {
+    if (!Number.isFinite(v)) return 0;
+    return Math.min(Math.max(v, 0), 1);
+}
+
+/** 右ドラッグ (指二本では二本の指の間の動き) の縦の動き dragPixelsY (CSS の px、下向きが正) から、
+ * 回る中心の高さを動かす量を決める。ポインターを下へ動かすと、映っているペルソナも下へ動く
+ * (回る中心とカメラは上へ動く)。canvas の縦の長さ一つ分のドラッグで、いまの距離で映る縦の
+ * 長さ (2 × 距離 × tan(縦の画角 / 2)) だけ動く。canvas の縦の長さが分からないときは 0。 */
+export function dragTargetHeightDelta(
+    dragPixelsY: number,
+    canvasHeightPx: number,
+    distance: number,
+    fovDeg: number = AVATAR_CAMERA_FOV_DEG,
+): number {
+    if (!(canvasHeightPx > 0) || !Number.isFinite(dragPixelsY) || !(distance > 0) || !Number.isFinite(distance)) return 0;
+    return (dragPixelsY / canvasHeightPx) * 2 * distance * tanHalfFov(fovDeg);
 }
 
 // 指の短いタップ二回を、ダブルタップとみなす条件。タッチの dblclick は端末によって来ないので、

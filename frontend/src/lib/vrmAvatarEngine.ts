@@ -35,13 +35,17 @@ import {
     computeAvatarFraming,
     computeAvatarOrbitLimits,
     decideMouthTarget,
+    dragTargetHeightDelta,
     isDoubleTap,
+    keepsZoomAim,
     matchFollowerBones,
     nextBlinkDelaySec,
+    pointedHeightOnBodyPlane,
     restArmRotationZ,
     smoothToward,
     stripNameNumberSuffix,
     tapFromPress,
+    zoomTargetHeight,
     type AvatarBonePositions,
     type AvatarFramingMode,
     type AvatarOrbitLimits,
@@ -126,9 +130,22 @@ interface Entry {
     touchMulti: boolean;
     /** 一つ前のタップ。 */
     lastTap: Tap | null;
+    /** 指が触れている pointer の、いまの位置 (pointerId → clientX / clientY)。指二本の間を求めるのに使う。 */
+    touchPoints: Map<number, { x: number; y: number }>;
+    /** 指がちょうど二本触れている間の、前に見た二本の指の間の高さ (clientY)。指の本数が変わったら null。 */
+    pinchMidY: number | null;
+    /** 右ドラッグの最中なら、その pointer と、前に見た高さ (clientY)。 */
+    verticalDrag: { pointerId: number; lastY: number } | null;
+    /** 寄る先として前に決めた、ポインターの位置と、指している高さ。ホイールではポインターが
+     * ほとんど動かない間 (keepsZoomAim)、指二本では本数が変わるまで、この高さを使い続ける。 */
+    zoomAim: { pinch: boolean; x: number; y: number; pointedY: number | null } | null;
+    /** OrbitControls が寄る・引くを受け付けてから、その update() が終わるまでの間だけ、
+     * 指している高さを持つ (installCameraListeners)。 */
+    zoomStep: { pointedY: number | null } | null;
     onControlsChange: () => void;
     onDoubleClick: (event: MouseEvent) => void;
     onPointerDown: (event: PointerEvent) => void;
+    onPointerMove: (event: PointerEvent) => void;
     onPointerUp: (event: PointerEvent) => void;
     onPointerCancel: (event: PointerEvent) => void;
     // 動きの状態
@@ -300,9 +317,11 @@ function createEntry(url: string): Entry | null {
         onContextLost: () => {},
         controls, orbit: null, userMoved: false, placingCamera: false,
         touchPresses: new Map(), touchMulti: false, lastTap: null,
+        touchPoints: new Map(), pinchMidY: null, verticalDrag: null, zoomAim: null, zoomStep: null,
         onControlsChange: () => {},
         onDoubleClick: () => {},
         onPointerDown: () => {},
+        onPointerMove: () => {},
         onPointerUp: () => {},
         onPointerCancel: () => {},
         time: 0, mouth: 0, blinkElapsed: null, blinkWait: nextBlinkDelaySec(Math.random()),
@@ -318,13 +337,17 @@ function createEntry(url: string): Entry | null {
 }
 
 /** canvas の上の操作でカメラを動かす OrbitControls を作る。骨の位置が読めて最初の構図に
- * 置くまでは、操作を受けない (enabled = false)。
+ * 置くまでは、操作を受けない (enabled = false)。OrbitControls が受け持つのは、次の二つだけ。
  * - 回す: 左ドラッグ / 指一本。縦は ORBIT_MIN_POLAR_RAD から ORBIT_MAX_POLAR_RAD まで。
- * - 寄る・引く: ホイール / 指二本。寄る先はポインターの位置 (指二本なら二本の指の間)。
- * - 横へずらす操作 (パン) は付けない。右ボタン・中ボタン・Ctrl などを押しながらのドラッグは何もしない。
+ * - 寄る・引く: ホイール / 指二本で広げる・つまむ。OrbitControls はカメラを回る中心へまっすぐ
+ *   近づけ・遠ざけるだけにして (zoomToCursor = false)、回る中心の高さを指している高さへ動かすのは
+ *   installCameraListeners でする。
+ * 右ドラッグと指二本のドラッグで回る中心を上下に動かすのも、installCameraListeners でする。
+ * OrbitControls のパン (enablePan) は使わない。中ボタン・Ctrl などを押しながらのドラッグは何もしない。
  * ホイールは OrbitControls が preventDefault するので、canvas の上では右サイドバーもページも
  * スクロールしない。指の操作も、OrbitControls が canvas に touch-action: none を付けるので、
- * canvas の上からはページをスクロールしない。 */
+ * canvas の上からはページをスクロールしない。右クリックのメニューは、OrbitControls が
+ * contextmenu を preventDefault するので、操作を受けている間 (enabled) は canvas の上に出ない。 */
 function createControls(camera: THREE.PerspectiveCamera, canvas: HTMLCanvasElement): OrbitControls {
     const controls = new OrbitControls(camera, canvas);
     // OrbitControls は作った時点で、カメラを target (原点) へ向ける。読み込みの前の向き
@@ -335,7 +358,10 @@ function createControls(camera: THREE.PerspectiveCamera, canvas: HTMLCanvasEleme
     controls.enablePan = false;
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: null, RIGHT: null };
     controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
-    controls.zoomToCursor = true;
+    // ポインターへ寄る OrbitControls の仕組み (zoomToCursor) は、カメラの向きを変えずに、指した所を
+    // 画面の同じ位置に留めたまま寄るので、枠の上の端の近くにある顔を指して寄っても、いちばん寄った
+    // ときに顔が真ん中へ来ない (胸やお腹が真ん中に来る)。だから使わない。
+    controls.zoomToCursor = false;
     controls.minPolarAngle = ORBIT_MIN_POLAR_RAD;
     controls.maxPolarAngle = ORBIT_MAX_POLAR_RAD;
     // 指を離した後も少しだけ動き続けて止まる。描画のループの中で controls.update() を呼ぶ。
@@ -346,11 +372,71 @@ function createControls(camera: THREE.PerspectiveCamera, canvas: HTMLCanvasEleme
     return controls;
 }
 
+/** OrbitControls (three 0.187.0) の内部のメソッド `_updateZoomParameters(x, y)` の形。型の定義
+ * (@types/three) には載っていない。 */
+type OrbitControlsZoomHook = { _updateZoomParameters: (x: number, y: number) => void };
+
 /** カメラの操作にかかわる聞き手を付ける。
  * - 'change' (OrbitControls がカメラを動かしたとき): 回る中心を体の範囲へ押し戻し、
  *   利用者が動かしたことを覚える。
- * - ダブルクリック (マウス) と、指の短いタップ二回: 最初の構図に戻す。 */
+ * - 寄る・引く (ホイール / 指二本で広げる・つまむ): OrbitControls がカメラを回る中心へまっすぐ
+ *   近づけ・遠ざけた後で、回る中心の高さを動かす (zoomTargetHeight)。寄ったときは、ポインター
+ *   (指二本なら二本の指の間) が指している高さ (pointedHeightOnBodyPlane) へ近づけ、いちばん寄った
+ *   距離でその高さが枠の真ん中に来る。引いたときは 'full' の構図の高さへ戻していき、いちばん
+ *   引いた距離で全身の構図の高さに戻る。カメラも同じだけ上下に動かして、カメラから回る中心への
+ *   向きと距離を保つ。
+ * - 右ドラッグと、指二本のドラッグ (二本の指の間の動き): 回る中心とカメラを、上下にだけ動かす
+ *   (dragTargetHeightDelta)。ポインターを下へ動かすと、映っているペルソナも下へ動く。横の動きは使わない。
+ *   指二本では、広げる・つまむと同時に効く。
+ * - ダブルクリック (マウス) と、指の短いタップ二回: 最初の構図に戻す。
+ *
+ * 寄る・引くの後で高さを動かすために、OrbitControls (three 0.187.0) の中に二か所手を入れる。
+ * - 内部のメソッド `_updateZoomParameters(x, y)` を、このインスタンスだけ差し替える。OrbitControls は
+ *   これを、ホイールでは寄る・引くの直前に (x, y はホイールの clientX / clientY)、指二本では
+ *   広げる・つまむの直前に (x, y は二本の指の間の pageX / pageY) 呼ぶ。元のメソッドは
+ *   zoomToCursor が false なら何もしないので、差し替えても OrbitControls の動きは変わらない。
+ *   指二本のときは、page の座標ではなく、こちらで覚えている指の位置 (touchPoints の clientX / clientY)
+ *   から二本の指の間を求める。
+ * - `update()` を、このインスタンスだけ包む。寄る・引くは update() の中で距離に反映されるので、
+ *   update() の前と後の距離を比べて、高さを動かす。
+ * three を上げるときは、OrbitControls.js の `_updateZoomParameters` を呼ぶ所 (`_handleMouseWheel`・
+ * `_handleTouchMoveDolly`) と、`update()` の中で寄る・引くを距離に反映する所が変わっていないかを確かめる。 */
 function installCameraListeners(e: Entry) {
+    const controls = e.controls;
+    (controls as unknown as OrbitControlsZoomHook)._updateZoomParameters = (x: number, y: number) => {
+        if (!e.orbit) return;
+        const pinch = e.touchPoints.size >= 2;
+        const point = pinch ? touchMidpoint(e) : { x, y };
+        if (!point) return;
+        let aim = e.zoomAim;
+        if (!aim || aim.pinch !== pinch || (!pinch && !keepsZoomAim(aim, point))) {
+            aim = { pinch, x: point.x, y: point.y, pointedY: pointedHeightAt(e, e.orbit, point) };
+            e.zoomAim = aim;
+        }
+        e.zoomStep = { pointedY: aim.pointedY };
+    };
+    const originalUpdate = controls.update.bind(controls);
+    controls.update = (deltaTime?: number | null): boolean => {
+        const step = e.zoomStep;
+        e.zoomStep = null;
+        const before = step ? cameraDistance(e) : 0;
+        const changed = originalUpdate(deltaTime);
+        if (step && e.orbit) {
+            const target = controls.target;
+            const y = zoomTargetHeight({
+                currentY: target.y,
+                prevDistance: before,
+                newDistance: cameraDistance(e),
+                minDistance: e.orbit.minDistance,
+                maxDistance: e.orbit.maxDistance,
+                pointedY: step.pointedY,
+                fullTargetY: e.orbit.fullTargetY,
+            });
+            shiftTargetHeight(e, e.orbit, y - target.y);
+        }
+        return changed;
+    };
+
     e.onControlsChange = () => {
         if (e.orbit) keepTargetInBounds(e, e.orbit);
         if (!e.placingCamera) e.userMoved = true;
@@ -361,15 +447,54 @@ function installCameraListeners(e: Entry) {
         resetCamera(e);
     };
     e.onPointerDown = (event: PointerEvent) => {
-        if (event.pointerType !== 'touch') return;
+        // 回したり上下に動かしたりすると、ポインターの下に映るものが変わるので、寄る先は決め直す。
+        e.zoomAim = null;
+        if (event.pointerType !== 'touch') {
+            if (event.button === 2 && e.controls.enabled) {
+                e.verticalDrag = { pointerId: event.pointerId, lastY: event.clientY };
+            }
+            return;
+        }
+        e.touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        e.pinchMidY = null;
         e.touchPresses.set(event.pointerId, { timeMs: event.timeStamp, x: event.clientX, y: event.clientY });
         if (e.touchPresses.size > 1) {
             e.touchMulti = true;
             e.lastTap = null;
         }
     };
+    // canvas の上の pointermove は、document で聞いている OrbitControls より先に届く。だから
+    // 指二本のときは、OrbitControls が広げる・つまむを受け付ける (_updateZoomParameters) 前に、
+    // touchPoints がもう今の位置になっている。
+    e.onPointerMove = (event: PointerEvent) => {
+        if (event.pointerType === 'touch') {
+            if (!e.touchPoints.has(event.pointerId)) return;
+            e.touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+            if (e.touchPoints.size !== 2) return;
+            const mid = touchMidpoint(e);
+            if (!mid) return;
+            if (e.pinchMidY !== null && e.controls.enabled) moveTargetByDrag(e, mid.y - e.pinchMidY);
+            e.pinchMidY = mid.y;
+            return;
+        }
+        const drag = e.verticalDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        // 右ボタンだけ先に離した (左ボタンはまだ押している) ときは、pointerup が来ないので、ここで終える。
+        if ((event.buttons & 2) === 0 || !e.controls.enabled) {
+            e.verticalDrag = null;
+            return;
+        }
+        moveTargetByDrag(e, event.clientY - drag.lastY);
+        drag.lastY = event.clientY;
+    };
     e.onPointerUp = (event: PointerEvent) => {
-        if (event.pointerType !== 'touch') return;
+        if (event.pointerType !== 'touch') {
+            if (e.verticalDrag?.pointerId === event.pointerId) e.verticalDrag = null;
+            return;
+        }
+        e.touchPoints.delete(event.pointerId);
+        e.pinchMidY = null;
+        e.zoomAim = null;
         const down = e.touchPresses.get(event.pointerId);
         e.touchPresses.delete(event.pointerId);
         if (down && !e.touchMulti) {
@@ -384,7 +509,13 @@ function installCameraListeners(e: Entry) {
         if (e.touchPresses.size === 0) e.touchMulti = false;
     };
     e.onPointerCancel = (event: PointerEvent) => {
-        if (event.pointerType !== 'touch') return;
+        if (event.pointerType !== 'touch') {
+            if (e.verticalDrag?.pointerId === event.pointerId) e.verticalDrag = null;
+            return;
+        }
+        e.touchPoints.delete(event.pointerId);
+        e.pinchMidY = null;
+        e.zoomAim = null;
         e.touchPresses.delete(event.pointerId);
         e.lastTap = null;
         if (e.touchPresses.size === 0) e.touchMulti = false;
@@ -392,6 +523,7 @@ function installCameraListeners(e: Entry) {
     e.controls.addEventListener('change', e.onControlsChange);
     e.canvas.addEventListener('dblclick', e.onDoubleClick);
     e.canvas.addEventListener('pointerdown', e.onPointerDown);
+    e.canvas.addEventListener('pointermove', e.onPointerMove);
     e.canvas.addEventListener('pointerup', e.onPointerUp);
     e.canvas.addEventListener('pointercancel', e.onPointerCancel);
 }
@@ -400,8 +532,60 @@ function removeCameraListeners(e: Entry) {
     e.controls.removeEventListener('change', e.onControlsChange);
     e.canvas.removeEventListener('dblclick', e.onDoubleClick);
     e.canvas.removeEventListener('pointerdown', e.onPointerDown);
+    e.canvas.removeEventListener('pointermove', e.onPointerMove);
     e.canvas.removeEventListener('pointerup', e.onPointerUp);
     e.canvas.removeEventListener('pointercancel', e.onPointerCancel);
+}
+
+function cameraDistance(e: Entry): number {
+    return e.camera.position.distanceTo(e.controls.target);
+}
+
+/** 触れている指のうち、最初の二本の間 (clientX / clientY)。二本に足りなければ null。 */
+function touchMidpoint(e: Entry): { x: number; y: number } | null {
+    const points = Array.from(e.touchPoints.values());
+    if (points.length < 2) return null;
+    return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+}
+
+const _aimDirection = new THREE.Vector3();
+const _viewDirection = new THREE.Vector3();
+/** canvas の上の点 point (clientX / clientY) が指している高さ (pointedHeightOnBodyPlane)。
+ * 決められないときは null。 */
+function pointedHeightAt(e: Entry, orbit: AvatarOrbitLimits, point: { x: number; y: number }): number | null {
+    const rect = e.canvas.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    const ndcX = ((point.x - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((point.y - rect.top) / rect.height) * 2 + 1;
+    const camera = e.camera;
+    camera.updateMatrixWorld();
+    _aimDirection.set(ndcX, ndcY, 0.5).unproject(camera).sub(camera.position);
+    _viewDirection.copy(e.controls.target).sub(camera.position);
+    const p = camera.position;
+    return pointedHeightOnBodyPlane(
+        { x: p.x, y: p.y, z: p.z },
+        { x: _aimDirection.x, y: _aimDirection.y, z: _aimDirection.z },
+        { x: _viewDirection.x, y: _viewDirection.y, z: _viewDirection.z },
+        orbit.targetBounds,
+    );
+}
+
+/** 右ドラッグ・指二本のドラッグの縦の動き dyPx (CSS の px、下向きが正) で、回る中心とカメラを上下に動かす。 */
+function moveTargetByDrag(e: Entry, dyPx: number) {
+    const orbit = e.orbit;
+    if (!orbit || dyPx === 0) return;
+    const height = e.canvas.clientHeight || e.size.height;
+    shiftTargetHeight(e, orbit, dragTargetHeightDelta(dyPx, height, cameraDistance(e), AVATAR_CAMERA_FOV_DEG));
+    e.userMoved = true;
+}
+
+/** 回る中心 (controls.target) とカメラを、同じだけ上下に動かす (カメラから中心への向きと距離は
+ * 変わらない)。動かした後で、中心を体の範囲へ押し戻す。 */
+function shiftTargetHeight(e: Entry, orbit: AvatarOrbitLimits, dy: number) {
+    if (!(dy !== 0) || !Number.isFinite(dy)) return;
+    e.controls.target.y += dy;
+    e.camera.position.y += dy;
+    keepTargetInBounds(e, orbit);
 }
 
 /** 回る中心 (controls.target) が体の範囲の外へ出ていたら、範囲の中へ押し戻す。カメラも同じだけ
@@ -608,6 +792,7 @@ function resetCamera(e: Entry) {
             e.placingCamera = false;
         }
         e.userMoved = false;
+        e.zoomAim = null;
         controls.enabled = true;
     }
     renderIfStopped(e);
