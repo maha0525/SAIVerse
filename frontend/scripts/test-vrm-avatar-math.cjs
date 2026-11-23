@@ -37,6 +37,21 @@ const {
     VOICE_LEVEL_FULL_RMS,
     mouthOpennessFromVoiceLevel,
     decideMouthTarget,
+    ORBIT_MIN_POLAR_RAD,
+    ORBIT_MAX_POLAR_RAD,
+    computeAvatarOrbitLimits,
+    clampOrbitTarget,
+    pointedHeightOnBodyPlane,
+    zoomTargetHeight,
+    dragTargetHeightDelta,
+    keepsZoomAim,
+    ZOOM_AIM_KEEP_PX,
+    tapFromPress,
+    isDoubleTap,
+    TAP_MAX_DURATION_MS,
+    TAP_MAX_MOVE_PX,
+    DOUBLE_TAP_MAX_INTERVAL_MS,
+    DOUBLE_TAP_MAX_DISTANCE_PX,
 } = mod.exports;
 
 // ── canvas を持つ借り手の決め方 ──
@@ -354,10 +369,259 @@ assert.equal(smoothToward(0.3, 0, 0.1, 0), 0, 'zero time constant jumps');
     assert.ok(ankleFromBottom > 0.12 && ankleFromBottom < 0.25, `ankle at ${ankleFromBottom} of the frame height`);
 }
 
+// ── カメラを回す・寄せる範囲 (docs/intent/screen_avatar.md「カメラを回す・寄せる」) ──
+{
+    const bones = {
+        hips: { x: 0, y: 0.9, z: 0 },
+        head: { x: 0, y: 1.4, z: 0 },
+        leftFoot: { x: 0.1, y: 0.08, z: 0 },
+        rightFoot: { x: -0.1, y: 0.08, z: 0 },
+        leftUpperArm: { x: 0.17, y: 1.3, z: 0 },
+        rightUpperArm: { x: -0.17, y: 1.3, z: 0 },
+    };
+    const deg = r => r * 180 / Math.PI;
+    // 縦は、水平から 60 度上 (polar 30 度) から、水平から 10 度下 (polar 100 度) まで
+    assert.ok(Math.abs(deg(ORBIT_MIN_POLAR_RAD) - 30) < 1e-9);
+    assert.ok(Math.abs(deg(ORBIT_MAX_POLAR_RAD) - 100) < 1e-9);
+    // 最初の構図のカメラは水平 (polar 90 度) なので、範囲の中にある
+    assert.ok(ORBIT_MIN_POLAR_RAD < Math.PI / 2 && Math.PI / 2 < ORBIT_MAX_POLAR_RAD);
+
+    const tanHalf = Math.tan((AVATAR_CAMERA_FOV_DEG * Math.PI / 180) / 2);
+    const dist = f => Math.hypot(f.position.x - f.target.x, f.position.y - f.target.y, f.position.z - f.target.z);
+    for (const aspect of [3 / 4, 4 / 3, 0.45, 1]) {
+        const upper = computeAvatarFraming(bones, 'upper', aspect);
+        const full = computeAvatarFraming(bones, 'full', aspect);
+        const lu = computeAvatarOrbitLimits(bones, upper, aspect);
+        const lf = computeAvatarOrbitLimits(bones, full, aspect);
+        // 'upper' と 'full' で同じ範囲
+        assert.deepEqual(lu, lf, `same limits for both framings at aspect ${aspect}`);
+        // 最初の構図の距離は、上下限の中にある (戻したときに押し戻されない)
+        for (const f of [upper, full]) {
+            assert.ok(lu.minDistance <= dist(f) && dist(f) <= lu.maxDistance, `default distance within limits (${aspect})`);
+            const c = clampOrbitTarget(f.target, lu.targetBounds);
+            assert.deepEqual(c, f.target, `default target stays inside (${aspect})`);
+        }
+        // いちばん寄ったとき: 頭のボーンから頭のてっぺんまで (0.225 m) が、縦にも横にも収まり、
+        // 縦か横のどちらかは、それを 1.25 倍した長さ (顎の下が少し入るくらい) ぴったり
+        const visibleH = 2 * lu.minDistance * tanHalf;
+        const visibleW = visibleH * aspect;
+        const headSpan = 0.5 * 0.45;
+        assert.ok(Math.min(visibleH, visibleW) >= headSpan, `face fits at the closest (${aspect})`);
+        assert.ok(Math.abs(Math.min(visibleH, visibleW) - headSpan * 1.25) < 1e-9, `face fills the frame (${aspect})`);
+        // いちばん引いたとき: 'full' の構図より 15% 遠い (全身に少し余裕がある)
+        assert.ok(Math.abs(lu.maxDistance - dist(full) * 1.15) < 1e-9, `farthest is a bit beyond full (${aspect})`);
+        assert.ok(lu.minDistance < dist(upper) && dist(full) < lu.maxDistance);
+    }
+
+    // 回る中心の範囲: 足の裏から頭のてっぺんまで、肩幅の内側 (体の縦の軸から 0.17 m)
+    const limits = computeAvatarOrbitLimits(bones, computeAvatarFraming(bones, 'upper', 3 / 4), 3 / 4);
+    const b = limits.targetBounds;
+    assert.equal(b.axisX, 0);
+    assert.equal(b.axisZ, 0);
+    assert.ok(Math.abs(b.radius - 0.17) < 1e-9, `radius ${b.radius}`);
+    assert.ok(Math.abs(b.maxY - (1.4 + 0.5 * 0.45)) < 1e-9, `top ${b.maxY}`);
+    assert.ok(b.minY < bones.leftFoot.y && b.minY > bones.leftFoot.y - 0.15, `sole ${b.minY}`);
+    // 押し戻し: 中なら同じ、上下は端へ、水平は軸からの向きを保って半径の上へ
+    assert.deepEqual(clampOrbitTarget({ x: 0.1, y: 1.0, z: -0.05 }, b), { x: 0.1, y: 1.0, z: -0.05 });
+    assert.equal(clampOrbitTarget({ x: 0, y: 5, z: 0 }, b).y, b.maxY);
+    assert.equal(clampOrbitTarget({ x: 0, y: -3, z: 0 }, b).y, b.minY);
+    const side = clampOrbitTarget({ x: 0.6, y: 1.0, z: 0.8 }, b);
+    assert.ok(Math.abs(Math.hypot(side.x, side.z) - 0.17) < 1e-9, 'pushed onto the radius');
+    assert.ok(Math.abs(side.x / side.z - 0.6 / 0.8) < 1e-9, 'direction from the axis is kept');
+    // 背の違うモデルでも、同じ割合 (2 倍の大きさなら距離も範囲も 2 倍)
+    const scale = v => v && ({ x: v.x * 2, y: v.y * 2, z: v.z * 2 });
+    const tall = Object.fromEntries(Object.entries(bones).map(([k, v]) => [k, scale(v)]));
+    const tallLimits = computeAvatarOrbitLimits(tall, computeAvatarFraming(tall, 'upper', 3 / 4), 3 / 4);
+    assert.ok(Math.abs(tallLimits.minDistance - 2 * limits.minDistance) < 1e-9);
+    assert.ok(Math.abs(tallLimits.maxDistance - 2 * limits.maxDistance) < 1e-9);
+    assert.ok(Math.abs(tallLimits.targetBounds.radius - 2 * b.radius) < 1e-9);
+    // ごく細い枠で最初の構図の中心が体の範囲の外に出るときは、範囲の側を広げて中心を入れる
+    for (const aspect of [0.1, 0.05]) {
+        for (const mode of ['upper', 'full']) {
+            const f = computeAvatarFraming(bones, mode, aspect);
+            const l = computeAvatarOrbitLimits(bones, f, aspect);
+            assert.deepEqual(clampOrbitTarget(f.target, l.targetBounds), f.target, `thin frame ${mode} ${aspect}`);
+            assert.ok(l.minDistance <= dist(f) && dist(f) <= l.maxDistance);
+        }
+    }
+    // 足や腕のボーンが無くても、縦横比が分からなくても、数が壊れない
+    for (const aspect of [0, NaN, -1, Infinity, 1]) {
+        const minimal = { hips: bones.hips, head: bones.head };
+        const l = computeAvatarOrbitLimits(minimal, computeAvatarFraming(minimal, 'full', aspect), aspect);
+        for (const v of [l.minDistance, l.maxDistance, l.targetBounds.radius, l.targetBounds.minY, l.targetBounds.maxY]) {
+            assert.ok(Number.isFinite(v), `finite with aspect ${aspect}`);
+        }
+        assert.ok(l.minDistance > 0 && l.minDistance < l.maxDistance);
+    }
+    // 'full' の構図の中心の高さを持ち、それは範囲の中にある (細い枠で 'upper' が最初の構図でも)
+    for (const aspect of [3 / 4, 16 / 9, 0.45, 0.1, 0.05]) {
+        const full = computeAvatarFraming(bones, 'full', aspect);
+        for (const mode of ['upper', 'full']) {
+            const l = computeAvatarOrbitLimits(bones, computeAvatarFraming(bones, mode, aspect), aspect);
+            assert.equal(l.fullTargetY, full.target.y, `fullTargetY ${mode} ${aspect}`);
+            assert.ok(l.targetBounds.minY <= l.fullTargetY && l.fullTargetY <= l.targetBounds.maxY,
+                `fullTargetY inside the bounds ${mode} ${aspect}`);
+        }
+    }
+}
+
+// ── 寄る・引くで、回る中心の高さを動かす (指した高さが、いちばん寄ったときに真ん中へ来る) ──
+{
+    const bones = {
+        hips: { x: 0, y: 0.9, z: 0 },
+        head: { x: 0, y: 1.4, z: 0 },
+        leftFoot: { x: 0.1, y: 0.08, z: 0 },
+        rightFoot: { x: -0.1, y: 0.08, z: 0 },
+        leftUpperArm: { x: 0.17, y: 1.3, z: 0 },
+        rightUpperArm: { x: -0.17, y: 1.3, z: 0 },
+    };
+    const top = 1.4 + 0.5 * 0.45;
+    const faceY = (bones.head.y + top) / 2;
+    const tanHalf = Math.tan((AVATAR_CAMERA_FOV_DEG * Math.PI / 180) / 2);
+    const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
+
+    // 指している高さ: 正面から水平に見て、体の縦の面 (z = 0) と交わる高さ
+    const limits = computeAvatarOrbitLimits(bones, computeAvatarFraming(bones, 'full', 3 / 4), 3 / 4);
+    const b = limits.targetBounds;
+    const level = { x: 0, y: 0, z: -1 };
+    assert.ok(near(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0.1, y: 0.2, z: -1 }, level, b), 1.6));
+    // 範囲の外を指したら、端に収める
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 1, z: -1 }, level, b), b.maxY);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: -1, z: -1 }, level, b), b.minY);
+    // 斜め上から見下ろしても、向いている先の高さを指す (向きの長さは問わない)
+    const cam = { x: 0, y: 2.5, z: 2 };
+    const look = { x: 0, y: 1.2 - 2.5, z: -2 };
+    assert.ok(near(pointedHeightOnBodyPlane(cam, look, { x: 0, y: -0.65, z: -1 }, b), 1.2));
+    // 横から見ても (カメラが +X にいて -X を向く)、体の縦の軸を通る面で測る
+    assert.ok(near(pointedHeightOnBodyPlane({ x: 2, y: 1, z: 0.05 }, { x: -1, y: 0.25, z: 0 }, { x: -1, y: 0, z: 0 }, b), 1.5));
+    // 真下を向いている・線が面とほとんど平行・交わる点がカメラの後ろ → 決めない (null)
+    assert.equal(pointedHeightOnBodyPlane(cam, { x: 0, y: -1, z: 0 }, { x: 0, y: -1, z: 0 }, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 1, y: 0, z: -0.01 }, level, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 0, z: 1 }, level, b), null);
+    assert.equal(pointedHeightOnBodyPlane({ x: 0, y: 1, z: 3 }, { x: 0, y: 0, z: 0 }, level, b), null);
+
+    // 一回分の高さの動かし方
+    const base = { currentY: 1.0, minDistance: 1, maxDistance: 5, pointedY: 1.5, fullTargetY: 0.8 };
+    // 寄る: 残りの距離の半分を寄ったら、指した高さとの差も半分詰める
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 2 }), 1.25));
+    // いちばん寄った距離に着いたら、指した高さちょうど
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 1 }), 1.5);
+    // もういちばん寄っている・指した高さが無い → 動かさない
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 1, newDistance: 0.9 }), 1.0);
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 2, pointedY: null }), 1.0);
+    // 引く: 残りの距離の半分を引いたら、'full' の構図の高さとの差も半分詰める。いちばん引いたら、その高さちょうど
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 4 }), 0.9));
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 5 }), 0.8);
+    // 引くときは、指した高さを使わない
+    assert.ok(near(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 4, pointedY: null }), 0.9));
+    // もういちばん引いている・距離が変わらない → 動かさない
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 5, newDistance: 5.1 }), 1.0);
+    assert.equal(zoomTargetHeight({ ...base, prevDistance: 3, newDistance: 3 }), 1.0);
+
+    // 寄る先を使い続けるか: ポインターがほとんど動いていない間だけ
+    assert.equal(ZOOM_AIM_KEEP_PX, 3);
+    assert.equal(keepsZoomAim(null, { x: 10, y: 10 }), false);
+    assert.equal(keepsZoomAim({ x: 10, y: 10 }, { x: 12, y: 12 }), true);
+    assert.equal(keepsZoomAim({ x: 10, y: 10 }, { x: 14, y: 10 }), false);
+
+    // 何回にも分けて顔へ寄る。'full' の構図から、ホイール一回で距離が 0.95 倍になるとして、
+    // いちばん寄った距離まで寄る。カメラは正面から水平に見ている (polar 90 度)。
+    for (const aspect of [16 / 9, 0.45]) {
+        const full = computeAvatarFraming(bones, 'full', aspect);
+        const l = computeAvatarOrbitLimits(bones, full, aspect);
+        const zoomInTo = (aimAt) => {
+            let y = full.target.y;
+            let d = full.position.z - full.target.z;
+            // 'full' の構図で、顔を指しているポインターの、枠の真ん中からの縦の位置 (-1〜1)
+            const cursor = (faceY - y) / (d * tanHalf);
+            let kept = null;
+            for (let i = 0; i < 500 && d > l.minDistance; i++) {
+                const camera = { x: full.target.x, y, z: full.target.z + d };
+                // 'face': ポインターを顔に合わせ続ける / 'still': ポインターを止めたまま回し続ける
+                const ray = aimAt === 'face'
+                    ? { x: 0, y: faceY - y, z: -d }
+                    : { x: 0, y: cursor * tanHalf, z: -1 };
+                const pointed = pointedHeightOnBodyPlane(camera, ray, level, l.targetBounds);
+                // ポインターが止まっている間は、最初に決めた高さを使い続ける (keepsZoomAim)
+                if (kept === null || aimAt === 'face') kept = pointed;
+                const next = Math.max(l.minDistance, d * 0.95);
+                y = zoomTargetHeight({
+                    currentY: y, prevDistance: d, newDistance: next,
+                    minDistance: l.minDistance, maxDistance: l.maxDistance,
+                    pointedY: kept, fullTargetY: l.fullTargetY,
+                });
+                d = next;
+            }
+            return { y, d };
+        };
+        for (const aimAt of ['face', 'still']) {
+            const { y, d } = zoomInTo(aimAt);
+            assert.equal(d, l.minDistance, `reached the closest (${aspect} ${aimAt})`);
+            const half = d * tanHalf;
+            // 顔 (頭のボーンから頭のてっぺんまで) が枠の中にあり、真ん中に来ている
+            assert.ok(y - half <= bones.head.y && top <= y + half, `face inside the frame (${aspect} ${aimAt})`);
+            assert.ok(near(y, faceY, 1e-6), `face centered (${aspect} ${aimAt}): ${y} vs ${faceY}`);
+
+            // そこからいちばん引くと、'full' の構図の高さに戻る (全身が枠に収まる)
+            let ty = y;
+            let td = d;
+            for (let i = 0; i < 500 && td < l.maxDistance; i++) {
+                const next = Math.min(l.maxDistance, td / 0.95);
+                ty = zoomTargetHeight({
+                    currentY: ty, prevDistance: td, newDistance: next,
+                    minDistance: l.minDistance, maxDistance: l.maxDistance,
+                    pointedY: null, fullTargetY: l.fullTargetY,
+                });
+                td = next;
+            }
+            assert.equal(td, l.maxDistance);
+            assert.ok(near(ty, full.target.y), `back to the full framing height (${aspect} ${aimAt})`);
+            const fullHalf = td * tanHalf;
+            assert.ok(ty - fullHalf < bones.leftFoot.y && top < ty + fullHalf, `whole body in the frame (${aspect})`);
+        }
+    }
+
+    // ドラッグ: canvas の縦一つ分で、いまの距離で映る縦の長さだけ動く。下へ動かすと中心は上へ。
+    const d = 2;
+    assert.ok(near(dragTargetHeightDelta(400, 400, d), 2 * d * tanHalf));
+    assert.ok(near(dragTargetHeightDelta(-100, 400, d), -0.5 * d * tanHalf));
+    assert.ok(dragTargetHeightDelta(10, 400, d) > 0, 'dragging down raises the target (the avatar moves down)');
+    assert.equal(dragTargetHeightDelta(10, 0, d), 0);
+    assert.equal(dragTargetHeightDelta(NaN, 400, d), 0);
+}
+
+// ── ダブルタップの判定 ──
+{
+    assert.equal(TAP_MAX_DURATION_MS, 250);
+    assert.equal(TAP_MAX_MOVE_PX, 10);
+    assert.equal(DOUBLE_TAP_MAX_INTERVAL_MS, 300);
+    assert.equal(DOUBLE_TAP_MAX_DISTANCE_PX, 30);
+    const s = (timeMs, x, y) => ({ timeMs, x, y });
+    // 短く、ほとんど動かない押し方はタップ
+    const first = tapFromPress(s(1000, 100, 100), s(1080, 103, 101));
+    assert.deepEqual(first, { downMs: 1000, upMs: 1080, x: 100, y: 100 });
+    // 長押しと、ドラッグはタップではない
+    assert.equal(tapFromPress(s(1000, 100, 100), s(1300, 100, 100)), null, 'a long press is not a tap');
+    assert.equal(tapFromPress(s(1000, 100, 100), s(1050, 120, 100)), null, 'a drag is not a tap');
+    assert.equal(tapFromPress(s(1000, 100, 100), s(990, 100, 100)), null, 'time going backwards is not a tap');
+    // 近い所への、すぐ続く二回目のタップはダブルタップ
+    const second = tapFromPress(s(1250, 110, 108), s(1320, 110, 108));
+    assert.ok(isDoubleTap(first, second));
+    // 一つ前のタップが無い・間が空きすぎ・離れすぎはダブルタップではない
+    assert.equal(isDoubleTap(null, second), false);
+    const late = tapFromPress(s(1400, 100, 100), s(1450, 100, 100));
+    assert.equal(isDoubleTap(first, late), false, 'too slow');
+    const far = tapFromPress(s(1200, 160, 100), s(1250, 160, 100));
+    assert.equal(isDoubleTap(first, far), false, 'too far apart');
+    // 二回目が一回目より前に始まっている (時刻が戻った) ものは数えない
+    const overlapped = { downMs: 1050, upMs: 1100, x: 100, y: 100 };
+    assert.equal(isDoubleTap(first, overlapped), false);
+}
+
 // ── 呼吸の揺れはごく小さい ──
 for (let t = 0; t < 20; t += 0.1) {
     const s = breathingSway(t);
     assert.ok(Math.abs(s.x) <= 0.02 && Math.abs(s.z) <= 0.02);
 }
 
-console.log('VRM avatar holder choice, framing, arm pose, follower bones, mouth, blink and sway rules passed.');
+console.log('VRM avatar holder choice, framing, camera orbit limits, double tap, arm pose, follower bones, mouth, blink and sway rules passed.');
