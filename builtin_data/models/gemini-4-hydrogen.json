@@ -14,7 +14,7 @@
     "rpd": 20,
     "reset_timezone": "America/Los_Angeles"
   },
-  "timeout": 900,
+  "timeout": 300,
   "parameters": {
     "thinking_level": {
       "type": "dropdown",

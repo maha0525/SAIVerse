@@ -6,8 +6,10 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from . import openai_runtime
+from .cancel_transport import CancellableHTTPTransport, cancellable_sleep
 from .exceptions import EmptyResponseError
 from .openai import OpenAIClient
+from sea.cancellation import ExecutionCancelledException
 
 
 def _mapping_option(options: Dict[str, Any], name: str) -> Dict[str, Any]:
@@ -128,7 +130,6 @@ class NvidiaNIMClient(OpenAIClient):
         Returns the JSON string of the structured output.
         """
         import httpx
-        import time
 
         url = f"{self._nim_base_url}/chat/completions"
 
@@ -200,11 +201,16 @@ class NvidiaNIMClient(OpenAIClient):
         for attempt in range(max_retries + 1):
             try:
                 # request_kwargs.timeout applies here as on the SDK path (_timeout_option).
-                with httpx.Client(timeout=timeout) as client:
+                with httpx.Client(
+                    timeout=timeout,
+                    transport=CancellableHTTPTransport(),
+                ) as client:
                     response = client.post(url, **post_kwargs)
                     response.raise_for_status()
                     resp_json = response.json()
                 break  # Success, exit retry loop
+            except ExecutionCancelledException:
+                raise
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 if attempt < max_retries:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s
@@ -212,7 +218,7 @@ class NvidiaNIMClient(OpenAIClient):
                         "NIM structured output request failed (attempt %d/%d): %s. Retrying in %ds...",
                         attempt + 1, max_retries + 1, type(e).__name__, wait_time
                     )
-                    time.sleep(wait_time)
+                    cancellable_sleep(wait_time)
                 else:
                     logging.error(
                         "NIM structured output request failed after %d attempts: %s",
@@ -231,7 +237,7 @@ class NvidiaNIMClient(OpenAIClient):
                         "NIM structured output request failed with %d (attempt %d/%d). Retrying in %ds...",
                         e.response.status_code, attempt + 1, max_retries + 1, wait_time
                     )
-                    time.sleep(wait_time)
+                    cancellable_sleep(wait_time)
                 else:
                     raise
 

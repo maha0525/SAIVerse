@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
+import httpx
 import openai
 from openai import OpenAI
 
@@ -18,6 +19,7 @@ from saiverse.llm_router import route
 from . import openai_errors
 from . import openai_runtime
 from .base import LLMClient, ToolSpecFormat, get_llm_logger
+from .cancel_transport import CancellableHTTPTransport
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
@@ -28,6 +30,7 @@ from .exceptions import (
     RateLimitError,
     ServerError,
 )
+from sea.cancellation import ExecutionCancelledException
 from .openai_message_preparer import (
     prepare_openai_messages,
 )
@@ -44,6 +47,7 @@ from .utils import merge_reasoning_strings, positive_token_count
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
+DEFAULT_TIMEOUT_SECONDS = 300.0  # 5 min; overridden by model config timeout
 _TEMPERATURE_FIXED_MODELS = {"gpt-5-nano"}
 
 
@@ -286,11 +290,20 @@ class OpenAIClient(LLMClient):
                 user_message="OpenAI APIキーが設定されていません。管理者にお問い合わせください。"
             )
 
-        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        effective_timeout = float(timeout) if timeout is not None else DEFAULT_TIMEOUT_SECONDS
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": effective_timeout,
+            # リトライは openai_runtime.call_with_retry (MAX_RETRIES=3: 初回+2回) で
+            # 一元管理し、SDK 既定 (max_retries=2) との二重リトライを防ぐ。
+            "max_retries": 0,
+            "http_client": httpx.Client(
+                transport=CancellableHTTPTransport(),
+                timeout=effective_timeout,
+            ),
+        }
         if base_url:
             client_kwargs["base_url"] = base_url
-        if timeout is not None:
-            client_kwargs["timeout"] = timeout
         # Sent on every request to this backend. Used for provider-side app
         # identification (OpenRouter attribution headers); belongs to the
         # connection, not to individual request parameters.
@@ -501,6 +514,8 @@ class OpenAIClient(LLMClient):
                 initial_backoff=INITIAL_BACKOFF,
                 should_retry=_should_retry,
             )
+        except ExecutionCancelledException:
+            raise
         except Exception as e:
             logging.exception("OpenAI call failed")
             raise _convert_to_llm_error(e, context)
@@ -595,6 +610,8 @@ class OpenAIClient(LLMClient):
                 initial_backoff=INITIAL_BACKOFF,
                 should_retry=_should_retry,
             )
+        except ExecutionCancelledException:
+            raise
         except Exception as e:
             logging.exception("OpenAI call failed")
             raise _convert_to_llm_error(e, context)
@@ -1067,6 +1084,8 @@ class OpenAIClient(LLMClient):
                     initial_backoff=INITIAL_BACKOFF,
                     should_retry=_should_retry,
                 )
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 logging.exception("OpenAI call failed")
                 raise _convert_to_llm_error(e, "streaming")
@@ -1104,6 +1123,8 @@ class OpenAIClient(LLMClient):
                 initial_backoff=INITIAL_BACKOFF,
                 should_retry=_should_retry,
             )
+        except ExecutionCancelledException:
+            raise
         except Exception as e:
             logging.exception("OpenAI call failed")
             raise _convert_to_llm_error(e, "JSON mode call")
@@ -1114,7 +1135,7 @@ class OpenAIClient(LLMClient):
                 history_snippets=history_snippets,
                 reasoning_chunks=reasoning_chunks,
             )
-        except LLMError:
+        except (LLMError, ExecutionCancelledException):
             raise
         except Exception as e:
             logging.exception("OpenAI stream call failed")
