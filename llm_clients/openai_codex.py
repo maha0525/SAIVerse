@@ -36,7 +36,7 @@ from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .base import LLMClient, ToolSpecFormat
-from .cancel_transport import CancellableHTTPTransport
+from .cancel_transport import install_cancellable_transport
 from .exceptions import InvalidRequestError
 from sea.cancellation import raise_if_llm_stopped
 from .openai_codex_auth import (
@@ -325,9 +325,8 @@ class OpenAICodexClient(LLMClient):
     def _ensure_session(self, is_siwc: bool = False) -> Any:
         if is_siwc:
             if self._httpx_session is None:
-                self._httpx_session = httpx.Client(
-                    timeout=self._timeout,
-                    transport=CancellableHTTPTransport(),
+                self._httpx_session = install_cancellable_transport(
+                    httpx.Client(timeout=self._timeout)
                 )
             return self._httpx_session
         if self._session is None:

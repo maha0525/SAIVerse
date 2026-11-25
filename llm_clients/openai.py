@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-import httpx
+import httpx2
 import openai
 from openai import OpenAI
 
@@ -19,7 +19,7 @@ from saiverse.llm_router import route
 from . import openai_errors
 from . import openai_runtime
 from .base import LLMClient, ToolSpecFormat, get_llm_logger
-from .cancel_transport import CancellableHTTPTransport
+from .cancel_transport import install_cancellable_transport2
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
@@ -291,16 +291,18 @@ class OpenAIClient(LLMClient):
             )
 
         effective_timeout = float(timeout) if timeout is not None else DEFAULT_TIMEOUT_SECONDS
+        # openai 3.x は httpx2 ベース。環境変数プロキシ設定を維持したまま
+        # キャンセル対応トランスポートを差し込む。
+        http_client = install_cancellable_transport2(
+            httpx2.Client(timeout=effective_timeout)
+        )
         client_kwargs: Dict[str, Any] = {
             "api_key": api_key,
             "timeout": effective_timeout,
             # リトライは openai_runtime.call_with_retry (MAX_RETRIES=3: 初回+2回) で
             # 一元管理し、SDK 既定 (max_retries=2) との二重リトライを防ぐ。
             "max_retries": 0,
-            "http_client": httpx.Client(
-                transport=CancellableHTTPTransport(),
-                timeout=effective_timeout,
-            ),
+            "http_client": http_client,
         }
         if base_url:
             client_kwargs["base_url"] = base_url

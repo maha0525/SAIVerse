@@ -12,8 +12,13 @@ import pytest
 from google import genai
 from google.genai import types
 
-from llm_clients.cancel_transport import CancellableHTTPTransport, cancellable_sleep
-from saiverse.gemini_clients import _attach_cancellable_retry_sleep
+from llm_clients.cancel_transport import (
+    CancellableHTTPTransport,
+    cancellable_sleep,
+    install_cancellable_transport,
+    install_cancellable_transport2,
+)
+from saiverse.gemini_clients import _attach_cancellable_hooks
 from sea.cancellation import (
     CancellationToken,
     ExecutionCancelledException,
@@ -159,7 +164,7 @@ def test_genai_sdk_stop_does_not_retry_after_abort():
             client_args={"transport": CancellableHTTPTransport()},
         )
         client = genai.Client(api_key="test-key", http_options=http_options)
-        _attach_cancellable_retry_sleep(client)
+        _attach_cancellable_hooks(client)
 
         def _stop_soon():
             assert entered.wait(timeout=5.0)
@@ -227,7 +232,7 @@ def test_genai_sdk_stop_aborts_retry_backoff_sleep_immediately():
             client_args={"transport": CancellableHTTPTransport()},
         )
         client = genai.Client(api_key="test-key", http_options=http_options)
-        _attach_cancellable_retry_sleep(client)
+        _attach_cancellable_hooks(client)
 
         def _stop_during_sleep():
             assert first_503_sent.wait(timeout=5.0)
@@ -421,3 +426,112 @@ def test_provider_timeout_and_retry_defaults_unified():
     ):
         cfg = json.loads((Path("builtin_data/models") / name).read_text(encoding="utf-8"))
         assert cfg["timeout"] == 300, f"{name} timeout should be 300"
+
+
+def test_openai_client_initializes_with_real_sdk_and_httpx2():
+    """openai 3.x の実コンストラクタが httpx2.Client + キャンセル対応で正常初期化する (P1 回帰)。"""
+    import httpx2
+    from llm_clients.openai import OpenAIClient
+
+    client = OpenAIClient(model="gpt-5", api_key="synthetic-test-key")
+    try:
+        inner_http = client.client._client
+        assert isinstance(inner_http, httpx2.Client)
+        assert client.client.max_retries == 0
+    finally:
+        client.client.close()
+
+
+def test_install_cancellable_transport_preserves_env_proxies(monkeypatch):
+    """HTTPS_PROXY がある環境でもプロキシマウント (HTTPProxy) が維持され、かつキャンセル対応になる (P2 回帰)。"""
+    import httpcore
+    import httpcore2
+    import httpx2
+    from llm_clients.cancel_transport import (
+        _CancellableSyncBackend,
+        _CancellableSyncBackend2,
+    )
+    from saiverse.gemini_clients import build_gemini_clients
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-test-key")
+    monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
+
+    with install_cancellable_transport(httpx.Client()) as c1:
+        proxy_pools = [
+            tr._pool for tr in c1._mounts.values() if isinstance(tr._pool, httpcore.HTTPProxy)
+        ]
+        assert proxy_pools, "httpx.Client should preserve HTTPS_PROXY HTTPProxy mount"
+        assert isinstance(proxy_pools[0]._network_backend, _CancellableSyncBackend)
+
+    with install_cancellable_transport2(httpx2.Client()) as c2:
+        proxy_pools2 = [
+            tr._pool for tr in c2._mounts.values() if isinstance(tr._pool, httpcore2.HTTPProxy)
+        ]
+        assert proxy_pools2, "httpx2.Client should preserve HTTPS_PROXY HTTPProxy mount"
+        assert isinstance(proxy_pools2[0]._network_backend, _CancellableSyncBackend2)
+
+    _free, _paid, active = build_gemini_clients(prefer_paid=True, timeout_seconds=30.0)
+    assert active is not None
+    gemini_http = active._api_client._httpx_client
+    gemini_proxy_pools = [
+        tr._pool for tr in gemini_http._mounts.values() if isinstance(tr._pool, httpcore.HTTPProxy)
+    ]
+    assert gemini_proxy_pools, "Gemini client should preserve HTTPS_PROXY HTTPProxy mount"
+    assert isinstance(gemini_proxy_pools[0]._network_backend, _CancellableSyncBackend)
+
+
+@pytest.mark.parametrize("use_httpx2", [False, True])
+def test_stop_aborts_hanging_tls_handshake_immediately(use_httpx2: bool):
+    """TCP 接続後に TLS ハンドシェイクを返さない接続先でも user_stop で即座に抜ける (P2 回帰)。"""
+    import socket
+    import httpx2
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    accepted = threading.Event()
+    release = threading.Event()
+
+    def _accept_and_hang():
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        accepted.set()
+        try:
+            release.wait(timeout=15.0)
+        finally:
+            conn.close()
+
+    t_srv = threading.Thread(target=_accept_and_hang, daemon=True)
+    t_srv.start()
+
+    token = CancellationToken()
+
+    def _stop_after_tcp():
+        assert accepted.wait(timeout=5.0)
+        time.sleep(0.05)
+        token.cancel(interrupted_by="user_stop")
+
+    t_stop = threading.Thread(target=_stop_after_tcp, daemon=True)
+    t_stop.start()
+
+    try:
+        if use_httpx2:
+            client = install_cancellable_transport2(httpx2.Client(timeout=30.0, trust_env=False))
+        else:
+            client = install_cancellable_transport(httpx.Client(timeout=30.0, trust_env=False))
+        with client:
+            t0 = time.monotonic()
+            with pytest.raises(ExecutionCancelledException) as exc_info:
+                with bind_llm_cancellation_token(token):
+                    client.get(f"https://127.0.0.1:{port}/")
+            elapsed = time.monotonic() - t0
+            assert elapsed < 2.0
+            assert exc_info.value.interrupted_by == "user_stop"
+    finally:
+        release.set()
+        srv.close()

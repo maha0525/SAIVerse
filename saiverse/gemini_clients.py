@@ -3,37 +3,21 @@ from __future__ import annotations
 
 import logging
 import os
-import ssl
 import sys
 from typing import Any
 
-from llm_clients.cancel_transport import CancellableHTTPTransport, cancellable_sleep
+from llm_clients.cancel_transport import cancellable_sleep, install_cancellable_transport
 from saiverse.gemini_timing import trace_gemini_request
 
 LOGGER = logging.getLogger(__name__)
 
 
-def _default_ssl_context() -> ssl.SSLContext:
-    """Build the same default SSLContext as google-genai (honoring SSL_CERT_FILE/DIR)."""
-    cafile = os.environ.get("SSL_CERT_FILE")
-    if not cafile:
-        try:
-            import certifi
-
-            cafile = certifi.where()
-        except Exception:  # noqa: BLE001
-            cafile = None
-    return ssl.create_default_context(
-        cafile=cafile,
-        capath=os.environ.get("SSL_CERT_DIR"),
-    )
-
-
-def _attach_cancellable_retry_sleep(client: Any) -> None:
-    """Replace tenacity's blocking sleep on the SDK client with cancellable_sleep."""
+def _attach_cancellable_hooks(client: Any) -> None:
+    """Install cancellable HTTP transport (preserving env proxies) and retry sleep."""
     api_client = getattr(client, "_api_client", None)
     if api_client is None:
         return
+    install_cancellable_transport(getattr(api_client, "_httpx_client", None))
     retry = getattr(api_client, "_retry", None)
     if retry is not None and hasattr(retry, "sleep"):
         retry.sleep = cancellable_sleep
@@ -70,12 +54,7 @@ def build_gemini_clients(
     timeout_ms = None if effective_timeout == 0 else int(effective_timeout * 1000)
 
     def _http_options() -> Any:
-        ssl_ctx = _default_ssl_context()
-        client_args = {
-            "event_hooks": {"request": [trace_gemini_request]},
-            "transport": CancellableHTTPTransport(verify=ssl_ctx),
-            "verify": ssl_ctx,
-        }
+        client_args = {"event_hooks": {"request": [trace_gemini_request]}}
         retry_options = genai.types.HttpRetryOptions(
             attempts=3,
             initial_delay=1.0,
@@ -103,7 +82,7 @@ def build_gemini_clients(
         if not api_key:
             return None
         client = genai.Client(api_key=api_key, http_options=_http_options())
-        _attach_cancellable_retry_sleep(client)
+        _attach_cancellable_hooks(client)
         return client
 
     free_client = _make_client(free_key)

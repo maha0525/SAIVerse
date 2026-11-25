@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from . import openai_runtime
-from .cancel_transport import CancellableHTTPTransport, cancellable_sleep
+from .cancel_transport import cancellable_sleep, install_cancellable_transport
 from .exceptions import EmptyResponseError
 from .openai import OpenAIClient
 from sea.cancellation import ExecutionCancelledException
@@ -201,10 +201,7 @@ class NvidiaNIMClient(OpenAIClient):
         for attempt in range(max_retries + 1):
             try:
                 # request_kwargs.timeout applies here as on the SDK path (_timeout_option).
-                with httpx.Client(
-                    timeout=timeout,
-                    transport=CancellableHTTPTransport(),
-                ) as client:
+                with install_cancellable_transport(httpx.Client(timeout=timeout)) as client:
                     response = client.post(url, **post_kwargs)
                     response.raise_for_status()
                     resp_json = response.json()
