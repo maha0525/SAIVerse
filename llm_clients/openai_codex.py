@@ -36,7 +36,9 @@ from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from .base import LLMClient, ToolSpecFormat
+from .cancel_transport import install_cancellable_transport
 from .exceptions import InvalidRequestError
+from sea.cancellation import raise_if_llm_stopped
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -323,7 +325,9 @@ class OpenAICodexClient(LLMClient):
     def _ensure_session(self, is_siwc: bool = False) -> Any:
         if is_siwc:
             if self._httpx_session is None:
-                self._httpx_session = httpx.Client(timeout=self._timeout)
+                self._httpx_session = install_cancellable_transport(
+                    httpx.Client(timeout=self._timeout)
+                )
             return self._httpx_session
         if self._session is None:
             self._session = cffi_requests.Session(impersonate=CODEX_IMPERSONATE)
@@ -1132,11 +1136,13 @@ class OpenAICodexClient(LLMClient):
 
     def _post_with_auth_retry(self, body: Dict[str, Any]) -> Any:
         """Run `_post_responses`, transparently refreshing once on 401."""
+        raise_if_llm_stopped()
         try:
             return self._post_responses(body)
         except CodexHTTPError as exc:
             if exc.status_code != 401:
                 raise
+            raise_if_llm_stopped()
             LOG.warning(
                 "received 401 from Codex (likely expired access_token); "
                 "attempting auth refresh and retry. body=%s",

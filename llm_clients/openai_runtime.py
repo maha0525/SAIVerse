@@ -5,7 +5,9 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional
 
+from .cancel_transport import cancellable_sleep
 from .exceptions import LLMError, SafetyFilterError
+from sea.cancellation import ExecutionCancelledException
 
 
 _CONTENT_FILTER_USER_MESSAGE = "生成された内容がOpenAIのコンテンツフィルターによりブロックされました。"
@@ -152,6 +154,8 @@ def call_with_retry(
     for attempt in range(max_retries):
         try:
             return create_completion()
+        except ExecutionCancelledException:
+            raise
         except Exception as err:  # noqa: BLE001
             last_error = err
             if should_retry(err) and attempt < max_retries - 1:
@@ -164,7 +168,7 @@ def call_with_retry(
                     type(err).__name__,
                     backoff,
                 )
-                time.sleep(backoff)
+                cancellable_sleep(backoff)
                 continue
             raise
     if last_error:

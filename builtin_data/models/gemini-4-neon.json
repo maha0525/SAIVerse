@@ -10,7 +10,7 @@
   "supports_sampling_parameters": false,
   "supports_model_prefill": false,
   "prefer_paid": true,
-  "timeout": 900,
+  "timeout": 300,
   "cache": {
     "supported": true,
     "type": "implicit",

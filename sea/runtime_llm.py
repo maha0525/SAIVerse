@@ -26,7 +26,7 @@ from sai_memory.memory.storage import (
     system_notice_message,
 )
 from sea.beat_gate import BeatGateClosedError
-from sea.cancellation import ExecutionCancelledException
+from sea.cancellation import ExecutionCancelledException, bind_llm_cancellation_token
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.tool_wait import await_tool_call, wait_tool_call_sync
 from sea.message_stamp import (
@@ -3125,71 +3125,75 @@ async def _consume_pipeline_stream(
         return newline + 1
 
     try:
-        for chunk in stream_iter:
-            if cancellation_token and cancellation_token.is_cancelled():
-                cancelled = True
-                break
+        with bind_llm_cancellation_token(cancellation_token):
+            for chunk in stream_iter:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    cancelled = True
+                    break
 
-            if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                    if event_callback:
+                        event_callback({
+                            "type": "streaming_thinking",
+                            "content": chunk["content"],
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "node_id": getattr(node_def, "id", "llm"),
+                            "pulse_id": state.get("_pulse_id"),
+                            "building_id": stream_building_id,
+                        })
+                    continue
+
+                text_chunks.append(chunk)
                 if event_callback:
                     event_callback({
-                        "type": "streaming_thinking",
-                        "content": chunk["content"],
+                        "type": "streaming_chunk",
+                        "content": chunk,
                         "persona_id": getattr(persona, "persona_id", None),
                         "node_id": getattr(node_def, "id", "llm"),
                         "pulse_id": state.get("_pulse_id"),
                         "building_id": stream_building_id,
                     })
-                continue
 
-            text_chunks.append(chunk)
-            if event_callback:
-                event_callback({
-                    "type": "streaming_chunk",
-                    "content": chunk,
-                    "persona_id": getattr(persona, "persona_id", None),
-                    "node_id": getattr(node_def, "id", "llm"),
-                    "pulse_id": state.get("_pulse_id"),
-                    "building_id": stream_building_id,
-                })
-
-            if pipeline_msg_id:
-                _buf = "".join(text_chunks)
-                while True:
-                    if spell_line_start is not None:
-                        # 唱えごとの行の途中。行が終わったら、その行だけを飛ばして
-                        # 後ろの文の送出を再開する。
-                        _spell_match = _SPELL_PATTERN.match(_buf, spell_line_start)
-                        if _spell_match is None:
-                            # 伸びた行が唱えごとの形をやめた回 (実際には起きない
-                            # はずだが、起きたら普通の本文として扱い直す)。
+                if pipeline_msg_id:
+                    _buf = "".join(text_chunks)
+                    while True:
+                        if spell_line_start is not None:
+                            # 唱えごとの行の途中。行が終わったら、その行だけを飛ばして
+                            # 後ろの文の送出を再開する。
+                            _spell_match = _SPELL_PATTERN.match(_buf, spell_line_start)
+                            if _spell_match is None:
+                                # 伸びた行が唱えごとの形をやめた回 (実際には起きない
+                                # はずだが、起きたら普通の本文として扱い直す)。
+                                spell_line_start = None
+                                continue
+                            _skip_to = _spell_line_skip_to(_buf, _spell_match)
+                            if _skip_to < 0:
+                                break
+                            last_emit_pos = _skip_to
                             spell_line_start = None
                             continue
-                        _skip_to = _spell_line_skip_to(_buf, _spell_match)
-                        if _skip_to < 0:
-                            break
-                        last_emit_pos = _skip_to
-                        spell_line_start = None
-                        continue
-                    # ``_buf`` 上の絶対位置で探す — ``^`` は本物の行頭 (文字列の
-                    # 先頭か改行の直後) にしか当たらないので、文の途中から始まる
-                    # 断片を唱えごとと見間違えない。
-                    _spell_match = _SPELL_PATTERN.search(_buf, last_emit_pos)
-                    if _spell_match is not None:
-                        _emit_fragment(
-                            _buf[last_emit_pos:_spell_match.start()].rstrip(),
-                        )
-                        last_emit_pos = _spell_match.start()
-                        spell_detected = True
-                        spell_line_start = _spell_match.start()
-                        continue
-                    while True:
-                        _boundary = _find_next_sentence_boundary(_buf, last_emit_pos)
-                        if _boundary < 0:
-                            break
-                        _emit_fragment(_buf[last_emit_pos:_boundary])
-                        last_emit_pos = _boundary
-                    break
+                        # ``_buf`` 上の絶対位置で探す — ``^`` は本物の行頭 (文字列の
+                        # 先頭か改行の直後) にしか当たらないので、文の途中から始まる
+                        # 断片を唱えごとと見間違えない。
+                        _spell_match = _SPELL_PATTERN.search(_buf, last_emit_pos)
+                        if _spell_match is not None:
+                            _emit_fragment(
+                                _buf[last_emit_pos:_spell_match.start()].rstrip(),
+                            )
+                            last_emit_pos = _spell_match.start()
+                            spell_detected = True
+                            spell_line_start = _spell_match.start()
+                            continue
+                        while True:
+                            _boundary = _find_next_sentence_boundary(_buf, last_emit_pos)
+                            if _boundary < 0:
+                                break
+                            _emit_fragment(_buf[last_emit_pos:_boundary])
+                            last_emit_pos = _boundary
+                        break
+    except ExecutionCancelledException:
+        LOGGER.info("[sea][pipeline] Stream aborted immediately by stop signal")
+        cancelled = True
     finally:
         if hasattr(stream_iter, "close"):
             stream_iter.close()
@@ -4761,13 +4765,14 @@ async def _run_spell_loop(
             emit_awaiting_response(event_callback, llm_client, persona)
             try:
                 if pipeline_streaming_state is not None:
-                    _retry_stream = llm_client.generate_stream(
-                        messages,
-                        tools=[],
-                        temperature=runtime._default_temperature(persona),
-                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                        **_continuous_cache_kwargs(state, persona, building_id),
-                    )
+                    with bind_llm_cancellation_token(pipeline_streaming_state.get("cancellation_token")):
+                        _retry_stream = llm_client.generate_stream(
+                            messages,
+                            tools=[],
+                            temperature=runtime._default_temperature(persona),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
+                        )
                     # progress に spell 側の器そのものを渡す — retry ストリームの
                     # 途中で死んでも、発火済みの sub-speak 連番と受信済みの chunk が
                     # 器に残る。この周の下書き行はこの retry のための新しい行なので、
@@ -4813,13 +4818,14 @@ async def _run_spell_loop(
                             loop_count,
                         )
                 else:
-                    retry_result = llm_client.generate(
-                        messages,
-                        tools=[],
-                        temperature=runtime._default_temperature(persona),
-                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                        **_continuous_cache_kwargs(state, persona, building_id),
-                    )
+                    with bind_llm_cancellation_token(state.get("_cancellation_token")):
+                        retry_result = llm_client.generate(
+                            messages,
+                            tools=[],
+                            temperature=runtime._default_temperature(persona),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
+                        )
             except EmptyResponseError:
                 # スペルの後に何も言わないのは正常な終わり方。ストリーミング経路は
                 # 空の本文を例外なしで受け取って黙って終わるので、全文一括の
@@ -6326,41 +6332,46 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     emit_awaiting_response(event_callback, llm_client, persona)
                     for stream_attempt in range(max_stream_retries):
                         text_chunks: list[str] = []
-                        stream_iter = llm_client.generate_stream(
-                            messages,
-                            tools=tools_spec,
-                            temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                            **_continuous_cache_kwargs(state, persona, building_id),
-                        )
                         try:
-                            for chunk in stream_iter:
-                                if cancellation_token and cancellation_token.is_cancelled():
-                                    LOGGER.info("[sea] Tool streaming cancelled by user")
-                                    cancelled_during_stream = True
-                                    break
-                                if isinstance(chunk, dict) and chunk.get("type") == "thinking":
-                                    event_callback({
-                                        "type": "streaming_thinking",
-                                        "content": chunk["content"],
-                                        "persona_id": getattr(persona, "persona_id", None),
-                                        "node_id": getattr(node_def, "id", "llm"),
-                                        "pulse_id": state.get("_pulse_id"),
-                                        "building_id": _tool_stream_bid,
-                                    })
-                                    continue
-                                text_chunks.append(chunk)
-                                event_callback({
-                                    "type": "streaming_chunk",
-                                    "content": chunk,
-                                    "persona_id": getattr(persona, "persona_id", None),
-                                    "node_id": getattr(node_def, "id", "llm"),
-                                    "pulse_id": state.get("_pulse_id"),
-                                    "building_id": _tool_stream_bid,
-                                })
-                        finally:
-                            if hasattr(stream_iter, 'close'):
-                                stream_iter.close()
+                            with bind_llm_cancellation_token(cancellation_token):
+                                stream_iter = llm_client.generate_stream(
+                                    messages,
+                                    tools=tools_spec,
+                                    temperature=runtime._default_temperature(persona),
+                                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                                    **_continuous_cache_kwargs(state, persona, building_id),
+                                )
+                                try:
+                                    for chunk in stream_iter:
+                                        if cancellation_token and cancellation_token.is_cancelled():
+                                            LOGGER.info("[sea] Tool streaming cancelled by user")
+                                            cancelled_during_stream = True
+                                            break
+                                        if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                                            event_callback({
+                                                "type": "streaming_thinking",
+                                                "content": chunk["content"],
+                                                "persona_id": getattr(persona, "persona_id", None),
+                                                "node_id": getattr(node_def, "id", "llm"),
+                                                "pulse_id": state.get("_pulse_id"),
+                                                "building_id": _tool_stream_bid,
+                                            })
+                                            continue
+                                        text_chunks.append(chunk)
+                                        event_callback({
+                                            "type": "streaming_chunk",
+                                            "content": chunk,
+                                            "persona_id": getattr(persona, "persona_id", None),
+                                            "node_id": getattr(node_def, "id", "llm"),
+                                            "pulse_id": state.get("_pulse_id"),
+                                            "building_id": _tool_stream_bid,
+                                        })
+                                finally:
+                                    if hasattr(stream_iter, 'close'):
+                                        stream_iter.close()
+                        except ExecutionCancelledException:
+                            LOGGER.info("[sea] Tool streaming aborted immediately by stop signal")
+                            cancelled_during_stream = True
                         text = "".join(text_chunks)
 
                         if cancelled_during_stream:
@@ -6526,13 +6537,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # ── Synchronous tool mode (original) ──
                     _freeze_turn_block_before_send(messages, state)
                     emit_awaiting_response(event_callback, llm_client, persona)
-                    result = llm_client.generate(
-                        messages,
-                        tools=tools_spec,
-                        temperature=runtime._default_temperature(persona),
-                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                        **_continuous_cache_kwargs(state, persona, building_id),
-                    )
+                    with bind_llm_cancellation_token(cancellation_token):
+                        result = llm_client.generate(
+                            messages,
+                            tools=tools_spec,
+                            temperature=runtime._default_temperature(persona),
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
+                        )
                     if isinstance(result, dict) and (
                         result.get("type") in ("tool_call", "both")
                         or str(result.get("content") or "").strip()
@@ -6876,13 +6888,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _freeze_turn_block_before_send(messages, state)
                     emit_awaiting_response(event_callback, llm_client, persona)
                     for stream_attempt in range(max_stream_retries):
-                        stream_iter = llm_client.generate_stream(
-                            messages,
-                            tools=[],
-                            temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                            **_continuous_cache_kwargs(state, persona, building_id),
-                        )
+                        try:
+                            with bind_llm_cancellation_token(cancellation_token):
+                                stream_iter = llm_client.generate_stream(
+                                    messages,
+                                    tools=[],
+                                    temperature=runtime._default_temperature(persona),
+                                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                                    **_continuous_cache_kwargs(state, persona, building_id),
+                                )
+                        except ExecutionCancelledException:
+                            LOGGER.info("[sea][pipeline] Stream start aborted immediately by stop signal")
+                            text = ""
+                            cancelled_during_stream = True
+                            break
                         _initial_text, pipeline_sub_seq, _initial_spell_detected, _initial_cancelled = await _consume_pipeline_stream(
                             stream_iter,
                             runtime=runtime,
@@ -7615,14 +7634,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
                     _freeze_turn_block_before_send(messages, state)
                     emit_awaiting_response(event_callback, llm_client, persona)
-                    text = llm_client.generate(
-                        messages,
-                        tools=[],
-                        temperature=runtime._default_temperature(persona),
-                        response_schema=response_schema,
-                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                        **_continuous_cache_kwargs(state, persona, building_id),
-                    )
+                    with bind_llm_cancellation_token(cancellation_token):
+                        text = llm_client.generate(
+                            messages,
+                            tools=[],
+                            temperature=runtime._default_temperature(persona),
+                            response_schema=response_schema,
+                            **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
+                        )
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
                     # 生成の正常な完了 = 本文 (構造化出力なら空でない値) を得た。
                     if (isinstance(text, str) and text.strip()) or (
