@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import contextmanager
-from contextvars import ContextVar
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, List, Optional
+
+from saiverse.http_cancel import (
+    bind_llm_cancellation_token,
+    current_llm_cancellation_token,
+    current_llm_stop_reason,
+    raise_if_llm_stopped,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -133,6 +138,15 @@ class CancellationToken:
                 message="Execution interrupted by higher priority request",
                 interrupted_by=self._interrupted_by
             )
+
+    def raise_if_stopped(self) -> None:
+        """Raise ExecutionCancelledException if an explicit stop was requested."""
+        if self._stopped.is_set():
+            reason = self.interrupted_by
+            raise ExecutionCancelledException(
+                message=f"LLM request stopped ({reason})",
+                interrupted_by=reason,
+            )
     
     @property
     def interrupted_by(self) -> Optional[str]:
@@ -147,50 +161,6 @@ class CancellationToken:
             self._stopped.clear()
             self._interrupted_by = None
             self._stop_callbacks.clear()
-
-
-#: 現在実行中の LLM 呼び出しに紐づく CancellationToken。
-#: HTTP トランスポートやリトライ待機 (sleep) がスレッドを跨がずに停止合図へ
-#: 反応できるよう、呼び出し元が ``bind_llm_cancellation_token`` でセットする。
-_ACTIVE_LLM_CANCEL_TOKEN: ContextVar[Optional[CancellationToken]] = ContextVar(
-    "active_llm_cancel_token", default=None,
-)
-
-
-def current_llm_cancellation_token() -> Optional[CancellationToken]:
-    """Return the CancellationToken bound to the current LLM call, if any."""
-    return _ACTIVE_LLM_CANCEL_TOKEN.get()
-
-
-def current_llm_stop_reason() -> Optional[str]:
-    """Return interrupted_by if the active LLM call received user_stop / server_shutdown."""
-    token = _ACTIVE_LLM_CANCEL_TOKEN.get()
-    if token is not None and token.is_stopped():
-        return token.interrupted_by
-    return None
-
-
-def raise_if_llm_stopped() -> None:
-    """Raise ExecutionCancelledException if the active LLM call was stopped."""
-    reason = current_llm_stop_reason()
-    if reason is not None:
-        raise ExecutionCancelledException(
-            message=f"LLM request stopped ({reason})",
-            interrupted_by=reason,
-        )
-
-
-@contextmanager
-def bind_llm_cancellation_token(token: Optional[CancellationToken]) -> Iterator[None]:
-    """Bind ``token`` to the current execution context for the duration of an LLM call."""
-    if token is None:
-        yield
-        return
-    ctx_token = _ACTIVE_LLM_CANCEL_TOKEN.set(token)
-    try:
-        yield
-    finally:
-        _ACTIVE_LLM_CANCEL_TOKEN.reset(ctx_token)
 
 
 __all__ = [

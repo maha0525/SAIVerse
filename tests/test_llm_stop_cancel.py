@@ -535,3 +535,23 @@ def test_stop_aborts_hanging_tls_handshake_immediately(use_httpx2: bool):
     finally:
         release.set()
         srv.close()
+
+
+@pytest.mark.parametrize("module_name", ["saiverse.gemini_clients", "saiverse.llm_router"])
+def test_shared_saiverse_modules_import_without_llm_clients_cycle(module_name: str):
+    """saiverse.gemini_clients / saiverse.llm_router を単独 import しても循環依存が起きない (P2 回帰)。"""
+    import subprocess
+    import sys
+
+    code = (
+        f"import sys, {module_name}; "
+        "assert 'llm_clients' not in sys.modules, f'unexpected llm_clients import: {list(k for k in sys.modules if k.startswith(\"llm_clients\"))}'"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"

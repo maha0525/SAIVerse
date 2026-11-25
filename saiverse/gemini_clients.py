@@ -6,8 +6,8 @@ import os
 import sys
 from typing import Any
 
-from llm_clients.cancel_transport import cancellable_sleep, install_cancellable_transport
 from saiverse.gemini_timing import trace_gemini_request
+from saiverse.http_cancel import cancellable_sleep, install_cancellable_transport
 
 LOGGER = logging.getLogger(__name__)
 
