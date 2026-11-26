@@ -11,7 +11,7 @@ import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
 import ActionsPanel from './ActionsPanel';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
-import { ADDON_PANELS } from '../addon-panels.generated';
+import { ADDON_PANELS, ADDON_PERSONA_PANELS } from '../addon-panels.generated';
 import AddonCatalogPanel from './AddonCatalogPanel';
 import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
 import AddonInstallProgressDialog from './AddonInstallProgressDialog';
@@ -764,9 +764,11 @@ function ParamRow({
 function ParamsSection({
     addon,
     personas,
+    onConfigChanged,
 }: {
     addon: AddonInfo;
     personas: { id: string; name: string }[];
+    onConfigChanged?: () => void | Promise<void>;
 }) {
     useLocale();
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
@@ -798,7 +800,9 @@ function ParamsSection({
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
     const oauthFlows = addon.oauth_flows ?? [];
     const hasOAuthFlows = oauthFlows.length > 0;
-    const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
+    const PersonaPanel = ADDON_PERSONA_PANELS?.[addon.addon_name];
+    const hasPersonaSection =
+        personaConfigurableSchemas.length > 0 || hasOAuthFlows || Boolean(PersonaPanel);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     // 保存は 1 本の鎖に並べて順番に流す。
@@ -814,6 +818,9 @@ function ParamsSection({
         saveChainRef.current = next.then(() => undefined, () => undefined);
         return next;
     };
+    const flushPendingSaves = useCallback(async (): Promise<void> => {
+        await saveChainRef.current;
+    }, []);
 
     // 保存（グローバル）。成功したかどうかを返す (削除操作の巻き戻し判定に使う)
     const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
@@ -1068,6 +1075,26 @@ function ParamsSection({
                                     personaId={selectedPersonaId}
                                 />
                             )}
+
+                            {/* Per-persona custom panel: expansion_data/<addon>/ui/PersonaPanel.tsx */}
+                            {PersonaPanel && (
+                                <Suspense fallback={<p className={styles.loadingText}>{uiText("components.AddonManagerModal.label003")}</p>}>
+                                    <PersonaPanel
+                                        addon={{
+                                            addon_name: addon.addon_name,
+                                            display_name: addon.display_name,
+                                            version: addon.version,
+                                            description: addon.description,
+                                        }}
+                                        personaId={selectedPersonaId}
+                                        personaName={personas.find((p) => p.id === selectedPersonaId)?.name ?? selectedPersonaId}
+                                        personas={personas}
+                                        addonApiBase={`/api/addon/${addon.addon_name}`}
+                                        onConfigChanged={onConfigChanged}
+                                        flushPendingSaves={flushPendingSaves}
+                                    />
+                                </Suspense>
+                            )}
                         </>
                     )}
                 </div>
@@ -1238,7 +1265,7 @@ function AddonCard({
             </div>
             {expanded && addon.is_enabled && (
                 <div className={styles.addonCardBody}>
-                    <ParamsSection addon={addon} personas={personas} />
+                    <ParamsSection addon={addon} personas={personas} onConfigChanged={onConfigChanged} />
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
                     <ActionsPanel addonName={addon.addon_name} />
                     {(() => {
