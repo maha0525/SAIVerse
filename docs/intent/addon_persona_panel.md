@@ -26,8 +26,8 @@
   2. `frontend/scripts/sync-addon-panels.mjs`（`predev` / `prebuild` で自動実行）が `ui/` 配下を `frontend/src/addon-panels/<addon>/` へコピーし、`frontend/src/addon-panels.generated.ts` に `ADDON_PANELS` と `ADDON_PERSONA_PANELS` および `AddonPersonaPanelProps` を生成する。
   3. `AddonManagerModal.tsx` の `ParamsSection` が `ADDON_PERSONA_PANELS[addon.addon_name]` を引き、ペルソナ選択後に `personaConfigBlock` と `OAuthFlowSection` の直下へ `Suspense` 付きで描画する。
 - **不変条件と所有境界**:
-  - **発見と配線は本体が所有、パネルの中身と API はアドオンが所有**: 本体側は `personaId` / `personaName` / `personas` / `addonApiBase` / `onConfigChanged` / `flushPendingSaves` の契約だけを提供する。
-  - **保存完了の保証**: `ParamsSection` の直列保存鎖 (`saveChainRef`) を `flushPendingSaves` として公開し、パネルが操作 API を叩く前に直前の設定変更の永続化完了を待てるようにする。
+  - **発見と配線は本体が所有、パネルの中身と API はアドオンが所有**: 本体側は `personaId` / `personaName` / `personas` / `addonApiBase` / `onConfigChanged` / `flushPendingSaves` / `configRevision` / `getConfigRevision` の契約だけを提供する。
+  - **保存完了と鮮度判定の保証**: `ParamsSection` の直列保存鎖 (`saveChainRef`) を `flushPendingSaves` として公開し、さらにグローバル設定・ペルソナ設定の変更ごとに同期インクリメントする連番 (`configRevision` / `getConfigRevision`) を渡すことで、パネル側が設定変更後の古いプレビューキャッシュを誤再利用しないようにする。
   - **ペルソナ欄の表示条件**: `persona_configurable` なパラメータや `oauth_flows` が無くても、`PersonaPanel` を持つアドオンならペルソナ選択セクションを表示する。
   - **バージョン互換**: 古い SAIVerse 本体（v0.3.34 以前）は `ui/PersonaPanel.tsx` を無視するだけで壊れないが UI が出ないため、`ui/PersonaPanel.tsx` に依存するアドオン版はカタログ側で `min_saiverse_version: "0.3.35"` を要求する。
 

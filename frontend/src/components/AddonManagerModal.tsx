@@ -772,6 +772,14 @@ function ParamsSection({
 }) {
     useLocale();
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
+    const configRevisionRef = useRef<number>(0);
+    const [configRevision, setConfigRevision] = useState<number>(0);
+    const bumpConfigRevision = useCallback(() => {
+        configRevisionRef.current += 1;
+        setConfigRevision(configRevisionRef.current);
+    }, []);
+    const getConfigRevision = useCallback(() => configRevisionRef.current, []);
+    const isInitialParamsRef = useRef<boolean>(true);
 
     // 外部から AddonConfig が更新された場合 (= addon panel 内で内部的に
     // params を書き換えた、 例: stackchan-addon のペアリング操作で
@@ -780,7 +788,12 @@ function ParamsSection({
     // を追従させないと UI 表示が古いまま (= まはー指摘の不整合)。
     useEffect(() => {
         setGlobalParams(addon.params ?? {});
-    }, [addon.params]);
+        if (isInitialParamsRef.current) {
+            isInitialParamsRef.current = false;
+        } else {
+            bumpConfigRevision();
+        }
+    }, [addon.params, bumpConfigRevision]);
 
     // 「値が保存されている secret 項目」の一覧。削除ボタンの出し分けに使う。
     const [globalSecretIsSet, setGlobalSecretIsSet] = useState<Record<string, boolean>>(
@@ -845,6 +858,7 @@ function ParamsSection({
     }, [addon.addon_name]);
 
     const handleGlobalChange = (key: string, val: unknown) => {
+        bumpConfigRevision();
         const next = { ...globalParams, [key]: val };
         setGlobalParams(next);
         void enqueueSave(() => saveGlobal(next));
@@ -856,6 +870,7 @@ function ParamsSection({
      * update_addon_config を参照)。保存に失敗したら見た目を元に戻す。
      */
     const deleteGlobalSecret = async (key: string) => {
+        bumpConfigRevision();
         const previousValue = globalParams[key];
         const next = { ...globalParams, [key]: null };
         setGlobalParams(next);
@@ -915,6 +930,7 @@ function ParamsSection({
     };
 
     const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
+        bumpConfigRevision();
         setPersonaConfigs((prev) => {
             const idx = prev.findIndex((c) => c.persona_id === personaId);
             if (idx >= 0) {
@@ -938,6 +954,7 @@ function ParamsSection({
      * 意思表示で、空欄では消えない。失敗したら見た目を元に戻す。
      */
     const deletePersonaSecret = async (personaId: string, key: string) => {
+        bumpConfigRevision();
         const previousValue = personaConfigs
             .find((c) => c.persona_id === personaId)?.params[key];
         setPersonaConfigs((cur) =>
@@ -1092,6 +1109,8 @@ function ParamsSection({
                                         addonApiBase={`/api/addon/${addon.addon_name}`}
                                         onConfigChanged={onConfigChanged}
                                         flushPendingSaves={flushPendingSaves}
+                                        configRevision={configRevision}
+                                        getConfigRevision={getConfigRevision}
                                     />
                                 </Suspense>
                             )}

@@ -86,6 +86,8 @@ async function main() {
         assert.ok(generated.includes('export interface AddonPanelProps'));
         assert.ok(generated.includes('export interface AddonPersonaPanelProps'));
         assert.ok(generated.includes('flushPendingSaves?: () => Promise<void>;'));
+        assert.ok(generated.includes('configRevision?: number;'));
+        assert.ok(generated.includes('getConfigRevision?: () => number;'));
         assert.ok(generated.includes('const addon_global_only_Panel = lazy(() => import("./addon-panels/addon-global-only/Panel"));'));
         assert.ok(generated.includes('const addon_persona_only_PersonaPanel = lazy(() => import("./addon-panels/addon-persona-only/PersonaPanel"));'));
         assert.ok(generated.includes('const addon_both_Panel = lazy(() => import("./addon-panels/addon-both/Panel"));'));
