@@ -44,3 +44,6 @@
 - 2026-11-27 (v0.3.35 のリリース準備で台帳を現況化): 本体側の PR #519 と #520 は develop に入り、v0.3.35 の範囲に入った。台帳にあった行:
 
 | 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側の `PersonaPanel` 枠と `saiverse-voice-tts` v0.7.0 のテスト再生・WAV/ZIP 出力はまはーが実機で確認済みで、両リポジトリの PR がレビューを待っている。次 = まはーが PR をマージし、v0.3.35 発行後にカタログへ `min_saiverse_version: "0.3.35"` で載せる。 | まはー (PR のレビュー) | [intent](../intent/addon_persona_panel.md) | 2026-11-26 |
+- 2026-11-27 (v0.3.35 の発行): 本体側のパネル枠を v0.3.35 として発行した。台帳にあった行:
+
+| 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側のパネル枠は v0.3.35 に載る。次 = v0.3.35 の発行後、`saiverse-voice-tts` v0.7.0 をカタログへ `min_saiverse_version: "0.3.35"` で載せるかをまはーが決める。 | まはー (カタログの判断) | [intent](../intent/addon_persona_panel.md) | 2026-11-27 |
