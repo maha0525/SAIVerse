@@ -62,7 +62,8 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
 
     def test_argon_definition_matches_the_official_contract(self):
         """Gemini 4 Argon: thinking_level は low/medium/high (既定 medium)、
-        sampling は無視される、明示キャッシュ非対応、長考のためタイムアウト 15 分。"""
+        sampling は無視される、明示キャッシュ非対応、タイムアウトは他の Gemini 4 と同じ 300 秒
+        (2026-11-24 の停止ボタン対応で統一、docs/intent/stop_button.md)。"""
         config = model_configs.get_model_config("gemini-4-argon")
         self.assertEqual(config["model"], "gemini-4-argon")
         self.assertTrue(config["prefer_paid"])
@@ -74,10 +75,10 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertEqual(thinking_level["options"], ["low", "medium", "high"])
         self.assertEqual(thinking_level["default"], "medium")
         self.assertIs(config["cache"]["explicit_supported"], False)
-        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(config["timeout"], 300)
 
     def test_carbon_definition_follows_argon(self):
-        """Gemini 4 Carbon: Argon と同じ契約 (thinking_level / 暗黙キャッシュのみ / 15 分)。"""
+        """Gemini 4 Carbon: Argon と同じ契約 (thinking_level / 暗黙キャッシュのみ / 300 秒)。"""
         config = model_configs.get_model_config("gemini-4-carbon")
         self.assertEqual(config["model"], "gemini-4-carbon")
         self.assertTrue(config["prefer_paid"])
@@ -86,7 +87,7 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
             config["parameters"]["thinking_level"]["options"], ["low", "medium", "high"]
         )
         self.assertIs(config["cache"]["explicit_supported"], False)
-        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(config["timeout"], 300)
         self.assertEqual(_gemini_version("gemini-4-carbon"), (4, 0))
 
     def test_hydrogen_definitions_match_the_official_contract(self):
@@ -138,7 +139,7 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
         self.assertIs(config["cache"]["explicit_supported"], False)
         self.assertIs(config["cache"]["persist_realtime_and_recall"], True)
         self.assertEqual(config["cache"]["min_tokens"], 4096)
-        self.assertEqual(config["timeout"], 900)
+        self.assertEqual(config["timeout"], 300)
         self.assertEqual(_gemini_version("gemini-4-neon"), (4, 0))
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-4-neon", 1_000_000, 1_000_000),

@@ -29,6 +29,7 @@ import pytest
 
 from llm_clients.factory import get_llm_client
 from saiverse import data_paths, model_configs, provider_configs
+from saiverse.http_cancel import install_cancellable_transport2
 
 # 構造化出力でも extra_body の指定が送られるかを確かめる見本。かつて同梱していた
 # DeepSeek V4 Flash 0731 (NIM) の定義と同じ形 (2026-09-21 に提供終了し、2026-10-09 に
@@ -131,10 +132,12 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
                 from openai import OpenAI as RealOpenAI
 
                 def sdk_with_mock_transport(**kwargs):
-                    return RealOpenAI(
-                        **kwargs,
-                        http_client=httpx2.Client(transport=httpx2.MockTransport(sdk_handler)),
+                    # OpenAIClient は停止ボタン用の http_client を自分で渡すので、
+                    # 足すのではなく差し替える (二重指定は TypeError になる)。
+                    kwargs["http_client"] = install_cancellable_transport2(
+                        httpx2.Client(transport=httpx2.MockTransport(sdk_handler))
                     )
+                    return RealOpenAI(**kwargs)
 
                 with patch("llm_clients.openai.OpenAI", side_effect=sdk_with_mock_transport):
                     return get_llm_client(key, resolved["provider"], 8192)
