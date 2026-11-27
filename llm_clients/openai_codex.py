@@ -24,9 +24,11 @@ body stripped of the parameters SIWC rejects (max_output_tokens etc.).
 from __future__ import annotations
 
 import codecs
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from uuid import uuid4
@@ -38,7 +40,7 @@ from filelock import FileLock, Timeout as FileLockTimeout
 from .base import LLMClient, ToolSpecFormat
 from .cancel_transport import install_cancellable_transport
 from .exceptions import InvalidRequestError
-from sea.cancellation import raise_if_llm_stopped
+from sea.cancellation import ExecutionCancelledException, raise_if_llm_stopped
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -85,6 +87,10 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Pre-emptively refresh when access_token has less than this many seconds left
 TOKEN_REFRESH_LEEWAY_SECONDS = 60.0
+# Skip the pre-send refresh when the store was refreshed less than this many
+# seconds ago: a fresh token that already looks expired means the local clock
+# runs ahead, and refreshing on every request would not fix that.
+PREEMPTIVE_REFRESH_MIN_INTERVAL_SECONDS = 300.0
 # Responses API parameters that SIWC token sharing rejects over HTTP. Only
 # max_output_tokens can currently come out of _build_body (temperature is
 # already dropped there); the rest are listed so a future builder change cannot
@@ -100,16 +106,36 @@ _SIWC_UNSUPPORTED_BODY_KEYS = (
 )
 
 
+def _token_fingerprint(token: str) -> str:
+    """SHA-256 hex digest of `token`, for comparing tokens without keeping them."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 class CodexHTTPError(RuntimeError):
     """Raised when the Codex backend returns a non-2xx HTTP response.
 
     Carries the status code and the response body so callers can decide
-    whether to refresh auth (401) or surface to the user (everything else).
+    whether to refresh auth or surface to the user. Auth is refreshed on 401,
+    and on any other 4xx when `sent_token_expired` is true: the access_token
+    sent with the request had already expired by the server's clock (the
+    response `Date` header, or the local clock when it is missing). The SIWC
+    route has been seen answering such requests with a bare 400.
+    `sent_token_fingerprint` is the SHA-256 of the sent access_token (never
+    the token itself), so the retry can tell whether the store still holds it.
     """
 
-    def __init__(self, status_code: int, body: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        body: str,
+        *,
+        sent_token_expired: bool = False,
+        sent_token_fingerprint: Optional[str] = None,
+    ) -> None:
         self.status_code = status_code
         self.body = body
+        self.sent_token_expired = sent_token_expired
+        self.sent_token_fingerprint = sent_token_fingerprint
         super().__init__(
             f"Codex backend returned status={status_code}: {body[:1000]}"
         )
@@ -769,11 +795,158 @@ class OpenAICodexClient(LLMClient):
             return
         if seconds <= 0:
             LOG.warning(
-                "Codex access_token already expired %.0fs ago (will trigger 401 + refresh)",
+                "Codex access_token already expired %.0fs ago "
+                "(refresh expected before or after this request)",
                 -seconds,
             )
         elif seconds < 5 * 60:
             LOG.info("Codex access_token expires in %.0fs", seconds)
+
+    @staticmethod
+    def _sent_token_was_expired(access_token: str, resp: Any) -> bool:
+        """Whether `access_token` had expired by the server's clock at `resp`.
+
+        The server's time comes from the response `Date` header; without a
+        parseable one the local clock stands in. Never raises: any failure
+        answers False so the original HTTP error surfaces unchanged.
+        """
+        try:
+            exp = access_token_expiry(access_token)
+            if exp is None:
+                return False
+            server_now: Optional[datetime] = None
+            headers = getattr(resp, "headers", None)
+            date_value = None
+            if headers is not None:
+                try:
+                    date_value = headers.get("Date")
+                except Exception:  # noqa: BLE001
+                    date_value = None
+                if date_value is None:
+                    try:
+                        for key, value in headers.items():
+                            if isinstance(key, str) and key.lower() == "date":
+                                date_value = value
+                                break
+                    except Exception:  # noqa: BLE001
+                        date_value = None
+            if isinstance(date_value, str) and date_value.strip():
+                try:
+                    server_now = parsedate_to_datetime(date_value)
+                except (TypeError, ValueError, IndexError):
+                    server_now = None
+                if server_now is not None and server_now.tzinfo is None:
+                    server_now = server_now.replace(tzinfo=timezone.utc)
+            if server_now is None:
+                server_now = datetime.now(tz=timezone.utc)
+            return server_now >= exp
+        except Exception as exc:  # noqa: BLE001
+            LOG.debug("could not judge whether the sent token had expired: %s", type(exc).__name__)
+            return False
+
+    @staticmethod
+    def _parse_last_refresh(value: Any) -> Optional[datetime]:
+        """Parse the auth store's `last_refresh` (ISO 8601; naive means UTC)."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _seconds_since_recent_refresh(auth: Any) -> Optional[float]:
+        """Seconds since the store's `last_refresh`, if within the min interval.
+
+        Returns None when `auth` is not a dict, `last_refresh` is missing or
+        unparseable, lies in the future, or is older than
+        `PREEMPTIVE_REFRESH_MIN_INTERVAL_SECONDS`.
+        """
+        if not isinstance(auth, dict):
+            return None
+        last_refresh = OpenAICodexClient._parse_last_refresh(auth.get("last_refresh"))
+        if last_refresh is None:
+            return None
+        since = (datetime.now(tz=timezone.utc) - last_refresh).total_seconds()
+        if 0 <= since <= PREEMPTIVE_REFRESH_MIN_INTERVAL_SECONDS:
+            return since
+        return None
+
+    def _refresh_before_send_if_expired(self) -> None:
+        """Refresh the stored access_token before sending when it has (nearly) expired.
+
+        Does nothing when the store cannot be read, holds no access_token, or
+        the token's expiry cannot be read (those cases keep the old behavior:
+        `_post_responses` reports them, or a 401 triggers the refresh). The
+        refresh is skipped when the store was refreshed within
+        `PREEMPTIVE_REFRESH_MIN_INTERVAL_SECONDS` (a fast local clock), so
+        requests do not refresh on every send. A failed refresh never stops
+        the request here: the stored token is sent and the server decides.
+        """
+        try:
+            auth = self._load_auth()
+        except Exception as exc:  # noqa: BLE001
+            LOG.debug("pre-send expiry check skipped: %s", type(exc).__name__)
+            return
+        tokens = auth.get("tokens") if isinstance(auth, dict) else None
+        access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+        if not isinstance(access_token, str) or not access_token:
+            return
+        seconds = self._seconds_until_expiry(access_token)
+        if seconds is None or seconds > TOKEN_REFRESH_LEEWAY_SECONDS:
+            return
+        since = self._seconds_since_recent_refresh(auth)
+        if since is not None:
+            LOG.warning(
+                "Codex access_token looks expired (%.0fs left) although the store "
+                "was refreshed %.0fs ago; the local clock may be ahead. "
+                "Sending without a pre-send refresh.",
+                seconds,
+                since,
+            )
+            return
+        LOG.info(
+            "Codex access_token expired or expiring (%.0fs left); refreshing before send",
+            seconds,
+        )
+        try:
+            self._refresh_or_pickup_latest(access_token)
+        except ExecutionCancelledException:
+            raise
+        except Exception as refresh_err:  # noqa: BLE001
+            # Best effort: the stored token may still be accepted (seconds of
+            # life left, or a fast local clock), so the request goes out
+            # anyway and the server decides. If it rejects the token as
+            # expired, `_post_with_auth_retry` refreshes again and that
+            # failure is the one reported to the user.
+            LOG.warning(
+                "pre-send refresh of the Codex access_token failed (%s: %s); "
+                "sending the stored token",
+                type(refresh_err).__name__,
+                redact_secrets(str(refresh_err), access_token),
+            )
+
+    def _refresh_or_raise(
+        self,
+        prior_access_token: Optional[str],
+        prior_fingerprint: Optional[str] = None,
+    ) -> None:
+        """Run `_refresh_or_pickup_latest`, wrapping failures in the user-facing error."""
+        try:
+            self._refresh_or_pickup_latest(
+                prior_access_token, prior_fingerprint=prior_fingerprint
+            )
+        except Exception as refresh_err:
+            raise RuntimeError(
+                f"Codex OAuth token expired and auto-refresh failed: "
+                f"{refresh_err}. {NO_AUTH_HINT}"
+            ) from refresh_err
 
     @staticmethod
     def _to_siwc_body(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -862,11 +1035,22 @@ class OpenAICodexClient(LLMClient):
             # token we just sent (an error page could echo it) and any others.
             err_text = redact_secrets(self._drain_error_body(resp), access_token_for_log)
             status = resp.status_code
+            sent_token_expired = False
+            if isinstance(status, int) and 400 <= status < 500 and access_token_for_log:
+                sent_token_expired = self._sent_token_was_expired(access_token_for_log, resp)
             try:
                 resp.close()
             except Exception:
                 pass
-            raise CodexHTTPError(status, err_text)
+            raise CodexHTTPError(
+                status,
+                err_text,
+                sent_token_expired=sent_token_expired,
+                sent_token_fingerprint=(
+                    _token_fingerprint(access_token_for_log)
+                    if access_token_for_log else None
+                ),
+            )
         # Bind the token to THIS response, so the stream diagnostics of this
         # response scrub this request's token even when other requests run
         # concurrently on the same client.
@@ -876,14 +1060,26 @@ class OpenAICodexClient(LLMClient):
             resp = _SentTokenResponse(resp, access_token_for_log or None)
         return resp
 
-    def _refresh_or_pickup_latest(self, prior_access_token: Optional[str]) -> None:
+    def _refresh_or_pickup_latest(
+        self,
+        prior_access_token: Optional[str],
+        prior_fingerprint: Optional[str] = None,
+    ) -> None:
         """Make sure the active auth store holds a usable access_token.
+
+        The caller names the token it wants replaced either by value
+        (`prior_access_token`) or by `prior_fingerprint` (`_token_fingerprint`
+        of the token a rejected request sent — the value itself is not kept).
 
         Resolves the active store (SAIVerse's own store, or ~/.codex/auth.json
         when piggybacking on the Codex CLI), acquires its file lock, then:
-          1. Re-read the store. If `access_token` differs from `prior_access_token`
+          1. Re-read the store. If `access_token` differs from the prior token
              AND has plenty of life left, assume another process (Codex CLI itself,
              or a parallel SAIVerse worker) refreshed it and we just pick it up.
+             A differing token is also picked up when the store's `last_refresh`
+             is within `PREEMPTIVE_REFRESH_MIN_INTERVAL_SECONDS`, even if it
+             looks expired (a fast local clock would otherwise make every
+             waiting request refresh again).
           2. Otherwise, POST to OpenAI's refresh endpoint with the stored
              refresh_token. Persist the new tokens via an atomic rename — into
              the same file they were read from (refresh_tokens are single-use;
@@ -917,14 +1113,35 @@ class OpenAICodexClient(LLMClient):
                 latest_refresh = latest_tokens.get("refresh_token")
                 is_siwc = is_siwc_record(latest)
 
-                if latest_access and latest_access != prior_access_token:
+                # The stored token is "the prior one" when it equals the token
+                # the caller holds, or matches the fingerprint of the token a
+                # rejected request sent. Compared here, under the lock, so a
+                # failed or stale read before the lock cannot pass for "differs".
+                holds_prior_token = bool(latest_access) and (
+                    latest_access == prior_access_token
+                    or (
+                        prior_fingerprint is not None
+                        and isinstance(latest_access, str)
+                        and _token_fingerprint(latest_access) == prior_fingerprint
+                    )
+                )
+                if latest_access and not holds_prior_token:
                     seconds = self._seconds_until_expiry(latest_access)
+                    since_refresh = self._seconds_since_recent_refresh(latest)
                     if seconds is None or seconds > TOKEN_REFRESH_LEEWAY_SECONDS:
                         LOG.info(
                             "%s already holds a fresh access_token "
                             "(expires in %.0fs); skipping refresh",
                             store.path,
                             seconds if seconds is not None else float("inf"),
+                        )
+                        return
+                    if since_refresh is not None:
+                        LOG.info(
+                            "%s was refreshed %.0fs ago by another request; "
+                            "skipping refresh",
+                            store.path,
+                            since_refresh,
                         )
                         return
 
@@ -1135,33 +1352,45 @@ class OpenAICodexClient(LLMClient):
         LOG.info("auth store updated with refreshed tokens: %s", store_path)
 
     def _post_with_auth_retry(self, body: Dict[str, Any]) -> Any:
-        """Run `_post_responses`, transparently refreshing once on 401."""
+        """Run `_post_responses` with an expired-token refresh on both sides.
+
+        Before sending, an expired (or nearly expired) stored access_token is
+        refreshed. After sending, a 401 — or another 4xx whose sent token had
+        expired by the server's clock — refreshes once and retries once.
+        """
+        raise_if_llm_stopped()
+        self._refresh_before_send_if_expired()
+        # The pre-send refresh can take seconds; do not send a request the
+        # user stopped while it ran.
         raise_if_llm_stopped()
         try:
             return self._post_responses(body)
         except CodexHTTPError as exc:
-            if exc.status_code != 401:
+            if exc.status_code != 401 and not exc.sent_token_expired:
                 raise
             raise_if_llm_stopped()
             LOG.warning(
-                "received 401 from Codex (likely expired access_token); "
+                "received %d from Codex with an expired or rejected access_token; "
                 "attempting auth refresh and retry. body=%s",
+                exc.status_code,
                 exc.body[:300],
             )
-            # Capture the access_token we just used so we can detect whether
-            # auth.json was refreshed by some other process before we lock.
-            try:
-                prior_auth = self._load_auth()
-                prior_access = (prior_auth.get("tokens") or {}).get("access_token")
-            except Exception:  # noqa: BLE001
-                prior_access = None
-            try:
-                self._refresh_or_pickup_latest(prior_access)
-            except Exception as refresh_err:
-                raise RuntimeError(
-                    f"Codex OAuth token expired and auto-refresh failed: "
-                    f"{refresh_err}. {NO_AUTH_HINT}"
-                ) from refresh_err
+            # Tell `_refresh_or_pickup_latest` which token was rejected, so it
+            # can see under the store lock whether another request already
+            # replaced it. The exception carries only the sent token's
+            # fingerprint, and the comparison happens under the lock (a read
+            # here, before the lock, could fail or go stale).
+            if exc.sent_token_fingerprint is not None:
+                self._refresh_or_raise(None, prior_fingerprint=exc.sent_token_fingerprint)
+            else:
+                # No fingerprint (an error raised without a sent token): keep
+                # the older behavior of naming the currently stored token.
+                try:
+                    prior_auth = self._load_auth()
+                    prior_access = (prior_auth.get("tokens") or {}).get("access_token")
+                except Exception:  # noqa: BLE001
+                    prior_access = None
+                self._refresh_or_raise(prior_access)
             return self._post_responses(body)
 
     @staticmethod
