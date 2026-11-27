@@ -25,9 +25,12 @@ const {
 assert.equal(RETURN_DELAY_AFTER_AUDIO_MS, 400);
 assert.equal(RETURN_DELAY_AFTER_TEXT_MS, 1500);
 
+// グローバル設定 (autoSwitch) は、指定しなければ ON として渡す (ON の振る舞いは設定を足す前と同じ)。
 const signal = (fields = {}) => ({
-    type: 'signal', enabled: true, speaking: false, audioPlaying: false, userBusy: false, ...fields,
+    type: 'signal', enabled: true, autoSwitch: true, speaking: false, audioPlaying: false, userBusy: false, ...fields,
 });
+// 設定が OFF の知らせ
+const signalOff = (fields = {}) => signal({ autoSwitch: false, ...fields });
 const fire = (s) => next(s, { type: 'returnTimerFired', token: s.pendingToken });
 // overlayMode に入って、誰も喋っていない状態
 const idle = () => next(initialRoomViewAutoSwitchState(), signal());
@@ -191,6 +194,100 @@ const idle = () => next(initialRoomViewAutoSwitchState(), signal());
     assert.equal(showSpeakingIndicator(s), true);
 }
 
+// 設定 (autoSwitch) の初期値は OFF
+assert.equal(initialRoomViewAutoSwitchState().autoSwitch, false);
+
+// 設定 OFF: 喋り出しても 'log' のまま、印も出さない。発話の追跡は続ける。
+{
+    const idleOff = next(initialRoomViewAutoSwitchState(), signalOff());
+    let s = next(idleOff, signalOff({ speaking: true }));
+    assert.equal(s.view, 'log', 'no auto switch while the setting is off');
+    assert.equal(showSpeakingIndicator(s), false, 'no indicator while the setting is off');
+    assert.equal(isUtteranceActive(s), true, 'the utterance is still tracked');
+    // 印は押せない
+    assert.equal(next(s, { type: 'pressIndicator' }).view, 'log');
+    // 入力中でない・遡っていない場合も同じ (userBusy に関係なく切り替えない)
+    s = next(s, signalOff({ speaking: false }));
+    assert.equal(isUtteranceActive(s), true, 'waiting still counts as the utterance');
+    s = fire(s);
+    assert.equal(s.view, 'log');
+    assert.equal(isUtteranceActive(s), false);
+}
+
+// 設定 OFF: ボタンで 'room' にしたら、発話が終わって待ち時間が過ぎても 'room' のまま。
+{
+    let s = next(initialRoomViewAutoSwitchState(), signalOff());
+    s = next(s, { type: 'toggle' });
+    assert.equal(s.view, 'room');
+    assert.equal(s.roomBy, 'manual');
+    s = next(s, signalOff({ speaking: true }));
+    assert.equal(s.view, 'room');
+    assert.equal(isUtteranceActive(s), true, 'captions can follow the utterance in the manual room view');
+    s = next(s, signalOff({ speaking: false }));
+    s = fire(s);
+    assert.equal(s.view, 'room', 'manual room stays while the setting is off');
+    assert.equal(s.roomBy, 'manual');
+}
+
+// 設定が発話の途中で ON → OFF: 自動で 'room' にしていたら、その場で 'log' に戻す。
+{
+    let s = next(idle(), signal({ speaking: true }));
+    assert.equal(s.view, 'room');
+    assert.equal(s.roomBy, 'auto');
+    s = next(s, signalOff({ speaking: true }));
+    assert.equal(s.view, 'log', 'auto room returns to the log when the setting turns off');
+    assert.equal(s.roomBy, null);
+    assert.equal(s.speaking, true, 'the utterance record is kept');
+    assert.equal(isUtteranceActive(s), true);
+    assert.equal(showSpeakingIndicator(s), false);
+}
+
+// 設定が発話の途中で ON → OFF: 手動 ('manual') の 'room' はそのまま。
+{
+    let s = next(idle(), { type: 'toggle' });
+    s = next(s, signal({ speaking: true }));
+    assert.equal(s.roomBy, 'manual');
+    s = next(s, signalOff({ speaking: true }));
+    assert.equal(s.view, 'room', 'manual room stays when the setting turns off');
+    assert.equal(s.roomBy, 'manual');
+}
+
+// 設定が発話の途中で OFF → ON: その発話では切り替えない。次の発話から切り替わる。
+{
+    let s = next(initialRoomViewAutoSwitchState(), signalOff());
+    s = next(s, signalOff({ speaking: true }));
+    s = next(s, signal({ speaking: true }));
+    assert.equal(s.view, 'log', 'no switch mid-utterance when the setting turns on');
+    assert.equal(showSpeakingIndicator(s), true, 'the indicator appears once the setting is on');
+    // 文字が終わって待っている間に音声が始まっても、同じ発話の続き — 切り替えない
+    s = next(s, signal({ speaking: false }));
+    s = next(s, signal({ speaking: true, audioPlaying: true }));
+    assert.equal(s.view, 'log', 'still the same utterance');
+    s = next(s, signal({ speaking: false }));
+    s = fire(s);
+    s = next(s, signal({ speaking: true }));
+    assert.equal(s.view, 'room', 'the next utterance switches');
+    assert.equal(s.roomBy, 'auto');
+}
+
+// 'reset' の後も設定の値を保つ (ON のまま reset → 次の発話で 'room')。
+{
+    let s = next(idle(), signal({ speaking: true }));
+    s = next(s, { type: 'reset' });
+    assert.equal(s.view, 'log');
+    assert.equal(s.autoSwitch, true, 'reset keeps the setting');
+    s = next(s, signal({ speaking: false }));
+    s = fire(s);
+    s = next(s, signal({ speaking: true }));
+    assert.equal(s.view, 'room', 'the next utterance after a reset switches');
+    // overlayMode を出入りしても設定の値は保つ
+    let w = next(idle(), signal({ enabled: false }));
+    assert.equal(w.autoSwitch, true);
+    w = next(w, signal());
+    w = next(w, signal({ speaking: true }));
+    assert.equal(w.view, 'room');
+}
+
 // 過去のログを遡って読んでいる最中か: 利用者の操作によるスクロールでだけ立てる。
 {
     const {
@@ -276,4 +373,4 @@ const idle = () => next(initialRoomViewAutoSwitchState(), signal());
     assert.equal(keepRoomViewPick(idlePick, 'A'), null);
 }
 
-console.log('Room view auto switch: switches on speaking, stays on the log while typing or reading back (indicator instead), returns after 400ms/1500ms, keeps manual choices, resets on room or width change, and marks reading back only on the reader\'s own scrolls.');
+console.log('Room view auto switch: follows the global setting (off: no auto switch or indicator, manual toggle still works; changes mid-utterance apply as specified), switches on speaking, stays on the log while typing or reading back (indicator instead), returns after 400ms/1500ms, keeps manual choices, resets on room or width change, and marks reading back only on the reader\'s own scrolls.');

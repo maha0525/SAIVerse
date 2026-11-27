@@ -9,6 +9,14 @@
  *
  * 「発話」は speaking が true になってから、false になって待ち時間が過ぎるまで。
  * 待っている間にまた speaking が true になったら、同じ発話の続きとして扱う。
+ *
+ * 自動で切り替えるかは、グローバル設定 (SAIVERSE_ROOM_VIEW_AUTO_SWITCH、既定 OFF) で決まり、
+ * `'signal'` の `autoSwitch` で渡される。OFF の間は、喋り出しても自動で 'room' にせず、
+ * 「喋っています」の印も出さない。ヘッダーのボタンでの切り替え ('manual') と、発話の追跡
+ * (speaking・待ち時間・isUtteranceActive) は ON と変わらない。発話の途中で ON → OFF に
+ * なったら、自動で 'room' にしていた場合 ('auto') だけその場で 'log' に戻す ('manual' は
+ * そのまま)。OFF → ON になった時点で続いている発話では自動で切り替えず、次の発話から効く
+ * (overlayMode になった瞬間と同じ考え方)。
  */
 
 export type RoomViewDisplay = 'log' | 'room';
@@ -21,6 +29,8 @@ export const RETURN_DELAY_AFTER_TEXT_MS = 1500;
 export interface RoomViewAutoSwitchState {
     /** overlayMode か。false の間は常に 'log' で、何も切り替えない。 */
     enabled: boolean;
+    /** グローバル設定で、喋っている間に自動で 'room' にするか。最後の 'signal' の値。 */
+    autoSwitch: boolean;
     view: RoomViewDisplay;
     /** 'room' になった経路。'auto' は自動か「喋っています」の印 (発話が終われば戻す)、
      * 'manual' はヘッダーのボタン (もう一度押すまで戻さない)。'log' の間は null。 */
@@ -28,7 +38,8 @@ export interface RoomViewAutoSwitchState {
     speaking: boolean;
     /** この発話の間に、読み上げの音声が鳴ったか。 */
     audioInUtterance: boolean;
-    /** この発話の間に、利用者がボタンで 'log' に戻したか。 */
+    /** この発話の間は自動で 'room' にしない印。利用者がボタンで 'log' に戻したとき、
+     * または発話の途中で autoSwitch が OFF → ON になったときに立つ。 */
     logChosenInUtterance: boolean;
     /** 発話が終わって待っている間の待ち時間。待っていなければ null。 */
     pendingReturnMs: number | null;
@@ -40,6 +51,8 @@ export type RoomViewAutoSwitchEvent =
     | {
         type: 'signal';
         enabled: boolean;
+        /** グローバル設定で、喋っている間に自動で 'room' にするか。 */
+        autoSwitch: boolean;
         speaking: boolean;
         audioPlaying: boolean;
         /** 利用者が入力している最中か、過去のログを遡って読んでいる最中。 */
@@ -56,6 +69,7 @@ export type RoomViewAutoSwitchEvent =
 export function initialRoomViewAutoSwitchState(): RoomViewAutoSwitchState {
     return {
         enabled: false,
+        autoSwitch: false,
         view: 'log',
         roomBy: null,
         speaking: false,
@@ -67,11 +81,12 @@ export function initialRoomViewAutoSwitchState(): RoomViewAutoSwitchState {
 }
 
 /** 発話の記録を捨てて 'log' に戻した状態。speaking はいまの値のまま持つ
- * (持たないと、次の知らせで false→true を誤って読む)。 */
+ * (持たないと、次の知らせで false→true を誤って読む)。autoSwitch は設定の値なので持ち越す。 */
 function backToLog(state: RoomViewAutoSwitchState, enabled: boolean, speaking: boolean): RoomViewAutoSwitchState {
     return {
         ...initialRoomViewAutoSwitchState(),
         enabled,
+        autoSwitch: state.autoSwitch,
         speaking,
         pendingToken: state.pendingToken + 1,
     };
@@ -83,52 +98,68 @@ export function nextRoomViewAutoSwitchState(
 ): RoomViewAutoSwitchState {
     switch (event.type) {
         case 'signal': {
+            // 設定 (autoSwitch) が変わったら、先に状態へ写す。
+            let current = state;
+            if (state.autoSwitch !== event.autoSwitch) {
+                current = { ...state, autoSwitch: event.autoSwitch };
+                if (!event.autoSwitch) {
+                    // ON → OFF: 自動で 'room' にしていたら、その場で 'log' に戻す (発話の記録は残す)。
+                    // 'manual' はそのまま。
+                    if (current.view === 'room' && current.roomBy === 'auto') {
+                        current = { ...current, view: 'log', roomBy: null };
+                    }
+                } else if (isUtteranceActive(current)) {
+                    // OFF → ON: いま続いている発話では自動で切り替えない (次の発話から効く)。
+                    current = { ...current, logChosenInUtterance: true };
+                }
+            }
+
             // 決まり 5: overlayMode でなくなったら 'log' に戻す。
             if (!event.enabled) {
-                if (!state.enabled && state.speaking === event.speaking) return state;
-                return backToLog(state, false, event.speaking);
+                if (!current.enabled && current.speaking === event.speaking) return current;
+                return backToLog(current, false, event.speaking);
             }
             // overlayMode になった瞬間に続いている発話では、自動で切り替えない (印は出す)。
-            if (!state.enabled) {
+            if (!current.enabled) {
                 return {
-                    ...backToLog(state, true, event.speaking),
+                    ...backToLog(current, true, event.speaking),
                     audioInUtterance: event.speaking && event.audioPlaying,
                 };
             }
 
-            if (!state.speaking && event.speaking) {
+            if (!current.speaking && event.speaking) {
                 // 待っている間に speaking が戻った = 同じ発話の続き。戻すのをやめる (決まり 3)。
-                const continuing = state.pendingReturnMs !== null;
+                const continuing = current.pendingReturnMs !== null;
                 let next: RoomViewAutoSwitchState = {
-                    ...state,
+                    ...current,
                     speaking: true,
                     pendingReturnMs: null,
-                    audioInUtterance: (continuing && state.audioInUtterance) || event.audioPlaying,
-                    logChosenInUtterance: continuing && state.logChosenInUtterance,
+                    audioInUtterance: (continuing && current.audioInUtterance) || event.audioPlaying,
+                    logChosenInUtterance: continuing && current.logChosenInUtterance,
                 };
-                // 決まり 1: 入力中・遡って読んでいる最中・この発話でログを選び直した後は、切り替えない。
-                if (next.view === 'log' && !event.userBusy && !next.logChosenInUtterance) {
+                // 決まり 1: 設定が OFF・入力中・遡って読んでいる最中・この発話でログを選び直した後は、切り替えない。
+                if (event.autoSwitch && next.view === 'log' && !event.userBusy && !next.logChosenInUtterance) {
                     next = { ...next, view: 'room', roomBy: 'auto' };
                 }
                 return next;
             }
 
-            if (state.speaking && !event.speaking) {
+            if (current.speaking && !event.speaking) {
                 // 決まり 3: 少し待ってから戻す。待つ長さは、この発話の間に音声が鳴ったかで決める。
-                const audio = state.audioInUtterance || event.audioPlaying;
+                const audio = current.audioInUtterance || event.audioPlaying;
                 return {
-                    ...state,
+                    ...current,
                     speaking: false,
                     audioInUtterance: audio,
                     pendingReturnMs: audio ? RETURN_DELAY_AFTER_AUDIO_MS : RETURN_DELAY_AFTER_TEXT_MS,
-                    pendingToken: state.pendingToken + 1,
+                    pendingToken: current.pendingToken + 1,
                 };
             }
 
-            if (state.speaking && event.audioPlaying && !state.audioInUtterance) {
-                return { ...state, audioInUtterance: true };
+            if (current.speaking && event.audioPlaying && !current.audioInUtterance) {
+                return { ...current, audioInUtterance: true };
             }
-            return state;
+            return current;
         }
 
         case 'returnTimerFired': {
@@ -225,9 +256,9 @@ export function keepRoomViewPick(pick: RoomViewPick | null, speakerId: string | 
     return pick.speakerAtPick === speakerId ? pick : null;
 }
 
-/** 「{名前} が喋っています」の印を出すか (決まり 2)。 */
+/** 「{名前} が喋っています」の印を出すか (決まり 2)。設定 (autoSwitch) が OFF の間は出さない。 */
 export function showSpeakingIndicator(state: RoomViewAutoSwitchState): boolean {
-    return state.enabled && state.speaking && state.view === 'log';
+    return state.enabled && state.autoSwitch && state.speaking && state.view === 'log';
 }
 
 /** 発話が続いているか (speaking が true か、終わった後の待ちの間)。 */

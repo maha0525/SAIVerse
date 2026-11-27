@@ -32,6 +32,7 @@ import RoomView from '@/components/RoomView';
 import { useBuildingDetails } from '@/lib/useBuildingDetails';
 import { useRightSidebarBesideWidth, useRoomViewColumn, useRoomViewOverlayWidth } from '@/lib/roomViewPlacement';
 import { useRoomViewAutoSwitch } from '@/lib/useRoomViewAutoSwitch';
+import { useRoomViewAutoSwitchSetting } from '@/lib/useRoomViewAutoSwitchSetting';
 import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId, resolveRoomViewVoicedId } from '@/lib/roomViewAutoSwitch';
 import { getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot, subscribeAudioPlayback } from '@/lib/clientActions/playAudio';
 import { getVoicedMessageId, getVoicedMessageIdServerSnapshot, subscribeVoicePlayback } from '@/lib/voiceLevelMeter';
@@ -691,8 +692,11 @@ export default function Home() {
     );
     const audioPlaying = !!audioSpeech;
     const speaking = !!streamingSpeech || audioPlaying;
+    // 喋っている間に自動でルームビューへ切り替えるか (グローバル設定、既定 OFF)。
+    const roomViewAutoSwitch = useRoomViewAutoSwitchSetting();
     const roomViewSwitch = useRoomViewAutoSwitch({
         enabled: overlayMode,
+        autoSwitch: roomViewAutoSwitch,
         speaking,
         audioPlaying,
         // 入力している最中 (入力欄に文字がある・添付がある) か、過去のログを遡って読んでいる最中

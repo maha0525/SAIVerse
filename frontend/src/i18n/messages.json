@@ -2599,6 +2599,14 @@
     "ja": "{p1}〜{p2} 回。既定は {p3} 回。保存すると次のターンから効きます。",
     "en": "{p1}-{p2} rounds. The default is {p3}. It takes effect from the next turn."
   },
+  "components.GlobalSettingsModal.text127": {
+    "ja": "ペルソナが喋っている間、自動でルームビューに切り替える",
+    "en": "Switch to Room View automatically while a persona is speaking"
+  },
+  "components.GlobalSettingsModal.text128": {
+    "ja": "画面の幅が狭いとき (スマホなど) に、ペルソナが喋っている間だけログからルームビューへ切り替えます。オフでも、ヘッダーのボタンで切り替えられます。",
+    "en": "On narrow screens (such as phones), the chat log switches to Room View only while a persona is speaking. When off, you can still switch with the header button."
+  },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",
     "en": "Inventory: "

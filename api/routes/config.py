@@ -861,6 +861,35 @@ def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+class RoomViewAutoSwitchRequest(BaseModel):
+    enabled: bool
+
+
+def _room_view_auto_switch_enabled() -> bool:
+    """``SAIVERSE_ROOM_VIEW_AUTO_SWITCH`` が ON か (既定 OFF)。呼ばれるたびに env を読む。"""
+    raw = os.environ.get("SAIVERSE_ROOM_VIEW_AUTO_SWITCH", "")
+    return raw.strip().lower() in ("true", "1", "yes", "on")
+
+
+@router.get("/room-view-auto-switch")
+def get_room_view_auto_switch():
+    """狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるか (グローバル設定、既定 OFF)。"""
+    return {"enabled": _room_view_auto_switch_enabled()}
+
+
+@router.post("/room-view-auto-switch")
+def set_room_view_auto_switch(req: RoomViewAutoSwitchRequest):
+    """狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるかを保存する (.env)。
+
+    読むのは画面 (チャット画面の useRoomViewAutoSwitchSetting) だけで、サーバーの
+    振る舞いは変わらない。write_env_updates が os.environ も更新するので、保存した
+    直後の GET から新しい値を返す。
+    """
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_ROOM_VIEW_AUTO_SWITCH": "true" if req.enabled else "false"})
+    return {"success": True, "enabled": req.enabled}
+
+
 class ReflexTimeoutRequest(BaseModel):
     seconds: float
 

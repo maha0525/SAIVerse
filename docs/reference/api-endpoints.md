@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 405（tag グループ: 26）
+**エンドポイント数**: 407（tag グループ: 26）
 
 ## addon
 
@@ -161,6 +161,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/config/reflex-timeout` | 反射判断を何秒まで待つか (グローバル設定、既定 5 秒)。 |
 | POST | `/api/config/reflex-timeout` | 反射判断を何秒まで待つかを保存する (.env)。 |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
+| GET | `/api/config/room-view-auto-switch` | 狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるか (グローバル設定、既定 OFF)。 |
+| POST | `/api/config/room-view-auto-switch` | 狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるかを保存する (.env)。 |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
 | GET | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限 (グローバル設定、既定 5 回)。 |
 | POST | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限を保存する (.env)。 |

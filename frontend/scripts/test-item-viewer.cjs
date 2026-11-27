@@ -164,6 +164,8 @@ function createHarness(component, props = {}, relativePath = path.relative) {
             if (name === '@/lib/useRoomViewAutoSwitch') return {
                 useRoomViewAutoSwitch: () => ({ view: 'log', showIndicator: false, utteranceActive: false, toggle() {}, pressIndicator() {} }),
             };
+            // Global setting for the automatic room view switch: off (the default).
+            if (name === '@/lib/useRoomViewAutoSwitchSetting') return { useRoomViewAutoSwitchSetting: () => false };
             if (name === '@/lib/clientActions/playAudio') return {
                 subscribeAudioPlayback: () => () => {}, getPlayingAudioMessageId: () => null, getPlayingAudioMessageIdServerSnapshot: () => null,
             };
