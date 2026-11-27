@@ -35,6 +35,7 @@
  */
 import type { ClientActionExecutor } from "@/lib/clientActionRegistry";
 import { resolveActionValue } from "@/lib/clientActionRegistry";
+import { attachVoiceLevelMeter } from "@/lib/voiceLevelMeter";
 
 // ---------- 共有 <audio> 要素と iOS gesture unlock --------------------
 
@@ -77,6 +78,14 @@ function getSharedAudio(): HTMLAudioElement {
     sharedAudio = new Audio();
     sharedAudio.preload = "auto";
     attachAudioListeners(sharedAudio);
+    // ルームビューの 3D アバターの口のために、鳴っている声と音量を読む
+    // (docs/intent/screen_avatar.md 設計 3)。audio 要素のイベントを聞くだけで、再生には
+    // 手を出さない。失敗しても声の再生を止めないよう、ここで握りつぶす。
+    try {
+        attachVoiceLevelMeter(sharedAudio, () => currentItem?.messageId);
+    } catch (err) {
+        console.warn("[play_audio] voice level meter could not be attached", err);
+    }
     return sharedAudio;
 }
 
@@ -166,8 +175,9 @@ function preemptCurrentPulse(reason: string): void {
         audio.pause();
         // src="" で empty にすると ended は発火せず、 直後の startNext での
         // src 差し替え時に Audio element の状態がリセットされた状態で開始
-        // できる。 emptied イベントは発火するが listener を付けていないので
-        // 副作用なし。
+        // できる。 emptied イベントは発火するが、 このファイルの listener は
+        // 付いていない。 聞いているのは lib/voiceLevelMeter.ts だけで、 そちらは
+        // 「この声は鳴り終わった」 と記録するだけなので、 再生には副作用なし。
         audio.src = "";
     }
     diag(`preempt fired (${reason})`, {
@@ -193,6 +203,54 @@ function shortMsg(id?: string): string {
 const playbackQueue: QueueItem[] = [];
 let currentItem: QueueItem | null = null;
 let listenersAttached = false;
+
+// ---------- 鳴っている音声の購読 (ルームビューの切り替えが読む) --------------------
+// docs/intent/screen_avatar.md 設計 1・設計 6。値は「鳴っている音声 (currentItem) の
+// messageId」で、鳴っていないときと、messageId の無い音声が鳴っているときは null。
+// 知らせるのは値が変わったときだけ。
+//
+// 知らせる場所は startNext の中だけに置く。currentItem を null にする経路
+// (onCurrentEnded / onCurrentError / onWatchdogFire / preemptCurrentPulse /
+// startNext の失敗) は、どれもその直後に startNext を呼ぶ (preempt は executor の
+// startNext)。startNext は最初の await の前に currentItem を入れるので、一つの音声が
+// 終わってすぐ次の音声が始まるときに、いったん「鳴っていない」(null) を知らせることはない
+// (次の音声の messageId へ一度で変わる)。fallback URL での取り直しは同じ messageId の
+// まま currentItem を入れ替えるだけなので、値は変わらない。
+// 吹き出しの「音声を再生」ボタン (AddonBubbleButtons.tsx) の音声はこの列を通らないので数えない。
+let notifiedMessageId: string | null = null;
+const playbackListeners = new Set<() => void>();
+
+function notifyPlaybackChange(): void {
+    const messageId = currentItem?.messageId ?? null;
+    if (messageId === notifiedMessageId) return;
+    notifiedMessageId = messageId;
+    for (const listener of Array.from(playbackListeners)) {
+        try {
+            listener();
+        } catch (err) {
+            console.error("[play_audio] playback listener failed", err);
+        }
+    }
+}
+
+/** 再生の列で鳴っている音声 (の messageId) の変化を購読する。useSyncExternalStore で読める形。 */
+export function subscribeAudioPlayback(listener: () => void): () => void {
+    playbackListeners.add(listener);
+    return () => {
+        playbackListeners.delete(listener);
+    };
+}
+
+/** 再生の列で鳴っている音声の messageId (最後に知らせた値)。鳴っていないとき、
+ * messageId の無い音声が鳴っているときは null。 */
+export function getPlayingAudioMessageId(): string | null {
+    return notifiedMessageId;
+}
+
+/** サーバー側の描画とハイドレーションの間の値 (鳴っていない)。 */
+export function getPlayingAudioMessageIdServerSnapshot(): string | null {
+    return null;
+}
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ``ended`` も ``error`` も発火しない hang 状態を防ぐための上限。
@@ -320,14 +378,17 @@ async function startNext(): Promise<void> {
         diag(`startNext called but currentItem exists msg=${shortMsg(currentItem.messageId)}`, {
             queueLength: playbackQueue.length,
         });
+        notifyPlaybackChange();
         return;
     }
     const next = playbackQueue.shift();
     if (!next) {
         diag("startNext called with empty queue");
+        notifyPlaybackChange();
         return;
     }
     currentItem = next;
+    notifyPlaybackChange();
     armWatchdog();
 
     const audio = getSharedAudio();

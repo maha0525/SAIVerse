@@ -519,6 +519,30 @@
     "ja": "建物が選ばれていません",
     "en": "No building selected"
   },
+  "app.page.roomViewToggleRoom": {
+    "ja": "ルームビュー",
+    "en": "Room view"
+  },
+  "app.page.roomViewToggleRoomTitle": {
+    "ja": "ルームビューに切り替える",
+    "en": "Switch to the room view"
+  },
+  "app.page.roomViewToggleLog": {
+    "ja": "ログ",
+    "en": "Log"
+  },
+  "app.page.roomViewToggleLogTitle": {
+    "ja": "ログに切り替える",
+    "en": "Switch to the chat log"
+  },
+  "app.page.roomViewSpeaking": {
+    "ja": "{p1} が喋っています",
+    "en": "{p1} is speaking"
+  },
+  "app.page.roomViewSpeakingNoName": {
+    "ja": "ペルソナが喋っています",
+    "en": "A persona is speaking"
+  },
   "app.phenomena.page.text001": {
     "ja": "編集内容が保存されていません。閉じてよろしいですか？",
     "en": "You have unsaved changes. Close anyway?"
@@ -2574,6 +2598,14 @@
   "components.GlobalSettingsModal.text126": {
     "ja": "{p1}〜{p2} 回。既定は {p3} 回。保存すると次のターンから効きます。",
     "en": "{p1}-{p2} rounds. The default is {p3}. It takes effect from the next turn."
+  },
+  "components.GlobalSettingsModal.text127": {
+    "ja": "ペルソナが喋っている間、自動でルームビューに切り替える",
+    "en": "Switch to Room View automatically while a persona is speaking"
+  },
+  "components.GlobalSettingsModal.text128": {
+    "ja": "画面の幅が狭いとき (スマホなど) に、ペルソナが喋っている間だけログからルームビューへ切り替えます。オフでも、ヘッダーのボタンで切り替えられます。",
+    "en": "On narrow screens (such as phones), the chat log switches to Room View only while a persona is speaking. When off, you can still switch with the header button."
   },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",
@@ -5967,9 +5999,9 @@
     "ja": "説明がありません",
     "en": "No description"
   },
-  "components.RightSidebar.text004": {
-    "ja": " インテリア",
-    "en": " Interior"
+  "components.RightSidebar.roomViewHeading": {
+    "ja": " ルームビュー",
+    "en": " Room view"
   },
   "components.RightSidebar.text005": {
     "ja": " 滞在ユーザー (",
@@ -6138,6 +6170,78 @@
   "components.RightSidebar.text046": {
     "ja": "{p1} 件",
     "en": "{p1} items"
+  },
+  "components.RightSidebar.text047": {
+    "ja": "ほかに {p1} 個のアイテムが埋もれています",
+    "en": "{p1} more items are buried here"
+  },
+  "components.RoomView.label001": {
+    "ja": "ルームビュー",
+    "en": "Room view"
+  },
+  "components.RoomView.alt001": {
+    "ja": "{p1} の内装",
+    "en": "Interior of {p1}"
+  },
+  "components.RoomView.alt002": {
+    "ja": "{p1} の姿",
+    "en": "{p1}"
+  },
+  "components.RoomView.text001": {
+    "ja": "{p1} を表示",
+    "en": "Show {p1}"
+  },
+  "components.RoomView.caption001": {
+    "ja": "いま喋っている内容",
+    "en": "What is being said now"
+  },
+  "components.VrmAvatar.loading": {
+    "ja": "3D アバターを読み込んでいます",
+    "en": "Loading the 3D avatar"
+  },
+  "components.VrmAvatar.loadingPercent": {
+    "ja": "3D アバターを読み込んでいます ({p1}%)",
+    "en": "Loading the 3D avatar ({p1}%)"
+  },
+  "components.VrmAvatar.failed": {
+    "ja": "3D アバターを読み込めませんでした",
+    "en": "Could not load the 3D avatar"
+  },
+  "components.VrmAvatar.dismiss": {
+    "ja": "この知らせを閉じる",
+    "en": "Dismiss this notice"
+  },
+  "components.VrmAvatar.reasonWebgl": {
+    "ja": "このブラウザでは 3D を描けません (WebGL が使えません)。",
+    "en": "This browser cannot draw 3D (WebGL is unavailable)."
+  },
+  "components.VrmAvatar.reasonNotFound": {
+    "ja": "VRM のファイルが見つかりません。ペルソナ設定で入れ直してください。",
+    "en": "The VRM file was not found. Add it again in the persona settings."
+  },
+  "components.VrmAvatar.reasonHttp": {
+    "ja": "サーバーが VRM を返しませんでした (HTTP {p1})。",
+    "en": "The server did not return the VRM (HTTP {p1})."
+  },
+  "components.VrmAvatar.reasonNetwork": {
+    "ja": "VRM のファイルを受け取りきれませんでした。",
+    "en": "The VRM file could not be fully downloaded."
+  },
+  "components.VrmAvatar.reasonParse": {
+    "ja": "VRM のファイルが壊れているか、読めない形式です。",
+    "en": "The VRM file is damaged or in a format that cannot be read."
+  },
+  "components.VrmAvatar.reasonNotVrm": {
+    "ja": "ファイルに VRM のアバターの情報がありません。",
+    "en": "The file does not contain VRM avatar data."
+  },
+  "components.VrmAvatar.reasonContextLost": {
+    "ja": "描いている途中で 3D の描画が止まりました。ページを開き直すと、もう一度試します。",
+    "en": "3D drawing stopped partway. Reload the page to try again."
+  },
+  "components.VrmAvatar.reasonEngine": {
+    "ja": "3D を描くための部品を読み込めませんでした。ページを開き直してください。",
+    "en": "The components for drawing 3D could not be loaded. Reload the page."
   },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",
@@ -8327,6 +8431,66 @@
     "ja": "LLMのビジュアルコンテキスト用の詳細な外見画像。アバターとは別です。",
     "en": "A detailed appearance image for the LLM's visual context, separate from the avatar."
   },
+  "components.SettingsModal.vrmLabel": {
+    "ja": "3D アバター (VRM)",
+    "en": "3D avatar (VRM)"
+  },
+  "components.SettingsModal.vrmChoose": {
+    "ja": "VRM ファイルを選んで入れる",
+    "en": "Choose a VRM file to add"
+  },
+  "components.SettingsModal.vrmReplace": {
+    "ja": "別の VRM に入れ替える",
+    "en": "Replace with another VRM"
+  },
+  "components.SettingsModal.vrmRemove": {
+    "ja": "VRM を外す",
+    "en": "Remove the VRM"
+  },
+  "components.SettingsModal.vrmRemoveConfirm": {
+    "ja": "VRM「{p1}」を外しますか? ルームビューには、上の外見画像が出るようになります。",
+    "en": "Remove the VRM \"{p1}\"? The room view will show the appearance image above instead."
+  },
+  "components.SettingsModal.vrmUploading": {
+    "ja": "送っています ({p1}%)",
+    "en": "Uploading ({p1}%)"
+  },
+  "components.SettingsModal.vrmProcessing": {
+    "ja": "VRM を確かめています",
+    "en": "Checking the VRM"
+  },
+  "components.SettingsModal.vrmRemoving": {
+    "ja": "外しています",
+    "en": "Removing"
+  },
+  "components.SettingsModal.vrmUploadFailed": {
+    "ja": "VRM を入れられませんでした: {p1}",
+    "en": "Could not add the VRM: {p1}"
+  },
+  "components.SettingsModal.vrmRemoveFailed": {
+    "ja": "VRM を外せませんでした: {p1}",
+    "en": "Could not remove the VRM: {p1}"
+  },
+  "components.SettingsModal.vrmNetworkError": {
+    "ja": "サーバーにつながりませんでした",
+    "en": "Could not reach the server"
+  },
+  "components.SettingsModal.vrmNotVrmFile": {
+    "ja": "拡張子が .vrm のファイルを選んでください。",
+    "en": "Choose a file with the .vrm extension."
+  },
+  "components.SettingsModal.vrmTooLarge": {
+    "ja": "300MB を超える VRM は入れられません。",
+    "en": "A VRM larger than 300 MB cannot be added."
+  },
+  "components.SettingsModal.vrmShow3d": {
+    "ja": "ルームビューに 3D アバターを出す",
+    "en": "Show the 3D avatar in the room view"
+  },
+  "components.SettingsModal.vrmDescription": {
+    "ja": "VRM を入れると、ルームビューに外見画像の代わりに 3D アバターが出ます。VRM のファイルを入れる・外すはすぐに反映され、3D アバターを出すかどうかの切り替えは「保存」を押すと反映されます。",
+    "en": "With a VRM, the room view shows a 3D avatar instead of the appearance image. Adding or removing the VRM file takes effect right away; whether to show the 3D avatar takes effect when you press Save."
+  },
   "components.SettingsModal.text102": {
     "ja": "説明",
     "en": "Description"
@@ -8590,6 +8754,26 @@
   "api.runtimeAlerts.memorizeFailed.message": {
     "ja": "{persona} の記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
     "en": "Saving {persona}'s memory failed. The conversation may not have been recorded."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.title": {
+    "ja": "VRM を引き継げませんでした",
+    "en": "Could not carry over the VRM"
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.sourceMissing": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (ファイルが見つかりません)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (the file was not found). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.notVrm": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (VRM のファイルではありません)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (the file is not a VRM). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.tooLarge": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (300MB を超えています)。ペルソナ設定の「3D アバター (VRM)」で、300MB までの VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (it is larger than 300 MB). Please add a VRM of up to 300 MB under \"3D avatar (VRM)\" in the persona settings."
+  },
+  "api.runtimeAlerts.vrmAdoptionFailed.failed": {
+    "ja": "{persona} の VRM を、Godot のアドオンの設定から SAIVerse へ引き継げませんでした (保存に失敗しました)。ペルソナ設定の「3D アバター (VRM)」で、VRM を入れ直してください。",
+    "en": "The VRM of {persona} could not be carried over from the Godot add-on settings to SAIVerse (saving failed). Please add the VRM again under \"3D avatar (VRM)\" in the persona settings."
   },
   "api.runtimeAlerts.chronicleSkipped.title": {
     "ja": "Chronicle の生成をスキップしました",

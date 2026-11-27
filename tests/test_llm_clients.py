@@ -27,6 +27,7 @@ from llm_clients import (
     OPENAI_TOOLS_SPEC,
 )
 from llm_clients.exceptions import InvalidRequestError
+from saiverse.http_cancel import install_cancellable_transport2
 from llm_clients.gemini import _billed_output_tokens
 
 if not saiverse_tools.OPENAI_TOOLS_SPEC:
@@ -104,10 +105,14 @@ class TestLLMClients(unittest.TestCase):
 
         self.assertIsInstance(client, OpenAIClient)
         self.assertEqual(client.model, "stockmark/stockmark-2-100b-instruct")
-        mock_openai.assert_called_once_with(
-            api_key='test_nim_key',
-            base_url='https://integrate.api.nvidia.com/v1'
-        )
+        mock_openai.assert_called_once()
+        sdk_kwargs = mock_openai.call_args.kwargs
+        self.assertEqual(sdk_kwargs["api_key"], 'test_nim_key')
+        self.assertEqual(sdk_kwargs["base_url"], 'https://integrate.api.nvidia.com/v1')
+        # Retries live in openai_runtime.call_with_retry; the SDK's own retry
+        # must stay off, and the SDK must sit on our cancellable httpx2 client.
+        self.assertEqual(sdk_kwargs["max_retries"], 0)
+        self.assertIsInstance(sdk_kwargs["http_client"], httpx2.Client)
 
     @patch('llm_clients.factory.OpenAIClient')
     def test_get_llm_client_forwards_openai_extra_kwargs(self, mock_openai_client):
@@ -240,10 +245,14 @@ class TestLLMClients(unittest.TestCase):
         # httpx.Client (measured: a MockTransport round trip even succeeds),
         # but that is duck-typing luck, not the contract -- stay on the SDK's
         # own stack so the test exercises what production runs on.
-        client.client = _RealOpenAI(
-            **mock_openai.call_args.kwargs,
-            http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
+        # The factory already passes its own http_client (the stop-button
+        # cancellable transport), so replace that entry instead of adding a
+        # second one, and wrap the MockTransport the same way production does.
+        sdk_kwargs = dict(mock_openai.call_args.kwargs)
+        sdk_kwargs["http_client"] = install_cancellable_transport2(
+            httpx2.Client(transport=httpx2.MockTransport(handler))
         )
+        client.client = _RealOpenAI(**sdk_kwargs)
         client.generate([{"role": "user", "content": "hi"}], tools=[])
         return captured[-1]
 

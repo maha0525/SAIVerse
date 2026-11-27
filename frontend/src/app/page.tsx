@@ -7,7 +7,7 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
 
-import { useState, useRef, useEffect, ChangeEvent, useCallback, useMemo, memo, ReactNode } from 'react';
+import { useState, useRef, useEffect, ChangeEvent, useCallback, useMemo, memo, ReactNode, useSyncExternalStore } from 'react';
 import ReactMarkdown, { defaultUrlTransform, Components } from 'react-markdown';
 import type { PluggableList } from 'unified';
 import remarkBreaks from 'remark-breaks';
@@ -28,6 +28,14 @@ import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
 import { fetchAllTableRows } from '@/lib/dbTable';
 import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
+import RoomView from '@/components/RoomView';
+import { useBuildingDetails } from '@/lib/useBuildingDetails';
+import { useRightSidebarBesideWidth, useRoomViewColumn, useRoomViewOverlayWidth } from '@/lib/roomViewPlacement';
+import { useRoomViewAutoSwitch } from '@/lib/useRoomViewAutoSwitch';
+import { useRoomViewAutoSwitchSetting } from '@/lib/useRoomViewAutoSwitchSetting';
+import { USER_SCROLL_KEYS, isUserScrollInputActive, nextScrolledBack, resolveRoomViewSpeakerId, resolveRoomViewVoicedId } from '@/lib/roomViewAutoSwitch';
+import { getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot, subscribeAudioPlayback } from '@/lib/clientActions/playAudio';
+import { getVoicedMessageId, getVoicedMessageIdServerSnapshot, subscribeVoicePlayback } from '@/lib/voiceLevelMeter';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
 import PeopleModal from '@/components/PeopleModal';
@@ -40,7 +48,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2 } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2, Image as ImageIcon, MessagesSquare } from 'lucide-react';
 import { shouldShowMovementMessage } from '@/lib/movementNotices';
 import { useMovementNoticeSettings } from '@/hooks/useMovementNoticeSettings';
 import { useMovementNoticeAutoScroll } from '@/hooks/useMovementNoticeAutoScroll';
@@ -440,6 +448,21 @@ export default function Home() {
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
+    // 過去のログを遡って読んでいる最中か。ルームビューへの自動の切り替えを止めるのに使う。
+    // handleScroll で nextScrolledBack (roomViewAutoSwitch.ts) を見て、値が変わったときだけ
+    // state を更新する (スクロールのたびに描き直さない)。true にするのは利用者の操作による
+    // スクロールのときだけで、その操作 (wheel・touchmove・ポインタが押されている間・
+    // スクロールのキー) は state ではなく ref に覚える。
+    const [isScrolledBack, setIsScrolledBack] = useState(false);
+    const isScrolledBackRef = useRef(false);
+    const userScrollPointerDownRef = useRef(false);
+    const lastUserScrollInputAtRef = useRef<number | null>(null);
+    const markUserScrollInput = useCallback(() => {
+        lastUserScrollInputAtRef.current = performance.now();
+    }, []);
+    // 入力欄。ルームビューをログに重ねている間、入力欄の高さの分だけ下を空ける。
+    const inputAreaRef = useRef<HTMLDivElement>(null);
+    const [inputAreaHeight, setInputAreaHeight] = useState(0);
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
 
     // Pagination State
@@ -471,6 +494,10 @@ export default function Home() {
     const [isLeftOpen, setIsLeftOpen] = useState(false);
     const [isOptionsOpen, setIsOptionsOpen] = useState(false);
     const [isInfoOpen, setIsInfoOpen] = useState(false); // Default closed to prevent mobile flash
+    // isInfoOpen の初期の決定 (下の最初の useEffect の、幅 768px 以上なら開く処理) が
+    // 済んだか。済むまでは overlayMode を false にする (描き始めた直後の一瞬だけ
+    // 切り替えのボタンが出るのを防ぐ)。
+    const [isInfoOpenDecided, setIsInfoOpenDecided] = useState(false);
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
     const [usageTooltipId, setUsageTooltipId] = useState<string | null>(null); // Track which message's usage tooltip is open
@@ -591,6 +618,7 @@ export default function Home() {
         if (window.innerWidth >= 768) {
             setIsInfoOpen(true);
         }
+        setIsInfoOpenDecided(true);
 
         return () => window.removeEventListener('resize', checkMobile);
     }, []);
@@ -632,6 +660,133 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // ルームビュー (docs/intent/screen_avatar.md 設計 1)。幅 2000px 以上では
+    // チャットのすぐ右にくっつけたUI区画として置き (チャットと合わせて中央に揃える)、
+    // それ未満では右サイドバーの中に置く。
+    const isRoomViewColumn = useRoomViewColumn();
+    // 右サイドバーを出せない幅 (overlayMode) では、ログとルームビューを切り替える
+    // (設計 1、必ず守ること 8)。幅 1100px 未満で、右サイドバーがチャットの横に
+    // 並んでいない (768px 以下の引き出す形か、閉じている) 間だけ。
+    const isRoomViewOverlayWidth = useRoomViewOverlayWidth();
+    const isRightSidebarBesideWidth = useRightSidebarBesideWidth();
+    const overlayMode = isInfoOpenDecided && isRoomViewOverlayWidth && !(isRightSidebarBesideWidth && isInfoOpen);
+    // speaking: 文字が流れている (本文のある _streaming の assistant の吹き出しがある) か、
+    // いま見ているログの吹き出しの読み上げの音声が鳴っている (playAudio.ts の再生の列) 間。
+    // 考えている途中 (_streamingThinking だけ) やスペルの実行中の表示だけの間は数えない。
+    const streamingSpeech = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i];
+            if (m.role === 'assistant' && m._streaming && typeof m.content === 'string' && m.content.length > 0) return m;
+        }
+        return undefined;
+    }, [messages]);
+    // 鳴っている音声の messageId (audio_ready の message_id = 建物の記録の行の id で、
+    // 吹き出しの id と同じ)。その id の吹き出しが messages の中にあるときだけ数える —
+    // 別の部屋の吹き出しの音声や、messageId の無い音声では切り替えない。
+    const playingAudioMessageId = useSyncExternalStore(
+        subscribeAudioPlayback, getPlayingAudioMessageId, getPlayingAudioMessageIdServerSnapshot,
+    );
+    const audioSpeech = useMemo(
+        () => (playingAudioMessageId ? messages.find(m => m.id === playingAudioMessageId) : undefined),
+        [playingAudioMessageId, messages],
+    );
+    const audioPlaying = !!audioSpeech;
+    const speaking = !!streamingSpeech || audioPlaying;
+    // 喋っている間に自動でルームビューへ切り替えるか (グローバル設定、既定 OFF)。
+    const roomViewAutoSwitch = useRoomViewAutoSwitchSetting();
+    const roomViewSwitch = useRoomViewAutoSwitch({
+        enabled: overlayMode,
+        autoSwitch: roomViewAutoSwitch,
+        speaking,
+        audioPlaying,
+        // 入力している最中 (入力欄に文字がある・添付がある) か、過去のログを遡って読んでいる最中
+        userBusy: !isInputEmpty || attachments.length > 0 || isScrolledBack,
+        resetKey: currentBuildingId,
+    });
+    const showRoomOverlay = overlayMode && roomViewSwitch.view === 'room';
+    // 部屋の詳細 (GET /api/info/details) は右サイドバーとルームビューの両方が使うので、
+    // ここで一度だけ取得する。10 秒ごとの取り直しは、右サイドバーが開いているか、
+    // ルームビューが画面に出ている間 (UI区画か、ログに重ねている間) だけ動く。
+    const { details: buildingDetails, refetchDetails: refetchBuildingDetails } = useBuildingDetails({
+        currentBuildingId,
+        refreshTrigger: moveTrigger,
+        sidebarOpen: isInfoOpen,
+        pollActive: isInfoOpen || isRoomViewColumn || showRoomOverlay,
+    });
+    // ルームビューに出すペルソナ: 文字が流れている吹き出し (streamingSpeech) の持ち主、
+    // 無ければ読み上げの音声が鳴っている吹き出し (audioSpeech) の持ち主、それも無ければ
+    // 末尾から見て最初の assistant の吹き出しの持ち主 (resolveRoomViewSpeakerId)。
+    // 字幕と speaking が使うのと同じ streamingSpeech / audioSpeech から決める —
+    // 本文の無い生成中の吹き出し (考えている途中・スペルの実行中) は、ここでも
+    // 「文字が流れている」に数えない。数えると、A の音声が鳴っている間に B が
+    // 考え始めただけで、A の声・字幕に B の姿が組み合わさる。
+    const roomViewSpeakerId = useMemo(() => {
+        let lastSpeakerId: string | undefined;
+        for (let i = messages.length - 1; i >= 0 && !lastSpeakerId; i--) {
+            lastSpeakerId = bubbleSpeakerId(messages[i]);
+        }
+        return resolveRoomViewSpeakerId(bubbleSpeakerId(streamingSpeech), bubbleSpeakerId(audioSpeech), lastSpeakerId);
+    }, [messages, streamingSpeech, audioSpeech]);
+    // いま喋っているペルソナ: speaking の間の roomViewSpeakerId。ルームビューの 3D アバターは、
+    // このペルソナのときだけ口を開け閉めする (docs/intent/screen_avatar.md 設計 3)。
+    const roomViewSpeakingId = speaking ? roomViewSpeakerId : undefined;
+    // 声が鳴っているペルソナ: 自動で鳴る声 (playAudio.ts) と、吹き出しの「音声を再生」ボタンで
+    // 鳴らした声のうち、最後に鳴り始めたものの吹き出しの持ち主 (lib/voiceLevelMeter.ts)。
+    // ルームビューの 3D アバターは、このペルソナのときだけ口の開きを声の音量に合わせる
+    // (docs/intent/screen_avatar.md 設計 3)。ルームビューの切り替えと speaking は、今までどおり
+    // audioSpeech から決めるので、この値では変わらない。
+    const voicedMessageId = useSyncExternalStore(
+        subscribeVoicePlayback, getVoicedMessageId, getVoicedMessageIdServerSnapshot,
+    );
+    const roomViewVoicedId = useMemo(() => {
+        if (!voicedMessageId) return undefined;
+        const bubble = messages.find(m => m.id === voicedMessageId);
+        // 流し込みの途中の吹き出しは、発言が保存されるまで id を持たない。音声のアドオンは
+        // その前から声を鳴らし始めるので、id の合う吹き出しが無い間は、まだ id を持たない
+        // 流し込み中の吹き出しを、その声の吹き出しとして扱う (resolveRoomViewVoicedId)。
+        return resolveRoomViewVoicedId(
+            bubble ? { speakerId: bubbleSpeakerId(bubble) } : undefined,
+            streamingSpeech && !streamingSpeech.id ? bubbleSpeakerId(streamingSpeech) : undefined,
+        );
+    }, [voicedMessageId, messages, streamingSpeech]);
+    // 「{名前} が喋っています」の印に出す名前。部屋にいるペルソナの名前、無ければ
+    // 吹き出しの表示名。どちらも分からなければ undefined (名前なしの文言を出す)。
+    const roomViewSpeakerName = useMemo(() => {
+        if (!roomViewSpeakerId) return undefined;
+        const occupant = buildingDetails?.occupants.find(o => o.id === roomViewSpeakerId);
+        if (occupant?.name) return occupant.name;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (bubbleSpeakerId(messages[i]) === roomViewSpeakerId && messages[i].sender) {
+                return messages[i].sender;
+            }
+        }
+        return undefined;
+    }, [roomViewSpeakerId, buildingDetails, messages]);
+    // ルームビューをログに重ねている間の字幕: いま喋っている吹き出しの本文そのもの。
+    // _streaming の吹き出しがあればそれ、無ければ (音声だけが鳴っている間) 鳴っている
+    // 音声の吹き出し (audioSpeech)。どちらも無い間 (発話が終わった後の待ちの間) は、
+    // 末尾から見て最初の assistant の吹き出し。考えている途中の文 (_streamingThinking) は
+    // 使わない。発話が続いている間 (終わった後の待ちの間を含む) だけ出す。
+    const roomViewCaptionContent = useMemo(() => {
+        if (!showRoomOverlay || !roomViewSwitch.utteranceActive) return undefined;
+        if (streamingSpeech) return streamingSpeech.content;
+        if (audioSpeech?.content) return audioSpeech.content;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i];
+            if (m.role === 'assistant' && !m.isError && m.content) return m.content;
+        }
+        return undefined;
+    }, [showRoomOverlay, roomViewSwitch.utteranceActive, streamingSpeech, audioSpeech, messages]);
+    // ルームビューをログに重ねている間だけ、入力欄の高さを測る (ResizeObserver は
+    // observe した直後にも一度知らせるので、最初の値もここで入る)。
+    useEffect(() => {
+        if (!showRoomOverlay) return;
+        const el = inputAreaRef.current;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        const observer = new ResizeObserver(() => setInputAreaHeight(el.offsetHeight));
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [showRoomOverlay]);
     // 表示中の建物が削除され、引っ越し先が見つからなかった状態。
     // 'empty' = 世界に建物がひとつも無い / 'error' = 一覧取得か移動に失敗。
     // 建物を再び表示できたら null に戻す。
@@ -1132,7 +1287,20 @@ export default function Home() {
 
     const handleScroll = () => {
         if (chatAreaRef.current) {
-            const { scrollTop } = chatAreaRef.current;
+            const { scrollTop, scrollHeight, clientHeight } = chatAreaRef.current;
+            const scrolledBack = nextScrolledBack(
+                isScrolledBackRef.current,
+                scrollHeight - scrollTop - clientHeight,
+                isUserScrollInputActive({
+                    pointerDown: userScrollPointerDownRef.current,
+                    lastInputAt: lastUserScrollInputAtRef.current,
+                    now: performance.now(),
+                }),
+            );
+            if (scrolledBack !== isScrolledBackRef.current) {
+                isScrolledBackRef.current = scrolledBack;
+                setIsScrolledBack(scrolledBack);
+            }
             // Use a threshold (e.g. 10px) to catch scrolls near the top
             if (scrollTop < 10) {
                 console.log(`[DEBUG] Scroll near top: hasMore=${hasMore}, isLoadingMore=${isLoadingMore}, messages.length=${messages.length}, isHistoryLoaded=${isHistoryLoaded}`);
@@ -1147,6 +1315,35 @@ export default function Home() {
             }
         }
     };
+
+    // ログ (.chatArea) の上での利用者のスクロールの操作を覚える (handleScroll が読む)。
+    // ポインタは、ログの上で押された (onPointerDown) ときから、どこで離されたときまで
+    // 押されている間とみなす。スクロールのキーは、入力欄などの文字を打つ場所で押されたものは
+    // 数えない (ログをスクロールしないので)。
+    useEffect(() => {
+        const releasePointer = () => {
+            userScrollPointerDownRef.current = false;
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (!USER_SCROLL_KEYS.has(event.key)) return;
+            const target = event.target;
+            if (target instanceof HTMLElement) {
+                if (target.isContentEditable) return;
+                if (target.closest('input, textarea, select')) return;
+                const chatArea = chatAreaRef.current;
+                if (target !== document.body && chatArea && !chatArea.contains(target)) return;
+            }
+            markUserScrollInput();
+        };
+        window.addEventListener('pointerup', releasePointer);
+        window.addEventListener('pointercancel', releasePointer);
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            window.removeEventListener('pointerup', releasePointer);
+            window.removeEventListener('pointercancel', releasePointer);
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [markUserScrollInput]);
 
     const fetchBuildingInfo = async (overrideBuildingId?: string) => {
         try {
@@ -3724,7 +3921,7 @@ export default function Home() {
                 onClose={() => setIsLeftOpen(false)}
             />
 
-            <main className={styles.contentWrapper}>
+            <main className={`${styles.contentWrapper} ${isRoomViewColumn ? styles.contentWrapperBesideRoomView : ''}`}>
                 <header className={styles.header}>
                     <div className={styles.headerLeft}>
                         <button
@@ -3813,6 +4010,21 @@ export default function Home() {
                         >
                             <Users size={20} />
                         </button>
+                        {/* ログとルームビューの切り替え (overlayMode の間だけ出す) */}
+                        {overlayMode && (
+                            <button data-i18n="app.page.roomViewToggleRoom app.page.roomViewToggleLog"
+                                type="button"
+                                className={`${styles.iconBtn} ${styles.roomViewToggle} ${roomViewSwitch.view === 'room' ? styles.roomViewToggleActive : ''}`}
+                                onClick={roomViewSwitch.toggle}
+                                title={roomViewSwitch.view === 'room' ? uiText("app.page.roomViewToggleLogTitle") : uiText("app.page.roomViewToggleRoomTitle")}
+                                aria-label={roomViewSwitch.view === 'room' ? uiText("app.page.roomViewToggleLogTitle") : uiText("app.page.roomViewToggleRoomTitle")}
+                            >
+                                {roomViewSwitch.view === 'room' ? <MessagesSquare size={18} /> : <ImageIcon size={18} />}
+                                <span className={styles.roomViewToggleLabel}>
+                                    {roomViewSwitch.view === 'room' ? uiText("app.page.roomViewToggleLog") : uiText("app.page.roomViewToggleRoom")}
+                                </span>
+                            </button>
+                        )}
                         <button
                             className={`${styles.iconBtn} ${isInfoOpen ? styles.active : ''}`}
                             onClick={() => setIsInfoOpen(!isInfoOpen)}
@@ -3912,10 +4124,17 @@ export default function Home() {
                     </div>
                 )}
 
+                {/* ログを包む要素。overlayMode でルームビューに切り替えている間は、ログを
+                    外さず (スクロールの位置と ref を保ったまま) その上にルームビューを重ねる。 */}
+                <div className={styles.chatStage}>
                 <div
                     className={styles.chatArea}
                     ref={chatAreaRef}
                     onScroll={handleScroll}
+                    onWheel={markUserScrollInput}
+                    onTouchMove={markUserScrollInput}
+                    onPointerDown={() => { userScrollPointerDownRef.current = true; }}
+                    {...(showRoomOverlay ? { inert: true, 'aria-hidden': true } : {})}
                 >
                     <HistoryContinuation
                         oldestId={messages[0]?.id}
@@ -4326,14 +4545,49 @@ export default function Home() {
                     )}
                     <div ref={messagesEndRef} />
                 </div>
+                {showRoomOverlay && (
+                    <div
+                        className={styles.roomViewOverlay}
+                        style={inputAreaHeight > 0 ? { paddingBottom: inputAreaHeight } : undefined}
+                    >
+                        <RoomView
+                            details={buildingDetails}
+                            speakerId={roomViewSpeakerId}
+                            speakingId={roomViewSpeakingId}
+                            voicedId={roomViewVoicedId}
+                            placement="overlay"
+                            caption={roomViewCaptionContent
+                                ? <MessageMarkdown content={roomViewCaptionContent} components={markdownComponents} />
+                                : undefined}
+                        />
+                    </div>
+                )}
+                </div>
 
                 <div
+                    ref={inputAreaRef}
                     className={styles.inputArea}
                     onDragEnter={handleDragEnter}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
                 >
+                    {/* ルームビューに自動で切り替えなかった間の「喋っています」の印。押すとルームビューになる。 */}
+                    {roomViewSwitch.showIndicator && (
+                        <button data-i18n="app.page.roomViewSpeaking app.page.roomViewSpeakingNoName"
+                            type="button"
+                            className={styles.roomViewSpeakingBadge}
+                            onClick={roomViewSwitch.pressIndicator}
+                            title={uiText("app.page.roomViewToggleRoomTitle")}
+                        >
+                            <ImageIcon size={14} aria-hidden="true" />
+                            <span>
+                                {roomViewSpeakerName
+                                    ? uiText("app.page.roomViewSpeaking", { p1: roomViewSpeakerName })
+                                    : uiText("app.page.roomViewSpeakingNoName")}
+                            </span>
+                        </button>
+                    )}
                     {/* Options bar: Model display + settings button + tool mode */}
                     <div className={styles.optionsBar}>
                         <button data-i18n="app.page.text074"
@@ -4502,6 +4756,13 @@ export default function Home() {
                 </div>
             </main>
 
+            {/* ルームビューのUI区画 (幅 2000px 以上)。右サイドバーを閉じていても出る。 */}
+            {isRoomViewColumn && (
+                <aside className={styles.roomViewColumn}>
+                    <RoomView details={buildingDetails} speakerId={roomViewSpeakerId} speakingId={roomViewSpeakingId} voicedId={roomViewVoicedId} placement="column" />
+                </aside>
+            )}
+
             {/* チュートリアル表示中は街マップを開かない。初回起動では map (デフォルト ON) と
                 チュートリアルの表示条件が同時に成立するため、判定完了 (tutorialChecked) かつ
                 チュートリアル非表示のときだけ開く。これで初回のマップちらつきと、チュートリアル
@@ -4523,8 +4784,13 @@ export default function Home() {
             <RightSidebar
                 isOpen={isInfoOpen}
                 onClose={() => setIsInfoOpen(false)}
-                refreshTrigger={moveTrigger}
                 currentBuildingId={currentBuildingId}
+                details={buildingDetails}
+                refetchDetails={refetchBuildingDetails}
+                showRoomView={!isRoomViewColumn}
+                speakerId={roomViewSpeakerId}
+                speakingId={roomViewSpeakingId}
+                voicedId={roomViewVoicedId}
                 onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
                 onStartVoiceCall={voiceCallAvailable
                     ? (personaId, personaName, buildingId) =>

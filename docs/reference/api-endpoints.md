@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 402（tag グループ: 26）
+**エンドポイント数**: 407（tag グループ: 26）
 
 ## addon
 
@@ -161,6 +161,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/config/reflex-timeout` | 反射判断を何秒まで待つか (グローバル設定、既定 5 秒)。 |
 | POST | `/api/config/reflex-timeout` | 反射判断を何秒まで待つかを保存する (.env)。 |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
+| GET | `/api/config/room-view-auto-switch` | 狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるか (グローバル設定、既定 OFF)。 |
+| POST | `/api/config/room-view-auto-switch` | 狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるかを保存する (.env)。 |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
 | GET | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限 (グローバル設定、既定 5 回)。 |
 | POST | `/api/config/spell-max-rounds` | 1 回のパルスでスペルを連続実行できる回数上限を保存する (.env)。 |
@@ -279,6 +281,9 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/fragments` | Get Memopedia fragments generated from a Chronicle entry. |
 | GET | `/api/people/{persona_id}/arasuji/{entry_id}/messages` | Get the source raw messages for a Level 1 Chronicle entry. |
 | POST | `/api/people/{persona_id}/arasuji/{entry_id}/regenerate` | Regenerate a specific Chronicle entry while preserving parent relationship. |
+| POST | `/api/people/{persona_id}/avatar-vrm` | VRM を一つ受け取り、そのペルソナの VRM として置く (前の VRM は保存が済んでから消す)。 |
+| GET | `/api/people/{persona_id}/avatar-vrm` | そのペルソナの VRM のファイルを返す。 |
+| DELETE | `/api/people/{persona_id}/avatar-vrm` | VRM を消し、``AVATAR_VRM_PATH`` を NULL にする。VRM が無くても成功を返す。 |
 | POST | `/api/people/{persona_id}/cache-config` | persona の cache 設定 ("off"/"5m"/"1h") を設定する (Phase 2、in-memory・非永続)。 |
 | GET | `/api/people/{persona_id}/cache-status` | 指定ペルソナの prompt cache 状態 (効いてるか / 残り秒) を read-only で返す。 |
 | GET | `/api/people/{persona_id}/clips` | メッセージ群に付いた観測点 (点クリップ) をバッチで返す (画面 C: ハイライト)。 |

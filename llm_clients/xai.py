@@ -18,6 +18,7 @@ from tools import OPENAI_TOOLS_SPEC
 from saiverse.llm_router import route
 
 from .base import LLMClient, ToolSpecFormat, get_llm_logger
+from .cancel_transport import cancellable_sleep
 from .exceptions import (
     AuthenticationError,
     ContextLengthExceededError,
@@ -31,6 +32,7 @@ from .exceptions import (
     ServerError,
     is_context_length_error,
 )
+from sea.cancellation import ExecutionCancelledException, raise_if_llm_stopped
 from .system_notice import (
     accepts_mid_conversation_system,
     present_system_notices,
@@ -333,7 +335,7 @@ class XAIClient(LLMClient):
                 user_message="xAI APIキーが設定されていません。管理者にお問い合わせください。",
             )
 
-        self.client = xai_sdk.Client(api_key=resolved_key, timeout=3600)
+        self.client = xai_sdk.Client(api_key=resolved_key, timeout=300)
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.max_image_bytes: Optional[int] = max_image_bytes
@@ -462,6 +464,7 @@ class XAIClient(LLMClient):
 
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES):
+            raise_if_llm_stopped()
             try:
                 if use_tools:
                     return self._generate_with_tools(xai_messages, tools_spec)
@@ -469,13 +472,13 @@ class XAIClient(LLMClient):
                     return self._generate_with_schema(xai_messages, response_schema)
                 else:
                     return self._generate_text(xai_messages, snippets)
-            except (PaymentError, AuthenticationError):
+            except (PaymentError, AuthenticationError, ExecutionCancelledException):
                 raise
             except LLMError as e:
                 last_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
                     _log.warning("[xai] Retryable error (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
-                    time.sleep(2 ** attempt)
+                    cancellable_sleep(2 ** attempt)
                     continue
                 raise
             except Exception as e:
@@ -483,7 +486,7 @@ class XAIClient(LLMClient):
                 converted = _convert_to_llm_error(e, "generate")
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
                     _log.warning("[xai] Retryable error (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
-                    time.sleep(2 ** attempt)
+                    cancellable_sleep(2 ** attempt)
                     continue
                 raise converted from e
 
@@ -761,7 +764,7 @@ class XAIClient(LLMClient):
             else:
                 self._store_tool_detection({"type": "text", "content": "".join(text_fragments)})
 
-        except LLMError:
+        except (LLMError, ExecutionCancelledException):
             raise
         except Exception as e:
             _log.exception("[xai] streaming failed")

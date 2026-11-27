@@ -25,6 +25,7 @@ from .anthropic_retry_policy import (
     _is_content_policy_error,
     _should_retry,
 )
+from .cancel_transport import cancellable_sleep, install_cancellable_transport2
 from .exceptions import (
     AuthenticationError,
     ContextLengthExceededError,
@@ -38,6 +39,7 @@ from .exceptions import (
     ServerError,
     is_context_length_error,
 )
+from sea.cancellation import ExecutionCancelledException
 
 
 # Retry configuration
@@ -56,7 +58,7 @@ INITIAL_BACKOFF = 1.0  # seconds
 # guard (anthropic messages.py only guards when client.timeout == DEFAULT_TIMEOUT),
 # so both paths can use the full configured max_tokens without a ValueError.
 # connect stays short so genuine connection failures still fail fast.
-DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECONDS
+DEFAULT_TIMEOUT_SECONDS = 300.0  # 5 min; override via ANTHROPIC_TIMEOUT_SECONDS
 
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
@@ -91,9 +93,17 @@ class AnthropicClient(LLMClient):
         # transport receives is the whole Timeout object instead of a number
         # (verified against 1.3.0 with a MockTransport, 2026-09-02). Tests pin
         # the type so this cannot regress silently.
+        httpx2_timeout = httpx2.Timeout(timeout_seconds, connect=5.0)
+        http_client = install_cancellable_transport2(
+            httpx2.Client(timeout=httpx2_timeout)
+        )
         self.client = Anthropic(
             api_key=api_key,
-            timeout=httpx2.Timeout(timeout_seconds, connect=5.0),
+            timeout=httpx2_timeout,
+            # リトライは AnthropicClient 側の MAX_RETRIES (= 3: 初回 + 2 回) で
+            # 一元管理し、SDK 既定 (max_retries=2) との二重リトライを防ぐ。
+            max_retries=0,
+            http_client=http_client,
         )
         self.model = model
 
@@ -296,6 +306,8 @@ class AnthropicClient(LLMClient):
                         f"Anthropic {context} failed: context length exceeded: {e}", e,
                     )
                 raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 last_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -309,7 +321,7 @@ class AnthropicClient(LLMClient):
                         type(e).__name__,
                         backoff,
                     )
-                    time.sleep(backoff)
+                    cancellable_sleep(backoff)
                     continue
                 logging.exception("[anthropic] %s failed", context[:1].upper() + context[1:])
                 raise _convert_to_llm_error(e, context)
@@ -560,6 +572,8 @@ class AnthropicClient(LLMClient):
                         f"Anthropic streaming API call failed: context length exceeded: {e}", e,
                     )
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 last_error = e
                 if outward_chunk_yielded:
@@ -580,7 +594,7 @@ class AnthropicClient(LLMClient):
                         type(e).__name__,
                         backoff,
                     )
-                    time.sleep(backoff)
+                    cancellable_sleep(backoff)
                     continue
                 logging.exception("[anthropic] Streaming API call failed")
                 raise _convert_to_llm_error(e, "streaming API call")

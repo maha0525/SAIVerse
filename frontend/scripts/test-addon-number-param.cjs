@@ -51,7 +51,7 @@ const localRequire = (name) => {
     if (name === './MCPSection' || name === './ActionsPanel' || name === './OAuthFlowSection' || name === './AddonCatalogPanel' || name === './AddonActionConfirmDialog' || name === './AddonInstallProgressDialog') {
         return { __esModule: true, default: () => null };
     }
-    if (name === '../addon-panels.generated') return { ADDON_PANELS: [] };
+    if (name === '../addon-panels.generated') return { ADDON_PANELS: {}, ADDON_PERSONA_PANELS: {} };
     if (name.endsWith('.css') || name.endsWith('.module.css')) return { __esModule: true, default: new Proxy({}, { get: (_, k) => k }) };
     return require(name);
 };

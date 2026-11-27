@@ -1,0 +1,278 @@
+/* ルームビュー (docs/intent/screen_avatar.md 設計 1・設計 2)。
+   ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。
+   大きさと縦横比は置き場所 (.sidebar / .column / .overlay) ごとに決める。 */
+.roomView {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid #374151;
+    background: #1f2937;
+    box-sizing: border-box;
+}
+
+.sidebar {
+    aspect-ratio: 4 / 3;
+}
+
+/* 'column' は幅 2000px 以上のUI区画 (page.module.css の .roomViewColumn) の中の置き方。
+   縦横比を 3:4 (幅 3・高さ 4) にし、幅はUI区画いっぱい。UI区画の高さが足りないときは、
+   高さに合わせて縮める (100cqw・100cqh はUI区画の中身の幅と高さ)。 */
+.column {
+    aspect-ratio: 3 / 4;
+    width: min(100cqw, 75cqh);
+    max-height: 100%;
+    flex-shrink: 0;
+}
+
+/* 'overlay' はログの領域いっぱいに重ねる置き方。 */
+.overlay {
+    height: 100%;
+}
+
+/* 'overlay' で字幕を出している間は、立ち絵のカードが字幕に隠れないよう、
+   絵を置く範囲を字幕の上限 (枠の 4 割) より上に寄せる。3D の canvas は枠の全体を
+   覆ったままで大きさを変えず (VrmAvatar.module.css)、字幕はその下側に重なる。
+   名前の札は、3D のときもこの範囲の下の行に出るので、字幕の上に来る。 */
+.overlay.withCaption .figureArea {
+    bottom: calc(40% + 1rem);
+    height: calc(60% - 1.75rem);
+}
+
+/* 字幕: いま喋っている吹き出しの本文そのもの。切り詰めず、高さの上限を超えたら
+   中をスクロールする。内装画像の上でも読めるよう半透明の地に置く。 */
+.caption {
+    position: absolute;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    max-height: 40%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0.6rem 0.9rem;
+    border-radius: 10px;
+    background: rgba(17, 24, 39, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #f3f4f6;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    box-sizing: border-box;
+    backdrop-filter: blur(6px);
+}
+
+.captionBody {
+    max-width: 100%;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.captionBody p {
+    margin: 0;
+}
+
+.captionBody p + p,
+.captionBody ul,
+.captionBody ol,
+.captionBody pre,
+.captionBody blockquote {
+    margin-top: 0.5em;
+}
+
+.captionBody img {
+    max-width: 100%;
+    height: auto;
+}
+
+.captionBody pre {
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+.captionBody a {
+    color: #93c5fd;
+}
+
+.background {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.backgroundFallback {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
+}
+
+/* ペルソナの姿: 枠の下側の中央に立てる。上の行が絵、下の行が名前の札。
+   3D アバターのときは、上の行は空で、名前の札だけが canvas の上に重なる。 */
+.figureArea {
+    position: absolute;
+    left: 50%;
+    bottom: 6%;
+    transform: translateX(-50%);
+    height: 80%;
+    width: 80%;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    justify-items: center;
+    row-gap: 0.4rem;
+    pointer-events: none;
+}
+
+.figureSlot {
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+}
+
+/* 見た目の画像は背景の透けていない普通の絵なので、絵のカードとして描く。
+   縦横比は絵のまま保ち、切り取らない。 */
+.figureCard {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    background: #111827;
+    box-sizing: border-box;
+}
+
+.initialCard {
+    height: 60%;
+    aspect-ratio: 3 / 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: #e5e7eb;
+    background: linear-gradient(160deg, #374151 0%, #1f2937 100%);
+}
+
+.nameTag {
+    max-width: 100%;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.8);
+    color: #f3f4f6;
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+}
+
+/* 部屋にいるペルソナのアイコンの列 (二人以上のときだけ出す) */
+.switcher {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    max-width: calc(100% - 1rem);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.3rem;
+}
+
+.switcherButton {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    background: #111827;
+    overflow: hidden;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.2s, border-color 0.2s, transform 0.2s;
+    flex-shrink: 0;
+}
+
+.switcherButton:hover {
+    opacity: 1;
+    transform: scale(1.08);
+}
+
+.switcherButton img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.switcherActive {
+    opacity: 1;
+    border-color: #60a5fa;
+}
+
+.switcherInitial {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #e5e7eb;
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .roomView {
+    border-color: #e2e8f0;
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .backgroundFallback {
+    background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
+}
+
+:global([data-theme="light"]) .figureCard {
+    border-color: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+    background: #ffffff;
+}
+
+:global([data-theme="light"]) .initialCard {
+    color: #334155;
+    background: linear-gradient(160deg, #ffffff 0%, #e2e8f0 100%);
+}
+
+:global([data-theme="light"]) .nameTag {
+    background: rgba(255, 255, 255, 0.9);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .switcherButton {
+    border-color: rgba(255, 255, 255, 0.9);
+    background: #e2e8f0;
+}
+
+:global([data-theme="light"]) .switcherActive {
+    border-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .switcherInitial {
+    color: #334155;
+}
+
+:global([data-theme="light"]) .caption {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(15, 23, 42, 0.12);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .captionBody a {
+    color: #2563eb;
+}

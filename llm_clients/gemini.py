@@ -13,6 +13,7 @@ import httpx
 from google import genai
 from google.genai import types
 
+from .cancel_transport import cancellable_sleep
 from .exceptions import (
     AuthenticationError,
     ContextLengthExceededError,
@@ -27,6 +28,7 @@ from .exceptions import (
     ServerError,
     is_context_length_error,
 )
+from sea.cancellation import ExecutionCancelledException
 
 try:  # pragma: no cover - optional defensive patching
     from google.genai import _api_client as _genai_api_client
@@ -2268,6 +2270,8 @@ class GeminiClient(LLMClient):
                             contents=contents,
                             config=types.GenerateContentConfig(**cfg_kwargs),
                         )
+                    except ExecutionCancelledException:
+                        raise
                     except Exception as sdk_exc:
                         # Structured-output parse failures happen inside the SDK
                         # and would otherwise take the response body with them.
@@ -2663,9 +2667,9 @@ class GeminiClient(LLMClient):
             except EmptyResponseError as e:
                 logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
                 continue
-            except LLMError:
-                # LLMError subclasses (SafetyFilterError, etc.) already have
-                # correct error_code and user_message — propagate as-is.
+            except (LLMError, ExecutionCancelledException):
+                # LLMError subclasses (SafetyFilterError, etc.) and user-stop
+                # cancellations must propagate as-is without retry or wrapping.
                 raise
             except Exception as exc:
                 # 付けたキャッシュが使えない (403/404 等) — 認証エラーやモデル無しと
@@ -2714,7 +2718,7 @@ class GeminiClient(LLMClient):
                         logging.info("Switching to paid Gemini API key after timeout")
                         active_client = self.paid_client
                     if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
+                        cancellable_sleep(2 ** attempt)
                     last_retry_exc = exc
                     continue
                 if self._is_payment_error(exc) or self._is_authentication_error(exc):
@@ -2732,7 +2736,7 @@ class GeminiClient(LLMClient):
                             "Rate limited (model=%s), waiting %.1fs before retry (attempt %d/%d)",
                             model_id, capped_delay, attempt + 1, max_retries,
                         )
-                        time.sleep(capped_delay)
+                        cancellable_sleep(capped_delay)
                         last_retry_exc = exc
                         continue
                     logging.warning("Rate limit exceeded for model=%s, no retries left", model_id)
@@ -2897,6 +2901,8 @@ class GeminiClient(LLMClient):
         stream_state: Dict[str, Any] = {"emitted": False}
         try:
             stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held, stream_state=stream_state)
+        except ExecutionCancelledException:
+            raise
         except Exception as exc:
             if self._is_payment_error(exc) or self._is_authentication_error(exc):
                 raise self._convert_to_llm_error(exc, "streaming")
@@ -2913,7 +2919,7 @@ class GeminiClient(LLMClient):
                             "Rate limited (model=%s), waiting %.1fs before stream retry",
                             self.model, capped_delay,
                         )
-                        time.sleep(capped_delay)
+                        cancellable_sleep(capped_delay)
                         stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held, stream_state=stream_state)
                     else:
                         logging.warning("Rate limit exceeded for model=%s", self.model)
@@ -3078,7 +3084,7 @@ class GeminiClient(LLMClient):
                 finish_reason = getattr(candidate, "finish_reason", None)
                 if finish_reason:
                     stream_completed = True
-        except LLMError:
+        except (LLMError, ExecutionCancelledException):
             raise
         except Exception as exc:
             logging.exception("Gemini stream iteration failed")
@@ -3289,6 +3295,8 @@ class GeminiClient(LLMClient):
                 contents=contents,
                 config=types.GenerateContentConfig(**cfg_kwargs),
             )
+        except ExecutionCancelledException:
+            raise
         except Exception as exc:
             # 要求を開いた時点で拒まれた (SDK が先に送る場合)。まだ何も返していない。
             reason = self._cache_use_error_reason(exc)
@@ -3325,6 +3333,8 @@ class GeminiClient(LLMClient):
             for chunk in stream:
                 yield chunk
             return
+        except ExecutionCancelledException:
+            raise
         except Exception as exc:
             reason = self._cache_use_error_reason(exc)
             if reason is None:

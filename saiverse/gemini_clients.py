@@ -7,8 +7,20 @@ import sys
 from typing import Any
 
 from saiverse.gemini_timing import trace_gemini_request
+from saiverse.http_cancel import cancellable_sleep, install_cancellable_transport
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _attach_cancellable_hooks(client: Any) -> None:
+    """Install cancellable HTTP transport (preserving env proxies) and retry sleep."""
+    api_client = getattr(client, "_api_client", None)
+    if api_client is None:
+        return
+    install_cancellable_transport(getattr(api_client, "_httpx_client", None))
+    retry = getattr(api_client, "_retry", None)
+    if retry is not None and hasattr(retry, "sleep"):
+        retry.sleep = cancellable_sleep
 
 
 def _get_genai_module():
@@ -44,7 +56,7 @@ def build_gemini_clients(
     def _http_options() -> Any:
         client_args = {"event_hooks": {"request": [trace_gemini_request]}}
         retry_options = genai.types.HttpRetryOptions(
-            attempts=5,
+            attempts=3,
             initial_delay=1.0,
             max_delay=30.0,
             http_status_codes=[408, 429, 500, 502, 503, 504],
@@ -69,7 +81,9 @@ def build_gemini_clients(
     def _make_client(api_key: str | None):
         if not api_key:
             return None
-        return genai.Client(api_key=api_key, http_options=_http_options())
+        client = genai.Client(api_key=api_key, http_options=_http_options())
+        _attach_cancellable_hooks(client)
+        return client
 
     free_client = _make_client(free_key)
     paid_client = _make_client(paid_key)

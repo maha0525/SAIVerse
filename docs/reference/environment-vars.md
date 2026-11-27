@@ -86,6 +86,7 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S` | `600` | Metabolism 系の LLM 呼び出し（スルース・編纂・束ね）がレート制限 (429) で失敗したあと、その persona の Metabolism を見送る秒数。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 C-1 |
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
+| `SAIVERSE_ROOM_VIEW_AUTO_SWITCH` | `false` | 画面の幅が狭いとき（スマホなど）に、ペルソナが喋っている間だけチャットのログからルームビューへ自動で切り替えるか。`true` / `1` / `yes` / `on` で ON。OFF でもヘッダーのボタンで切り替えられる。読むのは画面だけ（`GET /api/config/room-view-auto-switch`）。UI（グローバル設定 > 環境）からも切替可 |
 
 ## 反射判断（型付きの質問に確率だけで答える判断層）
 

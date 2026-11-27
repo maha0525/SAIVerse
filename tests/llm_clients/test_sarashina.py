@@ -107,6 +107,10 @@ def make_client(isolated, monkeypatch):
             return httpx.Response(200, json=completion(tool, structured))
 
         def sdk(**kwargs):
+            kwargs.pop("max_retries", None)
+            old_http = kwargs.pop("http_client", None)
+            if old_http is not None:
+                old_http.close()
             client = OpenAI(**kwargs, max_retries=0, http_client=httpx.Client(transport=httpx.MockTransport(handle)))
             opened.append(client)
             return client

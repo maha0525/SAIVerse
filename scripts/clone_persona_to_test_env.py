@@ -74,6 +74,10 @@ PERSISTENT_COLUMNS = [
     "DESCRIPTION",
     "AVATAR_IMAGE",
     "APPEARANCE_IMAGE_PATH",
+    # VRM は personas/<id>/avatar/ にあり、_copy_persona_dir がペルソナフォルダごと
+    # 同じ ID で写すので、SAIVERSE_HOME からの相対パスは複製先でもそのまま指せる
+    "AVATAR_VRM_PATH",
+    "AVATAR_3D_ENABLED",
     # EMOTION は「今の感情状態」だが、人格の連続性の一部として複製する
     "EMOTION",
     "DEFAULT_MODEL",

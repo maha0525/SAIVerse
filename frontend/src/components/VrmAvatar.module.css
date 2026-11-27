@@ -1,0 +1,124 @@
+/* ルームビューの 3D アバター (docs/intent/screen_avatar.md 設計 3)。
+   RoomView.module.css の .roomView の直下に置き、ルームビューの枠の全体を覆う。
+   立ち絵のカード (fallback) と名前の札 (overlay) は、この中に RoomView の .figureArea として
+   置かれるので、枠の中での位置は立ち絵だけのペルソナと同じになる。
+   この要素はポインターの操作を受けない。受けるのは、3D が見えている間の canvas (カメラを
+   回す・寄せる操作。docs/intent/screen_avatar.md「カメラを回す・寄せる」) と、読み込めなかった
+   理由の知らせだけ。在室者を切り替えるアイコンと字幕は、DOM の上でこの要素より後ろにあって
+   canvas の上に重なるので、今までどおり押せる。名前の札 (.figureArea) は pointer-events: none
+   なので、札の上の操作は canvas へ届く。
+   ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。 */
+.stage {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+/* canvas を置く場所。背景は透明で、後ろの内装画像が見える。3D が描けるまでは隠しておく。
+   大きさはルームビューの枠のままで、字幕が出たり消えたりしても変わらない。 */
+.canvasHost {
+    position: absolute;
+    inset: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+/* 3D が見えている間だけ、canvas がカメラの操作を受ける。pointer-events は子へ継承されるので、
+   ここで auto に戻すと、中の canvas も受ける。立ち絵のカードを出している間 (この class が無い間) は、
+   今までどおり何も受けない。カーソルの形 (grab / grabbing) と touch-action: none は、
+   lib/vrmAvatarEngine.ts の OrbitControls が canvas に付ける。 */
+.canvasShown {
+    visibility: visible;
+    pointer-events: auto;
+}
+
+/* 進み具合と失敗の知らせは、立ち絵のカードを立てる範囲 (RoomView.module.css の .figureArea。
+   枠の下から 6% の所から、高さ 80%) の上端あたりに出す。 */
+
+/* 読み込みの進み具合 (立ち絵の上側の中央に小さく) */
+.progress {
+    position: absolute;
+    top: calc(14% + 0.25rem);
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 80%;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.8);
+    color: #e5e7eb;
+    font-size: 0.72rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+}
+
+/* 読み込めなかった理由。立ち絵の上側に小さく出し、押すと閉じる。
+   .stage は pointer-events: none なので、ここで押せるように戻す。 */
+.notice {
+    position: absolute;
+    top: calc(14% + 0.25rem);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 80%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 0.4rem;
+    align-items: start;
+    padding: 0.3rem 0.5rem 0.3rem 0.65rem;
+    border-radius: 8px;
+    border: 1px solid rgba(248, 113, 113, 0.55);
+    background: rgba(17, 24, 39, 0.88);
+    color: #fecaca;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+    pointer-events: auto;
+    box-sizing: border-box;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.notice:hover {
+    border-color: rgba(248, 113, 113, 0.9);
+}
+
+.noticeTitle {
+    grid-column: 1;
+    font-weight: 600;
+}
+
+.noticeReason {
+    grid-column: 1;
+    color: #f3f4f6;
+}
+
+.noticeClose {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    font-size: 0.9rem;
+    line-height: 1;
+    opacity: 0.8;
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .progress {
+    background: rgba(255, 255, 255, 0.9);
+    color: #334155;
+}
+
+:global([data-theme="light"]) .notice {
+    background: rgba(255, 255, 255, 0.94);
+    border-color: rgba(220, 38, 38, 0.5);
+    color: #b91c1c;
+}
+
+:global([data-theme="light"]) .notice:hover {
+    border-color: rgba(220, 38, 38, 0.85);
+}
+
+:global([data-theme="light"]) .noticeReason {
+    color: #1f2937;
+}

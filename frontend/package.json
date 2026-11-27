@@ -6,11 +6,11 @@
   "scripts": {
     "test:body-emotes": "node scripts/test-body-emotes.cjs",
     "test:alerts": "node scripts/test-system-alert-banner.cjs && node scripts/test-system-notice-review-modal.cjs && node scripts/test-system-notice-review-entry.cjs && node scripts/test-system-notice-review-alert-sync.cjs",
-    "dev":"next dev -H 0.0.0.0",
+    "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node scripts/test-body-emotes.cjs && node scripts/test-spell-result-plain-text.cjs && node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-next-agent-upgrade-disabled.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs && node scripts/test-movement-notices.cjs && node scripts/test-chat-history-pagination.cjs && node scripts/test-chat-polling-cursor.cjs && node scripts/test-chat-progress.cjs && node scripts/test-building-auto-interval.cjs && node scripts/test-building-city-immutable.cjs && node scripts/test-item-viewer.cjs && node scripts/test-model-pricing.cjs && node scripts/test-codex-login-modal.cjs && node scripts/test-addon-number-param.cjs && node scripts/test-system-alert-banner.cjs && node scripts/test-system-notice-review-modal.cjs && node scripts/test-system-notice-review-entry.cjs && node scripts/test-system-notice-review-alert-sync.cjs && node scripts/test-persona-pack-review.cjs && node scripts/test-favorite-models.cjs",
+    "test": "node scripts/test-body-emotes.cjs && node scripts/test-spell-result-plain-text.cjs && node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-next-agent-upgrade-disabled.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs && node scripts/test-movement-notices.cjs && node scripts/test-chat-history-pagination.cjs && node scripts/test-chat-polling-cursor.cjs && node scripts/test-chat-progress.cjs && node scripts/test-building-auto-interval.cjs && node scripts/test-building-city-immutable.cjs && node scripts/test-item-viewer.cjs && node scripts/test-model-pricing.cjs && node scripts/test-codex-login-modal.cjs && node scripts/test-addon-number-param.cjs && node scripts/test-system-alert-banner.cjs && node scripts/test-system-notice-review-modal.cjs && node scripts/test-system-notice-review-entry.cjs && node scripts/test-system-notice-review-alert-sync.cjs && node scripts/test-persona-pack-review.cjs && node scripts/test-favorite-models.cjs && node scripts/test-room-view-auto-switch.cjs && node scripts/test-vrm-avatar-math.cjs && node scripts/test-voice-level-meter.cjs && node scripts/test-sync-addon-panels.cjs",
     "test:arasuji-busy": "node scripts/test-arasuji-busy.cjs",
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
@@ -25,9 +25,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@pixiv/three-vrm": "3.5.5",
     "@types/node": "^25.0.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/three": "0.187.0",
     "eslint": "^9.39.2",
     "eslint-config-next": "^16.4.6",
     "lucide-react": "^0.561.0",
@@ -40,6 +42,7 @@
     "rehype-sanitize": "^6.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.0",
+    "three": "0.187.0",
     "typescript": "^5.9.3"
   }
 }

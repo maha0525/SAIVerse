@@ -126,6 +126,8 @@ saiverse/
 │                           #   元の ID を空ける（DB の参照・記憶の印・フォルダ。部品は building_id_repair と共有）。
 │                           #   済まなかった続きと、昔消した建物の残骸は起動時に付け替える
 ├── data_paths.py           # パス管理（user_data/builtin_data）
+├── persona_avatar_vrm.py   # ペルソナの VRM の置き場（personas/<id>/avatar/）の決まりと、ペルソナを消すときの後始末。
+│                           #   受け取り・返す処理は api/routes/people/avatar_vrm.py
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── addon_events.py         # 常設 SSE（/api/addon/events）の配信。アドオンのイベントと動作中の警告（runtime_alert）が載る
@@ -160,7 +162,8 @@ api/
 │   ├── addon*.py     #   アドオン（catalog / actions / events）
 │   ├── admin.py      #   管理機能
 │   ├── people/       #   ペルソナ別（記憶・想起・スケジュール・デバッグ等のサブパッケージ）
-│   │   └── pocketbook.py  #     手帳（アクティビティ + メモ）とタスク帳の読み口（読み取り専用）
+│   │   ├── pocketbook.py  #     手帳（アクティビティ + メモ）とタスク帳を読み取る API（読み取り専用）
+│   │   └── avatar_vrm.py  #     ペルソナの VRM（3D アバター）の受け取り・返す・外す
 │   └── ...
 └── utils/
 ```
@@ -174,6 +177,10 @@ api/
 入退室ログの画面表示は `src/lib/movementNotices.ts` が全体・Building の優先順位を解決し、`src/hooks/useMovementNoticeSettings.ts` が設定変更を追随する。`useMovementNoticeAutoScroll.ts` は表示される新着だけでスクロールを追尾する。全体の操作欄は `src/components/settings/MovementNoticeSetting.tsx`、部屋別の操作欄は `BuildingSettingsModal.tsx`。`src/lib/buildingSettingsSave.ts` が部屋設定の保存待ちを持ち、閉じ直したフォームも保存前の値を読み直さない。`HistoryContinuation.tsx` は非表示の通知だけのページでも生の履歴カーソルで過去へ進める入口を残す。記録やペルソナの処理から分離した表示設定である（[intent](../intent/movement_notice_visibility.md)）。
 
 返事を待つ間のスピナーの文言は `src/lib/chatProgress.ts` だけが持ち、バックエンドの status イベントの段階 (`phase`、`sea/progress_events.py`) と画面の節目から決める。Playbook・ノードの名前は表示しない（[intent](../intent/chat_progress_display.md)）。
+
+ルームビュー（いまいる Building の内装とペルソナの姿を映す枠）の描画は `src/components/RoomView.tsx` にある。置き場所を切り替える画面の幅の数値は `src/lib/roomViewPlacement.ts` にだけ定義してある（2000px 以上は `src/app/page.tsx` でチャットの横に独立して置き、それ未満は `RightSidebar.tsx` の中、1100px 未満で右サイドバーが横に出ていない間はログに重ねて切り替える）。自動で切り替える条件は React に依らない `src/lib/roomViewAutoSwitch.ts` に書いてあり、`useRoomViewAutoSwitch.ts` には、喋り始め・喋り終わり・利用者の操作をその関数へ渡す処理と、待ち時間のタイマーだけを置いている。部屋の詳細 (`GET /api/info/details`) の取得は `src/lib/useBuildingDetails.ts` に一本化してあり、`page.tsx` で一度だけ取得した結果を `RightSidebar` とルームビューへ渡す。右サイドバーのアイテム欄の「見える / 埋もれた」の分け方は、API から返る `visible_item_ids` / `buried_item_ids` をそのまま表示し、画面の側では数え直さない（[intent](../intent/screen_avatar.md)）。
+
+ルームビューの 3D アバター（VRM）を描く処理は `src/components/VrmAvatar.tsx` にある。3D を描くライブラリ three と、VRM を読むライブラリ `@pixiv/three-vrm` を import する場所は `src/lib/vrmAvatarEngine.ts` だけにしてあり、`VrmAvatar.tsx` からは、このモジュールを必要になったときにだけ読み込む（動的 import。VRM を持たないペルソナしかいない画面に three を読み込ませないため）。読み込んだ VRM と、3D を描く領域（canvas）は `vrmAvatarEngine.ts` の中に一組だけあり、画面にルームビューが複数あるときも、canvas を置くのはそのうち一つだけにする。three に依らない計算（カメラの構図、口の開き、まばたき、体とは別の骨格（armature）に付いた服の骨（bone）の選び方）は `src/lib/vrmAvatarMath.ts` にあり、テストは `scripts/test-vrm-avatar-math.cjs` で行う。VRM の入れ替えは `SettingsModal.tsx` の「3D アバター (VRM)」の欄から行う。口を声の音量に合わせるための、鳴っている声と音量の読み取りは `src/lib/voiceLevelMeter.ts` にある。audio 要素のイベントを受け取るだけで再生には触らず、`clientActions/playAudio.ts`（自動で鳴る声）と `AddonBubbleButtons.tsx`（「音声を再生」ボタン）の audio 要素に付ける。テストは `scripts/test-voice-level-meter.cjs` で行う。
 
 `next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 

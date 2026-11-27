@@ -11,7 +11,9 @@ from typing import Any, Dict, Iterator, List, Optional
 import requests
 
 from .base import LLMClient, ToolSpecFormat
+from .cancel_transport import cancellable_sleep
 from .exceptions import EmptyResponseError
+from sea.cancellation import ExecutionCancelledException, raise_if_llm_stopped
 from .system_notice import (
     accepts_mid_conversation_system,
     is_head_system_message,
@@ -362,6 +364,7 @@ class OllamaClient(LLMClient):
 
             # 1st: Try /v1/chat/completions
             for attempt in range(MAX_RETRIES):
+                raise_if_llm_stopped()
                 try:
                     response = requests.post(self.url, json=tool_payload, timeout=(3, 300))
                     preview = response.text[:500] if response.text else "(empty)"
@@ -372,6 +375,8 @@ class OllamaClient(LLMClient):
                     response.raise_for_status()
                     data = response.json()
                     break  # Success
+                except ExecutionCancelledException:
+                    raise
                 except Exception as e:
                     if _should_retry(e) and attempt < MAX_RETRIES - 1:
                         backoff = INITIAL_BACKOFF * (2 ** attempt)
@@ -379,7 +384,7 @@ class OllamaClient(LLMClient):
                             "[ollama] Retryable v1 tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
-                        time.sleep(backoff)
+                        cancellable_sleep(backoff)
                         continue
                     logging.warning("Ollama v1 tool detection failed: %s; falling back to /api/chat", _extract_ollama_error(e))
                     break  # Fall through to /api/chat
@@ -394,6 +399,7 @@ class OllamaClient(LLMClient):
                     "tools": tools_spec,
                 }
                 for attempt in range(MAX_RETRIES):
+                    raise_if_llm_stopped()
                     try:
                         response = requests.post(self.chat_url, json=chat_tool_payload, timeout=(3, 300))
                         preview = response.text[:500] if response.text else "(empty)"
@@ -409,6 +415,8 @@ class OllamaClient(LLMClient):
                             "choices": [{"message": msg}],
                         }
                         break
+                    except ExecutionCancelledException:
+                        raise
                     except Exception as e:
                         if _should_retry(e) and attempt < MAX_RETRIES - 1:
                             backoff = INITIAL_BACKOFF * (2 ** attempt)
@@ -416,7 +424,7 @@ class OllamaClient(LLMClient):
                                 "[ollama] Retryable /api/chat tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
                                 attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                             )
-                            time.sleep(backoff)
+                            cancellable_sleep(backoff)
                             continue
                         logging.exception("Ollama tool detection failed on all endpoints")
                         raise RuntimeError(_extract_ollama_error(e))
@@ -485,6 +493,7 @@ class OllamaClient(LLMClient):
 
         if schema_payload is not None and self.chat_url:
             for attempt in range(MAX_RETRIES):
+                raise_if_llm_stopped()
                 try:
                     payload_chat: Dict[str, Any] = {
                         "model": self.model,
@@ -508,6 +517,8 @@ class OllamaClient(LLMClient):
                         return content
                     logging.warning("Ollama /api/chat returned empty content. raw=%s", chat_preview)
                     break  # Got response but empty - fall through to v1 endpoint
+                except ExecutionCancelledException:
+                    raise
                 except Exception as e:
                     if _should_retry(e) and attempt < MAX_RETRIES - 1:
                         backoff = INITIAL_BACKOFF * (2 ** attempt)
@@ -515,7 +526,7 @@ class OllamaClient(LLMClient):
                             "[ollama] Retryable /api/chat error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
-                        time.sleep(backoff)
+                        cancellable_sleep(backoff)
                         continue
                     logging.exception("Ollama /api/chat structured call failed; falling back to /v1 endpoint")
                     break  # Fall through to v1 endpoint
@@ -532,6 +543,7 @@ class OllamaClient(LLMClient):
         last_v1_error: Optional[Exception] = None
 
         for attempt in range(MAX_RETRIES):
+            raise_if_llm_stopped()
             try:
                 response = requests.post(self.url, json=payload_v1, timeout=(3, 300))
                 preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
@@ -565,6 +577,8 @@ class OllamaClient(LLMClient):
                     raise EmptyResponseError("Ollama returned empty response")
                 logging.debug("Raw ollama v1 response: %s", content)
                 return content
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 last_v1_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -573,7 +587,7 @@ class OllamaClient(LLMClient):
                         "[ollama] Retryable v1 error (attempt %d/%d): %s. Retrying in %.1fs...",
                         attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                     )
-                    time.sleep(backoff)
+                    cancellable_sleep(backoff)
                     continue
                 logging.exception("Ollama v1 endpoint failed")
                 break  # Fall through to legacy fallback
@@ -588,6 +602,7 @@ class OllamaClient(LLMClient):
 
         last_legacy_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
+            raise_if_llm_stopped()
             try:
                 legacy_payload: Dict[str, Any] = {
                     "model": self.model,
@@ -619,6 +634,8 @@ class OllamaClient(LLMClient):
                     )
                 logging.debug("Raw ollama fallback /api/chat response: %s", content)
                 return content
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 last_legacy_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -627,7 +644,7 @@ class OllamaClient(LLMClient):
                         "[ollama] Retryable fallback error (attempt %d/%d): %s. Retrying in %.1fs...",
                         attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                     )
-                    time.sleep(backoff)
+                    cancellable_sleep(backoff)
                     continue
                 logging.exception("Ollama fallback /api/chat failed")
                 raise RuntimeError(_extract_ollama_error(e))
@@ -661,6 +678,7 @@ class OllamaClient(LLMClient):
             # 1st: Try /api/chat with native Ollama format
             if self.chat_url:
                 for attempt in range(MAX_RETRIES):
+                    raise_if_llm_stopped()
                     try:
                         chat_payload: Dict[str, Any] = {
                             "model": self.model,
@@ -685,6 +703,8 @@ class OllamaClient(LLMClient):
                             return
                         logging.warning("Ollama stream /api/chat returned empty content. raw=%s", chat_preview)
                         break  # Empty response - fall through to v1
+                    except ExecutionCancelledException:
+                        raise
                     except Exception as e:
                         if _should_retry(e) and attempt < MAX_RETRIES - 1:
                             backoff = INITIAL_BACKOFF * (2 ** attempt)
@@ -692,7 +712,7 @@ class OllamaClient(LLMClient):
                                 "[ollama] Retryable stream /api/chat error (attempt %d/%d): %s. Retrying in %.1fs...",
                                 attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                             )
-                            time.sleep(backoff)
+                            cancellable_sleep(backoff)
                             continue
                         logging.exception("Ollama stream /api/chat structured call failed; falling back to /v1 endpoint")
                         break  # Fall through to v1
@@ -700,6 +720,7 @@ class OllamaClient(LLMClient):
             # 2nd: Fallback to /v1/chat/completions with OpenAI-style format
             last_schema_error: Optional[Exception] = None
             for attempt in range(MAX_RETRIES):
+                raise_if_llm_stopped()
                 try:
                     v1_payload: Dict[str, Any] = {
                         "model": self.model,
@@ -732,6 +753,8 @@ class OllamaClient(LLMClient):
                     logging.warning("Ollama stream v1 returned empty structured content. raw=%s", v1_preview)
                     yield ""
                     return
+                except ExecutionCancelledException:
+                    raise
                 except Exception as e:
                     last_schema_error = e
                     if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -740,7 +763,7 @@ class OllamaClient(LLMClient):
                             "[ollama] Retryable stream v1 structured error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
-                        time.sleep(backoff)
+                        cancellable_sleep(backoff)
                         continue
                     logging.exception("Ollama structured output failed on all endpoints")
                     raise RuntimeError(_extract_ollama_error(e))
@@ -764,6 +787,7 @@ class OllamaClient(LLMClient):
         # 1st: Try /api/chat (native Ollama streaming, supports think parameter)
         if self.chat_url:
             for attempt in range(MAX_RETRIES):
+                raise_if_llm_stopped()
                 outward_chunk_yielded = False
                 try:
                     chat_payload: Dict[str, Any] = {
@@ -847,6 +871,8 @@ class OllamaClient(LLMClient):
                         done_received,
                     )
                     return
+                except ExecutionCancelledException:
+                    raise
                 except Exception as e:
                     if outward_chunk_yielded:
                         logging.error(
@@ -860,7 +886,7 @@ class OllamaClient(LLMClient):
                             "[ollama] Retryable /api/chat streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
-                        time.sleep(backoff)
+                        cancellable_sleep(backoff)
                         continue
                     logging.warning("Ollama /api/chat streaming failed: %s; falling back to /v1", _extract_ollama_error(e))
                     break
@@ -868,6 +894,7 @@ class OllamaClient(LLMClient):
         # 2nd: Fallback to /v1/chat/completions (OpenAI-compatible streaming)
         last_v1_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
+            raise_if_llm_stopped()
             outward_chunk_yielded = False
             try:
                 stream_payload: Dict[str, Any] = {
@@ -939,6 +966,8 @@ class OllamaClient(LLMClient):
                     (done_time - stream_start) if done_time else -1,
                 )
                 return  # Stream completed successfully
+            except ExecutionCancelledException:
+                raise
             except Exception as e:
                 last_v1_error = e
                 if outward_chunk_yielded:
@@ -953,7 +982,7 @@ class OllamaClient(LLMClient):
                         "[ollama] Retryable v1 streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
                         attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                     )
-                    time.sleep(backoff)
+                    cancellable_sleep(backoff)
                     continue
                 logging.exception("Ollama v1 streaming failed on all endpoints")
                 break

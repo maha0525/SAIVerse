@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 from pydantic import BaseModel
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Tuple
 from api.deps import get_manager, avatar_path_to_url
 
 LOGGER = logging.getLogger(__name__)
@@ -22,6 +22,13 @@ class OccupantInfo(BaseModel):
     # None = lives 未宣言 (何も出さない。誤情報を出さないため)。
     life_state: Optional[str] = None      # "in_life" (活動中) / "valley" (休憩中)
     life_until: Optional[str] = None      # in_life のときだけ "HH:MM" (現在ライフの終了時刻)
+    # ルームビューの立ち絵 (docs/intent/screen_avatar.md)。AI.APPEARANCE_IMAGE_PATH を
+    # avatar_path_to_url に通した値。設定が無ければ None。users 配列では常に None。
+    appearance_image: Optional[str] = None
+    # ルームビューの 3D アバター (screen_avatar.md 設計 2・4)。VRM があり、
+    # AI.AVATAR_3D_ENABLED が False でないときだけ
+    # "/api/people/<id>/avatar-vrm?v=<入れ替えるたびに変わる文字列>"。users 配列では常に None。
+    avatar_vrm_url: Optional[str] = None
 
 class ItemInfo(BaseModel):
     id: str
@@ -49,6 +56,12 @@ class BuildingDetailsResponse(BaseModel):
     occupants: List[OccupantInfo]  # AI personas only
     users: List[OccupantInfo] = []  # Users present in the building (intent §D-3)
     items: List[ItemInfo]
+    # items を、ペルソナに見えるものと埋もれたものに分けた item の id
+    # (docs/intent/screen_avatar.md 設計 5)。選別はペルソナ向けの部屋の様子と同じ
+    # _select_displayed_items を通した結果で、どちらも最近触られた順 (先頭が一番新しい)。
+    # items の各 id は、二つのリストのちょうど片方に一度だけ現れる。
+    visible_item_ids: List[str] = []
+    buried_item_ids: List[str] = []
     fixtures: List[FixtureInfo] = []
 
 def _build_item_info(data: dict, manager: Any = None) -> dict:
@@ -74,6 +87,53 @@ def _build_item_info(data: dict, manager: Any = None) -> dict:
     return info
 
 
+def _split_item_ids_by_visibility(
+    manager: Any, building_id: str, items_list: List[dict],
+) -> Tuple[List[str], List[str]]:
+    """``items_list`` の id を ``(visible_item_ids, buried_item_ids)`` に分ける。
+
+    選別は ``select_displayed_building_item_ids`` (ペルソナ向けの部屋の様子と
+    同じ ``_select_displayed_items``) に任せ、ここでは数え直さない。返りが
+    ``items_list`` と食い違ったときだけ整える: ``items_list`` に無い id は捨て、
+    返りに無い id は ``buried_item_ids`` の末尾に足して WARNING を出す
+    (アイテムが画面から消える状態を作らない)。選別が例外を上げたら WARNING を
+    出し、全件を ``visible_item_ids`` に入れて返す。
+    """
+    listed = list(dict.fromkeys(str(info["id"]) for info in items_list))
+    try:
+        from builtin_data.tools.get_visual_context import (
+            select_displayed_building_item_ids,
+        )
+        visible_raw, buried_raw = select_displayed_building_item_ids(
+            manager, building_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "Failed to select displayed items for %s; returning every item "
+            "as visible", building_id, exc_info=True,
+        )
+        return listed, []
+
+    listed_set = set(listed)
+    seen: set = set()
+    visible: List[str] = []
+    buried: List[str] = []
+    for source, target in ((visible_raw, visible), (buried_raw, buried)):
+        for item_id in source:
+            if item_id in listed_set and item_id not in seen:
+                seen.add(item_id)
+                target.append(item_id)
+    missing = [item_id for item_id in listed if item_id not in seen]
+    if missing:
+        LOGGER.warning(
+            "Displayed-item selection for %s did not cover %d listed item(s) "
+            "%s; appending them to buried_item_ids", building_id, len(missing),
+            missing,
+        )
+        buried.extend(missing)
+    return visible, buried
+
+
 @router.get("/details", response_model=BuildingDetailsResponse)
 def get_building_details(building_id: Optional[str] = None, manager = Depends(get_manager)):
     """Get detailed info about a building: occupants, items.
@@ -97,8 +157,10 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         return {
             "id": "unknown", 
             "name": "Unknown", 
-            "occupants": [], 
-            "items": []
+            "occupants": [],
+            "items": [],
+            "visible_item_ids": [],
+            "buried_item_ids": [],
         }
 
     building = manager.building_map[building_id]
@@ -183,6 +245,10 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
 
                 items_list.append(item_info)
 
+    visible_item_ids, buried_item_ids = _split_item_ids_by_visibility(
+        manager, building_id, items_list,
+    )
+
     # Get Building image path from database
     building_image_path = None
     try:
@@ -197,6 +263,42 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
             session.close()
     except Exception as e:
         LOGGER.warning("Failed to get building image for %s: %s", building_id, e, exc_info=True)
+
+    # 部屋にいるペルソナの AI.APPEARANCE_IMAGE_PATH と VRM の列を一度の問い合わせで読む。
+    occupant_persona_ids = [o["id"] for o in occupants_list]
+    if occupant_persona_ids:
+        try:
+            from database.session import SessionLocal
+            from database.models import AI as AIModel
+            from saiverse.persona_avatar_vrm import existing_vrm_info
+            session = SessionLocal()
+            try:
+                rows = session.query(
+                    AIModel.AIID,
+                    AIModel.APPEARANCE_IMAGE_PATH,
+                    AIModel.AVATAR_VRM_PATH,
+                    AIModel.AVATAR_3D_ENABLED,
+                ).filter(
+                    AIModel.AIID.in_(occupant_persona_ids)
+                ).all()
+            finally:
+                session.close()
+            row_by_id = {row[0]: row for row in rows}
+            for occupant in occupants_list:
+                row = row_by_id.get(occupant["id"])
+                occupant["appearance_image"] = avatar_path_to_url(row[1] if row else None)
+                vrm_url = None
+                if row is not None and row[2] and row[3] is not False:
+                    # 値はあるのにファイルが無い・avatar フォルダの外のときは
+                    # existing_vrm_info が WARNING を出して None を返す
+                    info = existing_vrm_info(occupant["id"], row[2])
+                    vrm_url = info["url"] if info else None
+                occupant["avatar_vrm_url"] = vrm_url
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to get persona appearance images for %s: %s",
+                building_id, e, exc_info=True,
+            )
 
     # 3. Fixtures
     fixtures_list = []
@@ -225,6 +327,8 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         "occupants": occupants_list,
         "users": users_list,
         "items": items_list,
+        "visible_item_ids": visible_item_ids,
+        "buried_item_ids": buried_item_ids,
         "fixtures": fixtures_list,
     }
 

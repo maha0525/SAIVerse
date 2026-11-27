@@ -11,7 +11,7 @@ import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
 import ActionsPanel from './ActionsPanel';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
-import { ADDON_PANELS } from '../addon-panels.generated';
+import { ADDON_PANELS, ADDON_PERSONA_PANELS } from '../addon-panels.generated';
 import AddonCatalogPanel from './AddonCatalogPanel';
 import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
 import AddonInstallProgressDialog from './AddonInstallProgressDialog';
@@ -764,12 +764,22 @@ function ParamRow({
 function ParamsSection({
     addon,
     personas,
+    onConfigChanged,
 }: {
     addon: AddonInfo;
     personas: { id: string; name: string }[];
+    onConfigChanged?: () => void | Promise<void>;
 }) {
     useLocale();
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
+    const configRevisionRef = useRef<number>(0);
+    const [configRevision, setConfigRevision] = useState<number>(0);
+    const bumpConfigRevision = useCallback(() => {
+        configRevisionRef.current += 1;
+        setConfigRevision(configRevisionRef.current);
+    }, []);
+    const getConfigRevision = useCallback(() => configRevisionRef.current, []);
+    const isInitialParamsRef = useRef<boolean>(true);
 
     // 外部から AddonConfig が更新された場合 (= addon panel 内で内部的に
     // params を書き換えた、 例: stackchan-addon のペアリング操作で
@@ -778,7 +788,12 @@ function ParamsSection({
     // を追従させないと UI 表示が古いまま (= まはー指摘の不整合)。
     useEffect(() => {
         setGlobalParams(addon.params ?? {});
-    }, [addon.params]);
+        if (isInitialParamsRef.current) {
+            isInitialParamsRef.current = false;
+        } else {
+            bumpConfigRevision();
+        }
+    }, [addon.params, bumpConfigRevision]);
 
     // 「値が保存されている secret 項目」の一覧。削除ボタンの出し分けに使う。
     const [globalSecretIsSet, setGlobalSecretIsSet] = useState<Record<string, boolean>>(
@@ -798,7 +813,9 @@ function ParamsSection({
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
     const oauthFlows = addon.oauth_flows ?? [];
     const hasOAuthFlows = oauthFlows.length > 0;
-    const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
+    const PersonaPanel = ADDON_PERSONA_PANELS?.[addon.addon_name];
+    const hasPersonaSection =
+        personaConfigurableSchemas.length > 0 || hasOAuthFlows || Boolean(PersonaPanel);
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     // 保存は 1 本の鎖に並べて順番に流す。
@@ -814,6 +831,9 @@ function ParamsSection({
         saveChainRef.current = next.then(() => undefined, () => undefined);
         return next;
     };
+    const flushPendingSaves = useCallback(async (): Promise<void> => {
+        await saveChainRef.current;
+    }, []);
 
     // 保存（グローバル）。成功したかどうかを返す (削除操作の巻き戻し判定に使う)
     const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
@@ -838,6 +858,7 @@ function ParamsSection({
     }, [addon.addon_name]);
 
     const handleGlobalChange = (key: string, val: unknown) => {
+        bumpConfigRevision();
         const next = { ...globalParams, [key]: val };
         setGlobalParams(next);
         void enqueueSave(() => saveGlobal(next));
@@ -849,6 +870,7 @@ function ParamsSection({
      * update_addon_config を参照)。保存に失敗したら見た目を元に戻す。
      */
     const deleteGlobalSecret = async (key: string) => {
+        bumpConfigRevision();
         const previousValue = globalParams[key];
         const next = { ...globalParams, [key]: null };
         setGlobalParams(next);
@@ -908,6 +930,7 @@ function ParamsSection({
     };
 
     const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
+        bumpConfigRevision();
         setPersonaConfigs((prev) => {
             const idx = prev.findIndex((c) => c.persona_id === personaId);
             if (idx >= 0) {
@@ -931,6 +954,7 @@ function ParamsSection({
      * 意思表示で、空欄では消えない。失敗したら見た目を元に戻す。
      */
     const deletePersonaSecret = async (personaId: string, key: string) => {
+        bumpConfigRevision();
         const previousValue = personaConfigs
             .find((c) => c.persona_id === personaId)?.params[key];
         setPersonaConfigs((cur) =>
@@ -1067,6 +1091,28 @@ function ParamsSection({
                                     flows={oauthFlows}
                                     personaId={selectedPersonaId}
                                 />
+                            )}
+
+                            {/* Per-persona custom panel: expansion_data/<addon>/ui/PersonaPanel.tsx */}
+                            {PersonaPanel && (
+                                <Suspense fallback={<p className={styles.loadingText}>{uiText("components.AddonManagerModal.label003")}</p>}>
+                                    <PersonaPanel
+                                        addon={{
+                                            addon_name: addon.addon_name,
+                                            display_name: addon.display_name,
+                                            version: addon.version,
+                                            description: addon.description,
+                                        }}
+                                        personaId={selectedPersonaId}
+                                        personaName={personas.find((p) => p.id === selectedPersonaId)?.name ?? selectedPersonaId}
+                                        personas={personas}
+                                        addonApiBase={`/api/addon/${addon.addon_name}`}
+                                        onConfigChanged={onConfigChanged}
+                                        flushPendingSaves={flushPendingSaves}
+                                        configRevision={configRevision}
+                                        getConfigRevision={getConfigRevision}
+                                    />
+                                </Suspense>
                             )}
                         </>
                     )}
@@ -1238,7 +1284,7 @@ function AddonCard({
             </div>
             {expanded && addon.is_enabled && (
                 <div className={styles.addonCardBody}>
-                    <ParamsSection addon={addon} personas={personas} />
+                    <ParamsSection addon={addon} personas={personas} onConfigChanged={onConfigChanged} />
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
                     <ActionsPanel addonName={addon.addon_name} />
                     {(() => {
