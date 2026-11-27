@@ -20,6 +20,7 @@ and the only real sockets are the loopback listener on 127.0.0.1.
 from __future__ import annotations
 
 import base64
+import email.utils
 import json
 import socket
 import threading
@@ -2278,3 +2279,667 @@ def test_route_logout_invalidates_both_managers(api_client, isolated_stores):
     assert routes.LOGIN_MANAGER._generation == device_gen + 1
     assert routes.SIWC_LOGIN_MANAGER._generation == siwc_gen + 1
     assert not isolated_stores["saiverse"].exists()
+
+
+# ---------------------------------------------------------------------------
+# expired access_token: refresh before send, and after a 4xx rejection
+# ---------------------------------------------------------------------------
+
+# The body the SIWC route returned on 2026-11-27 for an expired access_token.
+_SIWC_EXPIRED_400_BODY = """{
+  "error": {
+    "message": "Bad Request",
+    "type": null,
+    "code": null,
+    "param": null
+  },
+  "status": 400
+}"""
+
+_POST_BODY = {"model": "m", "input": [], "stream": True, "store": False}
+_UNSET = object()
+
+
+def _expired_retry_store(path: Path, access: str, last_refresh=_UNSET) -> None:
+    record = {
+        "source": oca.SIWC_SOURCE,
+        "tokens": {
+            "access_token": access,
+            "refresh_token": "rt-old",
+            "client_id": "oaiapp_e",
+            "scope": oca.SIWC_SCOPE,
+        },
+    }
+    if last_refresh is not _UNSET:
+        record["last_refresh"] = last_refresh
+    _write_json(path, record)
+
+
+def _iso_ago(seconds: float) -> str:
+    return (datetime.now(tz=timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+def _http_date(dt: datetime) -> str:
+    return email.utils.format_datetime(dt.astimezone(timezone.utc), usegmt=True)
+
+
+def _resp_400(date: str | None = None) -> httpx.Response:
+    headers = {"Date": date} if date is not None else {}
+    return httpx.Response(400, headers=headers, content=_SIWC_EXPIRED_400_BODY.encode())
+
+
+class _ScriptedSiwcSession:
+    """Fake SIWC httpx session: records each Authorization, replays responses."""
+
+    def __init__(self, *responses) -> None:
+        self.responses = list(responses)
+        self.authorizations: list[str] = []
+
+    def build_request(self, method, url, headers=None, json=None):
+        assert url == oca.SIWC_RESPONSES_URL
+        self.authorizations.append(headers["Authorization"])
+        return object()
+
+    def send(self, _req, stream=False):
+        if not self.responses:
+            raise AssertionError("unexpected extra POST")
+        return self.responses.pop(0)
+
+
+def _install_session(client, monkeypatch, session) -> None:
+    monkeypatch.setattr(client, "_ensure_session", lambda is_siwc=False: session)
+
+
+_fp = codex_mod._token_fingerprint
+
+
+def _prior_fp(prior_access_token, prior_fingerprint):
+    """The token a refresh was asked to replace, as a fingerprint."""
+    if prior_fingerprint is not None:
+        return prior_fingerprint
+    return _fp(prior_access_token) if prior_access_token else None
+
+
+def _fake_refresh(client, monkeypatch, store_path: Path, new_access: str) -> list:
+    """Replace the refresh with one that writes `new_access` into the store."""
+    calls: list = []
+
+    def fake(prior_access_token, prior_fingerprint=None):
+        calls.append(_prior_fp(prior_access_token, prior_fingerprint))
+        record = _read_json(store_path)
+        record["tokens"]["access_token"] = new_access
+        record["last_refresh"] = datetime.now(tz=timezone.utc).isoformat()
+        _write_json(store_path, record)
+
+    monkeypatch.setattr(client, "_refresh_or_pickup_latest", fake)
+    return calls
+
+
+def _no_refresh(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        client, "_refresh_or_pickup_latest",
+        lambda prior, prior_fingerprint=None: pytest.fail("no refresh expected"),
+    )
+
+
+def test_expired_siwc_token_is_refreshed_before_the_post(isolated_stores, monkeypatch):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    captured = _capture_httpx_post(monkeypatch, {"access_token": new_access, "refresh_token": "rt-new"})
+    client = OpenAICodexClient(model="m")
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+
+    assert resp.status_code == 200
+    assert captured["url"] == oca.SIWC_TOKEN_URL
+    assert captured["data"]["refresh_token"] == "rt-old"
+    stored = _read_json(isolated_stores["saiverse"])
+    assert stored["tokens"]["access_token"] == new_access
+    assert stored["tokens"]["refresh_token"] == "rt-new"
+    assert session.authorizations == [f"Bearer {new_access}"]
+
+
+def test_token_with_plenty_of_life_is_not_refreshed_before_the_post(isolated_stores, monkeypatch):
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    client = OpenAICodexClient(model="m")
+    _no_refresh(client, monkeypatch)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    client._post_with_auth_retry(dict(_POST_BODY))
+    assert session.authorizations == [f"Bearer {access}"]
+
+
+def test_token_within_the_leeway_is_refreshed_before_the_post(isolated_stores, monkeypatch):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=30)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["saiverse"], new_access)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    client._post_with_auth_retry(dict(_POST_BODY))
+    assert calls == [_fp(old_access)]
+    assert session.authorizations == [f"Bearer {new_access}"]
+
+
+def test_token_without_readable_expiry_is_not_refreshed_before_the_post(isolated_stores, monkeypatch):
+    access = "opaque-token-without-exp"
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    client = OpenAICodexClient(model="m")
+    _no_refresh(client, monkeypatch)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    client._post_with_auth_retry(dict(_POST_BODY))
+    assert session.authorizations == [f"Bearer {access}"]
+
+
+@pytest.mark.parametrize(
+    "last_refresh",
+    [
+        lambda: _iso_ago(10),
+        lambda: _iso_ago(10).replace("+00:00", "Z"),
+        lambda: _iso_ago(10).replace("+00:00", ""),  # naive means UTC
+    ],
+    ids=["offset", "z_suffix", "naive"],
+)
+def test_expired_looking_token_right_after_a_refresh_is_sent_as_is(
+    isolated_stores, monkeypatch, caplog, last_refresh
+):
+    """更新直後なのに期限切れに見える (時計が進んでいる) ときは、送る前の更新を打たない。"""
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], access, last_refresh=last_refresh())
+    client = OpenAICodexClient(model="m")
+    _no_refresh(client, monkeypatch)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    with caplog.at_level("WARNING", logger="saiverse.llm_clients.openai_codex"):
+        client._post_with_auth_retry(dict(_POST_BODY))
+    assert session.authorizations == [f"Bearer {access}"]
+    assert "local clock may be ahead" in caplog.text
+    assert access not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "last_refresh",
+    [
+        lambda: _iso_ago(600),
+        lambda: _UNSET,
+        lambda: "not-a-timestamp",
+        lambda: _iso_ago(600).replace("+00:00", "Z"),
+        lambda: 12345,
+        lambda: _iso_ago(-3600),  # in the future
+    ],
+    ids=["ten_minutes_ago", "missing", "garbage", "z_suffix", "not_a_string", "future"],
+)
+def test_expired_token_is_refreshed_before_the_post_unless_just_refreshed(
+    isolated_stores, monkeypatch, last_refresh
+):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], old_access, last_refresh=last_refresh())
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["saiverse"], new_access)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    client._post_with_auth_retry(dict(_POST_BODY))
+    assert calls == [_fp(old_access)]
+    assert session.authorizations == [f"Bearer {new_access}"]
+
+
+def test_legacy_store_expired_token_is_refreshed_before_the_post(isolated_stores, monkeypatch):
+    old_access = _legacy_access_token(expires_in_seconds=-100)
+    _write_json(isolated_stores["cli"], {"tokens": {"access_token": old_access, "refresh_token": "rt-old"}})
+    new_access = _legacy_access_token()
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["cli"], new_access)
+    sent: list = []
+
+    class FakeCffi:
+        def post(self, url, headers=None, json=None, timeout=None, stream=False):
+            sent.append(headers["Authorization"])
+            resp = MagicMock()
+            resp.ok = True
+            return resp
+
+    monkeypatch.setattr(client, "_ensure_session", lambda is_siwc=False: FakeCffi())
+    client._post_with_auth_retry(dict(_POST_BODY))
+    assert calls == [_fp(old_access)]
+    assert sent == [f"Bearer {new_access}"]
+
+
+def test_failed_pre_send_refresh_still_sends_a_token_the_server_accepts(isolated_stores, monkeypatch):
+    """A failed pre-send refresh must not stop a request whose token still works."""
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=30)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    client = OpenAICodexClient(model="m")
+    calls: list = []
+
+    def failing_refresh(prior, prior_fingerprint=None):
+        calls.append(_prior_fp(prior, prior_fingerprint))
+        raise RuntimeError("refresh endpoint down")
+
+    monkeypatch.setattr(client, "_refresh_or_pickup_latest", failing_refresh)
+    session = _ScriptedSiwcSession(httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+    assert resp.status_code == 200
+    assert calls == [_fp(access)]
+    assert session.authorizations == [f"Bearer {access}"]
+
+
+def test_failed_pre_send_refresh_is_reported_once_the_server_rejects_the_token(
+    isolated_stores, monkeypatch, caplog
+):
+    """Expired token + broken refresh: one POST, then the refresh failure surfaces."""
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    client = OpenAICodexClient(model="m")
+    calls: list = []
+
+    def failing_refresh(prior, prior_fingerprint=None):
+        calls.append(_prior_fp(prior, prior_fingerprint))
+        raise RuntimeError("refresh endpoint down")
+
+    monkeypatch.setattr(client, "_refresh_or_pickup_latest", failing_refresh)
+    session = _ScriptedSiwcSession(_resp_400(_http_date(datetime.now(tz=timezone.utc))))
+    _install_session(client, monkeypatch, session)
+
+    with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="auto-refresh failed") as excinfo:
+            client._post_with_auth_retry(dict(_POST_BODY))
+    assert "refresh endpoint down" in str(excinfo.value)
+    assert calls == [_fp(old_access), _fp(old_access)]
+    assert session.authorizations == [f"Bearer {old_access}"]
+    assert old_access not in caplog.text
+
+
+def test_400_after_the_server_clock_passed_exp_refreshes_and_retries(isolated_stores, monkeypatch):
+    """ローカルの時計では期限内でも、サーバーの Date が exp を過ぎた 400 なら更新して送り直す。"""
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    server_date = _http_date(oca.access_token_expiry(old_access) + timedelta(seconds=10))
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    captured = _capture_httpx_post(monkeypatch, {"access_token": new_access, "refresh_token": "rt-new"})
+    client = OpenAICodexClient(model="m")
+    session = _ScriptedSiwcSession(_resp_400(server_date), httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+
+    assert resp.status_code == 200
+    assert captured["data"]["refresh_token"] == "rt-old"
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["access_token"] == new_access
+    assert session.authorizations == [f"Bearer {old_access}", f"Bearer {new_access}"]
+
+
+def test_400_before_exp_by_the_server_clock_is_raised_without_refresh(isolated_stores, monkeypatch):
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    server_date = _http_date(oca.access_token_expiry(access) - timedelta(seconds=600))
+    client = OpenAICodexClient(model="m")
+    _no_refresh(client, monkeypatch)
+    session = _ScriptedSiwcSession(_resp_400(server_date))
+    _install_session(client, monkeypatch, session)
+
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_with_auth_retry(dict(_POST_BODY))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.sent_token_expired is False
+    assert "Bad Request" in excinfo.value.body
+    assert session.authorizations == [f"Bearer {access}"]
+
+
+@pytest.mark.parametrize("date_header", [None, "not a date"], ids=["missing", "unparseable"])
+def test_400_without_usable_date_uses_the_local_clock_for_an_expired_token(
+    isolated_stores, monkeypatch, date_header
+):
+    """Date が無い・読めないときはローカルの時計で判定する (期限切れ → 更新して送り直す)。"""
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    # A refresh 10 s ago suppresses the pre-send refresh, so the expired token is sent.
+    _expired_retry_store(isolated_stores["saiverse"], old_access, last_refresh=_iso_ago(10))
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["saiverse"], new_access)
+    session = _ScriptedSiwcSession(_resp_400(date_header), httpx.Response(200, content=b""))
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+    assert resp.status_code == 200
+    assert calls == [_fp(old_access)]
+    assert session.authorizations == [f"Bearer {old_access}", f"Bearer {new_access}"]
+
+
+@pytest.mark.parametrize("date_header", [None, "not a date"], ids=["missing", "unparseable"])
+def test_400_without_usable_date_uses_the_local_clock_for_a_valid_token(
+    isolated_stores, monkeypatch, date_header
+):
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    client = OpenAICodexClient(model="m")
+    _no_refresh(client, monkeypatch)
+    session = _ScriptedSiwcSession(_resp_400(date_header))
+    _install_session(client, monkeypatch, session)
+
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_with_auth_retry(dict(_POST_BODY))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.sent_token_expired is False
+    assert session.authorizations == [f"Bearer {access}"]
+
+
+def test_400_response_without_headers_attribute_does_not_break(isolated_stores, monkeypatch):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], old_access, last_refresh=_iso_ago(10))
+
+    class _HeaderlessErr:
+        status_code = 400
+        ok = False
+
+        def iter_content(self):
+            yield _SIWC_EXPIRED_400_BODY.encode()
+
+        def close(self):
+            pass
+
+    session = _ScriptedSiwcSession(object())
+    client = OpenAICodexClient(model="m")
+    _install_session(client, monkeypatch, session)
+    monkeypatch.setattr(codex_mod, "_HttpxResponseAdapter", lambda raw: _HeaderlessErr())
+
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_responses(dict(_POST_BODY))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.sent_token_expired is True  # judged by the local clock
+    assert session.authorizations == [f"Bearer {old_access}"]
+
+    # The judgement itself never raises, even on objects without headers.
+    valid = _siwc_access_token(expires_in_seconds=3600)
+    assert OpenAICodexClient._sent_token_was_expired(valid, object()) is False
+    assert OpenAICodexClient._sent_token_was_expired(old_access, object()) is True
+    assert OpenAICodexClient._sent_token_was_expired("opaque", object()) is False
+
+
+def test_401_refreshes_and_retries_even_for_a_token_within_its_life(isolated_stores, monkeypatch):
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    new_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3000)
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["saiverse"], new_access)
+    session = _ScriptedSiwcSession(
+        httpx.Response(401, content=b'{"detail":{"code":"token_expired"}}'),
+        httpx.Response(200, content=b""),
+    )
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+    assert resp.status_code == 200
+    assert calls == [_fp(access)]
+    assert session.authorizations == [f"Bearer {access}", f"Bearer {new_access}"]
+
+
+def test_retry_rejected_again_as_expired_is_raised_without_a_second_refresh(
+    isolated_stores, monkeypatch
+):
+    """送り直しも期限切れ扱いの 4xx なら、二度目の更新はせずにそのまま投げる (ループしない)。"""
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access)
+    new_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3000)
+    late_date = _http_date(oca.access_token_expiry(access) + timedelta(seconds=10))
+    client = OpenAICodexClient(model="m")
+    calls = _fake_refresh(client, monkeypatch, isolated_stores["saiverse"], new_access)
+    session = _ScriptedSiwcSession(
+        httpx.Response(401, content=b'{"detail":{"code":"token_expired"}}'),
+        _resp_400(late_date),
+    )
+    _install_session(client, monkeypatch, session)
+
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_with_auth_retry(dict(_POST_BODY))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.sent_token_expired is True
+    assert calls == [_fp(access)]
+    assert session.authorizations == [f"Bearer {access}", f"Bearer {new_access}"]
+
+
+def test_codex_http_error_keeps_its_positional_form():
+    err = codex_mod.CodexHTTPError(400, "body")
+    assert err.sent_token_expired is False
+    assert err.sent_token_fingerprint is None
+    assert str(err) == "Codex backend returned status=400: body"
+
+
+# --- the refresh under the lock must recognise another request's refresh ---
+
+
+def _counting_auth_post(monkeypatch, make_payload) -> list:
+    """Fake auth HTTP (httpx.Client.post): records each call, payload per call."""
+    calls: list = []
+
+    def fake_post(_self, url, headers=None, data=None, json=None, **kwargs):
+        calls.append({"url": url, "data": data})
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = make_payload(len(calls))
+        return resp
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    return calls
+
+
+def _no_auth_post(monkeypatch) -> list:
+    return _counting_auth_post(
+        monkeypatch, lambda n: pytest.fail("no auth HTTP call expected")
+    )
+
+
+def test_pickup_of_another_requests_refresh_despite_a_fast_local_clock(isolated_stores, monkeypatch):
+    """ロックの下: 別の鍵が10秒前に更新済みなら、期限切れに見えても更新しない。"""
+    sent = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-200)
+    stored = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], stored, last_refresh=_iso_ago(10))
+    before = _read_json(isolated_stores["saiverse"])
+    calls = _counting_auth_post(monkeypatch, lambda n: pytest.fail("no refresh expected"))
+
+    OpenAICodexClient(model="m")._refresh_or_pickup_latest(sent)
+
+    assert calls == []
+    assert _read_json(isolated_stores["saiverse"]) == before
+
+
+@pytest.mark.parametrize(
+    "last_refresh", [lambda: _iso_ago(600), lambda: _UNSET], ids=["ten_minutes_ago", "missing"]
+)
+def test_differing_expired_token_without_a_recent_refresh_is_refreshed(
+    isolated_stores, monkeypatch, last_refresh
+):
+    sent = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-200)
+    stored = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], stored, last_refresh=last_refresh())
+    new_access = _siwc_access_token(client_id="oaiapp_e")
+    calls = _counting_auth_post(
+        monkeypatch, lambda n: {"access_token": new_access, "refresh_token": "rt-new"}
+    )
+
+    OpenAICodexClient(model="m")._refresh_or_pickup_latest(sent)
+
+    assert len(calls) == 1
+    assert calls[0]["data"]["refresh_token"] == "rt-old"
+    tokens = _read_json(isolated_stores["saiverse"])["tokens"]
+    assert tokens["access_token"] == new_access
+    assert tokens["refresh_token"] == "rt-new"
+
+
+def test_two_requests_holding_the_same_expired_token_refresh_once_with_a_fast_clock(
+    isolated_stores, monkeypatch
+):
+    """同じ期限切れの鍵 A を読んだ二つの要求: 更新後の鍵もローカルでは期限切れに見えるが、更新は1回。"""
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    _expired_retry_store(isolated_stores["saiverse"], old_access, last_refresh=_iso_ago(7200))
+    refreshed = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-50)
+    calls = _counting_auth_post(
+        monkeypatch, lambda n: {"access_token": refreshed, "refresh_token": f"rt-new-{n}"}
+    )
+    client = OpenAICodexClient(model="m")
+
+    client._refresh_or_pickup_latest(old_access)
+    client._refresh_or_pickup_latest(old_access)
+
+    assert len(calls) == 1
+    tokens = _read_json(isolated_stores["saiverse"])["tokens"]
+    assert tokens["access_token"] == refreshed
+    assert tokens["refresh_token"] == "rt-new-1"
+
+
+class _SwapOnFirstSendSession(_ScriptedSiwcSession):
+    """Like _ScriptedSiwcSession, but another request rotates the store during the 1st send."""
+
+    def __init__(self, store_path: Path, swapped_access: str, *responses) -> None:
+        super().__init__(*responses)
+        self.store_path = store_path
+        self.swapped_access = swapped_access
+        self.sends = 0
+
+    def send(self, _req, stream=False):
+        self.sends += 1
+        if self.sends == 1:
+            record = _read_json(self.store_path)
+            record["tokens"]["access_token"] = self.swapped_access
+            record["tokens"]["refresh_token"] = "rt-other"
+            record["last_refresh"] = datetime.now(tz=timezone.utc).isoformat()
+            _write_json(self.store_path, record)
+        return super().send(_req, stream=stream)
+
+
+def _assert_no_token_in_error(exc, token: str) -> None:
+    assert token not in str(exc)
+    assert token not in repr(exc)
+    assert token not in repr(vars(exc))
+    fp = exc.sent_token_fingerprint
+    assert isinstance(fp, str) and len(fp) == 64
+    assert all(c in "0123456789abcdef" for c in fp)
+
+
+def test_401_after_another_request_rotated_the_store_picks_up_without_refresh(
+    isolated_stores, monkeypatch
+):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    other_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3500)
+    auth_calls = _no_auth_post(monkeypatch)
+    client = OpenAICodexClient(model="m")
+    session = _SwapOnFirstSendSession(
+        isolated_stores["saiverse"],
+        other_access,
+        httpx.Response(401, content=b'{"detail":{"code":"token_expired"}}'),
+        httpx.Response(200, content=b""),
+    )
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+
+    assert resp.status_code == 200
+    assert auth_calls == []
+    assert session.authorizations == [f"Bearer {old_access}", f"Bearer {other_access}"]
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["refresh_token"] == "rt-other"
+
+
+def test_400_after_another_request_rotated_the_store_picks_up_without_refresh(
+    isolated_stores, monkeypatch
+):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=1800)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    server_date = _http_date(oca.access_token_expiry(old_access) + timedelta(seconds=10))
+    other_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3500)
+    auth_calls = _no_auth_post(monkeypatch)
+    client = OpenAICodexClient(model="m")
+    session = _SwapOnFirstSendSession(
+        isolated_stores["saiverse"],
+        other_access,
+        _resp_400(server_date),
+        httpx.Response(200, content=b""),
+    )
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+
+    assert resp.status_code == 200
+    assert auth_calls == []
+    assert session.authorizations == [f"Bearer {old_access}", f"Bearer {other_access}"]
+
+
+def test_401_with_the_sent_token_still_stored_refreshes_once(isolated_stores, monkeypatch):
+    """実物の更新経路: ストアが送った鍵のままなら、認証 HTTP を1回打って新しい鍵で送り直す。"""
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    new_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3500)
+    auth_calls = _counting_auth_post(
+        monkeypatch, lambda n: {"access_token": new_access, "refresh_token": "rt-new"}
+    )
+    client = OpenAICodexClient(model="m")
+    session = _ScriptedSiwcSession(
+        httpx.Response(401, content=b'{"detail":{"code":"token_expired"}}'),
+        httpx.Response(200, content=b""),
+    )
+    _install_session(client, monkeypatch, session)
+
+    resp = client._post_with_auth_retry(dict(_POST_BODY))
+
+    assert resp.status_code == 200
+    assert len(auth_calls) == 1
+    assert auth_calls[0]["data"]["refresh_token"] == "rt-old"
+    assert session.authorizations == [f"Bearer {old_access}", f"Bearer {new_access}"]
+
+
+def test_codex_http_error_carries_only_a_fingerprint_of_the_sent_token(isolated_stores, monkeypatch):
+    old_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], old_access)
+    client = OpenAICodexClient(model="m")
+    session = _ScriptedSiwcSession(
+        httpx.Response(401, content=f'{{"echo":"{old_access}"}}'.encode()),
+    )
+    _install_session(client, monkeypatch, session)
+
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_responses(dict(_POST_BODY))
+
+    exc = excinfo.value
+    _assert_no_token_in_error(exc, old_access)
+    assert exc.sent_token_fingerprint == codex_mod._token_fingerprint(old_access)
+    assert session.authorizations == [f"Bearer {old_access}"]
+
+
+def test_fingerprint_of_the_stored_token_forces_a_refresh_under_the_lock(isolated_stores, monkeypatch):
+    """The rejected token is still stored (and looks valid): it must be refreshed, not picked up."""
+    access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    _expired_retry_store(isolated_stores["saiverse"], access, _iso_ago(10))
+    new_access = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=7200)
+    captured = _capture_httpx_post(monkeypatch, {"access_token": new_access, "refresh_token": "rt-new"})
+
+    OpenAICodexClient(model="m")._refresh_or_pickup_latest(None, prior_fingerprint=_fp(access))
+
+    assert captured["url"] == oca.SIWC_TOKEN_URL
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["access_token"] == new_access
+
+
+def test_fingerprint_of_another_token_picks_up_the_stored_one(isolated_stores, monkeypatch):
+    """The store already holds a different, valid token: no refresh."""
+    stored = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=3600)
+    rejected = _siwc_access_token(client_id="oaiapp_e", expires_in_seconds=-100)
+    assert stored != rejected
+    _expired_retry_store(isolated_stores["saiverse"], stored, _iso_ago(10))
+    captured = _capture_httpx_post(monkeypatch, {"access_token": "unused", "refresh_token": "unused"})
+
+    OpenAICodexClient(model="m")._refresh_or_pickup_latest(None, prior_fingerprint=_fp(rejected))
+
+    assert "url" not in captured
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["access_token"] == stored
