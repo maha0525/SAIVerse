@@ -10,6 +10,8 @@ import {
 interface UseRoomViewAutoSwitchOptions {
     /** overlayMode か (docs/intent/screen_avatar.md 設計 1 の「右サイドバーを出せない幅」)。 */
     enabled: boolean;
+    /** グローバル設定で、喋っている間に自動でルームビューへ切り替えるか (useRoomViewAutoSwitchSetting)。 */
+    autoSwitch: boolean;
     speaking: boolean;
     audioPlaying: boolean;
     /** 利用者が入力している最中か、過去のログを遡って読んでいる最中。 */
@@ -20,7 +22,7 @@ interface UseRoomViewAutoSwitchOptions {
 
 /** ログとルームビューの切り替え。決まりは roomViewAutoSwitch.ts にあり、
  * ここは出来事を渡すことと、待ち時間のタイマーだけを受け持つ。 */
-export function useRoomViewAutoSwitch({ enabled, speaking, audioPlaying, userBusy, resetKey }: UseRoomViewAutoSwitchOptions): {
+export function useRoomViewAutoSwitch({ enabled, autoSwitch, speaking, audioPlaying, userBusy, resetKey }: UseRoomViewAutoSwitchOptions): {
     view: RoomViewDisplay;
     showIndicator: boolean;
     utteranceActive: boolean;
@@ -30,8 +32,8 @@ export function useRoomViewAutoSwitch({ enabled, speaking, audioPlaying, userBus
     const [state, dispatch] = useReducer(nextRoomViewAutoSwitchState, undefined, initialRoomViewAutoSwitchState);
 
     useEffect(() => {
-        dispatch({ type: 'signal', enabled, speaking, audioPlaying, userBusy });
-    }, [enabled, speaking, audioPlaying, userBusy]);
+        dispatch({ type: 'signal', enabled, autoSwitch, speaking, audioPlaying, userBusy });
+    }, [enabled, autoSwitch, speaking, audioPlaying, userBusy]);
 
     useEffect(() => {
         dispatch({ type: 'reset' });

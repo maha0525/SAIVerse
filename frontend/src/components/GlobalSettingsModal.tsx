@@ -9,6 +9,7 @@ import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon,
 import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import { fetchModelList, type PickerModel } from '@/lib/modelList';
 import { useFavoriteModels } from '@/lib/favoriteModels';
+import { announceRoomViewAutoSwitchChange } from '@/lib/useRoomViewAutoSwitchSetting';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -96,6 +97,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     // Media recall (attached image/audio/video summaries feed auto-recall search)
     const [mediaRecallEnabled, setMediaRecallEnabled] = useState(false);
+
+    // 狭い画面で、ペルソナが喋っている間に自動でルームビューへ切り替えるか (GET/POST /api/config/room-view-auto-switch)
+    const [roomViewAutoSwitchEnabled, setRoomViewAutoSwitchEnabled] = useState(false);
 
     // Gemini auto cache (every Gemini call creates an explicit cache to get cached input pricing)
     const [geminiAutoCacheEnabled, setGeminiAutoCacheEnabled] = useState(false);
@@ -241,6 +245,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadImageDefaultQuality();
             loadSpellMaxRounds();
             loadMediaRecallState();
+            loadRoomViewAutoSwitchState();
             loadGeminiAutoCacheState();
             loadMetabolismDefaults();
             // 配布チャンネルの欄が現在のチャンネルと戻れるかどうかを使う
@@ -365,6 +370,36 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle media recall", e);
+        }
+    };
+
+    const loadRoomViewAutoSwitchState = async () => {
+        try {
+            const res = await apiFetch('/api/config/room-view-auto-switch');
+            if (res.ok) {
+                const data = await res.json();
+                setRoomViewAutoSwitchEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load room view auto switch state", e);
+        }
+    };
+
+    const toggleRoomViewAutoSwitch = async () => {
+        const newState = !roomViewAutoSwitchEnabled;
+        try {
+            const res = await apiFetch('/api/config/room-view-auto-switch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setRoomViewAutoSwitchEnabled(newState);
+                // 開いているチャット画面 (useRoomViewAutoSwitchSetting) に、再読み込み無しで効かせる
+                announceRoomViewAutoSwitchChange(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle room view auto switch", e);
         }
     };
 
@@ -1070,6 +1105,18 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         >
                                             <Moon size={14} /> {uiText("components.GlobalSettingsModal.label003")}</button>
                                     </div>
+                                </div>
+
+                                {/* Room View Auto Switch Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div data-i18n="components.GlobalSettingsModal.text127" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text127")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text128" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text128")}</div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${roomViewAutoSwitchEnabled ? styles.active : ''}`}
+                                        onClick={toggleRoomViewAutoSwitch}
+                                    />
                                 </div>
 
                                 {/* Image Default Quality Selector */}
