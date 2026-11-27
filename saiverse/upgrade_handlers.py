@@ -1563,4 +1563,30 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.33 -> 0.3.34 (no world-data changes in the chain).",
     ),
+    # ---- v0.3.35 ----
+    # ChatGPT ログインの鍵の期限切れを 401 だけに頼らず判定して更新する修正、チャット画面の
+    # ルームビュー (内装・ペルソナの姿・アイテム、VRM の 3D 表示と口の動き・カメラ操作)、
+    # 停止ボタンで LLM の応答待ちとリトライをすぐ断つ修正とタイムアウト・リトライ上限の統一、
+    # アドオン管理のペルソナ別設定の中のパネル枠、アドオンの複合アクションのツール名の修正。
+    # このバージョンで保存済みのデータが変わる所は一つで、この鎖の外で行う。
+    #   - saiverse.db の AI 表に ``AVATAR_VRM_PATH`` と ``AVATAR_3D_ENABLED`` の二列が増える:
+    #     起動時の軽量な移行 (database/migrate.py の ``try_additive_migration``)。
+    #     どちらも NULL を許す列で、既存の行は書き換えない。
+    # 世界のデータを書き換える処理は無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_35",
+        scope="city",
+        from_version="0.3.34",
+        to_version="0.3.35",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.34 -> 0.3.35 (no world-data changes in the chain).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_35",
+        scope="ai",
+        from_version="0.3.34",
+        to_version="0.3.35",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.34 -> 0.3.35 (no world-data changes in the chain).",
+    ),
 ]

@@ -1,6 +1,6 @@
 # Intent: アドオン管理のペルソナ別設定内パネル (`ui/PersonaPanel.tsx`)
 
-**ステータス**: 検証待ち（本体・アドオンとも実装およびまはー実機確認済み、PR レビュー待ち）
+**ステータス**: 検証待ち（本体・アドオンとも実装およびまはー実機確認済み。本体側は PR #519 / #520 で develop に入り、v0.3.35 に載る。アドオン側をカタログへ載せるのは v0.3.35 の発行後）
 
 ## これは何か
 
@@ -41,3 +41,6 @@
 
 - 2026-11-23: `saiverse-voice-tts` のテスト再生・WAV/ZIP 出力機能の配置相談を受け、ペルソナ別設定のすぐ下に置ける本体拡張 (`ui/PersonaPanel.tsx`) を採用。SAIVerse v0.3.35 向けに実装し、アドオン側 (v0.7.0) は v0.3.35 リリース後に `min_saiverse_version: "0.3.35"` でカタログ登録する方針で合意。
 - 2026-11-26: まはーが実機確認で問題なしと確認。本体 (`feature/addon-persona-panel`) とアドオン (`feature/voice-test-and-batch-export`) の PR を作成。
+- 2026-11-27 (v0.3.35 のリリース準備で台帳を現況化): 本体側の PR #519 と #520 は develop に入り、v0.3.35 の範囲に入った。台帳にあった行:
+
+| 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側の `PersonaPanel` 枠と `saiverse-voice-tts` v0.7.0 のテスト再生・WAV/ZIP 出力はまはーが実機で確認済みで、両リポジトリの PR がレビューを待っている。次 = まはーが PR をマージし、v0.3.35 発行後にカタログへ `min_saiverse_version: "0.3.35"` で載せる。 | まはー (PR のレビュー) | [intent](../intent/addon_persona_panel.md) | 2026-11-26 |
