@@ -286,6 +286,9 @@ def backup_saiverse_db(
         raise RuntimeError(f"Backup failed: {exc}") from exc
 
 
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+
+
 def _open_readonly_sqlite(path: Path) -> sqlite3.Connection:
     wal = path.with_name(path.name + "-wal")
     if wal.is_file() and wal.stat().st_size > 0:
@@ -293,19 +296,36 @@ def _open_readonly_sqlite(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
 
 
-def _validated_backup_metadata(path: Path) -> dict | None:
+def _has_sqlite_header(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(_SQLITE_HEADER_MAGIC)) == _SQLITE_HEADER_MAGIC
+    except OSError:
+        return False
+
+
+def _validated_backup_metadata(
+    path: Path,
+    *,
+    check_sqlite_integrity: bool = True,
+) -> dict | None:
     manifest_path = path.with_suffix(path.suffix + ".json")
     try:
         metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return None
         if metadata.get("size") != path.stat().st_size:
             return None
-        with closing(_open_readonly_sqlite(path)) as connection:
-            result = connection.execute("PRAGMA integrity_check").fetchone()
-        if not result or result[0] != "ok":
-            return None
         datetime.fromisoformat(metadata["created_at"])
+        if check_sqlite_integrity:
+            with closing(_open_readonly_sqlite(path)) as connection:
+                result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or result[0] != "ok":
+                return None
+        elif not _has_sqlite_header(path):
+            return None
         return metadata
-    except (OSError, KeyError, ValueError, json.JSONDecodeError, sqlite3.Error):
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
         return None
 
 
@@ -318,6 +338,12 @@ def _prune_old_backups(
 ) -> None:
     """Remove old backups, keeping only the most recent N backups.
 
+    Existing generations were already verified with full ``PRAGMA integrity_check``
+    before their manifest was atomically written on creation, so pruning checks
+    the manifest, exact file size, timestamp, and SQLite header magic instead of
+    re-scanning every kept generation (~1 GB+) on every startup. Restoration
+    (:func:`restore_saiverse_db_backup`) still runs full ``PRAGMA integrity_check``.
+
     Args:
         db_path: Path to the main database
         keep_count: Number of recent backups to keep
@@ -329,11 +355,15 @@ def _prune_old_backups(
         else f"{db_path.name}_backup_*.bak"
     )
 
+    candidates = [path for path in target_dir.glob(pattern) if path.is_file()]
+    if len(candidates) <= keep_count:
+        return
+
     # Find all backups matching the pattern
     validated = [
         (path, metadata)
-        for path in target_dir.glob(pattern)
-        if path.is_file() and (metadata := _validated_backup_metadata(path)) is not None
+        for path in candidates
+        if (metadata := _validated_backup_metadata(path, check_sqlite_integrity=False)) is not None
     ]
     backups = [
         item[0]
