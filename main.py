@@ -319,6 +319,18 @@ def main():
         parser.error(str(exc))
     atexit.register(release_runtime_marker, runtime_marker_token)
 
+    # Start loading the shared ONNX embedding model on a background thread now
+    # so it overlaps with pre-upgrade DB backup, migrations, and world setup.
+    try:
+        from sai_memory.config import load_settings as _load_memory_settings
+        from sai_memory.memory.recall import preload_embedder_async
+
+        _mem_settings = _load_memory_settings()
+        if _mem_settings.memory_enabled:
+            preload_embedder_async(local_model_path=_mem_settings.embed_model_path)
+    except Exception:
+        logging.debug("Embedding model background preload skipped", exc_info=True)
+
     # Every startup mutation (schema, data backfill, version handler) is preceded
     # by a synchronous, integrity-checked restore point. Failure is startup-fatal.
     if db_path.exists():
@@ -462,8 +474,10 @@ def main():
         _upgrade_session.close()
         _upgrade_engine.dispose()
 
-    # Start database backup in background thread
-    threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
+    # Defer per-persona SAIMemory startup backups until FastAPI/Uvicorn is live
+    # so they do not compete with persona loading for disk I/O and the GIL.
+    from saiverse_memory.adapter import defer_startup_backups, release_startup_backups
+    defer_startup_backups()
 
     global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP, api_server_process
     manager = SAIVerseManager(
@@ -589,6 +603,8 @@ def main():
         logging.info("[shutdown] API Server subprocess stopped")
         if manager:
             manager.shutdown()
+        # Release any deferred persona backup threads so they observe _closed and exit.
+        release_startup_backups()
         logging.info("[shutdown] complete")
 
     def handle_sigterm(signum, frame):
@@ -629,6 +645,11 @@ def main():
             )
         except Exception:
             logging.exception("Failed to start the event loop stall watch")
+
+        # Startup is complete — now start the background main-DB startup backup
+        # and release deferred per-persona SAIMemory startup backups.
+        threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
+        release_startup_backups()
         yield
         # 終了処理はここに書かない。上の shutdown_everything (atexit / SIGTERM) が
         # 唯一の終了経路で、二本目を作ると順序が絡む (発言生成の後始末 → MCP →

@@ -9,11 +9,13 @@ import argparse
 import contextlib
 import gc
 import hashlib
+import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -335,6 +337,12 @@ def _get_latest_simple_backup(backup_dir: Path) -> Path | None:
     return backups[0] if backups else None
 
 
+_SIMPLE_BACKUP_STATE_FILENAME = ".simple_backup_state.json"
+_SIMPLE_BACKUP_STATE_VERSION = 1
+_SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
+_FAST_SKIP_MAX_WAL_BYTES = 4 * 1024 * 1024
+
+
 def _compute_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
     """Compute hash of a file."""
     h = hashlib.new(algorithm)
@@ -342,6 +350,117 @@ def _compute_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _capture_source_fingerprint(db_path: Path) -> dict[str, Any] | None:
+    """Capture a TOCTOU-checked fingerprint of ``memory.db`` and its WAL.
+
+    Returns ``None`` if the DB is being modified concurrently, has an active
+    rollback journal, has a WAL larger than ``_FAST_SKIP_MAX_WAL_BYTES``, or
+    lacks a valid SQLite header — in all those cases callers fall back to the
+    full SQLite backup + SHA-256 comparison.
+    """
+    journal_path = db_path.with_name(db_path.name + "-journal")
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    try:
+        db_st_1 = db_path.stat()
+        with db_path.open("rb") as handle:
+            header = handle.read(100)
+        if len(header) < 100 or header[:16] != _SQLITE_HEADER_MAGIC:
+            return None
+        change_counter = struct.unpack(">I", header[24:28])[0]
+        schema_cookie = struct.unpack(">I", header[40:44])[0]
+
+        if journal_path.exists() and journal_path.stat().st_size > 0:
+            return None
+
+        wal_size = 0
+        wal_mtime_ns = 0
+        wal_sha256 = ""
+        if wal_path.exists():
+            wal_st_1 = wal_path.stat()
+            if wal_st_1.st_size > _FAST_SKIP_MAX_WAL_BYTES:
+                return None
+            if wal_st_1.st_size > 0:
+                wal_sha256 = _compute_file_hash(wal_path)
+                wal_st_2 = wal_path.stat()
+                if (
+                    wal_st_1.st_size != wal_st_2.st_size
+                    or wal_st_1.st_mtime_ns != wal_st_2.st_mtime_ns
+                ):
+                    return None
+                wal_size = wal_st_1.st_size
+                wal_mtime_ns = wal_st_1.st_mtime_ns
+
+        # Re-stat after reading to ensure nothing mutated mid-fingerprint.
+        db_st_2 = db_path.stat()
+        if (
+            db_st_1.st_size != db_st_2.st_size
+            or db_st_1.st_mtime_ns != db_st_2.st_mtime_ns
+        ):
+            return None
+        if journal_path.exists() and journal_path.stat().st_size > 0:
+            return None
+        if wal_size == 0 and wal_path.exists() and wal_path.stat().st_size > 0:
+            return None
+
+        return {
+            "db_path": str(db_path.resolve()),
+            "db_size": db_st_1.st_size,
+            "db_mtime_ns": db_st_1.st_mtime_ns,
+            "db_change_counter": change_counter,
+            "db_schema_cookie": schema_cookie,
+            "wal_size": wal_size,
+            "wal_mtime_ns": wal_mtime_ns,
+            "wal_sha256": wal_sha256,
+        }
+    except OSError:
+        return None
+
+
+def _capture_backup_fingerprint(backup_path: Path) -> dict[str, Any] | None:
+    try:
+        st = backup_path.stat()
+    except OSError:
+        return None
+    if st.st_size <= 0:
+        return None
+    return {
+        "name": backup_path.name,
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+    }
+
+
+def _load_simple_backup_state(backup_dir: Path) -> dict[str, Any] | None:
+    state_path = backup_dir / _SIMPLE_BACKUP_STATE_FILENAME
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("format_version") != _SIMPLE_BACKUP_STATE_VERSION:
+        return None
+    return data
+
+
+def _save_simple_backup_state(
+    backup_dir: Path,
+    source_fp: dict[str, Any],
+    backup_fp: dict[str, Any],
+) -> None:
+    state_path = backup_dir / _SIMPLE_BACKUP_STATE_FILENAME
+    tmp_path = backup_dir / f"{_SIMPLE_BACKUP_STATE_FILENAME}.{uuid4().hex}.tmp"
+    payload = {
+        "format_version": _SIMPLE_BACKUP_STATE_VERSION,
+        "source": source_fp,
+        "latest_backup": backup_fp,
+    }
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, state_path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
 
 
 def run_simple_backup(
@@ -377,6 +496,28 @@ def run_simple_backup(
         keep_count = SIMPLE_BACKUP_KEEP
 
     backup_dir = _simple_backup_dir(persona_id, output_root)
+    fp_before = _capture_source_fingerprint(db_path)
+
+    # Fast-skip when the source DB (including header counters and WAL bytes)
+    # and the latest backup file both match the state recorded on a previous
+    # verified backup/comparison. Any mismatch, concurrent write, or missing
+    # state falls through to the full SQLite backup + SHA-256 comparison.
+    latest_backup = _get_latest_simple_backup(backup_dir) if skip_if_unchanged else None
+    if skip_if_unchanged and latest_backup is not None and fp_before is not None:
+        latest_fp = _capture_backup_fingerprint(latest_backup)
+        cached = _load_simple_backup_state(backup_dir)
+        if (
+            latest_fp is not None
+            and cached is not None
+            and cached.get("source") == fp_before
+            and cached.get("latest_backup") == latest_fp
+        ):
+            LOGGER.info(
+                "Simple backup skipped for %s: no changes since %s (fast-check)",
+                persona_id,
+                latest_backup.name,
+            )
+            return None
 
     # Create a temporary snapshot first to handle WAL mode correctly
     tmpdir = None
@@ -396,6 +537,8 @@ def run_simple_backup(
         # Force garbage collection to release file handles on Windows
         gc.collect()
 
+        fp_after = _capture_source_fingerprint(db_path)
+
         # Check if unchanged from latest backup
         if skip_if_unchanged:
             latest_backup = _get_latest_simple_backup(backup_dir)
@@ -403,6 +546,10 @@ def run_simple_backup(
                 current_hash = _compute_file_hash(snapshot_path)
                 latest_hash = _compute_file_hash(latest_backup)
                 if current_hash == latest_hash:
+                    if fp_before is not None and fp_before == fp_after:
+                        latest_fp = _capture_backup_fingerprint(latest_backup)
+                        if latest_fp is not None:
+                            _save_simple_backup_state(backup_dir, fp_after, latest_fp)
                     LOGGER.info(
                         "Simple backup skipped for %s: no changes since %s",
                         persona_id,
@@ -421,6 +568,11 @@ def run_simple_backup(
         LOGGER.info("Simple backup created: %s (size: %.1f KB)", backup_path.name, size_kb)
 
         _prune_simple_backups(backup_dir, keep_count)
+
+        if fp_before is not None and fp_before == fp_after:
+            new_fp = _capture_backup_fingerprint(backup_path)
+            if new_fp is not None:
+                _save_simple_backup_state(backup_dir, fp_after, new_fp)
 
         return backup_path
 

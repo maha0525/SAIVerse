@@ -278,6 +278,11 @@ def purge_stale_legacy_embeddings(
     if not _relation_exists(conn, "embeddings"):
         return 0
     if everything:
+        # Avoid opening a write transaction (and dirtying memory.db-wal) on
+        # every startup when the legacy table is already empty.
+        row = conn.execute("SELECT EXISTS(SELECT 1 FROM embeddings LIMIT 1)").fetchone()
+        if not row or not row[0]:
+            return 0
         with immediate_transaction(conn, db_lock):
             cur = conn.execute("DELETE FROM embeddings")
         return cur.rowcount

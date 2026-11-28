@@ -344,8 +344,8 @@ def test_db_without_json_rows_takes_no_write_lock(tmp_path):
         _seed(conn, EMBED_DIM)
         with patch("sai_memory.embedding_migration.immediate_transaction") as tx:
             result = convert_json_vectors(conn)
-        # 旧形式の表を空にする一回だけ
-        assert tx.call_count == 1
+        # 旧形式の embeddings 表も空なので、書き込みのトランザクションは一度も始めない
+        assert tx.call_count == 0
         assert result.converted == 0 and result.kept == 0
         assert not result.did_anything
     finally:

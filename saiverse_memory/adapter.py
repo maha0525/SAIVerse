@@ -92,6 +92,29 @@ def _auto_backup_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+# Startup persona backup coordination:
+# - _STARTUP_BACKUP_GATE is SET by default so standalone SAIMemoryAdapter callers
+#   and unit tests run backups immediately. main.py clears it before loading all
+#   personas and releases it once the server is ready, avoiding disk/GIL
+#   contention during boot.
+# - _STARTUP_BACKUP_SEMAPHORE serializes startup backups so multiple personas do
+#   not simultaneously copy/hash large memory.db files and trigger parallel
+#   gc.collect() pauses.
+_STARTUP_BACKUP_GATE = threading.Event()
+_STARTUP_BACKUP_GATE.set()
+_STARTUP_BACKUP_SEMAPHORE = threading.BoundedSemaphore(1)
+
+
+def defer_startup_backups() -> None:
+    """Pause automatic persona startup backup threads until release_startup_backups()."""
+    _STARTUP_BACKUP_GATE.clear()
+
+
+def release_startup_backups() -> None:
+    """Allow deferred persona startup backup threads to proceed."""
+    _STARTUP_BACKUP_GATE.set()
+
+
 def _coerce_content_to_text(content: Any) -> str:
     """Normalize a message ``content`` to text for the TEXT column.
 
@@ -187,6 +210,7 @@ class SAIMemoryAdapter:
         # 起動時の集計 (manager/persona.py) が全ペルソナで読むので、
         # 無効化で早期 return する経路でも必ず持たせる。
         self.embed_model_changed = False
+        self._closed = False
 
         if not self.settings.memory_enabled:
             LOGGER.warning("SAIMemory disabled via settings; adapter will no-op")
@@ -1480,24 +1504,30 @@ class SAIMemoryAdapter:
     # ------------------------------------------------------------------
 
     def _run_startup_backup(self) -> None:
-        db_path = Path(self.settings.db_path)
-        rdiff_path = os.getenv("SAIMEMORY_RDIFF_PATH")
-        prefer_simple = os.getenv("SAIMEMORY_BACKUP_SIMPLE", "").strip().lower() in {"1", "true", "yes", "on"}
-        try:
-            result = run_backup_auto(
-                persona_id=self.persona_id,
-                db_path=db_path,
-                rdiff_path=rdiff_path,
-                prefer_simple=prefer_simple,
-            )
-            if result is None:
-                LOGGER.info("Auto SAIMemory backup skipped for persona=%s (no changes)", self.persona_id)
-            else:
-                LOGGER.info("Auto SAIMemory backup completed for persona=%s: %s", self.persona_id, result)
-        except BackupError as exc:
-            LOGGER.warning("Auto SAIMemory backup failed for persona=%s: %s", self.persona_id, exc)
-        except Exception:
-            LOGGER.exception("Unexpected error during auto SAIMemory backup for %s", self.persona_id)
+        _STARTUP_BACKUP_GATE.wait()
+        if getattr(self, "_closed", False):
+            return
+        with _STARTUP_BACKUP_SEMAPHORE:
+            if getattr(self, "_closed", False):
+                return
+            db_path = Path(self.settings.db_path)
+            rdiff_path = os.getenv("SAIMEMORY_RDIFF_PATH")
+            prefer_simple = os.getenv("SAIMEMORY_BACKUP_SIMPLE", "").strip().lower() in {"1", "true", "yes", "on"}
+            try:
+                result = run_backup_auto(
+                    persona_id=self.persona_id,
+                    db_path=db_path,
+                    rdiff_path=rdiff_path,
+                    prefer_simple=prefer_simple,
+                )
+                if result is None:
+                    LOGGER.info("Auto SAIMemory backup skipped for persona=%s (no changes)", self.persona_id)
+                else:
+                    LOGGER.info("Auto SAIMemory backup completed for persona=%s: %s", self.persona_id, result)
+            except BackupError as exc:
+                LOGGER.warning("Auto SAIMemory backup failed for persona=%s: %s", self.persona_id, exc)
+            except Exception:
+                LOGGER.exception("Unexpected error during auto SAIMemory backup for %s", self.persona_id)
 
     def recent_persona_messages(
         self,
@@ -2523,6 +2553,7 @@ class SAIMemoryAdapter:
         )
 
     def close(self) -> None:
+        self._closed = True
         if self.conn is not None:
             try:
                 self.conn.close()
