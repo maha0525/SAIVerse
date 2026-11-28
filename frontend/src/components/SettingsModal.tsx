@@ -98,9 +98,6 @@ interface AIConfig {
     home_city_language?: string | null;
     default_model: string | null;
     lightweight_model: string | null;
-    vision_model: string | null;
-    audio_model: string | null;
-    video_model: string | null;
     memory_weave_model: string | null;
     // 反射判断に答えるモデルの、このペルソナだけの上書き (null = 世界の既定に従う)
     reflex_judgment_model: string | null;
@@ -162,9 +159,6 @@ export default function SettingsModal({ isOpen, onClose, personaId, onAvatarChan
     const [language, setLanguage] = useState<string>('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
-    const [visionModel, setVisionModel] = useState<string>('');
-    const [audioModel, setAudioModel] = useState<string>('');
-    const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
     const [reflexJudgmentModel, setReflexJudgmentModel] = useState<string>('');
     // 開いたときのモデル欄の値の控え。保存は「開いてから変えた欄」だけを送る —
@@ -328,17 +322,11 @@ export default function SettingsModal({ isOpen, onClose, personaId, onAvatarChan
                 setLanguage(data.language ?? '');
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
-                setVisionModel(data.vision_model || '');
-                setAudioModel(data.audio_model || '');
-                setVideoModel(data.video_model || '');
                 setMemoryWeaveModel(data.memory_weave_model || '');
                 setReflexJudgmentModel(data.reflex_judgment_model || '');
                 loadedModelsRef.current = {
                     default_model: data.default_model || '',
                     lightweight_model: data.lightweight_model || '',
-                    vision_model: data.vision_model || '',
-                    audio_model: data.audio_model || '',
-                    video_model: data.video_model || '',
                     memory_weave_model: data.memory_weave_model || '',
                     reflex_judgment_model: data.reflex_judgment_model || '',
                 };
@@ -477,9 +465,6 @@ export default function SettingsModal({ isOpen, onClose, personaId, onAvatarChan
                     // 空文字は「個別設定を外す」としてそのまま送る。
                     default_model: modelFieldIfChanged('default_model', defaultModel),
                     lightweight_model: modelFieldIfChanged('lightweight_model', lightweightModel),
-                    vision_model: modelFieldIfChanged('vision_model', visionModel),
-                    audio_model: modelFieldIfChanged('audio_model', audioModel),
-                    video_model: modelFieldIfChanged('video_model', videoModel),
                     memory_weave_model: modelFieldIfChanged('memory_weave_model', memoryWeaveModel),
                     reflex_judgment_model: modelFieldIfChanged('reflex_judgment_model', reflexJudgmentModel),
                     autonomy_enabled: autonomyEnabled,
@@ -724,54 +709,6 @@ export default function SettingsModal({ isOpen, onClose, personaId, onAvatarChan
                                     ariaLabel={uiText("components.SettingsModal.text019")}
                                 />
                                 <div data-i18n="components.SettingsModal.text022" className={styles.description}>{uiText("components.SettingsModal.text022")}</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label data-i18n="components.SettingsModal.text023" className={styles.label}>{uiText("components.SettingsModal.text023")}</label>
-                                <ModelPicker
-                                    models={conversationModels}
-                                    value={visionModel}
-                                    onChange={setVisionModel}
-                                    emptyLabel={uiText("components.SettingsModal.text024")}
-                                    unknownValueLabel={uiText("components.SettingsModal.text025")}
-                                    favorites={favoriteModels}
-                                    onToggleFavorite={toggleFavorite}
-                                    favoriteDisabled={!favoritesReady}
-                                    ariaLabel={uiText("components.SettingsModal.text023")}
-                                />
-                                <div data-i18n="components.SettingsModal.text026" className={styles.description}>{uiText("components.SettingsModal.text026")}</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label data-i18n="components.SettingsModal.text027" className={styles.label}>{uiText("components.SettingsModal.text027")}</label>
-                                <ModelPicker
-                                    models={conversationModels}
-                                    value={audioModel}
-                                    onChange={setAudioModel}
-                                    emptyLabel={uiText("components.SettingsModal.text028")}
-                                    unknownValueLabel={uiText("components.SettingsModal.text029")}
-                                    favorites={favoriteModels}
-                                    onToggleFavorite={toggleFavorite}
-                                    favoriteDisabled={!favoritesReady}
-                                    ariaLabel={uiText("components.SettingsModal.text027")}
-                                />
-                                <div data-i18n="components.SettingsModal.text030" className={styles.description}>{uiText("components.SettingsModal.text030")}</div>
-                            </div>
-
-                            <div className={styles.fieldGroup}>
-                                <label data-i18n="components.SettingsModal.text031" className={styles.label}>{uiText("components.SettingsModal.text031")}</label>
-                                <ModelPicker
-                                    models={conversationModels}
-                                    value={videoModel}
-                                    onChange={setVideoModel}
-                                    emptyLabel={uiText("components.SettingsModal.text032")}
-                                    unknownValueLabel={uiText("components.SettingsModal.text033")}
-                                    favorites={favoriteModels}
-                                    onToggleFavorite={toggleFavorite}
-                                    favoriteDisabled={!favoritesReady}
-                                    ariaLabel={uiText("components.SettingsModal.text031")}
-                                />
-                                <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>

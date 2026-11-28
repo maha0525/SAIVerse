@@ -82,10 +82,6 @@ PERSISTENT_COLUMNS = [
     "EMOTION",
     "DEFAULT_MODEL",
     "LIGHTWEIGHT_MODEL",
-    "LIGHTWEIGHT_VISION_MODEL",
-    "VISION_MODEL",
-    "AUDIO_MODEL",
-    "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
     "REFLEX_JUDGMENT_MODEL",
     "CHRONICLE_ENABLED",
@@ -135,10 +131,6 @@ REMAPPED_COLUMNS = [
 MODEL_COLUMNS = [
     "DEFAULT_MODEL",
     "LIGHTWEIGHT_MODEL",
-    "LIGHTWEIGHT_VISION_MODEL",
-    "VISION_MODEL",
-    "AUDIO_MODEL",
-    "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
     # ペルソナ個別の反射判断モデル。ここに入れておかないと、複製先で
     # そのモデル JSON が無いまま列だけ残る (docs/intent/reflex_judgment.md §1)。

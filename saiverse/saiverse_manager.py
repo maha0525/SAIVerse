@@ -1992,9 +1992,6 @@ class SAIVerseManager(
         # モデル欄の既定は「送られてこなかった = 触らない」の印 (manager/admin.py の
         # UNSET)。None を既定にすると、これらの欄を知らない入口の保存が個別モデルを
         # 黙って NULL へ戻す。委譲なので admin 側と同じ既定を持つ。
-        vision_model: Any = UNSET,
-        audio_model: Any = UNSET,
-        video_model: Any = UNSET,
         memory_weave_model: Any = UNSET,
         reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
@@ -2026,9 +2023,6 @@ class SAIVerseManager(
             avatar_path,
             avatar_upload,
             appearance_image_path,
-            vision_model=vision_model,
-            audio_model=audio_model,
-            video_model=video_model,
             memory_weave_model=memory_weave_model,
             reflex_judgment_model=reflex_judgment_model,
             chronicle_enabled=chronicle_enabled,

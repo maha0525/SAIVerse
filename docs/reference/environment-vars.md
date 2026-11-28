@@ -132,6 +132,9 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 |---|---|
 | `SAIVERSE_DEFAULT_MODEL` | グローバル設定の標準モデル。ペルソナが話す標準モデルは「チャット画面の一時上書き → ペルソナ個別の標準モデル → この値 → 組み込みの既定モデル」の順に、空でない最初のものになる。選ばれたモデルの設定ファイルが無ければ代わりのモデルでは動かず、そのペルソナは選び直すまで止まる。UI（グローバル設定の「モデルロール」）で変えると再起動しなくても効き、設定ファイルの無いモデル名は保存されない（[persona_model_selection.md](../intent/persona_model_selection.md)） |
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
+| `SAIVERSE_IMAGE_SUMMARY_MODEL` | 添付画像と文書の要約に使うモデル（グローバル設定「モデルロール」タブの画像要約モデル）。未設定なら組み込みの既定の軽量モデル（`BUILTIN_DEFAULT_LITE_MODEL`）。全ペルソナ共通で、ペルソナごとの設定は無い（`saiverse/media_summary.py`） |
+| `SAIVERSE_AUDIO_SUMMARY_MODEL` | 添付音声の要約に使うモデル（同タブの音声要約モデル）。未設定時と適用範囲は上と同じ |
+| `SAIVERSE_VIDEO_SUMMARY_MODEL` | 添付動画の要約に使うモデル（同タブの動画要約モデル）。未設定時と適用範囲は上と同じ |
 | `SAIVERSE_REFLEX_JUDGMENT_MODEL` | グローバル設定の反射判断のモデル（未設定なら反射判断は動かない）。詳細は上の「反射判断」節 |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（秒、既定 300、`0` で無制限）。モデル設定に `timeout`（秒）があればそちらが優先 |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 送る画像の枚数の上限。**未設定（既定）なら枚数では絞らず、すべての画像を画像のまま送る。** 数を設定したときだけ、新しい順にその枚数を画像のまま送り、それより古い画像を要約の文字に置き換える（新しい画像が来るたびに古い画像が文字に変わるので、キャッシュの前方一致が割れる — [issue](../issues/image_attachment_limit_breaks_cache_prefix.md)）。`0` はすべての画像を要約の文字にする。整数でない値は警告を出して未設定と同じ扱い（枚数の上限なし）。プロバイダごとの `SAIVERSE_{GEMINI,OPENAI,ANTHROPIC,XAI}_ATTACHMENT_LIMIT` が優先。モデル設定 `cache.persist_realtime_and_recall` が `true` のモデルへ送るときは設定しても使わない（`docs/intent/persist_realtime_and_recall.md` §4.2） |
