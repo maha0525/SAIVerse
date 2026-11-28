@@ -3475,22 +3475,127 @@ def _describe_processes(processes: list[Any]) -> str:
     return ", ".join(parts)
 
 
+def _is_window_shell_process(process: Any) -> bool:
+    try:
+        return (process.name() or "").lower() in _WINDOW_SHELL_NAMES
+    except Exception:
+        return False
+
+
+def _terminate_windows_process_zero(process: Any, psutil: Any) -> bool:
+    """Terminate a verified Windows process with exit code 0.
+
+    ``psutil.Process.terminate()`` on Windows calls ``TerminateProcess(h, 15)``
+    (``SIGTERM``). Windows Terminal's default ``closeOnExit: "graceful"`` only
+    auto-closes tabs that exit with code 0, so code 15 leaves behind scary
+    "[process exited with code 15 (0x0000000f)]" tabs for every stopped
+    ``cmd /k`` window. Using ``TerminateProcess(h, 0)`` after verifying the
+    handle's ``GetProcessTimes`` creation timestamp closes them cleanly without
+    any PID-reuse window.
+
+    Returns ``True`` if handled (terminated, already gone, or PID recycled),
+    or ``False`` if the caller should fall back to ``process.terminate()``.
+    """
+    if not _is_windows():
+        return False
+    real_process_cls = getattr(psutil, "Process", None)
+    if not isinstance(real_process_cls, type) or not isinstance(process, real_process_cls):
+        return False
+    try:
+        expected_create_time = float(process.create_time())
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        access = 0x0001 | 0x1000  # PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel32.OpenProcess(access, False, int(process.pid))
+        if not handle:
+            return not process.is_running()
+        try:
+            creation = wintypes.FILETIME()
+            exit_ft = wintypes.FILETIME()
+            kernel_ft = wintypes.FILETIME()
+            user_ft = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_ft),
+                ctypes.byref(kernel_ft),
+                ctypes.byref(user_ft),
+            ):
+                return False
+            raw_100ns = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            handle_create_time = (raw_100ns - 116444736000000000) / 10_000_000.0
+            if abs(handle_create_time - expected_create_time) > 0.01:
+                LOGGER.warning(
+                    "Refusing to terminate PID %s: handle creation time mismatch (PID reused)",
+                    process.pid,
+                )
+                return True
+            if kernel32.TerminateProcess(handle, 0):
+                return True
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value != 259:
+                return True
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        LOGGER.debug(
+            "Win32 exit-code-0 terminate failed for PID %s; falling back to psutil",
+            getattr(process, "pid", "?"),
+            exc_info=True,
+        )
+        return False
+
+
 def _terminate_processes(processes: list[Any], psutil: Any, timeout: float) -> list[Any]:
     """terminate, wait, kill what is left, wait again. Returns the survivors."""
-    for process in processes:
+    ordered = (
+        [p for p in processes if not _is_window_shell_process(p)]
+        + [p for p in processes if _is_window_shell_process(p)]
+        if _is_windows()
+        else list(processes)
+    )
+    for process in ordered:
         try:
-            process.terminate()
+            if not _terminate_windows_process_zero(process, psutil):
+                process.terminate()
         except psutil.NoSuchProcess:
             continue
         except (psutil.Error, OSError) as exc:
             LOGGER.warning("Could not ask PID %s to stop: %s", getattr(process, "pid", "?"), exc)
-    _, alive = psutil.wait_procs(processes, timeout=timeout)
+    _, alive = psutil.wait_procs(ordered, timeout=timeout)
     if not alive:
         return []
     LOGGER.warning("Process(es) did not stop in time; killing: %s", _describe_processes(alive))
     for process in alive:
         try:
-            process.kill()
+            if not _terminate_windows_process_zero(process, psutil):
+                process.kill()
         except psutil.NoSuchProcess:
             continue
         except (psutil.Error, OSError) as exc:

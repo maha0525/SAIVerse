@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from unittest.mock import MagicMock, Mock, patch
 
 from fastapi import FastAPI
@@ -517,3 +518,32 @@ def test_has_posix_launcher_ancestor_matches_only_this_checkout(tmp_path: Path) 
             return_value=make_psutil(["bash", "./start.sh"], str(other)),
         ):
             assert update_engine._has_posix_launcher_ancestor(123, project) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Terminal exit-code-0 check")
+def test_windows_terminate_processes_exits_cmd_window_with_code_zero() -> None:
+    """Stopping a ``cmd /k`` console window on Windows must exit with code 0
+    (not psutil's default 15) so Windows Terminal closes the tab cleanly."""
+    import subprocess
+    import time
+
+    import psutil
+
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    proc = subprocess.Popen(
+        ["cmd.exe", "/k", "title saiverse_test_exit_zero"],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=si,
+    )
+    try:
+        time.sleep(0.25)
+        ps_proc = psutil.Process(proc.pid)
+        survivors = update_engine._terminate_processes([ps_proc], psutil, timeout=5.0)
+        assert survivors == []
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

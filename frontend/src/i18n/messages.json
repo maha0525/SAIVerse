@@ -2163,6 +2163,14 @@
     "ja": "サーバーを再起動しています…",
     "en": "Restarting the server..."
   },
+  "components.GlobalSettingsModal.restartServerDoneToast": {
+    "ja": "サーバーを再起動しました。",
+    "en": "Server has been restarted."
+  },
+  "components.GlobalSettingsModal.channelSwitchDoneToast": {
+    "ja": "配布チャンネルを切り替え、再起動しました。",
+    "en": "Release channel switched and server restarted."
+  },
   "components.GlobalSettingsModal.restartServerFailed": {
     "ja": "サーバーの再起動開始に失敗しました。",
     "en": "Failed to start server restart."
@@ -11347,6 +11355,10 @@
     "ja": "停止が完了したらこのタブを閉じてください。再開するときは start.bat（Mac / Linux は start.sh）を実行してください。",
     "en": "You can close this tab once shutdown completes. Run start.bat (or start.sh on macOS / Linux) to start SAIVerse again."
   },
+  "app.page.updateCompleteToast": {
+    "ja": "アップデートが完了し、再起動しました。",
+    "en": "Update complete! Application has been restarted."
+  },
   "app.page.label012": {
     "ja": "New version available: v",
     "en": "New version available: v"
@@ -14178,6 +14190,18 @@
   "components.BackupManagementPanel.bannerRestoringPersona": {
     "ja": "{p1} の記憶 (memory.db) を復元しています…",
     "en": "Restoring memory.db for {p1}..."
+  },
+  "components.BackupManagementPanel.toastSnapshotCreated": {
+    "ja": "世界スナップショットの作成が完了し、再起動しました。",
+    "en": "World snapshot created and server restarted."
+  },
+  "components.BackupManagementPanel.toastSnapshotRestored": {
+    "ja": "世界スナップショットからの復元が完了し、再起動しました。",
+    "en": "World restored from snapshot and server restarted."
+  },
+  "components.BackupManagementPanel.toastPersonaRestored": {
+    "ja": "{p1} の記憶復元が完了し、再起動しました。",
+    "en": "Restored memory.db for {p1} and restarted."
   },
   "components.BackupManagementPanel.noPersonas": {
     "ja": "対象ペルソナが見つかりません",

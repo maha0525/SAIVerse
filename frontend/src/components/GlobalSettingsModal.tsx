@@ -912,7 +912,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 setServerActionBusy(false);
                 return;
             }
-            announceUpdateStarted('', uiText("components.GlobalSettingsModal.text006"));
+            announceUpdateStarted(
+                '',
+                uiText("components.GlobalSettingsModal.text006"),
+                uiText("components.GlobalSettingsModal.restartServerDoneToast"),
+            );
             onClose();
         } catch (e) {
             console.error(e);
@@ -968,7 +972,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             setChannelConsentOpen(false);
             setChannelConsentChecked(false);
             setChannelSwitching(false);
-            announceUpdateStarted(targetVersion);
+            announceUpdateStarted(
+                targetVersion,
+                '',
+                uiText("components.GlobalSettingsModal.channelSwitchDoneToast"),
+            );
             onClose();
             return;
         }
