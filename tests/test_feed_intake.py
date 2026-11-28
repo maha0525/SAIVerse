@@ -2502,7 +2502,6 @@ class ManagerShutdownTest(unittest.TestCase):
             sds_stop_event=threading.Event(),
             db_polling_stop_event=threading.Event(),
             event_scheduler=None,
-            conversation_managers={},
             feed_manager=SimpleNamespace(stop=lambda: order.append("feed_stop")),
             personas={
                 "p1": SimpleNamespace(

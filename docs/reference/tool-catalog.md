@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 116（うち Spell 化: 79）
+**登録ツール数**: 115（うち Spell 化: 79）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -28,7 +28,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
 | `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | ドキュメント検索 |
 | `episode_read` | 出来事の参照 (episode:N) から、その出来事の間に記録された内容（発話・スペルの実行と結果）の全文を読み返します。作業セッションの要約 (digest) の元になった原本を確認したいときに使ってください。 | `episode*`: string | 出来事の記録を読む |
-| `forget_recalled` | 想起した記憶をワーキングメモリから忘れます。source_idを指定すると特定の記憶だけ忘れます。省略するとすべての想起記憶をクリアします。 | `source_id`: string | — |
 | `game_create_building` | Create a building (shop, inn, plaza, dungeon room, etc.) inside the game Region you rule. The building becomes usable… | `name*`: string, `description*`: string, `system_instruction`: string, `subregion_id`: string, `capacity`: integer | 建物作成 (GM) |
 | `game_create_subregion` | Create a SubRegion (an area such as a town, dungeon, or wilderness zone) inside the game Region you rule. SubRegions … | `name*`: string, `description*`: string | エリア作成 (GM) |
 | `game_move_party` | Move the whole party (all participants and yourself) to a building inside the game Region you rule. Use this when the… | `building_id*`: string | パーティー移動 (GM) |

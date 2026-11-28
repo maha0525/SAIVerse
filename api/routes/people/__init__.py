@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from . import summon, memory, recall, config, avatar_vrm
 from . import import_chatlog, import_claude, import_muse, reembed, memopedia, native_export_import, persona_pack
 from . import schedule, inventory, arasuji
-from . import pulse_logs, memory_notes, working_memory
+from . import pulse_logs, memory_notes
 from . import storage_layers, cache_status, context_status, debug, pulse_timeline
 from . import realtime_spell, core_memory, life
 from . import experience_ledger
@@ -58,7 +58,6 @@ router.include_router(inventory.router, tags=["people"])
 router.include_router(arasuji.router, tags=["people"])
 router.include_router(pulse_logs.router, tags=["people"])
 router.include_router(memory_notes.router, tags=["people"])
-router.include_router(working_memory.router, tags=["people"])
 router.include_router(storage_layers.router, tags=["people"])
 router.include_router(cache_status.router, tags=["people"])
 router.include_router(context_status.router, tags=["people"])

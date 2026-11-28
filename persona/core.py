@@ -17,15 +17,11 @@ from persona.bootstrap import (
     initialise_memory_adapter,
     load_session_data,
 )
-from persona.constants import (
-    RECALL_SNIPPET_PULSE_MAX_CHARS,
-)
 from persona.history import initialise_pulse_state
 from persona.tasks import PersonaTaskStore
 from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
-    PersonaMovementMixin,
 )
 
 load_dotenv()
@@ -34,7 +30,6 @@ load_dotenv()
 class PersonaCore(
     PersonaGenerationMixin,
     PersonaHistoryMixin,
-    PersonaMovementMixin,
 ):
     # 特殊ペルソナの役割 (AI.PERSONA_ROLE 由来)。None=通常ペルソナ、'ruler'=Region RPG の GM。
     # 構築後に manager 側 (manager/persona.py) が設定する。設計: temp/region_rpg_intent.md §B

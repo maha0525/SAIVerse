@@ -208,9 +208,8 @@ scripts/
 persona/
 ├── core.py           # PersonaCore メインクラス
 ├── bootstrap.py      # 初期化
-├── constants.py      # 定数
 ├── history.py / history_manager.py # 履歴
-├── mixins/           # 機能別ミックスイン（generation / history / movement）
+├── mixins/           # 機能別ミックスイン（generation / history）
 └── tasks/            # タスク管理（storage.py / store.py。現状ほぼ未運用）
 ```
 

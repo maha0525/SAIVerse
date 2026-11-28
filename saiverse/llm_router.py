@@ -1,10 +1,10 @@
-import json, logging
-import os
+import json
+import logging
+import threading
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 
-from google import genai
 from google.genai import types as gtypes
 from saiverse.gemini_clients import build_gemini_clients
 from tools.core import ToolSchema
@@ -16,28 +16,48 @@ log = logging.getLogger("saiverse.router")
 from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
 
 ROUTER_MODEL = BUILTIN_DEFAULT_LITE_MODEL
-_free_client, _paid_client, client = build_gemini_clients()
-_CLIENT_LABELS = {}
-if _free_client is not None:
-    _CLIENT_LABELS[id(_free_client)] = "free"
-if _paid_client is not None:
-    _CLIENT_LABELS[id(_paid_client)] = "paid"
+# Clients are created lazily on the first route() call rather than at import
+# time: build_gemini_clients() takes ~1 s on Windows (SSL store setup) and
+# route() is only invoked on legacy tools=None calls.
+_free_client = None
+_paid_client = None
+client = None
+_CLIENT_LABELS: Dict[int, str] = {}
+_clients_initialized = False
+_clients_lock = threading.Lock()
+
+
+def _ensure_clients() -> None:
+    """Initialise router Gemini clients on first use (no-op if already set/mocked)."""
+    global _free_client, _paid_client, client, _CLIENT_LABELS, _clients_initialized
+    if client is not None or _clients_initialized:
+        return
+    with _clients_lock:
+        if client is not None or _clients_initialized:
+            return
+        _free_client, _paid_client, client = build_gemini_clients()
+        _CLIENT_LABELS = {}
+        if _free_client is not None:
+            _CLIENT_LABELS[id(_free_client)] = "free"
+        if _paid_client is not None:
+            _CLIENT_LABELS[id(_paid_client)] = "paid"
+        _clients_initialized = True
 
 
 def rebuild_clients():
-    """Rebuild Gemini clients from current os.environ.
+    """Reset cached Gemini clients so the next route() call uses updated os.environ.
 
     Called after API keys are updated at runtime (e.g. via tutorial or admin UI)
-    so that the router uses the latest credentials.
+    so that the router uses the latest credentials without blocking key saves.
     """
-    global _free_client, _paid_client, client, _CLIENT_LABELS
-    _free_client, _paid_client, client = build_gemini_clients()
-    _CLIENT_LABELS = {}
-    if _free_client is not None:
-        _CLIENT_LABELS[id(_free_client)] = "free"
-    if _paid_client is not None:
-        _CLIENT_LABELS[id(_paid_client)] = "paid"
-    log.info("Router Gemini clients rebuilt with updated API keys")
+    global _free_client, _paid_client, client, _CLIENT_LABELS, _clients_initialized
+    with _clients_lock:
+        _free_client = None
+        _paid_client = None
+        client = None
+        _CLIENT_LABELS = {}
+        _clients_initialized = False
+    log.info("Router Gemini clients reset (will rebuild lazily on next route())")
 
 
 SYS_TEMPLATE = """\
@@ -128,6 +148,7 @@ def extract_tool_names(tools_spec: list) -> set[str]:
 
 def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     """Return {"call":"yes/no","tool": name, "args": {...}}"""
+    _ensure_clients()
     if client is None:
         log.warning("Router unavailable: no Gemini API key configured. Skipping tool routing.")
         return {"call": "no", "tool": "", "args": {}}

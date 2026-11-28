@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 418（tag グループ: 27）
+**エンドポイント数**: 414（tag グループ: 27）
 
 ## addon
 
@@ -406,10 +406,6 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
 | POST | `/api/people/{persona_id}/unified-recall` | Search across Chronicle and Memopedia using embeddings. |
-| GET | `/api/people/{persona_id}/working-memory` | Get current working memory recalled IDs. |
-| POST | `/api/people/{persona_id}/working-memory/recall` | Add a recalled ID to working memory. |
-| DELETE | `/api/people/{persona_id}/working-memory/recall` | Clear all recalled IDs from working memory. |
-| DELETE | `/api/people/{persona_id}/working-memory/recall/{source_id}` | Remove a specific recalled ID from working memory. |
 
 ## phenomena
 
