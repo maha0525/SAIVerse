@@ -555,6 +555,49 @@ def _write_object_atomically(
         raise
 
 
+def _iter_decompressed_zlib(
+    stream: Any,
+    *,
+    chunk_size: int = STREAM_CHUNK_SIZE,
+    max_plain_chunk: int = STREAM_CHUNK_SIZE,
+    on_compressed_bytes: Optional[Callable[[int], None]] = None,
+) -> Iterator[bytes]:
+    """Stream-decompress a single zlib stream with bounded output chunks.
+
+    Uses ``max_length`` + ``unconsumed_tail`` so highly compressible files
+    (e.g. large zero-filled SQLite DBs) never inflate unbounded buffers into
+    memory. Raises ``zlib.error`` if the stream lacks EOF or has trailing bytes.
+    """
+    decompressor = zlib.decompressobj()
+    for chunk in iter(lambda: stream.read(chunk_size), b""):
+        if decompressor.eof:
+            raise zlib.error("Trailing data after zlib stream EOF")
+        buf = chunk
+        while buf:
+            plain = decompressor.decompress(buf, max_plain_chunk)
+            tail = decompressor.unconsumed_tail
+            consumed = len(buf) - len(tail)
+            if on_compressed_bytes is not None and consumed > 0:
+                on_compressed_bytes(consumed)
+            if plain:
+                yield plain
+            if decompressor.eof:
+                if decompressor.unused_data:
+                    raise zlib.error("Trailing data after zlib stream EOF")
+                break
+            if not tail:
+                break
+            if not plain and len(tail) == len(buf):
+                raise zlib.error("Zlib decompressor made no progress")
+            buf = tail
+
+    tail_out = decompressor.flush(max_plain_chunk)
+    if tail_out:
+        yield tail_out
+    if not decompressor.eof or decompressor.unused_data:
+        raise zlib.error("Incomplete or corrupted zlib stream")
+
+
 def _verify_existing_object(
     obj_path: Path,
     encoding: str,
@@ -581,21 +624,12 @@ def _verify_existing_object(
                     if on_bytes is not None:
                         on_bytes(chunk_len)
             elif encoding == "zlib":
-                decompressor = zlib.decompressobj()
-                for chunk in iter(lambda: stream.read(STREAM_CHUNK_SIZE), b""):
-                    chunk_len = len(chunk)
-                    plain = decompressor.decompress(chunk)
-                    if plain:
-                        digest.update(plain)
-                        actual_size += len(plain)
-                    if on_bytes is not None:
-                        on_bytes(chunk_len)
-                tail = decompressor.flush()
-                if tail:
-                    digest.update(tail)
-                    actual_size += len(tail)
-                if not decompressor.eof or decompressor.unused_data:
-                    return False
+                for plain in _iter_decompressed_zlib(
+                    stream,
+                    on_compressed_bytes=on_bytes,
+                ):
+                    digest.update(plain)
+                    actual_size += len(plain)
             else:
                 return False
     except (OSError, zlib.error):
@@ -1474,15 +1508,12 @@ def validate_and_extract_cas_snapshot(
                             progress_callback,
                         )
             else:
-                decompressor = zlib.decompressobj()
                 try:
-                    for chunk in iter(lambda: source.read(STREAM_CHUNK_SIZE), b""):
-                        plain = decompressor.decompress(chunk)
-                        if plain:
-                            digest.update(plain)
-                            size += len(plain)
-                            done_bytes += len(plain)
-                            destination.write(plain)
+                    for plain in _iter_decompressed_zlib(source):
+                        digest.update(plain)
+                        size += len(plain)
+                        done_bytes += len(plain)
+                        destination.write(plain)
                         now = time.monotonic()
                         if now - last_report >= PROGRESS_INTERVAL_SECONDS:
                             last_report = now
@@ -1491,14 +1522,6 @@ def validate_and_extract_cas_snapshot(
                                 f"({done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB)",
                                 progress_callback,
                             )
-                    tail = decompressor.flush()
-                    if tail:
-                        digest.update(tail)
-                        size += len(tail)
-                        done_bytes += len(tail)
-                        destination.write(tail)
-                    if not decompressor.eof or decompressor.unused_data:
-                        raise ValueError(f"Corrupted zlib stream for {archive_path}")
                 except zlib.error as exc:
                     raise ValueError(f"Decompression failed for {archive_path}: {exc}") from exc
 
@@ -1590,18 +1613,15 @@ def export_snapshot_to_zip(
                                 size += len(chunk)
                                 dst.write(chunk)
                         else:
-                            decompressor = zlib.decompressobj()
-                            for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
-                                plain = decompressor.decompress(chunk)
-                                if plain:
+                            try:
+                                for plain in _iter_decompressed_zlib(src):
                                     digest.update(plain)
                                     size += len(plain)
                                     dst.write(plain)
-                            tail = decompressor.flush()
-                            if tail:
-                                digest.update(tail)
-                                size += len(tail)
-                                dst.write(tail)
+                            except zlib.error as exc:
+                                raise ValueError(
+                                    f"Decompression failed while exporting {archive_path}: {exc}"
+                                ) from exc
                     if digest.hexdigest() != expected_sha or size != expected_size:
                         raise ValueError(f"Integrity check failed while exporting {archive_path}")
                     v2_files[archive_path] = {"sha256": expected_sha, "size": expected_size}

@@ -828,3 +828,59 @@ def test_gc_refuses_when_manifest_file_count_or_total_bytes_mismatches(
         gc_res = snapshot.gc_store()
         assert gc_res["removed_objects"] == 0
         assert gc_res["live_objects"] == initial_object_count
+
+
+def test_bounded_zlib_decompression_caps_peak_memory_and_rejects_trailing_garbage(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #531 round-2 finding: Decompressing a highly compressible
+    128 MiB zero-filled CAS object must bound output chunk sizes and peak
+    memory instead of inflating the entire payload in one decompress() call."""
+    import tracemalloc
+    import zlib
+
+    total_size = 128 * 1024 * 1024  # 128 MiB of zeros -> ~130-590 KiB compressed
+    block = b"\x00" * (1024 * 1024)
+    digest = hashlib.sha256()
+    compressor = zlib.compressobj(level=snapshot.ZLIB_COMPRESS_LEVEL)
+    z_path = tmp_path / "zeros.z"
+    with z_path.open("wb") as fh:
+        for _ in range(128):
+            digest.update(block)
+            out = compressor.compress(block)
+            if out:
+                fh.write(out)
+        fh.write(compressor.flush())
+    expected_sha = digest.hexdigest()
+
+    # Every yielded chunk must respect STREAM_CHUNK_SIZE
+    with z_path.open("rb") as fh:
+        max_chunk = 0
+        yielded_total = 0
+        for plain in snapshot._iter_decompressed_zlib(fh):
+            max_chunk = max(max_chunk, len(plain))
+            yielded_total += len(plain)
+    assert yielded_total == total_size
+    assert max_chunk <= snapshot.STREAM_CHUNK_SIZE
+
+    # Peak Python allocation during _verify_existing_object must stay bounded
+    # (unbounded decompress() allocated ~270 MiB for 128 MiB zeros).
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        ok = snapshot._verify_existing_object(z_path, "zlib", expected_sha, total_size)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert ok is True
+    assert peak < 16 * 1024 * 1024, f"Peak memory too high: {peak / (1024 * 1024):.1f} MiB"
+
+    # Trailing garbage appended after valid zlib EOF must be rejected
+    trailing_path = tmp_path / "zeros_trailing.z"
+    trailing_path.write_bytes(z_path.read_bytes() + b"JUNK")
+    assert snapshot._verify_existing_object(trailing_path, "zlib", expected_sha, total_size) is False
+
+    # Truncated stream without EOF must be rejected
+    truncated_path = tmp_path / "zeros_truncated.z"
+    truncated_path.write_bytes(z_path.read_bytes()[:-8])
+    assert snapshot._verify_existing_object(truncated_path, "zlib", expected_sha, total_size) is False
