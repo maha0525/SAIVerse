@@ -780,3 +780,51 @@ def test_list_snapshots_with_stats_computes_exact_unique_bytes_and_handles_corru
         after_by_name = {item["name"]: item for item in items_after}
         assert stats_after["cas_snapshot_count"] == 1
         assert after_by_name["gen1"]["unique_bytes"] == stats_after["cas_store_bytes"]
+
+
+def test_gc_refuses_when_manifest_file_count_or_total_bytes_mismatches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex PR #531 finding: A valid-JSON manifest whose ``files`` table lost
+    entries (``file_count != len(files)``) or has mismatched total bytes must be
+    treated as corrupted so fail-closed GC refuses to delete any objects."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="m-v1", mem_val="m-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("gen1")
+
+        manifest_path = home / "snapshots" / "manifests" / "gen1.json"
+        original_text = manifest_path.read_text(encoding="utf-8")
+        original = json.loads(original_text)
+        assert original["file_count"] == 3
+        initial_object_count = snapshot.get_store_stats()["cas_object_count"]
+        assert initial_object_count == 3
+
+        # Case 1: file_count stays 3, but files table is truncated to {}
+        truncated = dict(original, files={})
+        manifest_path.write_text(json.dumps(truncated), encoding="utf-8")
+
+        items, stats = snapshot.list_snapshots_with_stats()
+        assert stats["corrupted_manifests"] == ["gen1.json"]
+        assert items[0]["readable"] is False
+        assert items[0]["unique_bytes"] is None
+        with pytest.raises(RuntimeError, match="fail-closed"):
+            snapshot.gc_store()
+        assert snapshot.get_store_stats()["cas_object_count"] == initial_object_count
+
+        # Case 2: file_count matches len(files), but total_bytes_uncompressed mismatches
+        bad_total = dict(original, total_bytes_uncompressed=original["total_bytes_uncompressed"] + 1)
+        manifest_path.write_text(json.dumps(bad_total), encoding="utf-8")
+        assert snapshot.get_store_stats()["corrupted_manifests"] == ["gen1.json"]
+        with pytest.raises(RuntimeError, match="fail-closed"):
+            snapshot.gc_store()
+        assert snapshot.get_store_stats()["cas_object_count"] == initial_object_count
+
+        # Restoring valid manifest makes GC healthy again
+        manifest_path.write_text(original_text, encoding="utf-8")
+        assert snapshot.get_store_stats()["corrupted_manifests"] == []
+        gc_res = snapshot.gc_store()
+        assert gc_res["removed_objects"] == 0
+        assert gc_res["live_objects"] == initial_object_count

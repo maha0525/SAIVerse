@@ -709,17 +709,44 @@ def _temp_file_pid(filename: str) -> Optional[int]:
 
 
 def _extract_manifest_hashes(meta: Optional[dict]) -> Optional[set[str]]:
-    """CAS マニフェストの整合性を検証し、参照している一意な SHA-256 集合を返す。"""
+    """CAS マニフェストの整合性を検証し、参照している一意な SHA-256 集合を返す。
+
+    ``validate_and_extract_cas_snapshot()`` と同じ整合性条件
+    (``format_version`` / ``file_count`` / ``total_bytes_uncompressed`` /
+    各エントリの ``sha256``・``size``・``encoding``) を満たさないマニフェストは
+    破損扱い (``None``) とし、fail-closed GC が欠落エントリのオブジェクトを
+    誤削除するのを防ぐ。
+    """
     if not meta or meta.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
         return None
     files = meta.get("files")
     if not isinstance(files, dict):
         return None
+    file_count = meta.get("file_count")
+    if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count != len(files):
+        return None
+    total_uncompressed = meta.get("total_bytes_uncompressed")
+    if (
+        isinstance(total_uncompressed, bool)
+        or not isinstance(total_uncompressed, int)
+        or total_uncompressed < 0
+    ):
+        return None
     manifest_hashes: set[str] = set()
+    sum_sizes = 0
     for entry in files.values():
         if not isinstance(entry, dict) or not _is_valid_sha256(entry.get("sha256")):
             return None
+        size = entry.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return None
+        encoding = entry.get("encoding")
+        if encoding is not None and encoding not in ("raw", "zlib"):
+            return None
+        sum_sizes += size
         manifest_hashes.add(entry["sha256"])
+    if sum_sizes != total_uncompressed:
+        return None
     return manifest_hashes
 
 
