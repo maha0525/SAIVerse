@@ -41,6 +41,16 @@ LOGGER = logging.getLogger(__name__)
 # ました」の顔で通り、知らせるための機構が黙る (Codex 指摘 2026-09-01)。
 _WEAVE_INSPECT_FAILED = object()
 
+# キャッシュ期限切れを表す過去時刻のオフセット。アンカー自動前進 (§14-2)、
+# 履歴復元時の行初期化、キャッシュ無効化書き込みで共有する。epoch 0 を使わないのは
+# タイムゾーン次第で負になり Windows で扱えないため。
+_COLD_ANCHOR_AGE = timedelta(days=3650)
+
+
+def _cold_updated_at() -> datetime:
+    """キャッシュ期限切れを表す過去時刻 (UPDATED_AT 書き込み用)。"""
+    return datetime.now() - _COLD_ANCHOR_AGE
+
 
 def _rows_content_digest(rows: Sequence[Dict[str, Any]]) -> str:
     """保存行の (id, 本文) を順序込みで畳んだダイジェスト (sha256 の hex)。
@@ -540,6 +550,56 @@ class SessionLifecycle:
             entry["folded_ranges"] = folded
         return entry
 
+    # ------------------------------------------------------------------
+    # キャッシュ状態の更新 (docs/intent/cache_lifecycle_control.md §5.2)
+    #
+    # SessionAnchor 行の (TTL_SECONDS, UPDATED_AT) は「現在の提示コンテキストに
+    # 対して、有効なプロンプトキャッシュがいつまで残っているか」の記録。
+    # 提示内容 (アンカー位置や圧縮区間) を書き換える経路は、同じ書き込みでこの
+    # 2 値も必ず更新する。提示内容だけを変えて 2 値を放置すると、変更前の窓で
+    # 作ったキャッシュの TTL が新しい窓のものとして生き残ってしまう
+    # (2026-09-12 実機: 3 ヶ月半前の 1 時間キャッシュ行に履歴復元が UPDATED_AT=now
+    # だけを上書きし、実際は 5 分キャッシュなのに UI が「残り 58 分」と表示し続けた)。
+    # 更新パターンは「キャッシュ無効化」と「新規設定」の 2 種類。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def cache_broken_stamp() -> Tuple[Optional[int], int]:
+        """キャッシュ無効化用の値 — 提示内容が変わり、既存キャッシュは使えない。
+
+        TTL_SECONDS は None (有効期限の主張をクリア)、UPDATED_AT は十分に過去の時刻
+        (期限切れ扱い) にする。「期限切れ」と判定させるには両方が必要:
+        TTL_SECONDS だけ None にして UPDATED_AT を now のままにすると、読み手
+        (:meth:`anchor_entry_ttl_seconds`) が現行設定の TTL へフォールバックして
+        「今作ったばかりの有効キャッシュ」と誤認してしまう。
+
+        §14-2 のアンカー自動前進 (:meth:`_advance_anchor_preserving_folds`) と同じ形。
+
+        Returns:
+            ``(TTL_SECONDS, UPDATED_AT)`` に書き込む値。
+        """
+        return (None, int(_cold_updated_at().timestamp()))
+
+    def cache_fresh_stamp(
+        self, model_key: Optional[str], persona_id: Optional[str],
+    ) -> Tuple[int, int]:
+        """キャッシュ新規設定用の値 — 直後の LLM 呼び出しで新しい窓がキャッシュされる。
+
+        UPDATED_AT は now、TTL_SECONDS は**現行設定** (= 次のキャッシュ作成に使う TTL。
+        §5.4 の消費者 a と同じ値で、:meth:`touch_anchor_after_llm_call` が LLM 成功後に
+        書く値と一致する)。返答直前の履歴復元 (:meth:`_write_refill`) で使う —
+        復元した窓はその返答でそのままキャッシュされるため、UPDATED_AT を過去時刻のまま
+        放置すると直後の解決処理で §14-2 のアンカー自動前進が走り、復元した範囲が
+        同じ Pulse 内で再び圧縮されてしまう (docs/intent/arasuji_levels.md §15-2)。
+
+        Returns:
+            ``(TTL_SECONDS, UPDATED_AT)`` に書き込む値。
+        """
+        return (
+            int(self.get_anchor_validity_seconds(str(model_key or ""), persona_id)),
+            int(datetime.now().timestamp()),
+        )
+
     def load_folded_ranges(
         self, persona_id: Optional[str], model_key: Optional[str],
         *, strict: bool = False,
@@ -564,8 +624,26 @@ class SessionLifecycle:
         persona_id: Optional[str],
         model_key: Optional[str],
         folds: List["FoldedRange"],
+        *,
+        preserve_active_window: bool = False,
     ) -> None:
-        """圧縮区間を session_anchor 行へ書く。anchor / TTL は触らない。"""
+        """圧縮区間を session_anchor 行へ保存する。ANCHOR_MESSAGE_ID は変更しない。
+
+        圧縮区間が変わると提示コンテキストも変わり、既存のプロンプトキャッシュは
+        ヒットしなくなるため、既定では同じコミットでキャッシュ無効化
+        (:meth:`cache_broken_stamp`) を書き込む。
+
+        ``preserve_active_window=True`` は返答直前の要約表示への再圧縮
+        (:meth:`_refold_raw_view_folds`) 専用:
+        - 保存時点でその行がキャッシュ有効期限内であれば、:meth:`cache_fresh_stamp`
+          (現行設定の TTL + 現在時刻) を書き込む。これにより、旧 1 時間キャッシュ
+          (経過 10 分) の状態で現行設定を 5 分へ下げて再圧縮しても、TTL クリアによる
+          フォールバック失効で直後の resolve が §14-2 のアンカー自動前進を発火させ、
+          残すべき会話範囲を同じ Pulse 内で閉じてしまう不具合を防げる (かつ古い 1 時間
+          TTL も現行設定へ置き換わる)。
+        - 保存時点で既に期限切れであれば、:meth:`cache_broken_stamp` を書き込む
+          (5 分キャッシュ失効後に 1 時間へ設定変更された場合でも、誤って有効化しない)。
+        """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return
         if not persona_id or not model_key:
@@ -589,6 +667,14 @@ class SessionLifecycle:
                     )
                 return
             row.FOLDED_RANGES_JSON = payload
+            if preserve_active_window and self._anchor_entry_is_hot(
+                self._row_to_entry(row), str(model_key), persona_id,
+            ):
+                ttl, updated_at = self.cache_fresh_stamp(model_key, persona_id)
+            else:
+                ttl, updated_at = self.cache_broken_stamp()
+            row.TTL_SECONDS = ttl
+            row.UPDATED_AT = updated_at
             db.commit()
         except Exception as exc:
             LOGGER.warning(
@@ -962,7 +1048,7 @@ class SessionLifecycle:
             try:
                 updated = datetime.fromisoformat(updated_at_iso)
             except (TypeError, ValueError):
-                updated = datetime.now() - timedelta(days=3650)
+                updated = _cold_updated_at()
             row.ANCHOR_MESSAGE_ID = new_anchor_id
             row.FOLDED_RANGES_JSON = serialize_folds(kept)
             row.TTL_SECONDS = None
@@ -1200,7 +1286,7 @@ class SessionLifecycle:
                         self_entry.get("updated_at")
                         # 元の時刻が無い行は「十分に過去」で冷えを表す
                         # (epoch 0 は TZ 次第で負になり Windows で扱えない)
-                        or (datetime.now() - timedelta(days=3650)).isoformat(),
+                        or _cold_updated_at().isoformat(),
                         strict=strict,
                     )
                     if not advanced:
@@ -2652,6 +2738,7 @@ class SessionLifecycle:
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
         close_undersized_tail: bool = False,
+        before_reply: bool = False,
     ) -> str:
         """Execute history metabolism: Chronicle generation + anchor update.
 
@@ -2715,6 +2802,7 @@ class SessionLifecycle:
                 stop_when_disabled=stop_when_disabled,
                 cancellation_token=cancellation_token,
                 close_undersized_tail=close_undersized_tail,
+                before_reply=before_reply,
             )
 
     def run_manual_compaction(
@@ -3224,7 +3312,7 @@ class SessionLifecycle:
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
                     # 「十分に過去」= 確実に冷えている温度で立てる
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
         # close_undersized_tail: U 判定が材料字数になった (2026-08-29 裁定) ため、
         # 「生は巨大だが材料が薄い」期間では通常計画が fold を閉じられず、高水位
@@ -3234,6 +3322,7 @@ class SessionLifecycle:
             persona, building_id, window, watermarks, event_callback,
             model_key=model_key, chronicle_force=True,
             close_undersized_tail=True,
+            before_reply=True,
         )
 
     # ------------------------------------------------------------------
@@ -3304,7 +3393,7 @@ class SessionLifecycle:
             if not entry or not entry.get("anchor_id"):
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
 
         if not self._write_refill(
@@ -3576,7 +3665,7 @@ class SessionLifecycle:
             if not entry or not entry.get("anchor_id"):
                 self.upsert_anchor_entry(persona_id, model_key, {
                     "anchor_id": anchor_id,
-                    "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+                    "updated_at": _cold_updated_at().isoformat(),
                 })
         if not self._write_refill(
             persona_id, model_key, anchor_id, new_anchor_id, new_folds + folds,
@@ -4323,34 +4412,36 @@ class SessionLifecycle:
         folds: List["FoldedRange"],
         *,
         raise_on_error: bool = False,
+        invalidate_cache: bool = False,
     ) -> bool:
-        """§15 読み戻しの書き込み — anchor 引き戻しと圧縮区間 (印含む) を同一コミットで。
+        """アンカーの巻き戻しと圧縮区間を CAS 付き単一コミットで書き込む (§15 履歴復元 / 要約漏れ修復)。
 
         汎用 :meth:`upsert_anchor_entry` は anchor 変更時に圧縮区間を列ごと
         クリアするため使えない (§14-6-7 の前進と同じ理由の対側)。
 
-        CAS: 行の現在の anchor が読み戻し計画の前提 (``expected_anchor_id``) と
-        一致するときだけ書く。発火判定と書き込みの間に別入口 (手動整理 /
-        先回り畳み) が anchor を動かしていたら、この計画は古い窓のものなので
-        棄却する — 次の会話開始が再計画する。
+        CAS: 行の現在の anchor が計画時の前提 (``expected_anchor_id``) と
+        一致するときだけ書き込む。判定と書き込みの間に別経路 (手動整理 /
+        期限切れ時の事前圧縮) が anchor を動かしていたら古い計画なのでスキップし、
+        次回に再計画する。
 
-        温度は now を書く (§14-6-5 の据え置きと逆にする理由): 読み戻しは応答の
-        直前にだけ走り、開いた窓はその応答の LLM 呼び出しでそのままキャッシュ
-        される — 据え置きにすると、直後の context 構築の resolve が「冷えた行が
-        最前線より後ろ」と見て §14-2 の前進で読み戻しを即座に飲み込み、同じ
-        会話の中で開いた窓が閉じる。
+        キャッシュ状態 (TTL_SECONDS, UPDATED_AT) の扱い:
+        - 既定 (``invalidate_cache=False``): 返答直前の履歴復元 (:meth:`maybe_run_window_refill`
+          / :meth:`_apply_window_floor_once`) 用。:meth:`cache_fresh_stamp` で
+          UPDATED_AT=now・TTL_SECONDS=現行設定 を同じ UPDATE に載せる。直後の返答で
+          この窓がそのままキャッシュされるため now にし (過去時刻のままにすると直後の
+          resolve で §14-2 のアンカー自動前進が復元した範囲を閉じてしまう)、古い
+          TTL 設定の残りを引き継がないよう現行設定で上書きする。
+        - ``invalidate_cache=True``: 直後に LLM 応答が走らない経路
+          (``sea/coverage_repair.run_tail_rewind`` の要約漏れ修復ジョブ) 用。
+          :meth:`cache_broken_stamp` でキャッシュを失効扱いにする (LLM を呼ばずに
+          キャッシュ有効と誤表示しないため)。
 
-        ``raise_on_error=True`` は「書けなかった」の内訳を分ける
-        (:meth:`preview_refilled_history` と同じ型): 書き込み自体の失敗
-        (DB 例外) と、書き込みを試みられない状態 (manager 未接続) を例外で
-        伝え、False を「CAS 不一致 = 意図した見送り」だけの意味にする。
-        既定 (False) は §15 読み戻しの fail-open — どちらも False にして
-        呼び出し側が "skip" へ落とす従来の挙動をそのまま保つ。補修の
-        anchor 引き戻し (sea/coverage_repair.run_tail_rewind) だけが True を
-        使い、DB 失敗を "failed" に写像する (Codex 十一巡 P1)。
+        ``raise_on_error=True`` は DB 失敗や manager 未接続を例外で伝え、False を
+        「CAS 不一致によるスキップ」のみに限定する (``run_tail_rewind`` が DB 失敗を
+        ``"failed"`` に分類するため。Codex 十一巡 P1)。既定 (False) は fail-open。
 
         Returns:
-            書けたら True。CAS 不一致は False。DB 失敗・manager 未接続は
+            書き込めたら True。CAS 不一致は False。DB 失敗・manager 未接続は
             ``raise_on_error`` が False なら False、True なら例外。
         """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
@@ -4362,13 +4453,20 @@ class SessionLifecycle:
             return False
         from sea.session_window import serialize_folds
         folds = self._merge_overlapping_folds(folds, persona_id, model_key)
+        # TTL_SECONDS は UPDATED_AT と同じ 1 文で更新する。UPDATED_AT=now だけ書くと、
+        # 行に残っていた古い TTL 設定 (例: 1 時間) が「今作られたキャッシュ」として
+        # 復活し、実際は 5 分キャッシュなのに UI が残り 58 分と表示し続ける (2026-09-12 実機)。
+        if invalidate_cache:
+            ttl_seconds, updated_at = self.cache_broken_stamp()
+        else:
+            ttl_seconds, updated_at = self.cache_fresh_stamp(model_key, persona_id)
         db = self.manager.SessionLocal()
         try:
             from database.models import SessionAnchor
             # CAS は条件付き UPDATE 1 文 (keepalive touch の §14-6-10 と同じ型)。
             # SELECT → 比較 → 書き込みに分けると、比較と commit の間に別接続の
-            # 前進が挟まったとき stale な巻き戻しで上書きしてしまう (Codex 指摘
-            # 2026-07-30)。
+            # 前進が挟まったとき古い巻き戻しで上書きしてしまう (Codex 指摘
+            # 2026-07-30)。キャッシュ状態の更新も読み→書きの二段にせず同じ 1 文に載せる。
             updated = db.query(SessionAnchor).filter_by(
                 PERSONA_ID=persona_id,
                 MODEL_KEY=str(model_key),
@@ -4376,7 +4474,8 @@ class SessionLifecycle:
             ).update({
                 SessionAnchor.ANCHOR_MESSAGE_ID: new_anchor_id,
                 SessionAnchor.FOLDED_RANGES_JSON: serialize_folds(folds),
-                SessionAnchor.UPDATED_AT: int(datetime.now().timestamp()),
+                SessionAnchor.TTL_SECONDS: ttl_seconds,
+                SessionAnchor.UPDATED_AT: updated_at,
             }, synchronize_session=False)
             db.commit()
             if not updated:
@@ -4466,6 +4565,13 @@ class SessionLifecycle:
         動かさず UPDATED_AT も書かない — 被覆補修の印はキャッシュの主張では
         ないので、冷えた行を温かく偽装しない (§14-6-5 と同じ理由)。
 
+        ここがキャッシュ無効化 (:meth:`cache_broken_stamp`) を書かない唯一の
+        圧縮区間書き込みなのは、**提示コンテキストの内容が変わらないため**:
+        書き込む区間は ``presented_raw=True`` (生ログのまま提示) で、head の
+        Chronicle 枠からの除外リストに載せるためだけの記録なので、プロンプト内容は
+        書き込み前後で一致する。加えて呼び出し元 (``mark_covered_cold_windows``) は
+        キャッシュ有効期限内の行を対象外にしているため、触る行はもともと期限切れ。
+
         Returns:
             書けたら True。CAS 棄却 (anchor が動いていた)・DB 失敗は False —
             呼び出し側 (mark_covered_cold_windows) は棄却された行を諦め、
@@ -4507,6 +4613,8 @@ class SessionLifecycle:
     def _refold_raw_view_folds(
         self, persona, model_key: Optional[str], window: "SessionWindow",
         watermarks: Watermarks,
+        *,
+        preserve_active_window: bool = True,
     ) -> Optional["SessionWindow"]:
         """§15-3 印戻し — 生に開いた圧縮区間を digest 提示へ戻す (LLM なしの畳み)。
 
@@ -4523,7 +4631,16 @@ class SessionLifecycle:
             return None
         current_presented, flipped = plan
         persona_id = getattr(persona, "persona_id", None)
-        self.save_folded_ranges(persona_id, model_key, window.folds)
+        # 返答直前の再圧縮 (preserve_active_window=True) で行がキャッシュ有効期限内
+        # なら、現行設定の TTL + 現在時刻で有効状態を維持する。TTL だけクリアして
+        # UPDATED_AT を据え置くと、1 時間キャッシュ (10 分経過) → 5 分設定変更のケースで
+        # 期限切れに反転し、直後の resolve で §14-2 のアンカー自動前進が走って残すべき
+        # 会話範囲まで同じ Pulse 内で閉じてしまう (§15-2)。返答後・手動整理など直後に
+        # LLM 応答が走らない経路 (preserve_active_window=False) は失効扱いにする。
+        self.save_folded_ranges(
+            persona_id, model_key, window.folds,
+            preserve_active_window=preserve_active_window,
+        )
         LOGGER.info(
             "[metabolism] refolded %d raw-view range(s) back to digest "
             "(persona=%s model=%s, LLM-free; %d conversation-row chars "
@@ -5044,6 +5161,7 @@ class SessionLifecycle:
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
         close_undersized_tail: bool = False,
+        before_reply: bool = False,
     ) -> str:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
@@ -5114,7 +5232,10 @@ class SessionLifecycle:
         # §15-3 印戻し: 読み戻しで生に開いた圧縮区間は、退場計画より先に digest
         # 提示へ戻す (既存あらすじの再利用 = 編纂ゼロの畳み)。印戻しだけで残す量に
         # 収まればこの Metabolism は編纂なしで完了する。
-        refolded = self._refold_raw_view_folds(persona, model_key, window, watermarks)
+        refolded = self._refold_raw_view_folds(
+            persona, model_key, window, watermarks,
+            preserve_active_window=before_reply,
+        )
         if refolded is not None:
             window = refolded
             current_messages = window.presented
@@ -7505,6 +7626,12 @@ def remove_folds_referencing_entry(
                     if len(kept) == len(folds):
                         continue
                     row.FOLDED_RANGES_JSON = serialize_folds(kept)
+                    # 圧縮区間の記録を外すと生ログ表示に戻る = 提示コンテキストが変わるため、
+                    # 同じコミットでキャッシュ無効化を書く (提示だけ変えると、変更前の窓の
+                    # キャッシュ TTL が新しい窓のものとして生き残ってしまう)。
+                    ttl, updated_at = SessionLifecycle.cache_broken_stamp()
+                    row.TTL_SECONDS = ttl
+                    row.UPDATED_AT = updated_at
                     removed += len(folds) - len(kept)
                 if removed:
                     db.commit()

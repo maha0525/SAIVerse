@@ -898,13 +898,17 @@ def run_tail_rewind(
         return "failed"
     # 書き込みは raise_on_error=True で呼ぶ (Codex 十一巡 P1): _write_refill の
     # False は既定では「CAS 不一致」と「DB 失敗」の両方を意味するので、そのまま
-    # "cas_rejected" (成功系の白名簿) へ写すと、書けなかった末尾が残ったまま
-    # 補修が成功の顔で終わる (裁定 6 に反する)。例外側だけ "failed" へ倒す。
-    # §15 通常経路 (maybe_run_window_refill) は既定のまま = 挙動据え置き。
+    # "cas_rejected" (成功系の許可リスト) へ写すと、書けなかった末尾が残ったまま
+    # 修復が成功扱いになる。例外側だけ "failed" へ倒す。
+    # また、run_tail_rewind は直後に LLM 応答が走らない修復ジョブなので、
+    # invalidate_cache=True でキャッシュ失効扱いにする (LLM 呼び出し無しで
+    # キャッシュ有効と誤表示させないため。巻き戻し先の gap は未要約の生ログ
+    # なので、失効扱いにしても §14-2 のアンカー自動前進に飲み込まれない)。
     try:
         written = lifecycle._write_refill(
             persona_id, plan.model_key, plan.expected_anchor_id,
-            plan.new_anchor_id, existing_folds, raise_on_error=True,
+            plan.new_anchor_id, existing_folds,
+            raise_on_error=True, invalidate_cache=True,
         )
     except Exception:
         LOGGER.warning(
