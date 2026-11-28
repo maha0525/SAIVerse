@@ -1,6 +1,6 @@
 # Intent: アドオン管理のペルソナ別設定内パネル (`ui/PersonaPanel.tsx`)
 
-**ステータス**: 検証待ち（本体・アドオンとも実装およびまはー実機確認済み、PR レビュー待ち）
+**ステータス**: 完了（本体側のパネル枠は SAIVerse v0.3.35 で発行済み。`saiverse-voice-tts` v0.7.0 は 2026-11-27 に、`min_saiverse_version: "0.3.35"` を付けてアドオンカタログへ掲載済み）
 
 ## これは何か
 
@@ -41,3 +41,12 @@
 
 - 2026-11-23: `saiverse-voice-tts` のテスト再生・WAV/ZIP 出力機能の配置相談を受け、ペルソナ別設定のすぐ下に置ける本体拡張 (`ui/PersonaPanel.tsx`) を採用。SAIVerse v0.3.35 向けに実装し、アドオン側 (v0.7.0) は v0.3.35 リリース後に `min_saiverse_version: "0.3.35"` でカタログ登録する方針で合意。
 - 2026-11-26: まはーが実機確認で問題なしと確認。本体 (`feature/addon-persona-panel`) とアドオン (`feature/voice-test-and-batch-export`) の PR を作成。
+- 2026-11-27 (v0.3.35 のリリース準備で台帳を現況化): 本体側の PR #519 と #520 は develop に入り、v0.3.35 の範囲に入った。台帳にあった行:
+
+| 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側の `PersonaPanel` 枠と `saiverse-voice-tts` v0.7.0 のテスト再生・WAV/ZIP 出力はまはーが実機で確認済みで、両リポジトリの PR がレビューを待っている。次 = まはーが PR をマージし、v0.3.35 発行後にカタログへ `min_saiverse_version: "0.3.35"` で載せる。 | まはー (PR のレビュー) | [intent](../intent/addon_persona_panel.md) | 2026-11-26 |
+- 2026-11-27 (v0.3.35 の発行): 本体側のパネル枠を v0.3.35 として発行した。台帳にあった行:
+
+| 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側のパネル枠は v0.3.35 に載る。次 = v0.3.35 の発行後、`saiverse-voice-tts` v0.7.0 をカタログへ `min_saiverse_version: "0.3.35"` で載せるかをまはーが決める。 | まはー (カタログの判断) | [intent](../intent/addon_persona_panel.md) | 2026-11-27 |
+- 2026-11-27 (カタログへの掲載、まはー「voice-ttsのカタログ登録も進めよう。確かv0.3.35待ちだったはず。」「署名して公開して」): `saiverse-voice-tts` v0.7.0 (コミット `eec0076e`) を GitHub のリリースとして発行し、アドオンカタログ (`maha0525/saiverse-addon-registry`) へ `min_saiverse_version: "0.3.35"`・`setup_version: 4` で載せて、公式の鍵で署名して公開した。公開のあとで確かめたこと: 本体 v0.3.35 のカタログ読み込み (公式の URL、署名の検証つき) が voice-tts の最新版を 0.7.0・必要な本体を 0.3.35 と読むこと。本体の版の検査が 0.3.35 を通し、0.3.34 を「このアドオンには SAIVerse 0.3.35 以降が必要です」で止めること。本番とは別の場所に置いた 0.6.4 を、本体の更新処理 (`prepare_update` → `plan_update_confirm` → `execute_update_plan`) でカタログの 0.7.0 へ更新でき、セットアップのやり直しが起きず、`ui/PersonaPanel.tsx` が入ること。確かめていないこと: アドオン管理の画面のボタンを押して更新する操作そのもの。台帳にあった行:
+
+| 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側のパネル枠は v0.3.35 で発行済み。次 = `saiverse-voice-tts` v0.7.0 をカタログへ `min_saiverse_version: "0.3.35"` で載せるかをまはーが決める。 | まはー (カタログの判断) | [intent](../intent/addon_persona_panel.md) | 2026-11-27 |
