@@ -74,8 +74,7 @@ def get_world_snapshots():
     """Return all world snapshots (CAS v3 + legacy ZIP v2) and disk stats."""
     from scripts import snapshot
 
-    items = snapshot.list_snapshots()
-    stats = snapshot.get_store_stats()
+    items, stats = snapshot.list_snapshots_with_stats()
     return {
         "snapshots": items,
         "stats": stats,

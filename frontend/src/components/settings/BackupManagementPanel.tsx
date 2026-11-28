@@ -26,12 +26,14 @@ interface SnapshotItem {
     file_count: number | null;
     total_bytes_uncompressed: number | null;
     archive_size_bytes: number | null;
+    unique_bytes: number | null;
     readable: boolean;
 }
 
 interface SnapshotStats {
     cas_store_bytes: number;
     cas_object_count: number;
+    cas_snapshot_count: number;
     legacy_zip_bytes: number;
     legacy_zip_count: number;
     total_disk_bytes: number;
@@ -500,6 +502,12 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
 
     const reclaimableBytes = (stats?.orphan_bytes || 0) + (stats?.temp_bytes || 0);
     const reclaimableCount = (stats?.orphan_object_count || 0) + (stats?.temp_file_count || 0);
+    const latestUncompressedBytes =
+        snapshots.find(
+            item => item.readable && typeof item.total_bytes_uncompressed === 'number'
+        )?.total_bytes_uncompressed ?? null;
+    const casSnapshotCount = stats?.cas_snapshot_count ?? 0;
+    const gcPausedByCorruption = (stats?.corrupted_manifests.length ?? 0) > 0;
 
     return (
         <div className={styles.container}>
@@ -563,6 +571,16 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                                         {formatBytes(stats.total_disk_bytes)}
                                     </span>
                                 </span>
+                                {(casSnapshotCount > 0 || stats.cas_store_bytes > 0) && (
+                                    <span className={styles.statItem}>
+                                        <span className={styles.statLabel}>
+                                            {uiText('components.BackupManagementPanel.statCasStore')}
+                                        </span>
+                                        <span className={styles.statValue}>
+                                            {formatBytes(stats.cas_store_bytes)} ({casSnapshotCount})
+                                        </span>
+                                    </span>
+                                )}
                                 {stats.legacy_zip_count > 0 && (
                                     <span className={styles.statItem}>
                                         <span className={styles.statLabel}>
@@ -570,6 +588,16 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                                         </span>
                                         <span className={styles.statValue}>
                                             {formatBytes(stats.legacy_zip_bytes)} ({stats.legacy_zip_count})
+                                        </span>
+                                    </span>
+                                )}
+                                {latestUncompressedBytes != null && (
+                                    <span className={styles.statItem}>
+                                        <span className={styles.statLabel}>
+                                            {uiText('components.BackupManagementPanel.statLatestUncompressed')}
+                                        </span>
+                                        <span className={styles.statValue}>
+                                            {formatBytes(latestUncompressedBytes)}
                                         </span>
                                     </span>
                                 )}
@@ -657,9 +685,17 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                                                 </span>
                                             )}
                                             <span>
-                                                {item.format === 'zip' && item.archive_size_bytes != null
-                                                    ? `${formatBytes(item.archive_size_bytes)} (ZIP)`
-                                                    : formatBytes(item.total_bytes_uncompressed)}
+                                                {item.unique_bytes != null
+                                                    ? uiText('components.BackupManagementPanel.reclaimOnDelete', {
+                                                          p1: formatBytes(item.unique_bytes),
+                                                      })
+                                                    : item.format === 'cas' && gcPausedByCorruption
+                                                        ? uiText(
+                                                              'components.BackupManagementPanel.reclaimUnavailableGcPaused'
+                                                          )
+                                                        : uiText('components.BackupManagementPanel.reclaimOnDelete', {
+                                                              p1: '-',
+                                                          })}
                                             </span>
                                         </div>
                                         {item.note && <div className={styles.itemNote}>{item.note}</div>}
