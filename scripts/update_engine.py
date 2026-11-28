@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,24 @@ DEPENDENCIES_RECORD = ".update_dependencies_complete"
 # (``saiverse/update_dependencies_alert.py``); the next fully successful
 # ``--install-dependencies`` run removes it.
 DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
+
+# Written when an offline backup/restore operation (snapshot save/restore or
+# persona memory.db restore launched from the Backup UI tab) fails while the
+# backend is stopped. The backend reads and deletes it on the next startup to
+# surface a one-shot alert banner.
+BACKUP_OPERATION_FAILURE_RECORD = ".backup_operation_failed.json"
+
+OPERATION_UPDATE = "update"
+OPERATION_SNAPSHOT_SAVE = "snapshot_save"
+OPERATION_SNAPSHOT_RESTORE = "snapshot_restore"
+OPERATION_PERSONA_MEMORY_RESTORE = "persona_memory_restore"
+OFFLINE_BACKUP_OPERATIONS = frozenset(
+    {
+        OPERATION_SNAPSHOT_SAVE,
+        OPERATION_SNAPSHOT_RESTORE,
+        OPERATION_PERSONA_MEMORY_RESTORE,
+    }
+)
 
 # Steps of ``update_dependencies`` whose failure does not stop the update. They
 # are reported back as ``DependencyStepFailure`` and written to
@@ -403,6 +422,45 @@ def write_dependencies_failure(
 
 def clear_dependencies_failure(project_dir: Path) -> None:
     _remove_file(dependencies_failure_path(project_dir), purpose="a resolved package install failure")
+
+
+def backup_operation_failure_path(project_dir: Path) -> Path:
+    return project_dir / BACKUP_OPERATION_FAILURE_RECORD
+
+
+def write_backup_operation_failure(
+    project_dir: Path,
+    *,
+    operation: str,
+    target: str,
+    error: str,
+) -> None:
+    """Record a failed offline backup/restore operation for startup_alerts."""
+    document = {
+        "operation": operation,
+        "target": target,
+        "error": error.strip()[-2000:],
+        "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    target_path = backup_operation_failure_path(project_dir)
+    try:
+        _write_json_atomically(target_path, document)
+    except OSError:
+        LOGGER.error(
+            "Could not write %s, so the SAIVerse screen will not show this backup failure",
+            target_path,
+            exc_info=True,
+        )
+
+
+def consume_backup_operation_failure(project_dir: Path) -> dict[str, Any] | None:
+    """Read and remove a one-shot offline backup/restore failure record."""
+    target_path = backup_operation_failure_path(project_dir)
+    record = _read_json_object(target_path)
+    if record is None:
+        return None
+    _remove_file(target_path, purpose="consumed offline backup operation failure alert")
+    return record
 
 
 def invalidate_completion_marker(project_dir: Path) -> None:
@@ -1481,16 +1539,145 @@ def _remove_partial_snapshot_archive(tmp_archive: Path) -> None:
     LOGGER.warning("Removed the partial snapshot archive left behind: %s", tmp_archive)
 
 
-# pre-update スナップショットに許す時間。他フェーズ（pip / npm の既定 900 秒、
-# git pull の 300 秒）より長いのは、この処理だけが世界の大きさに比例して伸びる
-# ため。2026-09-02、実測 24GB の世界が 900 秒に収まらず start.bat が起動不能に
-# なった。llama_cache を除外して対象は 8.9GB に落ちたが、世界は今後も育つので
-# 余裕を取る。
-#
-# ⚠ これは暫定値であって解ではない。固定値である限り、世界が育てばいつか再び
-# 追い越される。恒久策（進捗を見て「生きている限り待つ」形へ）は
-# docs/issues/snapshot_timeout_is_fixed_while_world_grows.md。
-SNAPSHOT_TIMEOUT_SECONDS = 3600
+def _cleanup_partial_snapshot_files(name: str, child_pid: int | None = None) -> None:
+    """中断・タイムアウトした snapshot.py save の一時ファイルを掃除する。
+
+    旧 ZIP 形式の ``<name>.zip.tmp`` に加え、CAS 形式の ``manifests/<name>.json.tmp*``
+    と子プロセス (``child_pid``) が残した ``.store/objects/**/.tmp.<pid>*`` を片付ける。
+    掃除の失敗で本来のエラーを隠さないよう、例外はすべてログに留める。
+    """
+    snaps = _saiverse_home() / "snapshots"
+    _remove_partial_snapshot_archive(snaps / f"{name}.zip.tmp")
+
+    manifests_dir = snaps / "manifests"
+    if manifests_dir.is_dir():
+        try:
+            for candidate in list(manifests_dir.glob(f"{name}.json.tmp*")):
+                _remove_partial_snapshot_archive(candidate)
+        except OSError as exc:
+            LOGGER.warning("Could not scan partial snapshot manifests in %s: %s", manifests_dir, exc)
+
+    if child_pid is not None:
+        objects_dir = snaps / ".store" / "objects"
+        if objects_dir.is_dir():
+            marker = f".tmp.{child_pid}"
+            try:
+                for root, _dirs, files in os.walk(objects_dir):
+                    root_path = Path(root)
+                    for fname in files:
+                        if marker in fname:
+                            _remove_partial_snapshot_archive(root_path / fname)
+            except OSError as exc:
+                LOGGER.warning("Could not scan partial CAS objects in %s: %s", objects_dir, exc)
+
+
+# 進捗出力が完全に途絶えたときにハングとみなす秒数 (無進捗タイムアウト)。
+# 以前は固定 3600 秒の上限だったが、世界が育てば必ず追い越される構造だったため、
+# snapshot.py が進捗を出し続ける限り待ち続け、5 分間完全に無出力になった場合だけ
+# 停止する方式へ移行した (docs/intent/world_snapshot.md §3.2)。
+SNAPSHOT_STALL_TIMEOUT_SECONDS = 300
+
+
+def _run_with_stall_timeout(
+    command: list[str],
+    *,
+    cwd: Path,
+    label: str,
+    stall_timeout: float = SNAPSHOT_STALL_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
+    on_pid: Any | None = None,
+) -> str:
+    """Run a long-running command while streaming output and enforcing an inactivity timeout.
+
+    Unlike ``_run(..., timeout=...)`` which caps total wall time, this allows the
+    command to run as long as it continues emitting progress lines, and kills the
+    entire process tree if output goes silent for more than ``stall_timeout`` seconds.
+    """
+    LOGGER.info("Phase: %s", label)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise UpdateError(
+            f"{label} could not run: {exc}",
+            ui_key="api.systemUpdate.commandCouldNotRun",
+            ui_params={"label": label, "error": str(exc)},
+        ) from exc
+
+    if on_pid is not None:
+        try:
+            on_pid(process.pid)
+        except Exception:
+            pass
+
+    activity_lock = threading.Lock()
+    last_activity = [time.monotonic()]
+    recent_lines: list[str] = []
+
+    def _drain_output() -> None:
+        assert process.stdout is not None
+        try:
+            for line in iter(process.stdout.readline, ""):
+                now = time.monotonic()
+                stripped = line.rstrip("\r\n")
+                with activity_lock:
+                    last_activity[0] = now
+                    if stripped:
+                        recent_lines.append(stripped)
+                        if len(recent_lines) > 200:
+                            del recent_lines[:50]
+                if stripped:
+                    LOGGER.info("[%s] %s", label, stripped)
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=_drain_output, name=f"stream-{label}", daemon=True)
+    reader.start()
+
+    stalled = False
+    while process.poll() is None:
+        reader.join(timeout=0.2)
+        with activity_lock:
+            idle_seconds = time.monotonic() - last_activity[0]
+        if idle_seconds > stall_timeout and process.poll() is None:
+            stalled = True
+            left = _stop_process_tree(process)
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+            reader.join(timeout=5)
+            extra = (
+                f"; {len(left)} child process(es) did not exit: "
+                + ", ".join(str(pid) for pid in left)
+                if left
+                else ""
+            )
+            raise UpdateError(
+                f"{label} stalled with no progress for {stall_timeout:.0f}s{extra}"
+            )
+
+    reader.join(timeout=5)
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+
+    if not stalled and process.returncode != 0:
+        tail = "\n".join(recent_lines[-20:])
+        raise UpdateError(f"{label} failed with exit {process.returncode}: {tail[-1000:]}")
+    return "\n".join(recent_lines)
 
 
 def create_pre_update_snapshot(
@@ -1499,6 +1686,7 @@ def create_pre_update_snapshot(
     *,
     prefix: str = "auto_before_update",
     note: str = "Automatic restore point before code update",
+    name: str | None = None,
 ) -> str:
     """Save and validate a whole-world snapshot before any code moves.
 
@@ -1506,30 +1694,31 @@ def create_pre_update_snapshot(
     (``ea_optin_*`` / ``ea_return_*``) so it can be told apart from a routine
     update's later.
     """
-    name = datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
-    # snapshot.py は書き上がった ZIP を .zip.tmp から os.replace で publish する。
-    # ここでタイムアウトすると _run が子プロセスを kill するので snapshot.py 側の
-    # except 節は走らず、書きかけの .zip.tmp が数十 GB のまま残る。子を殺した
-    # 側であるこちらが後始末する。パスの規則は snapshot.py と同じ。
-    tmp_archive = _saiverse_home() / "snapshots" / f"{name}.zip.tmp"
+    snapshot_name = name or datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
+    child_pid_holder: list[int | None] = [None]
+
+    def _record_pid(pid: int) -> None:
+        child_pid_holder[0] = pid
+
     try:
-        _run(
+        _run_with_stall_timeout(
             [
                 python,
                 str(project_dir / "scripts" / "snapshot.py"),
                 "save",
-                name,
+                snapshot_name,
                 "--note",
                 note,
             ],
             cwd=project_dir,
             label="create and validate pre-update world snapshot",
-            timeout=SNAPSHOT_TIMEOUT_SECONDS,
+            stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            on_pid=_record_pid,
         )
     except Exception:
-        _remove_partial_snapshot_archive(tmp_archive)
+        _cleanup_partial_snapshot_files(snapshot_name, child_pid=child_pid_holder[0])
         raise
-    return name
+    return snapshot_name
 
 
 def update_code(project_dir: Path) -> None:
@@ -3713,6 +3902,124 @@ def _run_detached_update(
     _restart_frontend(project_dir, stopped_frontend_mode)
 
 
+def _run_detached_backup_operation(
+    config: dict[str, Any],
+    project_dir: Path,
+    python: str,
+) -> None:
+    """Run an offline backup/restore operation requested from the Backup UI tab.
+
+    Waits for the running backend to exit, executes the requested offline
+    snapshot/restore command, records any failure to
+    ``BACKUP_OPERATION_FAILURE_RECORD`` (for the startup alert banner), and
+    always restarts the backend afterwards.
+    """
+    operation = str(config.get("operation") or "")
+    if operation not in OFFLINE_BACKUP_OPERATIONS:
+        raise UpdateError(f"Unknown offline backup operation: {operation!r}")
+
+    wait_for_owned_process_exit(
+        int(config["main_pid"]),
+        config.get("main_process_created_at"),
+    )
+    _remove_file(
+        backup_operation_failure_path(project_dir),
+        purpose="before starting an offline backup operation",
+    )
+
+    target_label = ""
+    op_error: Exception | None = None
+    try:
+        if operation == OPERATION_SNAPSHOT_SAVE:
+            note = str(config.get("snapshot_note") or "Manual snapshot from Backup settings")
+            requested_name = config.get("snapshot_name")
+            target_label = str(requested_name or "manual snapshot")
+            saved_name = create_pre_update_snapshot(
+                project_dir,
+                python,
+                prefix="manual",
+                note=note,
+                name=str(requested_name) if requested_name else None,
+            )
+            LOGGER.info("Offline manual snapshot complete: %s", saved_name)
+        elif operation == OPERATION_SNAPSHOT_RESTORE:
+            snapshot_name = str(config.get("snapshot_name") or "").strip()
+            if not snapshot_name:
+                raise UpdateError("snapshot_name is missing from backup operation config")
+            target_label = snapshot_name
+            _run_with_stall_timeout(
+                [
+                    python,
+                    str(project_dir / "scripts" / "snapshot.py"),
+                    "restore",
+                    snapshot_name,
+                    "--yes",
+                ],
+                cwd=project_dir,
+                label=f"restore world snapshot {snapshot_name}",
+                stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            )
+            LOGGER.info("Offline world snapshot restore complete: %s", snapshot_name)
+        elif operation == OPERATION_PERSONA_MEMORY_RESTORE:
+            persona_id = str(config.get("persona_id") or "").strip()
+            backup_file = str(config.get("backup_file") or "").strip()
+            if not persona_id or not backup_file:
+                raise UpdateError("persona_id or backup_file is missing from backup operation config")
+            target_label = f"{persona_id} ({backup_file})"
+            cmd = [
+                python,
+                "-m",
+                "sai_memory.backup",
+                "restore",
+                "--persona",
+                persona_id,
+                "--file",
+                backup_file,
+            ]
+            resolved_db = config.get("resolved_db_path")
+            if resolved_db:
+                cmd.extend(["--saiverse-db", str(resolved_db)])
+            _run_with_stall_timeout(
+                cmd,
+                cwd=project_dir,
+                label=f"restore persona memory {persona_id}",
+                stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            )
+            LOGGER.info("Offline persona memory restore complete: %s (%s)", persona_id, backup_file)
+    except Exception as exc:
+        op_error = exc
+        LOGGER.exception("Offline backup operation %s failed for %s", operation, target_label)
+        write_backup_operation_failure(
+            project_dir,
+            operation=operation,
+            target=target_label,
+            error=str(exc),
+        )
+
+    process = restart_application(config)
+    payload = wait_for_healthy_restart(process, config)
+    LOGGER.info(
+        "Backend restarted after offline operation %s: City=%s version=%s PID=%s",
+        operation,
+        payload.get("city_name"),
+        payload.get("version"),
+        process.pid,
+    )
+    if op_error is not None:
+        if isinstance(op_error, UpdateError):
+            raise op_error
+        raise UpdateError(str(op_error)) from op_error
+
+
+def _config_operation(config: dict[str, Any] | None) -> str:
+    if not config:
+        return OPERATION_UPDATE
+    op = config.get("operation")
+    if not op:
+        return OPERATION_UPDATE
+    return str(op)
+
+
 def _load_config(config_path: Path) -> dict[str, Any]:
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -3896,8 +4203,14 @@ def main(argv: list[str] | None = None) -> int:
                 "channel through the update config"
             )
         config = None if args.manual else _load_config(config_path)
-        switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
-        run_update(config, project_dir, switch_channel=switch_channel)
+        operation = _config_operation(config)
+        if operation in OFFLINE_BACKUP_OPERATIONS:
+            assert config is not None
+            python = str(config.get("venv_python", sys.executable))
+            _run_detached_backup_operation(config, project_dir, python)
+        else:
+            switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
+            run_update(config, project_dir, switch_channel=switch_channel)
     except UpdateError as exc:
         LOGGER.error("Update aborted: %s", exc)
         return 1

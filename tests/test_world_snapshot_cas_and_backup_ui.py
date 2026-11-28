@@ -1,0 +1,413 @@
+"""Regression and contract tests for CAS snapshots, DB backup separation,
+persona memory.db restore, stall timeout, and the /api/backups endpoints.
+
+All tests run against an isolated ``tmp_path`` via ``SAIVERSE_HOME`` and never
+touch the user's real ``~/.saiverse/``.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import closing
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import sys
+from unittest.mock import patch
+import zipfile
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+import pytest
+
+from api.routes import backups as backups_route
+from database.backup import backup_saiverse_db, get_recent_backups, resolve_backup_dir
+from sai_memory import backup as mem_backup
+from saiverse.environment_alerts import backup_operation_failure_alerts
+from scripts import snapshot, update_engine
+
+
+def _create_sqlite(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS state (value TEXT)")
+        conn.execute("DELETE FROM state")
+        conn.execute("INSERT INTO state (value) VALUES (?)", (value,))
+        conn.commit()
+
+
+def _read_sqlite(path: Path) -> str:
+    with closing(sqlite3.connect(path)) as conn:
+        row = conn.execute("SELECT value FROM state").fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _seed_world(home: Path, *, main_val: str = "v1", mem_val: str = "m1") -> None:
+    _create_sqlite(home / "user_data" / "database" / "saiverse.db", main_val)
+    _create_sqlite(home / "personas" / "mira" / "memory.db", mem_val)
+    img = home / "image" / "photo.png"
+    img.parent.mkdir(parents=True, exist_ok=True)
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"image-payload" * 50)
+
+
+# ---- CAS v3 snapshots: multi-generation, dedup, GC, fail-closed, v2 compat ----
+
+
+def test_cas_multi_generation_dedup_and_arbitrary_rollback(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _seed_world(home, main_val="gen1", mem_val="mem1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        r1 = snapshot.save_snapshot("gen1", note="first")
+        assert r1["new_objects"] == 3
+        assert r1["reused_objects"] == 0
+
+        # Check encoding choice: PNG -> raw, SQLite DB -> zlib
+        m1 = json.loads((home / "snapshots" / "manifests" / "gen1.json").read_text(encoding="utf-8"))
+        assert m1["format_version"] == snapshot.CAS_SNAPSHOT_FORMAT_VERSION
+        assert m1["files"]["image/photo.png"]["encoding"] == "raw"
+        assert m1["files"]["personas/mira/memory.db"]["encoding"] == "zlib"
+        assert (home / "snapshots" / "README.txt").is_file()
+
+        # Mutate only memory.db -> saiverse.db and photo.png must be reused!
+        _create_sqlite(home / "personas" / "mira" / "memory.db", "mem2")
+        r2 = snapshot.save_snapshot("gen2", note="second")
+        assert r2["new_objects"] == 1
+        assert r2["reused_objects"] == 2
+
+        # Mutate both DBs for gen3
+        _create_sqlite(home / "user_data" / "database" / "saiverse.db", "gen3")
+        _create_sqlite(home / "personas" / "mira" / "memory.db", "mem3")
+        snapshot.save_snapshot("gen3", note="third")
+
+        # Roll back directly to gen1 (skipping gen2)
+        rc = snapshot.cmd_restore(
+            argparse.Namespace(name="gen1", yes=True, no_auto_snapshot=True)
+        )
+        assert rc == 0
+        assert _read_sqlite(home / "user_data" / "database" / "saiverse.db") == "gen1"
+        assert _read_sqlite(home / "personas" / "mira" / "memory.db") == "mem1"
+
+        # Delete gen2 -> gen1 and gen3 must both remain restorable!
+        deleted = snapshot.delete_snapshot("gen2", run_gc=True)
+        assert deleted["gc"]["removed_objects"] == 1  # only mem2 object was unique to gen2
+
+        rc3 = snapshot.cmd_restore(
+            argparse.Namespace(name="gen3", yes=True, no_auto_snapshot=True)
+        )
+        assert rc3 == 0
+        assert _read_sqlite(home / "user_data" / "database" / "saiverse.db") == "gen3"
+        assert _read_sqlite(home / "personas" / "mira" / "memory.db") == "mem3"
+
+
+def test_manual_manifest_delete_and_fail_closed_gc(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _seed_world(home, main_val="gen1", mem_val="mem1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("gen1")
+        _create_sqlite(home / "personas" / "mira" / "memory.db", "mem2")
+        snapshot.save_snapshot("gen2")
+
+        # Simulate Explorer manual deletion of gen2 manifest
+        (home / "snapshots" / "manifests" / "gen2.json").unlink()
+
+        stats_before = snapshot.get_store_stats()
+        assert stats_before["orphan_object_count"] == 1
+
+        # Add a corrupted manifest -> GC must refuse (fail-closed) and delete nothing!
+        corrupt = home / "snapshots" / "manifests" / "broken.json"
+        corrupt.write_text("{not valid json", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="fail-closed"):
+            snapshot.gc_store()
+        assert snapshot.get_store_stats()["cas_object_count"] == 4
+
+        # Remove corrupted manifest -> GC succeeds and reclaims only mem2's object
+        corrupt.unlink()
+        gc_res = snapshot.gc_store()
+        assert gc_res["removed_objects"] == 1
+        assert gc_res["live_objects"] == 3
+
+        # gen1 still restores cleanly
+        rc = snapshot.cmd_restore(
+            argparse.Namespace(name="gen1", yes=True, no_auto_snapshot=True)
+        )
+        assert rc == 0
+        assert _read_sqlite(home / "personas" / "mira" / "memory.db") == "mem1"
+
+
+def test_export_cas_to_v2_zip_and_coexistence(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _seed_world(home, main_val="v1", mem_val="m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("cas_one", note="cas")
+        exported = home / "snapshots" / "legacy_zip.zip"
+        snapshot.export_snapshot_to_zip("cas_one", exported)
+
+        listed = snapshot.list_snapshots()
+        formats = {item["name"]: item["format"] for item in listed}
+        assert formats == {"cas_one": "cas", "legacy_zip": "zip"}
+
+        # Exported ZIP must validate as format v2 and restore cleanly
+        _create_sqlite(home / "user_data" / "database" / "saiverse.db", "changed")
+        rc = snapshot.cmd_restore(
+            argparse.Namespace(name="legacy_zip", yes=True, no_auto_snapshot=True)
+        )
+        assert rc == 0
+        assert _read_sqlite(home / "user_data" / "database" / "saiverse.db") == "v1"
+
+
+# ---- DB backup relocation & exclusion from snapshots ----
+
+
+def test_db_backup_relocates_to_backups_dir_and_is_excluded_from_snapshots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    db_path = home / "user_data" / "database" / "saiverse.db"
+    _create_sqlite(db_path, "live")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    # Plant legacy backups + orphaned -shm in user_data/database/
+    legacy_bak = db_path.parent / "saiverse.db_20260101_000000.bak"
+    legacy_bak.write_bytes(b"old-backup")
+    orphan_shm = db_path.parent / "saiverse.db_backup_startup_old.bak-shm"
+    orphan_shm.write_bytes(b"orphan")
+
+    # Even BEFORE backup_saiverse_db relocates them, snapshot.py must exclude them
+    collected = {e.archive_path for e in snapshot.collect_files_to_snapshot()}
+    assert "user_data/database/saiverse.db" in collected
+    assert "user_data/database/saiverse.db_20260101_000000.bak" not in collected
+    assert "user_data/database/saiverse.db_backup_startup_old.bak-shm" not in collected
+
+    # Restoring a snapshot must preserve unmigrated .bak files in user_data/database/
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("before_relocate")
+        _create_sqlite(db_path, "after")
+        assert snapshot.cmd_restore(
+            argparse.Namespace(name="before_relocate", yes=True, no_auto_snapshot=True)
+        ) == 0
+        assert _read_sqlite(db_path) == "live"
+        assert legacy_bak.is_file()
+
+    # Running backup_saiverse_db writes to backups/saiverse_db/, relocates legacy .bak,
+    # removes orphaned .bak-shm, and spawns no new .bak-shm sidecar.
+    assert resolve_backup_dir(db_path) == (home / "backups" / "saiverse_db").resolve()
+    created = backup_saiverse_db(db_path, keep_count=5, kind="startup")
+    assert created is not None
+    assert created.parent.resolve() == (home / "backups" / "saiverse_db").resolve()
+    assert not legacy_bak.exists()
+    assert (home / "backups" / "saiverse_db" / legacy_bak.name).is_file()
+    assert not orphan_shm.exists()
+    assert not created.with_name(created.name + "-shm").exists()
+    assert len(get_recent_backups(db_path, limit=5)) == 1
+
+
+# ---- Persona memory.db individual backup & restore ----
+
+
+def test_persona_memory_restore_preserves_safety_backup_and_clears_head_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+    mem_db = home / "personas" / "mira" / "memory.db"
+    main_db = home / "user_data" / "database" / "saiverse.db"
+    _create_sqlite(mem_db, "memory-v1")
+    main_db.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(main_db)) as conn:
+        conn.execute(
+            "CREATE TABLE session_head_snapshot ("
+            "PERSONA_ID TEXT, MODEL_KEY TEXT, SECTIONS_JSON TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO session_head_snapshot VALUES ('mira', 'm1', '{}'), ('other', 'm1', '{}')"
+        )
+        conn.commit()
+
+    b1 = mem_backup.run_simple_backup(persona_id="mira", db_path=mem_db, skip_if_unchanged=False)
+    assert b1 is not None
+
+    _create_sqlite(mem_db, "memory-v2")
+    with patch("saiverse.runtime_marker.marker_status", return_value=("stopped", "test")):
+        res = mem_backup.restore_simple_backup(
+            persona_id="mira",
+            filename=b1.name,
+            db_path=mem_db,
+            saiverse_db_path=main_db,
+            require_stopped=True,
+        )
+
+    assert _read_sqlite(mem_db) == "memory-v1"
+    assert res["pre_restore_backup"] is not None
+    assert res["cleared_head_snapshots"] == 1
+
+    # Other persona's session_head_snapshot row stays intact
+    with closing(sqlite3.connect(main_db)) as conn:
+        remaining = [r[0] for r in conn.execute("SELECT PERSONA_ID FROM session_head_snapshot")]
+    assert remaining == ["other"]
+
+    # pre_restore backup is NOT pruned by routine keep_count=1
+    _create_sqlite(mem_db, "memory-v3")
+    mem_backup.run_simple_backup(
+        persona_id="mira", db_path=mem_db, keep_count=1, skip_if_unchanged=False
+    )
+    listed = mem_backup.list_simple_backups("mira")
+    assert any(item["kind"] == "pre_restore" for item in listed)
+
+
+# ---- Stall-based liveness timeout & offline backup failure alerts ----
+
+
+def test_stall_timeout_allows_slow_progress_and_kills_silent_hang(tmp_path: Path) -> None:
+    # Slow but emitting output every 0.15s for ~0.6s > stall_timeout=0.45s -> MUST SUCCEED
+    progress_cmd = [
+        sys.executable,
+        "-c",
+        "import time, sys\nfor i in range(4):\n print(f'step {i}', flush=True)\n time.sleep(0.15)\n",
+    ]
+    out = update_engine._run_with_stall_timeout(
+        progress_cmd,
+        cwd=tmp_path,
+        label="progressing child",
+        stall_timeout=0.45,
+    )
+    assert "step 3" in out
+
+    # Silent hang for 5s with stall_timeout=0.4s -> MUST FAIL quickly
+    hang_cmd = [sys.executable, "-c", "import time; time.sleep(5)"]
+    with pytest.raises(update_engine.UpdateError, match="stalled"):
+        update_engine._run_with_stall_timeout(
+            hang_cmd,
+            cwd=tmp_path,
+            label="hung child",
+            stall_timeout=0.4,
+        )
+
+
+def test_backup_operation_failure_alert_is_one_shot(tmp_path: Path) -> None:
+    update_engine.write_backup_operation_failure(
+        tmp_path,
+        operation=update_engine.OPERATION_SNAPSHOT_RESTORE,
+        target="gen1",
+        error="checksum mismatch",
+    )
+    first = backup_operation_failure_alerts(tmp_path)
+    assert len(first) == 1
+    assert first[0]["id"] == "backup_operation_failed"
+    assert "gen1" in first[0]["message"]
+    assert first[0]["details"]["error"] == "checksum mismatch"
+    # Second call sees nothing (consumed once)
+    assert backup_operation_failure_alerts(tmp_path) == []
+
+
+def test_detached_backup_operation_restarts_backend_and_records_failure(tmp_path: Path) -> None:
+    config = {
+        "main_pid": 999999,
+        "main_process_created_at": None,
+        "operation": update_engine.OPERATION_SNAPSHOT_RESTORE,
+        "snapshot_name": "missing_snap",
+    }
+    restarted: list[bool] = []
+
+    class _FakeProc:
+        pid = 12345
+
+    with patch.object(update_engine, "wait_for_owned_process_exit"), patch.object(
+        update_engine,
+        "_run_with_stall_timeout",
+        side_effect=update_engine.UpdateError("Snapshot 'missing_snap' not found"),
+    ), patch.object(
+        update_engine, "restart_application", side_effect=lambda _c: (restarted.append(True), _FakeProc())[1]
+    ), patch.object(
+        update_engine,
+        "wait_for_healthy_restart",
+        return_value={"city_name": "city_a", "version": "0.3.35"},
+    ):
+        with pytest.raises(update_engine.UpdateError, match="missing_snap"):
+            update_engine._run_detached_backup_operation(config, tmp_path, sys.executable)
+
+    assert restarted == [True]
+    alerts = backup_operation_failure_alerts(tmp_path)
+    assert len(alerts) == 1
+    assert alerts[0]["details"]["operation"] == update_engine.OPERATION_SNAPSHOT_RESTORE
+    assert "missing_snap" in alerts[0]["details"]["error"]
+
+
+# ---- /api/backups endpoints ----
+
+
+def test_backup_api_routes_snapshots_and_personas(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _seed_world(home, main_val="api-v1", mem_val="api-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("snap_api_1", note="via test")
+
+    app = FastAPI()
+    app.include_router(backups_route.router, prefix="/api/backups")
+    client = TestClient(app)
+
+    # Snapshot listing
+    res = client.get("/api/backups/snapshots")
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body["snapshots"]) == 1
+    assert body["snapshots"][0]["name"] == "snap_api_1"
+    assert body["snapshots"][0]["format"] == "cas"
+
+    # Restore without confirm=true is refused
+    res_no_confirm = client.post("/api/backups/snapshots/snap_api_1/restore", json={"confirm": False})
+    assert res_no_confirm.status_code == 400
+
+    # Delete snapshot + auto GC
+    res_del = client.delete("/api/backups/snapshots/snap_api_1")
+    assert res_del.status_code == 200
+    assert res_del.json()["deleted"]["name"] == "snap_api_1"
+    assert client.get("/api/backups/snapshots").json()["snapshots"] == []
+
+    # Persona memory backup live create, list, and delete
+    res_personas = client.get("/api/backups/personas")
+    assert res_personas.status_code == 200
+    assert any(p["persona_id"] == "mira" for p in res_personas.json()["personas"])
+
+    res_create = client.post("/api/backups/personas/mira")
+    assert res_create.status_code == 200
+    created_name = res_create.json()["created"]
+    assert created_name is not None
+
+    # Restore requires confirm=true
+    assert (
+        client.post(
+            "/api/backups/personas/mira/restore",
+            json={"filename": created_name, "confirm": False},
+        ).status_code
+        == 400
+    )
+
+    # Restore with confirm=true launches detached worker with exact operation config
+    launched: list[dict] = []
+    with patch.object(backups_route, "_launch_offline_backup_op", side_effect=launched.append):
+        res_restore = client.post(
+            "/api/backups/personas/mira/restore",
+            json={"filename": created_name, "confirm": True},
+        )
+    assert res_restore.status_code == 200
+    assert launched == [
+        {
+            "operation": update_engine.OPERATION_PERSONA_MEMORY_RESTORE,
+            "persona_id": "mira",
+            "backup_file": created_name,
+        }
+    ]
+
+    # Delete persona backup
+    res_pdel = client.delete(f"/api/backups/personas/mira/{created_name}")
+    assert res_pdel.status_code == 200
+    assert res_pdel.json()["backups"] == []

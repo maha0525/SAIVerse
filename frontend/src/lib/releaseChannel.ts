@@ -25,12 +25,14 @@ export interface VersionInfo {
     can_return_to_stable?: boolean | null;
 }
 
-/** 更新 (またはチャンネルの切り替え) が始まり、バックエンドが再起動に入ったことの知らせ。
- *  detail.version は行き先の版 (分からなければ空文字)。 */
+/** 更新 (またはチャンネルの切り替え・オフラインのバックアップ/復元) が始まり、
+ *  バックエンドが再起動に入ったことの知らせ。
+ *  detail.version は行き先の版 (分からなければ空文字)。
+ *  detail.label があるときは再起動待ちバナーにその作業名を表示する。 */
 export const UPDATE_STARTED_EVENT = 'saiverse-update-started';
 
-export function announceUpdateStarted(version: string): void {
-    window.dispatchEvent(new CustomEvent(UPDATE_STARTED_EVENT, { detail: { version } }));
+export function announceUpdateStarted(version: string, label?: string): void {
+    window.dispatchEvent(new CustomEvent(UPDATE_STARTED_EVENT, { detail: { version, label: label || '' } }));
 }
 
 /**

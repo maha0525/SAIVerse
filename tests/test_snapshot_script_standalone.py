@@ -41,5 +41,4 @@ def test_snapshot_save_runs_without_editable_install(tmp_path):
 
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
     assert "ModuleNotFoundError" not in result.stderr
-    snapshots = list((home / "snapshots").glob("*.zip"))
-    assert len(snapshots) == 1
+    assert (home / "snapshots" / "manifests" / "regression.json").is_file()

@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | 世界スナップショットの CAS 高速化・進捗監視・グローバル設定「バックアップ」タブ | CAS 倉庫化、無進捗タイムアウト、DB 自動バックアップ分離、バックアップタブ UI (世界スナップショットとペルソナ記憶の個別復元) の実装と自動検査まで完了。次 = まはーが実機でバックアップタブの操作とスナップショット所要時間を確認する。 | まはー (実機確認) | [intent](../intent/world_snapshot.md) / [issue](../issues/snapshot_timeout_is_fixed_while_world_grows.md) | 2026-11-28 |
 | 🟣 検証待ち | ChatGPT ログインの鍵が切れると Codex のペルソナが 400 エラーで話せなくなる (利用者報告) | 送る前に鍵の期限を見て更新する修正が PR でレビューを待っている。次 = まはーが PR を確かめて develop に入れ、再起動後、最後の Codex の発話から 1 時間以上あけて話しかけて返事が来ることを見る。 | まはー (PR 確認・実機確認) | [issue](../issues/codex_expired_token_400_blocks_refresh.md) | 2026-11-27 |
 | 🟣 検証待ち | アドオン管理のペルソナ別パネル枠 (`ui/PersonaPanel.tsx`) と Voice TTS テスト再生・一括 ZIP 出力 | 本体側の `PersonaPanel` 枠と `saiverse-voice-tts` v0.7.0 のテスト再生・WAV/ZIP 出力はまはーが実機で確認済みで、両リポジトリの PR がレビューを待っている。次 = まはーが PR をマージし、v0.3.35 発行後にカタログへ `min_saiverse_version: "0.3.35"` で載せる。 | まはー (PR のレビュー) | [intent](../intent/addon_persona_panel.md) | 2026-11-26 |
 | 🟣 検証待ち | 自動想起のキーワードの抽出を軽くする (返事の前の待ちを数秒減らす) | 修正は v0.3.34 で発行済みで、まはーの本番環境で、語が 12 個の回のキーワードの抽出が 0.17 秒であることを確かめてある。次 = 語が 60 個以上の回が本番環境のログに出たときに、メティスが所要時間の行でキーワードの抽出の時間を確かめる。 | 私 (ログ確認) | [issue](../issues/auto_recall_keyword_count_scans_all_messages_per_word.md) / [intent](../intent/auto_recall_jev_rerank.md) | 2026-11-22 |

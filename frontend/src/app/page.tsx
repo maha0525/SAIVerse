@@ -871,6 +871,12 @@ export default function Home() {
         }
         return false;
     });
+    const [updatingLabel, setUpdatingLabel] = useState(() => {
+        if (typeof window !== 'undefined') {
+            return sessionStorage.getItem('saiverse_updating_label') || '';
+        }
+        return '';
+    });
     const updatingTargetVersion = useRef<string>('');
 
     // Announcements unread badge
@@ -1964,7 +1970,9 @@ export default function Home() {
                         // The completion toast is shown after the reload.
                         if (isUpdating) {
                             setIsUpdating(false);
+                            setUpdatingLabel('');
                             sessionStorage.removeItem('saiverse_updating');
+                            sessionStorage.removeItem('saiverse_updating_label');
                             sessionStorage.setItem('saiverse_update_finished', 'true');
                             window.location.reload();
                             return;
@@ -2001,13 +2009,22 @@ export default function Home() {
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
     }, []);
 
-    // 設定画面からチャンネルを切り替えたときも、更新ボタンと同じ「再起動待ち」に乗せる。
+    // 設定画面からチャンネルを切り替えたときやオフラインのバックアップ/復元も、
+    // 更新ボタンと同じ「再起動待ち」に乗せる。
     useEffect(() => {
         const onUpdateStarted = (event: Event) => {
-            const version = (event as CustomEvent<{ version?: string }>).detail?.version || '';
+            const detail = (event as CustomEvent<{ version?: string; label?: string }>).detail;
+            const version = detail?.version || '';
+            const label = detail?.label || '';
             updatingTargetVersion.current = version;
+            setUpdatingLabel(label);
             setIsUpdating(true);
             sessionStorage.setItem('saiverse_updating', 'true');
+            if (label) {
+                sessionStorage.setItem('saiverse_updating_label', label);
+            } else {
+                sessionStorage.removeItem('saiverse_updating_label');
+            }
             setUpdateAvailable(null);
         };
         window.addEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
@@ -4039,7 +4056,11 @@ export default function Home() {
                     <div className={styles.updatingBanner}>
                         <Loader size={16} className={styles.spinIcon} />
                         <div className={styles.updatingContent}>
-                            <div>{uiText("app.page.label007")}{updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}{uiText("app.page.label008")}</div>
+                            <div>
+                                {updatingLabel
+                                    ? updatingLabel
+                                    : `${uiText("app.page.label007")}${updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}${uiText("app.page.label008")}`}
+                            </div>
                             <div>{uiText("app.page.label009")}</div>
                         </div>
                     </div>

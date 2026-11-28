@@ -13998,5 +13998,245 @@
   "app.page.updateBackendUnreachable": {
     "ja": "更新を開始できませんでした。バックエンドに接続できない可能性があります。",
     "en": "Failed to start update. Backend may be unreachable."
+  },
+  "components.GlobalSettingsModal.backupTab": {
+    "ja": "バックアップ",
+    "en": "Backups"
+  },
+  "components.BackupManagementPanel.subTabSnapshots": {
+    "ja": "世界スナップショット",
+    "en": "World Snapshots"
+  },
+  "components.BackupManagementPanel.subTabPersonas": {
+    "ja": "ペルソナの記憶 (memory.db)",
+    "en": "Persona Memory (memory.db)"
+  },
+  "components.BackupManagementPanel.snapshotsTitle": {
+    "ja": "世界スナップショット管理",
+    "en": "World Snapshot Management"
+  },
+  "components.BackupManagementPanel.snapshotsIntro": {
+    "ja": "世界全体 (DB・ペルソナ記憶・画像など) の復元ポイントです。重複排除形式で保存されるため、2回目以降は変更分のみを高速に保存します。自動削除は行いません。",
+    "en": "Whole-world restore points (main DB, persona memories, images, etc.). Stored in a deduplicated format so subsequent snapshots only write changed files. Snapshots are never deleted automatically."
+  },
+  "components.BackupManagementPanel.personasTitle": {
+    "ja": "ペルソナの記憶バックアップ (個別復元)",
+    "en": "Persona Memory Backups (Individual Restore)"
+  },
+  "components.BackupManagementPanel.personasIntro": {
+    "ja": "各ペルソナの memory.db の自動・手動バックアップを管理し、指定したペルソナの記憶だけを過去の状態へ戻せます。",
+    "en": "Manage automatic and manual memory.db backups for each persona and restore a single persona memory to an earlier point."
+  },
+  "components.BackupManagementPanel.refresh": {
+    "ja": "更新",
+    "en": "Refresh"
+  },
+  "components.BackupManagementPanel.loading": {
+    "ja": "読み込み中...",
+    "en": "Loading..."
+  },
+  "components.BackupManagementPanel.statCount": {
+    "ja": "世代数:",
+    "en": "Count:"
+  },
+  "components.BackupManagementPanel.statTotalDisk": {
+    "ja": "ディスク使用量:",
+    "en": "Disk usage:"
+  },
+  "components.BackupManagementPanel.statLegacyZip": {
+    "ja": "旧 ZIP:",
+    "en": "Legacy ZIP:"
+  },
+  "components.BackupManagementPanel.gcButton": {
+    "ja": "不要データを掃除 ({p1})",
+    "en": "Clean unused data ({p1})"
+  },
+  "components.BackupManagementPanel.corruptedManifestsWarning": {
+    "ja": "読み取れないスナップショット台帳があります ({p1})。安全のため不要データの自動掃除を停止しています。",
+    "en": "Unreadable snapshot manifest(s) detected ({p1}). Garbage collection is paused for safety."
+  },
+  "components.BackupManagementPanel.notePlaceholder": {
+    "ja": "メモ (任意: 例「大きな設定変更の前」)",
+    "en": "Optional note (e.g. Before major config change)"
+  },
+  "components.BackupManagementPanel.createSnapshotButton": {
+    "ja": "いまスナップショットを作成",
+    "en": "Create Snapshot Now"
+  },
+  "components.BackupManagementPanel.createSnapshotConfirm": {
+    "ja": "世界全体のスナップショットを作成します。データの整合性を守るため SAIVerse を一時停止し、完了後に自動で再起動します。続行しますか？",
+    "en": "Create a whole-world snapshot? SAIVerse will briefly stop to ensure database consistency and restart automatically when finished."
+  },
+  "components.BackupManagementPanel.noSnapshots": {
+    "ja": "スナップショットはまだありません。",
+    "en": "No snapshots yet."
+  },
+  "components.BackupManagementPanel.fileCount": {
+    "ja": "{p1} ファイル",
+    "en": "{p1} files"
+  },
+  "components.BackupManagementPanel.restoreButton": {
+    "ja": "復元",
+    "en": "Restore"
+  },
+  "components.BackupManagementPanel.deleteButton": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.BackupManagementPanel.deleteSnapshotConfirm": {
+    "ja": "スナップショット「{p1}」を削除しますか？他の世代に必要なデータは残したまま、不要なデータだけを回収します。",
+    "en": "Delete snapshot \"{p1}\"? Only data unreferenced by other snapshots will be reclaimed."
+  },
+  "components.BackupManagementPanel.deleteSnapshotDone": {
+    "ja": "スナップショット「{p1}」を削除しました ({p2} を解放)。",
+    "en": "Deleted snapshot \"{p1}\" (reclaimed {p2})."
+  },
+  "components.BackupManagementPanel.gcDone": {
+    "ja": "不要データを掃除しました ({p1} / {p2} 件を解放)。",
+    "en": "Cleaned unused data (reclaimed {p1} across {p2} items)."
+  },
+  "components.BackupManagementPanel.restoreSnapshotModalTitle": {
+    "ja": "このスナップショットから世界を復元しますか？",
+    "en": "Restore the whole world from this snapshot?"
+  },
+  "components.BackupManagementPanel.currentCodeVersion": {
+    "ja": "現在の本体 v{p1}",
+    "en": "current app v{p1}"
+  },
+  "components.BackupManagementPanel.restoreSnapshotNote1": {
+    "ja": "復元を始める前に、現在の状態が auto_before_restore_* として自動で保存されます。",
+    "en": "Before restoring, your current state is automatically saved as auto_before_restore_*."
+  },
+  "components.BackupManagementPanel.restoreSnapshotNote2": {
+    "ja": "整合性チェックと入れ替えのため SAIVerse を一時停止し、完了後に自動で再起動します。",
+    "en": "SAIVerse will stop to verify integrity and swap the world data, then restart automatically."
+  },
+  "components.BackupManagementPanel.restoreSnapshotNote3": {
+    "ja": "SAIVerse のコードのバージョン自体は戻りません (古い版の世界を戻した場合は再起動時に移行処理が走ります)。",
+    "en": "The SAIVerse application version itself does not roll back (restoring an older world will run startup migrations on restart)."
+  },
+  "components.BackupManagementPanel.restoreConfirmCheckbox": {
+    "ja": "上記の内容を確認し、一時停止して復元を実行することに同意します。",
+    "en": "I understand the above and want to stop SAIVerse to run the restore."
+  },
+  "components.BackupManagementPanel.cancel": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.BackupManagementPanel.executeRestore": {
+    "ja": "復元を実行",
+    "en": "Run Restore"
+  },
+  "components.BackupManagementPanel.bannerCreatingSnapshot": {
+    "ja": "世界スナップショットを作成しています…",
+    "en": "Creating world snapshot..."
+  },
+  "components.BackupManagementPanel.bannerRestoringSnapshot": {
+    "ja": "世界スナップショットから復元しています…",
+    "en": "Restoring world snapshot..."
+  },
+  "components.BackupManagementPanel.bannerRestoringPersona": {
+    "ja": "{p1} の記憶 (memory.db) を復元しています…",
+    "en": "Restoring memory.db for {p1}..."
+  },
+  "components.BackupManagementPanel.noPersonas": {
+    "ja": "対象ペルソナが見つかりません",
+    "en": "No personas found"
+  },
+  "components.BackupManagementPanel.personaBackupCount": {
+    "ja": "{p1} 件",
+    "en": "{p1} backups"
+  },
+  "components.BackupManagementPanel.unregisteredTag": {
+    "ja": "DB 未登録",
+    "en": "Unregistered"
+  },
+  "components.BackupManagementPanel.createPersonaBackupButton": {
+    "ja": "いまバックアップを作成",
+    "en": "Back Up Now"
+  },
+  "components.BackupManagementPanel.createPersonaBackupDone": {
+    "ja": "{p1} の記憶バックアップを作成しました。",
+    "en": "Created a memory backup for {p1}."
+  },
+  "components.BackupManagementPanel.currentMemoryDbSize": {
+    "ja": "現在の memory.db:",
+    "en": "Current memory.db:"
+  },
+  "components.BackupManagementPanel.noMemoryDb": {
+    "ja": "なし",
+    "en": "None"
+  },
+  "components.BackupManagementPanel.rdiffNotice": {
+    "ja": "このペルソナには backups/saimemory_rdiff/ 配下の rdiff-backup 履歴も存在します。この画面では標準の SQLite バックアップ (saimemory_simple) を管理します。",
+    "en": "This persona also has rdiff-backup history under backups/saimemory_rdiff/. This panel manages standard SQLite backups (saimemory_simple)."
+  },
+  "components.BackupManagementPanel.noPersonaBackups": {
+    "ja": "このペルソナのバックアップはまだありません。",
+    "en": "No backups for this persona yet."
+  },
+  "components.BackupManagementPanel.preRestoreBadge": {
+    "ja": "復元前退避",
+    "en": "Pre-restore"
+  },
+  "components.BackupManagementPanel.deletePersonaBackupConfirm": {
+    "ja": "バックアップ「{p1}」を削除しますか？",
+    "en": "Delete backup \"{p1}\"?"
+  },
+  "components.BackupManagementPanel.deletePersonaBackupDone": {
+    "ja": "バックアップ「{p1}」を削除しました ({p2} を解放)。",
+    "en": "Deleted backup \"{p1}\" (reclaimed {p2})."
+  },
+  "components.BackupManagementPanel.restorePersonaModalTitle": {
+    "ja": "このペルソナの記憶 (memory.db) を復元しますか？",
+    "en": "Restore this persona memory (memory.db)?"
+  },
+  "components.BackupManagementPanel.restorePersonaNote1": {
+    "ja": "復元前に現在の memory.db が「復元前退避 (pre_restore)」として自動保存されます。",
+    "en": "Your current memory.db is automatically saved as a pre-restore backup before replacing it."
+  },
+  "components.BackupManagementPanel.restorePersonaNote2": {
+    "ja": "このペルソナの記憶 (memory.db) のみが過去の状態に戻ります。建物の会話ログや他のペルソナには影響しません。",
+    "en": "Only this persona memory.db is restored. Building chat logs and other personas are not modified."
+  },
+  "components.BackupManagementPanel.restorePersonaNote3": {
+    "ja": "安全な入れ替えと記憶キャッシュ再構築のため SAIVerse を一時停止し、完了後に自動で再起動します。",
+    "en": "SAIVerse will stop to safely swap the database and clear stale head cache, then restart automatically."
+  },
+  "components.BackupManagementPanel.loadSnapshotsFailed": {
+    "ja": "スナップショット一覧の取得に失敗しました。",
+    "en": "Failed to load snapshots."
+  },
+  "components.BackupManagementPanel.createSnapshotFailed": {
+    "ja": "スナップショットの作成開始に失敗しました。",
+    "en": "Failed to start snapshot creation."
+  },
+  "components.BackupManagementPanel.deleteSnapshotFailed": {
+    "ja": "スナップショットの削除に失敗しました。",
+    "en": "Failed to delete snapshot."
+  },
+  "components.BackupManagementPanel.gcFailed": {
+    "ja": "不要データの掃除に失敗しました。",
+    "en": "Failed to clean unused data."
+  },
+  "components.BackupManagementPanel.restoreSnapshotFailed": {
+    "ja": "スナップショットの復元開始に失敗しました。",
+    "en": "Failed to start snapshot restore."
+  },
+  "components.BackupManagementPanel.loadPersonaFailed": {
+    "ja": "ペルソナの記憶バックアップ一覧の取得に失敗しました。",
+    "en": "Failed to load persona memory backups."
+  },
+  "components.BackupManagementPanel.createPersonaBackupFailed": {
+    "ja": "ペルソナの記憶バックアップ作成に失敗しました。",
+    "en": "Failed to create persona memory backup."
+  },
+  "components.BackupManagementPanel.deletePersonaBackupFailed": {
+    "ja": "ペルソナの記憶バックアップ削除に失敗しました。",
+    "en": "Failed to delete persona memory backup."
+  },
+  "components.BackupManagementPanel.restorePersonaFailed": {
+    "ja": "ペルソナの記憶復元開始に失敗しました。",
+    "en": "Failed to start persona memory restore."
   }
 }

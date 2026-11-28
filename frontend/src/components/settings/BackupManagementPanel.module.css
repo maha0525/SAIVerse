@@ -1,0 +1,424 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.subTabBar {
+    display: flex;
+    gap: 6px;
+    border-bottom: 1px solid var(--border-color, #444);
+    padding-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.subTab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #444);
+    background: var(--bg-secondary, transparent);
+    color: var(--text-secondary, inherit);
+    cursor: pointer;
+    font-size: 0.88rem;
+    font-weight: 500;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.subTab:hover {
+    color: var(--text-primary, inherit);
+    border-color: var(--primary, #4a7eb5);
+}
+
+.subTabActive {
+    background: var(--primary, #4a7eb5);
+    color: var(--primary-foreground, #ffffff);
+    border-color: var(--primary, #4a7eb5);
+}
+
+.subTabActive:hover {
+    color: var(--primary-foreground, #ffffff);
+}
+
+.sectionHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sectionHeader h3 {
+    margin: 0;
+    font-size: 1rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.intro {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary, #888);
+    line-height: 1.6;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.statsCard {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color, #444);
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.08));
+    font-size: 0.85rem;
+}
+
+.statsGroup {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    align-items: center;
+}
+
+.statItem {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.statLabel {
+    color: var(--text-secondary, #888);
+    font-size: 0.8rem;
+}
+
+.statValue {
+    font-weight: 600;
+}
+
+.createCard {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color, #444);
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.06));
+}
+
+.noteInput {
+    flex: 1 1 220px;
+    min-width: 0;
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #555);
+    background: var(--bg-primary, transparent);
+    color: var(--text-primary, inherit);
+    font-size: 0.85rem;
+}
+
+.selectInput {
+    flex: 1 1 240px;
+    min-width: 0;
+    max-width: 100%;
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #555);
+    background: var(--bg-primary, #1f242c);
+    color: var(--text-primary, inherit);
+    font-size: 0.88rem;
+}
+
+.notice {
+    padding: 9px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    background: rgba(56, 189, 248, 0.12);
+    color: var(--text-primary, inherit);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.errorBox {
+    padding: 9px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--text-primary, inherit);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.warningBox {
+    padding: 9px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    border: 1px solid rgba(245, 158, 11, 0.5);
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--text-primary, inherit);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.itemCard {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color, #444);
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.06));
+    flex-wrap: wrap;
+}
+
+.itemMain {
+    flex: 1 1 260px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.itemTitleRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.itemName {
+    font-weight: 600;
+    font-size: 0.9rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    border: 1px solid var(--border-color, #555);
+    background: var(--bg-primary, rgba(127, 127, 127, 0.15));
+    color: var(--text-secondary, inherit);
+}
+
+.badgeCas {
+    border-color: rgba(59, 130, 246, 0.5);
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--text-primary, inherit);
+}
+
+.badgePreRestore {
+    border-color: rgba(245, 158, 11, 0.5);
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--text-primary, inherit);
+}
+
+.itemMeta {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #888);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+}
+
+.itemNote {
+    font-size: 0.82rem;
+    color: var(--text-primary, inherit);
+    opacity: 0.9;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.itemActions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    align-items: center;
+}
+
+.btnPrimary {
+    padding: 6px 12px;
+    background: var(--primary, #4a7eb5);
+    color: var(--primary-foreground, #ffffff);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.84rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.btnPrimary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btnSecondary {
+    padding: 6px 10px;
+    background: var(--bg-primary, transparent);
+    color: var(--text-primary, inherit);
+    border: 1px solid var(--border-color, #555);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.btnSecondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btnDanger {
+    padding: 6px 10px;
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.btnDanger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btnDangerSolid {
+    padding: 7px 14px;
+    background: #dc2626;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btnDangerSolid:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.emptyState {
+    padding: 18px 14px;
+    text-align: center;
+    font-size: 0.86rem;
+    color: var(--text-secondary, #888);
+    border: 1px dashed var(--border-color, #555);
+    border-radius: 8px;
+}
+
+/* Confirmation dialog (inside ModalOverlay) */
+.confirmOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2200;
+    padding: 16px;
+}
+
+.confirmModal {
+    width: min(500px, 100%);
+    max-width: 100%;
+    background: var(--bg-primary, #1f242c);
+    color: var(--text-primary, #f3f4f6);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 10px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.confirmTitle {
+    margin: 0;
+    font-size: 1.02rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.confirmDetails {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #444);
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.08));
+    font-size: 0.84rem;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.confirmBullets {
+    margin: 0;
+    padding-left: 1.2rem;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    color: var(--text-secondary, inherit);
+}
+
+.confirmCheckLabel {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    line-height: 1.5;
+}
+
+.confirmFooter {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
