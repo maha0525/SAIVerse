@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     AlertTriangle,
     Database,
@@ -58,6 +58,12 @@ interface PersonaBackupEntry {
     kind: 'backup' | 'pre_restore';
     size_bytes: number;
     created_at: string;
+}
+
+interface PersonaRestoreTarget {
+    personaId: string;
+    displayName: string;
+    entry: PersonaBackupEntry;
 }
 
 interface BackupManagementPanelProps {
@@ -123,6 +129,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
     // Persona memory.db backups state
     const [personas, setPersonas] = useState<PersonaBackupSummary[]>([]);
     const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
+    const [loadedPersonaId, setLoadedPersonaId] = useState<string>('');
     const [personaBackups, setPersonaBackups] = useState<PersonaBackupEntry[]>([]);
     const [personaHasDb, setPersonaHasDb] = useState(false);
     const [personaDbSize, setPersonaDbSize] = useState(0);
@@ -131,10 +138,26 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
     const [personaBusy, setPersonaBusy] = useState(false);
     const [personaNotice, setPersonaNotice] = useState<string | null>(null);
     const [personaError, setPersonaError] = useState<string | null>(null);
-    const [personaRestoreTarget, setPersonaRestoreTarget] = useState<PersonaBackupEntry | null>(null);
+    const [personaRestoreTarget, setPersonaRestoreTarget] = useState<PersonaRestoreTarget | null>(null);
     const [personaRestoreChecked, setPersonaRestoreChecked] = useState(false);
 
+    // Guards against out-of-order / stale async responses when switching personas
+    const selectedPersonaIdRef = useRef<string>('');
+    const snapReqGenRef = useRef(0);
+    const personasListReqGenRef = useRef(0);
+    const personaDetailReqGenRef = useRef(0);
+    const personaDetailAbortRef = useRef<AbortController | null>(null);
+
+    selectedPersonaIdRef.current = selectedPersonaId;
+
+    useEffect(() => {
+        return () => {
+            personaDetailAbortRef.current?.abort();
+        };
+    }, []);
+
     const loadSnapshots = useCallback(async () => {
+        const reqGen = ++snapReqGenRef.current;
         setSnapLoading(true);
         setSnapError(null);
         try {
@@ -143,44 +166,74 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.loadSnapshotsFailed')));
             }
             const data = await res.json();
+            if (reqGen !== snapReqGenRef.current) return;
             setSnapshots(Array.isArray(data.snapshots) ? data.snapshots : []);
             setStats(data.stats || null);
             setCurrentVersion(typeof data.saiverse_version === 'string' ? data.saiverse_version : '');
         } catch (err) {
+            if (reqGen !== snapReqGenRef.current) return;
             setSnapError(err instanceof Error ? err.message : uiText('components.BackupManagementPanel.loadSnapshotsFailed'));
         } finally {
-            setSnapLoading(false);
+            if (reqGen === snapReqGenRef.current) {
+                setSnapLoading(false);
+            }
         }
     }, []);
 
     const loadPersonaDetail = useCallback(async (personaId: string) => {
+        personaDetailAbortRef.current?.abort();
+        const reqGen = ++personaDetailReqGenRef.current;
+        setLoadedPersonaId('');
+        setPersonaBackups([]);
+        setPersonaHasDb(false);
+        setPersonaDbSize(0);
+        setPersonaHasRdiff(false);
         if (!personaId) {
-            setPersonaBackups([]);
-            setPersonaHasDb(false);
-            setPersonaDbSize(0);
-            setPersonaHasRdiff(false);
+            setPersonaLoading(false);
             return;
         }
+        const controller = new AbortController();
+        personaDetailAbortRef.current = controller;
         setPersonaLoading(true);
         setPersonaError(null);
         try {
-            const res = await apiFetch(`/api/backups/personas/${encodeURIComponent(personaId)}`);
+            const res = await apiFetch(
+                `/api/backups/personas/${encodeURIComponent(personaId)}`,
+                { signal: controller.signal }
+            );
             if (!res.ok) {
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.loadPersonaFailed')));
             }
             const data = await res.json();
+            if (
+                reqGen !== personaDetailReqGenRef.current
+                || selectedPersonaIdRef.current !== personaId
+            ) {
+                return;
+            }
+            setLoadedPersonaId(personaId);
             setPersonaBackups(Array.isArray(data.backups) ? data.backups : []);
             setPersonaHasDb(Boolean(data.has_memory_db));
             setPersonaDbSize(typeof data.memory_db_size_bytes === 'number' ? data.memory_db_size_bytes : 0);
             setPersonaHasRdiff(Boolean(data.has_rdiff_backup));
         } catch (err) {
+            if (
+                controller.signal.aborted
+                || reqGen !== personaDetailReqGenRef.current
+                || selectedPersonaIdRef.current !== personaId
+            ) {
+                return;
+            }
             setPersonaError(err instanceof Error ? err.message : uiText('components.BackupManagementPanel.loadPersonaFailed'));
         } finally {
-            setPersonaLoading(false);
+            if (reqGen === personaDetailReqGenRef.current) {
+                setPersonaLoading(false);
+            }
         }
     }, []);
 
     const loadPersonas = useCallback(async () => {
+        const reqGen = ++personasListReqGenRef.current;
         setPersonaLoading(true);
         setPersonaError(null);
         try {
@@ -189,6 +242,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.loadPersonaFailed')));
             }
             const data = await res.json();
+            if (reqGen !== personasListReqGenRef.current) return;
             const list: PersonaBackupSummary[] = Array.isArray(data.personas) ? data.personas : [];
             setPersonas(list);
             setSelectedPersonaId(prev => {
@@ -196,9 +250,12 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                 return list[0]?.persona_id || '';
             });
         } catch (err) {
+            if (reqGen !== personasListReqGenRef.current) return;
             setPersonaError(err instanceof Error ? err.message : uiText('components.BackupManagementPanel.loadPersonaFailed'));
         } finally {
-            setPersonaLoading(false);
+            if (reqGen === personasListReqGenRef.current) {
+                setPersonaLoading(false);
+            }
         }
     }, []);
 
@@ -332,26 +389,29 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
     // ---- Persona memory.db actions ----
 
     const selectedPersona = personas.find(p => p.persona_id === selectedPersonaId) || null;
+    const detailMatchesSelection = Boolean(selectedPersonaId && loadedPersonaId === selectedPersonaId);
 
     const handleCreatePersonaBackup = async () => {
-        if (!selectedPersonaId || personaBusy) return;
+        const targetPersonaId = selectedPersonaId;
+        const targetDisplayName = selectedPersona?.display_name || targetPersonaId;
+        if (!targetPersonaId || !detailMatchesSelection || personaBusy) return;
         setPersonaBusy(true);
         setPersonaError(null);
         setPersonaNotice(null);
         try {
-            const res = await apiFetch(`/api/backups/personas/${encodeURIComponent(selectedPersonaId)}`, {
+            const res = await apiFetch(`/api/backups/personas/${encodeURIComponent(targetPersonaId)}`, {
                 method: 'POST',
             });
             if (!res.ok) {
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.createPersonaBackupFailed')));
             }
             const data = await res.json();
-            if (Array.isArray(data.backups)) {
+            if (selectedPersonaIdRef.current === targetPersonaId && Array.isArray(data.backups)) {
                 setPersonaBackups(data.backups);
             }
             setPersonaNotice(
                 uiText('components.BackupManagementPanel.createPersonaBackupDone', {
-                    p1: selectedPersona?.display_name || selectedPersonaId,
+                    p1: targetDisplayName,
                 })
             );
             await loadPersonas();
@@ -363,7 +423,8 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
     };
 
     const handleDeletePersonaBackup = async (entry: PersonaBackupEntry) => {
-        if (!selectedPersonaId || personaBusy) return;
+        const targetPersonaId = selectedPersonaId;
+        if (!targetPersonaId || !detailMatchesSelection || personaBusy) return;
         if (
             !window.confirm(
                 uiText('components.BackupManagementPanel.deletePersonaBackupConfirm', {
@@ -378,14 +439,14 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
         setPersonaNotice(null);
         try {
             const res = await apiFetch(
-                `/api/backups/personas/${encodeURIComponent(selectedPersonaId)}/${encodeURIComponent(entry.filename)}`,
+                `/api/backups/personas/${encodeURIComponent(targetPersonaId)}/${encodeURIComponent(entry.filename)}`,
                 { method: 'DELETE' }
             );
             if (!res.ok) {
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.deletePersonaBackupFailed')));
             }
             const data = await res.json();
-            if (Array.isArray(data.backups)) {
+            if (selectedPersonaIdRef.current === targetPersonaId && Array.isArray(data.backups)) {
                 setPersonaBackups(data.backups);
             }
             setPersonaNotice(
@@ -403,17 +464,18 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
     };
 
     const handleConfirmRestorePersona = async () => {
-        if (!selectedPersonaId || !personaRestoreTarget || !personaRestoreChecked || personaBusy) return;
+        if (!personaRestoreTarget || !personaRestoreChecked || personaBusy) return;
+        const { personaId, displayName, entry } = personaRestoreTarget;
         setPersonaBusy(true);
         setPersonaError(null);
         try {
             const res = await apiFetch(
-                `/api/backups/personas/${encodeURIComponent(selectedPersonaId)}/restore`,
+                `/api/backups/personas/${encodeURIComponent(personaId)}/restore`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        filename: personaRestoreTarget.filename,
+                        filename: entry.filename,
                         confirm: true,
                     }),
                 }
@@ -426,7 +488,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
             announceUpdateStarted(
                 '',
                 uiText('components.BackupManagementPanel.bannerRestoringPersona', {
-                    p1: selectedPersona?.display_name || selectedPersonaId,
+                    p1: displayName,
                 })
             );
             onOperationStarted?.();
@@ -667,6 +729,8 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                             value={selectedPersonaId}
                             onChange={e => {
                                 setSelectedPersonaId(e.target.value);
+                                setPersonaRestoreTarget(null);
+                                setPersonaRestoreChecked(false);
                                 setPersonaNotice(null);
                                 setPersonaError(null);
                             }}
@@ -694,14 +758,14 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                             type="button"
                             className={styles.btnPrimary}
                             onClick={handleCreatePersonaBackup}
-                            disabled={personaBusy || !selectedPersonaId || !personaHasDb}
+                            disabled={personaBusy || personaLoading || !detailMatchesSelection || !personaHasDb}
                         >
                             <Plus size={15} />
                             {uiText('components.BackupManagementPanel.createPersonaBackupButton')}
                         </button>
                     </div>
 
-                    {selectedPersonaId && (
+                    {detailMatchesSelection && (
                         <div className={styles.statsCard}>
                             <div className={styles.statsGroup}>
                                 <span className={styles.statItem}>
@@ -724,7 +788,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                         </div>
                     )}
 
-                    {personaHasRdiff && (
+                    {detailMatchesSelection && personaHasRdiff && (
                         <div className={styles.notice}>
                             {uiText('components.BackupManagementPanel.rdiffNotice')}
                         </div>
@@ -733,7 +797,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                     {personaNotice && <div className={styles.notice}>{personaNotice}</div>}
                     {personaError && <div className={styles.errorBox}>{personaError}</div>}
 
-                    {personaLoading ? (
+                    {personaLoading || (Boolean(selectedPersonaId) && !detailMatchesSelection) ? (
                         <div className={styles.emptyState}>
                             {uiText('components.BackupManagementPanel.loading')}
                         </div>
@@ -744,7 +808,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                     ) : (
                         <div className={styles.list}>
                             {personaBackups.map(entry => (
-                                <div key={entry.filename} className={styles.itemCard}>
+                                <div key={`${loadedPersonaId}:${entry.filename}`} className={styles.itemCard}>
                                     <div className={styles.itemMain}>
                                         <div className={styles.itemTitleRow}>
                                             <span className={styles.itemName}>
@@ -766,10 +830,15 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                                             type="button"
                                             className={styles.btnSecondary}
                                             onClick={() => {
-                                                setPersonaRestoreTarget(entry);
+                                                if (!detailMatchesSelection) return;
+                                                setPersonaRestoreTarget({
+                                                    personaId: loadedPersonaId,
+                                                    displayName: selectedPersona?.display_name || loadedPersonaId,
+                                                    entry,
+                                                });
                                                 setPersonaRestoreChecked(false);
                                             }}
-                                            disabled={personaBusy}
+                                            disabled={personaBusy || !detailMatchesSelection}
                                         >
                                             <RotateCcw size={14} />
                                             {uiText('components.BackupManagementPanel.restoreButton')}
@@ -778,7 +847,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                                             type="button"
                                             className={styles.btnDanger}
                                             onClick={() => handleDeletePersonaBackup(entry)}
-                                            disabled={personaBusy}
+                                            disabled={personaBusy || !detailMatchesSelection}
                                         >
                                             <Trash2 size={14} />
                                             {uiText('components.BackupManagementPanel.deleteButton')}
@@ -857,7 +926,7 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
             )}
 
             {/* Persona memory.db restore confirmation modal */}
-            {personaRestoreTarget && selectedPersonaId && (
+            {personaRestoreTarget && (
                 <ModalOverlay
                     onClose={() => {
                         if (!personaBusy) setPersonaRestoreTarget(null);
@@ -871,13 +940,13 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                         </h4>
                         <div className={styles.confirmDetails}>
                             <div>
-                                <strong>{selectedPersona?.display_name || selectedPersonaId}</strong> ({selectedPersonaId})
+                                <strong>{personaRestoreTarget.displayName}</strong> ({personaRestoreTarget.personaId})
                             </div>
                             <div>
-                                {formatTimestamp(personaRestoreTarget.created_at)} /{' '}
-                                {formatBytes(personaRestoreTarget.size_bytes)}
+                                {formatTimestamp(personaRestoreTarget.entry.created_at)} /{' '}
+                                {formatBytes(personaRestoreTarget.entry.size_bytes)}
                             </div>
-                            <div>{personaRestoreTarget.filename}</div>
+                            <div>{personaRestoreTarget.entry.filename}</div>
                         </div>
                         <ul className={styles.confirmBullets}>
                             <li>{uiText('components.BackupManagementPanel.restorePersonaNote1')}</li>

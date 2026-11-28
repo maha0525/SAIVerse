@@ -554,34 +554,105 @@ def _write_object_atomically(
         raise
 
 
+def _verify_existing_object(
+    obj_path: Path,
+    encoding: str,
+    expected_sha256: str,
+    expected_size: int,
+    *,
+    on_bytes: Optional[Callable[[int], None]] = None,
+) -> bool:
+    """Verify an existing CAS object's stream integrity, size, and SHA-256.
+
+    Returns True only when the object on disk decompresses cleanly (with EOF and
+    no trailing garbage for ``zlib``) and reproduces ``expected_size`` and
+    ``expected_sha256``.
+    """
+    digest = hashlib.sha256()
+    actual_size = 0
+    try:
+        with obj_path.open("rb") as stream:
+            if encoding == "raw":
+                for chunk in iter(lambda: stream.read(STREAM_CHUNK_SIZE), b""):
+                    digest.update(chunk)
+                    chunk_len = len(chunk)
+                    actual_size += chunk_len
+                    if on_bytes is not None:
+                        on_bytes(chunk_len)
+            elif encoding == "zlib":
+                decompressor = zlib.decompressobj()
+                for chunk in iter(lambda: stream.read(STREAM_CHUNK_SIZE), b""):
+                    chunk_len = len(chunk)
+                    plain = decompressor.decompress(chunk)
+                    if plain:
+                        digest.update(plain)
+                        actual_size += len(plain)
+                    if on_bytes is not None:
+                        on_bytes(chunk_len)
+                tail = decompressor.flush()
+                if tail:
+                    digest.update(tail)
+                    actual_size += len(tail)
+                if not decompressor.eof or decompressor.unused_data:
+                    return False
+            else:
+                return False
+    except (OSError, zlib.error):
+        return False
+    return actual_size == expected_size and digest.hexdigest() == expected_sha256
+
+
 def _process_entry_for_cas(
     entry: SnapshotEntry,
     *,
     hash_locks: Dict[str, threading.Lock],
     locks_guard: threading.Lock,
+    verified_objects: Optional[Dict[str, str]] = None,
     on_bytes: Optional[Callable[[int], None]] = None,
 ) -> Tuple[str, str, int, str, bool]:
-    """1 ファイルをハッシュ計算し、未保存なら CAS 倉庫へ書き込む。
+    """1 ファイルをハッシュ計算し、既存オブジェクトの整合性を確認して再利用または書き込む。
+
+    既存の CAS オブジェクトが破損していた場合は警告を出して元ファイルから
+    再作成 (自己修復) する。
 
     Returns:
         (archive_path, sha256, size, encoding, was_new)
     """
     sha256, size = _sha256_and_size(entry.abs_path, on_bytes=on_bytes)
-    existing = _find_existing_object(sha256, size)
-    if existing is not None:
-        _, encoding = existing
-        return entry.archive_path, sha256, size, encoding, False
-
     with locks_guard:
+        if verified_objects is not None and sha256 in verified_objects:
+            return entry.archive_path, sha256, size, verified_objects[sha256], False
         lock = hash_locks.setdefault(sha256, threading.Lock())
 
     with lock:
+        if verified_objects is not None:
+            with locks_guard:
+                if sha256 in verified_objects:
+                    return entry.archive_path, sha256, size, verified_objects[sha256], False
+
         existing = _find_existing_object(sha256, size)
         if existing is not None:
-            _, encoding = existing
-            return entry.archive_path, sha256, size, encoding, False
+            obj_path, encoding = existing
+            if _verify_existing_object(obj_path, encoding, sha256, size, on_bytes=on_bytes):
+                if verified_objects is not None:
+                    with locks_guard:
+                        verified_objects[sha256] = encoding
+                return entry.archive_path, sha256, size, encoding, False
+            LOGGER.warning(
+                "Corrupted CAS object %s detected; repairing from live file %s",
+                obj_path,
+                entry.abs_path,
+            )
+            try:
+                obj_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove corrupted CAS object %s: %s", obj_path, exc)
+
         encoding = _preferred_encoding(entry.abs_path)
         _write_object_atomically(entry.abs_path, sha256, size, encoding, on_bytes=on_bytes)
+        if verified_objects is not None:
+            with locks_guard:
+                verified_objects[sha256] = encoding
         return entry.archive_path, sha256, size, encoding, True
 
 
@@ -1350,13 +1421,34 @@ def export_snapshot_to_zip(
 ) -> Path:
     """スナップショットを単一の format_version 2 互換 ZIP ファイルへ書き出す。"""
     output_zip = output_zip.resolve()
+    sdir_resolved = snapshots_dir().resolve()
+    store_resolved = store_dir().resolve()
+    manifests_resolved = manifests_dir().resolve()
+
+    if output_zip.is_relative_to(store_resolved) or output_zip.is_relative_to(manifests_resolved):
+        raise ValueError(
+            f"Cannot export snapshot inside internal store directory: {output_zip}"
+        )
+
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = output_zip.with_name(f"{output_zip.name}.tmp.{os.getpid()}")
 
     try:
         with snapshot_store_lock(timeout=lock_timeout):
+            if (
+                output_zip.parent == sdir_resolved
+                and output_zip.suffix.lower() == ".zip"
+                and (manifests_dir() / f"{output_zip.stem}.json").exists()
+            ):
+                raise ValueError(
+                    f"Export destination '{output_zip.name}' collides with existing CAS snapshot "
+                    f"'{output_zip.stem}' in {sdir_resolved}; choose a different filename or directory."
+                )
+
             fmt, path = resolve_snapshot(name)
             if fmt == "zip":
+                if output_zip == path.resolve():
+                    raise ValueError(f"Export destination cannot overwrite source archive: {output_zip}")
                 shutil.copy2(path, tmp_out)
                 os.replace(tmp_out, output_zip)
                 return output_zip
@@ -1617,6 +1709,7 @@ def _save_snapshot_locked(
     failed: List[Tuple[Path, str]] = []
     hash_locks: Dict[str, threading.Lock] = {}
     locks_guard = threading.Lock()
+    verified_objects: Dict[str, str] = {}
 
     progress_lock = threading.Lock()
     done_files = 0
@@ -1652,6 +1745,7 @@ def _save_snapshot_locked(
                     entry,
                     hash_locks=hash_locks,
                     locks_guard=locks_guard,
+                    verified_objects=verified_objects,
                     on_bytes=_on_worker_bytes,
                 ): entry
                 for entry in entries

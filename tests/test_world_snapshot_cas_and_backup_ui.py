@@ -633,3 +633,74 @@ def test_relocate_legacy_db_backups_preserves_wal_when_wal_move_fails(
     assert legacy_wal.is_file()
     assert legacy_wal.read_bytes() == b"uncheckpointed-wal-data"
     assert not (home / "backups" / "saiverse_db" / legacy_bak.name).exists()
+
+
+# ---- Codex review round-3 regression tests (PR #525) ----
+
+
+def test_corrupted_cas_object_is_detected_and_repaired_on_next_save(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-3 Finding 1: Truncated .z and corrupted .raw CAS objects must not be
+    blindly reused; save_snapshot detects the corruption and repairs them from live files."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="heal-v1", mem_val="heal-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("gen1")
+
+        m1 = json.loads((home / "snapshots" / "manifests" / "gen1.json").read_text(encoding="utf-8"))
+        db_sha = m1["files"]["personas/mira/memory.db"]["sha256"]
+        img_sha = m1["files"]["image/photo.png"]["sha256"]
+        _, db_z_path = snapshot._object_paths(db_sha)
+        img_raw_path, _ = snapshot._object_paths(img_sha)
+
+        # Truncate compressed .z object to 10 bytes (non-zero size, corrupt zlib stream)
+        db_z_path.write_bytes(db_z_path.read_bytes()[:10])
+        # Overwrite raw object with same-length garbage bytes
+        orig_raw_len = img_raw_path.stat().st_size
+        img_raw_path.write_bytes(b"X" * orig_raw_len)
+
+        # Saving gen2 must detect both corrupt objects, repair them, and succeed
+        r2 = snapshot.save_snapshot("gen2")
+        assert r2["new_objects"] == 2
+        assert r2["reused_objects"] == 1  # untouched saiverse.db was verified and reused
+
+        # Both gen2 and gen1 must now validate and extract cleanly
+        snapshot.validate_and_extract_cas_snapshot(
+            home / "snapshots" / "manifests" / "gen2.json", tmp_path / "stage_gen2"
+        )
+        snapshot.validate_and_extract_cas_snapshot(
+            home / "snapshots" / "manifests" / "gen1.json", tmp_path / "stage_gen1"
+        )
+
+
+def test_export_snapshot_rejects_ambiguous_collision_with_existing_cas_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-3 Finding 3: Exporting a CAS snapshot to snapshots/<same-name>.zip
+    or inside .store/ must be refused before publishing."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="exp-v1", mem_val="exp-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("third")
+
+    colliding_zip = home / "snapshots" / "third.zip"
+    with pytest.raises(ValueError, match="collides with existing CAS snapshot"):
+        snapshot.export_snapshot_to_zip("third", colliding_zip)
+    assert not colliding_zip.exists()
+
+    with pytest.raises(ValueError, match="internal store directory"):
+        snapshot.export_snapshot_to_zip("third", home / "snapshots" / ".store" / "bad.zip")
+
+    # resolve_snapshot('third') stays unambiguous
+    fmt, _ = snapshot.resolve_snapshot("third")
+    assert fmt == "cas"
+
+    # Exporting outside snapshots/ (or with a non-colliding filename) succeeds
+    ok_zip = tmp_path / "third.zip"
+    snapshot.export_snapshot_to_zip("third", ok_zip)
+    assert ok_zip.is_file()
