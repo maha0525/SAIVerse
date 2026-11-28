@@ -5,7 +5,7 @@ SAIVerse dispatches function calls itself. Since google-genai 2.18,
 ... is not recommended" once per process unless
 ``automatic_function_calling.disable=True`` is set explicitly -- even when no
 tools are passed at all. ``llm_clients/gemini.py`` always disabled it; these tests
-pin the SDK behaviour and the three side call sites that were brought in line
+pin the SDK behaviour and the side call sites that were brought in line
 when google-genai moved 1.75 -> 2.21 (docs/intent/dependency_management.md §3-4).
 """
 
@@ -67,24 +67,6 @@ def test_llm_router_disables_afc(mock_client):
     route("hello", OPENAI_TOOLS_SPEC)
 
     config = mock_client.models.generate_content.call_args.kwargs["config"]
-    assert _afc_disabled(config)
-
-
-def test_emotion_module_disables_afc(tmp_path):
-    from persona.emotion_module import EmotionControlModule
-
-    prompt = tmp_path / "emotion_control.txt"
-    prompt.write_text("{user_message}|{assistant_message}", encoding="utf-8")
-    client = MagicMock()
-    resp = MagicMock()
-    resp.text = '{"stability": {"mean": 0.1}}'
-    client.models.generate_content.return_value = resp
-
-    with patch("persona.emotion_module.build_gemini_clients", return_value=(client, None, client)):
-        module = EmotionControlModule(prompt_path=prompt, model="gemini-test")
-    assert module.evaluate("u", "a") == {"stability": {"mean": 0.1}}
-
-    config = client.models.generate_content.call_args.kwargs["config"]
     assert _afc_disabled(config)
 
 

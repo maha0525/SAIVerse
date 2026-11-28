@@ -209,9 +209,8 @@ persona/
 ├── core.py           # PersonaCore メインクラス
 ├── bootstrap.py      # 初期化
 ├── constants.py      # 定数
-├── emotion_module.py # 感情モジュール（実質未活用）
 ├── history.py / history_manager.py # 履歴
-├── mixins/           # 機能別ミックスイン（emotion / generation / history / movement）
+├── mixins/           # 機能別ミックスイン（generation / history / movement）
 └── tasks/            # タスク管理（storage.py / store.py。現状ほぼ未運用）
 ```
 
