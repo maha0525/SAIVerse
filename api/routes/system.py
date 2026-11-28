@@ -799,6 +799,34 @@ def _launch_detached_updater(
         except Exception:
             pass
 
+    # Snapshot companion server / POSIX launcher state while the backend is
+    # still alive so Linux start.sh/start-dev.sh EXIT traps cannot create a
+    # race where companions vanish before the detached worker starts up.
+    pre_searxng_running = False
+    pre_frontend_mode = None
+    posix_launcher_present = False
+    try:
+        from scripts.update_engine import (
+            _has_posix_launcher_ancestor,
+            find_frontend_servers,
+            find_searxng_servers,
+        )
+
+        try:
+            pre_searxng_running = bool(find_searxng_servers(project_path))
+        except Exception:
+            pass
+        try:
+            pre_frontend_mode = find_frontend_servers(project_path).mode
+        except Exception:
+            pass
+        try:
+            posix_launcher_present = _has_posix_launcher_ancestor(os.getpid(), project_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     # Write an atomic, exact restart contract.
     config = {
         "format_version": 2,
@@ -817,6 +845,9 @@ def _launch_detached_updater(
         ),
         "child_processes": child_processes,
         "backend_windows": backend_windows,
+        "pre_searxng_running": pre_searxng_running,
+        "pre_frontend_mode": pre_frontend_mode,
+        "posix_launcher_present": posix_launcher_present,
         "venv_python": venv_python,
         **(extra_config or {}),
     }

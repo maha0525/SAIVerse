@@ -299,3 +299,221 @@ def test_update_engine_main_dispatches_lifecycle_operation_and_cleans_config(
     assert rc == 0
     lifecycle.assert_called_once()
     assert not cfg.exists()
+
+
+def test_detached_restart_on_linux_start_sh_recovers_searxng_and_frontend(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #529 finding: on Linux start.sh/start-dev.sh, backend exit triggers
+    wait -n -> cleanup() killing SearXNG and Frontend. Detached restart must settle
+    and restart SearXNG (before backend) and Frontend (after backend is healthy)."""
+    order: list[str] = []
+    config = {
+        "operation": update_engine.OPERATION_RESTART_BACKEND,
+        "main_pid": 999999,
+        "main_process_created_at": 1234.5,
+        "pre_searxng_running": True,
+        "pre_frontend_mode": update_engine.FRONTEND_MODE_START,
+        "posix_launcher_present": True,
+    }
+    fake_proc = MagicMock(pid=4242)
+
+    with patch.object(update_engine, "_is_windows", return_value=False), patch.object(
+        update_engine,
+        "wait_for_owned_process_exit",
+        side_effect=lambda *_a, **_k: order.append("wait_exit"),
+    ), patch.object(
+        update_engine,
+        "_cleanup_after_backend_exit",
+        side_effect=lambda _c: order.append("cleanup"),
+    ), patch.object(
+        update_engine,
+        "stop_searxng_servers",
+        side_effect=lambda _d: (order.append("stop_searxng"), True)[1],
+    ), patch.object(
+        update_engine,
+        "stop_frontend_servers",
+        side_effect=lambda _d: (
+            order.append("stop_frontend"),
+            update_engine.FrontendServers([], update_engine.FRONTEND_MODE_START),
+        )[1],
+    ), patch.object(update_engine, "find_searxng_servers", return_value=[]), patch.object(
+        update_engine,
+        "find_frontend_servers",
+        return_value=update_engine.FrontendServers([], None),
+    ), patch.object(
+        update_engine,
+        "_restart_searxng",
+        side_effect=lambda _d, was: (order.append(f"restart_searxng:{was}"), True)[1],
+    ), patch.object(
+        update_engine,
+        "restart_application",
+        side_effect=lambda _c: (order.append("restart_backend"), fake_proc)[1],
+    ), patch.object(
+        update_engine,
+        "wait_for_healthy_restart",
+        side_effect=lambda _p, _c: (
+            order.append("healthy"),
+            {"city_name": "city_a", "version": "0.3.35"},
+        )[1],
+    ), patch.object(
+        update_engine,
+        "_restart_frontend",
+        side_effect=lambda _d, mode: order.append(f"restart_frontend:{mode}"),
+    ):
+        update_engine._run_detached_lifecycle_operation(config, tmp_path)
+
+    assert order == [
+        "wait_exit",
+        "cleanup",
+        "stop_searxng",
+        "stop_frontend",
+        "restart_searxng:True",
+        "restart_backend",
+        "healthy",
+        "restart_frontend:start",
+    ]
+
+
+def test_detached_restart_on_windows_leaves_running_companions_untouched(
+    tmp_path: Path,
+) -> None:
+    """When SearXNG and Frontend remain alive (Windows separate windows),
+    restarting the backend must not stop or restart them."""
+    config = {
+        "operation": update_engine.OPERATION_RESTART_BACKEND,
+        "main_pid": 999999,
+        "main_process_created_at": 1234.5,
+        "pre_searxng_running": True,
+        "pre_frontend_mode": update_engine.FRONTEND_MODE_START,
+        "posix_launcher_present": False,
+    }
+    fake_proc = MagicMock(pid=4242)
+
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "wait_for_owned_process_exit"
+    ), patch.object(update_engine, "_cleanup_after_backend_exit"), patch.object(
+        update_engine, "stop_searxng_servers"
+    ) as stop_sx, patch.object(
+        update_engine, "stop_frontend_servers"
+    ) as stop_fe, patch.object(
+        update_engine, "find_searxng_servers", return_value=[MagicMock(pid=88)]
+    ), patch.object(
+        update_engine,
+        "find_frontend_servers",
+        return_value=update_engine.FrontendServers([MagicMock(pid=30)], "start"),
+    ), patch.object(update_engine, "_restart_searxng") as restart_sx, patch.object(
+        update_engine, "restart_application", return_value=fake_proc
+    ), patch.object(
+        update_engine,
+        "wait_for_healthy_restart",
+        return_value={"city_name": "city_a", "version": "0.3.35"},
+    ), patch.object(update_engine, "_restart_frontend") as restart_fe:
+        update_engine._run_detached_lifecycle_operation(config, tmp_path)
+
+    stop_sx.assert_not_called()
+    stop_fe.assert_not_called()
+    restart_sx.assert_not_called()
+    restart_fe.assert_not_called()
+
+
+def test_detached_backup_operation_recovers_stopped_companions_on_linux_start_sh(
+    tmp_path: Path,
+) -> None:
+    """Offline backup operations also stop the backend; when started from
+    Linux start.sh, SearXNG and Frontend must be recovered around the restart."""
+    order: list[str] = []
+    config = {
+        "operation": update_engine.OPERATION_SNAPSHOT_SAVE,
+        "snapshot_name": "manual_snap",
+        "main_pid": 999999,
+        "main_process_created_at": 1234.5,
+        "pre_searxng_running": True,
+        "pre_frontend_mode": update_engine.FRONTEND_MODE_DEV,
+        "posix_launcher_present": True,
+    }
+    fake_proc = MagicMock(pid=5555)
+
+    with patch.object(update_engine, "_is_windows", return_value=False), patch.object(
+        update_engine, "wait_for_owned_process_exit"
+    ), patch.object(update_engine, "_cleanup_after_backend_exit"), patch.object(
+        update_engine,
+        "stop_searxng_servers",
+        side_effect=lambda _d: (order.append("stop_searxng"), True)[1],
+    ), patch.object(
+        update_engine,
+        "stop_frontend_servers",
+        side_effect=lambda _d: (
+            order.append("stop_frontend"),
+            update_engine.FrontendServers([], update_engine.FRONTEND_MODE_DEV),
+        )[1],
+    ), patch.object(
+        update_engine,
+        "create_pre_update_snapshot",
+        side_effect=lambda *_a, **_k: (order.append("snapshot"), "manual_snap")[1],
+    ), patch.object(update_engine, "find_searxng_servers", return_value=[]), patch.object(
+        update_engine,
+        "find_frontend_servers",
+        return_value=update_engine.FrontendServers([], None),
+    ), patch.object(
+        update_engine,
+        "_restart_searxng",
+        side_effect=lambda _d, _w: (order.append("restart_searxng"), True)[1],
+    ), patch.object(
+        update_engine,
+        "restart_application",
+        side_effect=lambda _c: (order.append("restart_backend"), fake_proc)[1],
+    ), patch.object(
+        update_engine,
+        "wait_for_healthy_restart",
+        return_value={"city_name": "city_a", "version": "0.3.35"},
+    ), patch.object(
+        update_engine,
+        "_restart_frontend",
+        side_effect=lambda _d, mode: order.append(f"restart_frontend:{mode}"),
+    ):
+        update_engine._run_detached_backup_operation(config, tmp_path, "python")
+
+    assert order == [
+        "stop_searxng",
+        "stop_frontend",
+        "snapshot",
+        "restart_searxng",
+        "restart_backend",
+        "restart_frontend:dev",
+    ]
+
+
+def test_has_posix_launcher_ancestor_matches_only_this_checkout(tmp_path: Path) -> None:
+    project = tmp_path / "saiverse"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    (project / "start.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (other / "start.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    def make_psutil(parent_cmdline: list[str], parent_cwd: str):
+        parent = MagicMock()
+        parent.cmdline.return_value = parent_cmdline
+        parent.cwd.return_value = parent_cwd
+        proc = MagicMock()
+        proc.parents.return_value = [parent]
+        ps = MagicMock()
+        ps.Error = Exception
+        ps.Process.return_value = proc
+        return ps
+
+    with patch.object(update_engine, "_is_windows", return_value=False):
+        with patch.object(
+            update_engine,
+            "_import_psutil",
+            return_value=make_psutil(["bash", "./start.sh"], str(project)),
+        ):
+            assert update_engine._has_posix_launcher_ancestor(123, project) is True
+
+        with patch.object(
+            update_engine,
+            "_import_psutil",
+            return_value=make_psutil(["bash", "./start.sh"], str(other)),
+        ):
+            assert update_engine._has_posix_launcher_ancestor(123, project) is False

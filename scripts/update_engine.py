@@ -1420,6 +1420,155 @@ def _cleanup_after_backend_exit(config: dict[str, Any]) -> None:
     )
 
 
+_POSIX_LAUNCHER_SCRIPTS = frozenset({"start.sh", "start-dev.sh"})
+
+
+def _has_posix_launcher_ancestor(pid: int, project_dir: Path) -> bool:
+    """Return whether ``pid`` was started under this checkout's ``start.sh`` / ``start-dev.sh``.
+
+    On Linux, those scripts wait with ``wait -n`` and run ``cleanup()`` on EXIT,
+    which sends SIGTERM to companion background jobs (SearXNG, Frontend) as soon
+    as the backend exits. Knowing this before exit lets detached restarts cleanly
+    settle and recover those companions without racing the script's trap.
+    """
+    if _is_windows():
+        return False
+    try:
+        psutil = _import_psutil()
+        launcher_targets = {
+            (project_dir / name).resolve() for name in _POSIX_LAUNCHER_SCRIPTS
+        }
+        proc = psutil.Process(pid)
+        for parent in proc.parents():
+            try:
+                cmdline = list(parent.cmdline() or [])
+            except (psutil.Error, OSError):
+                continue
+            try:
+                cwd = parent.cwd()
+            except (psutil.Error, OSError):
+                cwd = None
+            for arg in cmdline:
+                if os.path.basename(arg) not in _POSIX_LAUNCHER_SCRIPTS:
+                    continue
+                candidate = Path(arg)
+                if not candidate.is_absolute():
+                    if not cwd:
+                        continue
+                    candidate = Path(cwd) / candidate
+                try:
+                    if candidate.resolve() in launcher_targets:
+                        return True
+                except OSError:
+                    continue
+    except Exception:
+        LOGGER.debug("Could not inspect POSIX launcher ancestors for PID %s", pid, exc_info=True)
+    return False
+
+
+def _capture_pre_exit_companion_state(
+    config: dict[str, Any],
+    project_dir: Path,
+) -> tuple[bool, str | None, bool]:
+    """Capture SearXNG / Frontend / start.sh state before the backend exits.
+
+    Prefers values recorded in ``config`` while the backend was still running
+    (closing any race where ``start.sh`` already killed companions before the
+    detached worker finished starting), falling back to live inspection when
+    the config omits those keys.
+    """
+    if "pre_searxng_running" in config:
+        pre_searxng_running = bool(config.get("pre_searxng_running"))
+    else:
+        try:
+            pre_searxng_running = bool(find_searxng_servers(project_dir))
+        except Exception:
+            LOGGER.debug("Could not probe SearXNG state before backend exit", exc_info=True)
+            pre_searxng_running = False
+
+    if "pre_frontend_mode" in config:
+        raw_mode = config.get("pre_frontend_mode")
+        pre_frontend_mode = (
+            str(raw_mode) if raw_mode in _FRONTEND_WINDOW_TITLES else None
+        )
+    else:
+        try:
+            pre_frontend_mode = find_frontend_servers(project_dir).mode
+        except Exception:
+            LOGGER.debug("Could not probe frontend state before backend exit", exc_info=True)
+            pre_frontend_mode = None
+
+    if "posix_launcher_present" in config:
+        posix_launcher_present = bool(config.get("posix_launcher_present"))
+    else:
+        raw_pid = config.get("main_pid")
+        posix_launcher_present = (
+            _has_posix_launcher_ancestor(int(raw_pid), project_dir)
+            if isinstance(raw_pid, int) and raw_pid > 0
+            else False
+        )
+
+    return pre_searxng_running, pre_frontend_mode, posix_launcher_present
+
+
+def _settle_companions_for_posix_launcher(
+    project_dir: Path,
+    *,
+    pre_searxng_running: bool,
+    pre_frontend_mode: str | None,
+) -> None:
+    """Finish stopping companions being torn down by ``start.sh`` / ``start-dev.sh``.
+
+    Calling ``stop_*`` before restarting ensures any process already receiving
+    SIGTERM from ``start.sh``'s ``cleanup()`` trap has fully exited and released
+    its port before we bring it back in an independent session.
+    """
+    if pre_searxng_running:
+        try:
+            stop_searxng_servers(project_dir)
+        except Exception:
+            LOGGER.warning(
+                "Could not cleanly settle SearXNG after POSIX launcher exit; continuing restart",
+                exc_info=True,
+            )
+    if pre_frontend_mode is not None:
+        try:
+            stop_frontend_servers(project_dir)
+        except Exception:
+            LOGGER.warning(
+                "Could not cleanly settle Frontend after POSIX launcher exit; continuing restart",
+                exc_info=True,
+            )
+
+
+def _recover_searxng_if_stopped(project_dir: Path, pre_searxng_running: bool) -> None:
+    """Restart SearXNG if it was running before backend exit and is now stopped."""
+    if not pre_searxng_running:
+        return
+    try:
+        if find_searxng_servers(project_dir):
+            return
+    except Exception:
+        LOGGER.warning("Could not verify SearXNG status during restart; skipping recovery", exc_info=True)
+        return
+    LOGGER.info("SearXNG stopped alongside the backend; starting it again")
+    _restart_searxng(project_dir, True)
+
+
+def _recover_frontend_if_stopped(project_dir: Path, pre_frontend_mode: str | None) -> None:
+    """Restart Frontend if it was running before backend exit and is now stopped."""
+    if pre_frontend_mode is None:
+        return
+    try:
+        if find_frontend_servers(project_dir).processes:
+            return
+    except Exception:
+        LOGGER.warning("Could not verify Frontend status during restart; skipping recovery", exc_info=True)
+        return
+    LOGGER.info("Frontend stopped alongside the backend; starting it again (mode=%s)", pre_frontend_mode)
+    _restart_frontend(project_dir, pre_frontend_mode)
+
+
 def _ensure_portable_git_on_path(project_dir: Path) -> None:
     """Make a setup-installed PortableGit visible to this (separate) session.
 
@@ -4026,11 +4175,21 @@ def _run_detached_backup_operation(
     if operation not in OFFLINE_BACKUP_OPERATIONS:
         raise UpdateError(f"Unknown offline backup operation: {operation!r}")
 
+    pre_searxng_running, pre_frontend_mode, posix_launcher_present = (
+        _capture_pre_exit_companion_state(config, project_dir)
+    )
+
     wait_for_owned_process_exit(
         int(config["main_pid"]),
         config.get("main_process_created_at"),
     )
     _cleanup_after_backend_exit(config)
+    if posix_launcher_present and not _is_windows():
+        _settle_companions_for_posix_launcher(
+            project_dir,
+            pre_searxng_running=pre_searxng_running,
+            pre_frontend_mode=pre_frontend_mode,
+        )
     _remove_file(
         backup_operation_failure_path(project_dir),
         purpose="before starting an offline backup operation",
@@ -4105,6 +4264,7 @@ def _run_detached_backup_operation(
             error=str(exc),
         )
 
+    _recover_searxng_if_stopped(project_dir, pre_searxng_running)
     process = restart_application(config)
     payload = wait_for_healthy_restart(process, config)
     LOGGER.info(
@@ -4114,6 +4274,7 @@ def _run_detached_backup_operation(
         payload.get("version"),
         process.pid,
     )
+    _recover_frontend_if_stopped(project_dir, pre_frontend_mode)
     if op_error is not None:
         if isinstance(op_error, UpdateError):
             raise op_error
@@ -4137,6 +4298,14 @@ def _run_detached_lifecycle_operation(
     if operation not in LIFECYCLE_OPERATIONS:
         raise UpdateError(f"Unknown lifecycle operation: {operation!r}")
 
+    pre_searxng_running = False
+    pre_frontend_mode: str | None = None
+    posix_launcher_present = False
+    if operation == OPERATION_RESTART_BACKEND:
+        pre_searxng_running, pre_frontend_mode, posix_launcher_present = (
+            _capture_pre_exit_companion_state(config, project_dir)
+        )
+
     wait_for_owned_process_exit(
         int(config["main_pid"]),
         config.get("main_process_created_at"),
@@ -4144,6 +4313,13 @@ def _run_detached_lifecycle_operation(
     _cleanup_after_backend_exit(config)
 
     if operation == OPERATION_RESTART_BACKEND:
+        if posix_launcher_present and not _is_windows():
+            _settle_companions_for_posix_launcher(
+                project_dir,
+                pre_searxng_running=pre_searxng_running,
+                pre_frontend_mode=pre_frontend_mode,
+            )
+        _recover_searxng_if_stopped(project_dir, pre_searxng_running)
         process = restart_application(config)
         payload = wait_for_healthy_restart(process, config)
         LOGGER.info(
@@ -4152,6 +4328,7 @@ def _run_detached_lifecycle_operation(
             payload.get("version"),
             process.pid,
         )
+        _recover_frontend_if_stopped(project_dir, pre_frontend_mode)
         return
 
     # OPERATION_SHUTDOWN_ALL: attempt to stop both Frontend and SearXNG even if
