@@ -4,7 +4,7 @@ import { apiFetch, parseUIEvent } from '@/i18n/api';
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Brain, Trash2, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 import MemopediaConversion from './MemopediaConversion';
 
@@ -115,32 +115,6 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         } finally {
             setIsImporting(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
-        }
-    };
-
-    // Working memory add state
-    const [addingToWm, setAddingToWm] = useState<string | null>(null);
-    const [wmAddResult, setWmAddResult] = useState<{ id: string; ok: boolean } | null>(null);
-
-    const handleAddToWorkingMemory = async (hit: UnifiedHit) => {
-        setAddingToWm(hit.source_id);
-        setWmAddResult(null);
-        try {
-            const res = await apiFetch(`/api/people/${personaId}/working-memory/recall`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    source_type: hit.source_type,
-                    source_id: hit.source_id,
-                    title: hit.title,
-                    uri: hit.uri,
-                }),
-            });
-            setWmAddResult({ id: hit.source_id, ok: res.ok });
-        } catch {
-            setWmAddResult({ id: hit.source_id, ok: false });
-        } finally {
-            setAddingToWm(null);
         }
     };
 
@@ -810,7 +784,6 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                     <th className={styles.scoreCol}>{uiText("components.memory.MemoryRecall.label011")}</th>
                                     <th className={styles.roleCol}>{uiText("components.memory.MemoryRecall.label012")}</th>
                                     <th className={styles.contentCol}>{uiText("components.memory.MemoryRecall.label013")}</th>
-                                    <th style={{ width: '3rem', textAlign: 'center' }}>{uiText("components.memory.MemoryRecall.label014")}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -839,34 +812,6 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                                     <code style={{ fontSize: '0.7rem', color: '#666' }}>{hit.uri}</code>
                                                 </>}
                                             </div>
-                                        </td>
-                                        <td style={{ textAlign: 'center' }}>
-                                            <button data-i18n="components.memory.MemoryRecall.text110 components.memory.MemoryRecall.text111"
-                                                onClick={() => handleAddToWorkingMemory(hit)}
-                                                disabled={addingToWm === hit.source_id || !hit.uri}
-                                                title={hit.uri ? uiText("components.memory.MemoryRecall.text110")
-                                                    : uiText("components.memory.MemoryRecall.text111")}
-                                                style={{
-                                                    background: wmAddResult?.id === hit.source_id && wmAddResult.ok
-                                                        ? 'rgba(43, 138, 62, 0.2)' : 'none',
-                                                    border: '1px solid #444',
-                                                    borderRadius: '4px',
-                                                    padding: '2px 6px',
-                                                    cursor: addingToWm === hit.source_id ? 'wait' : 'pointer',
-                                                    color: wmAddResult?.id === hit.source_id && wmAddResult.ok
-                                                        ? '#69db7c' : '#aaa',
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                }}
-                                            >
-                                                {addingToWm === hit.source_id ? (
-                                                    <Loader2 size={12} className={styles.loader} />
-                                                ) : wmAddResult?.id === hit.source_id && wmAddResult.ok ? (
-                                                    '✓'
-                                                ) : (
-                                                    <Plus size={12} />
-                                                )}
-                                            </button>
                                         </td>
                                     </tr>
                                 ))}

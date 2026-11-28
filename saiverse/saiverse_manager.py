@@ -23,7 +23,6 @@ from sea.pulse_controller import PulseController
 from persona.core import PersonaCore
 from .model_configs import get_model_provider, get_context_length
 from .occupancy_manager import OccupancyManager
-from .conversation_manager import ConversationManager
 from .schedule_manager import ScheduleManager
 from .integration_manager import IntegrationManager
 from .meta_layer import MetaLayer
@@ -325,20 +324,6 @@ class SAIVerseManager(
         self._load_occupancy_from_db()
 
         # --- Step 6: Prepare Background Task Managers ---
-        # 自律会話を管理するConversationManagerを準備します（この時点ではまだ起動しません）。
-        self.conversation_managers: Dict[str, ConversationManager] = {}
-        for b_id in self.building_map.keys(): # building_map is already filtered by city
-            # user_roomはユーザー操作起点なので自律会話は不要
-            if not b_id.startswith("user_room"):
-                building = self.building_map[b_id]
-                manager = ConversationManager(
-                    building_id=b_id,
-                    saiverse_manager=self,
-                    interval=building.auto_interval_sec
-                )
-                self.conversation_managers[b_id] = manager
-        logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
-
         # スケジュールマネージャーを初期化 (Phase 4-e: push 駆動、ポーリング廃止)。
         # ⚠️ 構築のみ。起動 (.start()) は start() に集約する (下記 NOTE 参照)。
         self.schedule_manager = ScheduleManager(saiverse_manager=self)
@@ -546,11 +531,7 @@ class SAIVerseManager(
             except Exception:
                 logging.exception("[start] Failed to sync autonomy for %s", persona_id)
 
-        # 3. 自律会話マネージャ (mode=auto のペルソナ)。
-        logging.info("Auto-starting autonomous conversation managers...")
-        self.start_autonomous_conversations()
-
-        # 4. server_start トリガ (ここまで来て初めてワールドは "稼働中")。
+        # 3. server_start トリガ (ここまで来て初めてワールドは "稼働中")。
         self._emit_trigger(
             TriggerType.SERVER_START,
             {"city_id": self.city_id, "city_name": self.city_name},
@@ -1118,10 +1099,6 @@ class SAIVerseManager(
             except Exception:
                 logging.exception("Failed to stop FeedManager")
 
-        # Stop all conversation managers
-        for manager in self.conversation_managers.values():
-            manager.stop()
-
         # Stop integration manager
         if hasattr(self, "integration_manager"):
             self.integration_manager.stop()
@@ -1583,38 +1560,6 @@ class SAIVerseManager(
 
         logging.info("[stop-autonomy] persona=%s", persona_id)
         return {"autonomy_running": am.is_running}
-
-    def start_autonomous_conversations(self):
-        """Start all autonomous conversation managers."""
-        if getattr(self, "runtime", None):
-            self.runtime.start_autonomous_conversations()
-            return
-
-        if self.state.autonomous_conversation_running:
-            logging.warning("Autonomous conversations are already running.")
-            return
-
-        logging.info("Starting all autonomous conversation managers...")
-        for manager in self.conversation_managers.values():
-            manager.start()
-        self.state.autonomous_conversation_running = True
-        logging.info("All autonomous conversation managers have been started.")
-
-    def stop_autonomous_conversations(self):
-        """Stop all autonomous conversation managers."""
-        if getattr(self, "runtime", None):
-            self.runtime.stop_autonomous_conversations()
-            return
-
-        if not self.state.autonomous_conversation_running:
-            logging.warning("Autonomous conversations are not running.")
-            return
-
-        logging.info("Stopping all autonomous conversation managers...")
-        for manager in self.conversation_managers.values():
-            manager.stop()
-        self.state.autonomous_conversation_running = False
-        logging.info("All autonomous conversation managers have been stopped.")
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         """指定された Building の生の会話ログを取得する (DB クエリ)。

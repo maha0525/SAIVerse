@@ -46,6 +46,40 @@ def test_persona_core_init_does_not_build_gemini_clients(tmp_path: Path) -> None
         build_clients.assert_not_called()
 
 
+def test_llm_router_initializes_gemini_clients_lazily() -> None:
+    import importlib
+    import saiverse.llm_router as router
+
+    with patch("saiverse.gemini_clients.build_gemini_clients") as build_clients:
+        importlib.reload(router)
+        build_clients.assert_not_called()
+        assert router.client is None
+
+    fake_client = MagicMock(name="LazyRouterClient")
+    resp = MagicMock()
+    cand = MagicMock()
+    cand.text = '{"call": "no", "tool": "", "args": {}}'
+    resp.candidates = [cand]
+    fake_client.models.generate_content.return_value = resp
+
+    with patch("saiverse.llm_router.build_gemini_clients", return_value=(fake_client, None, fake_client)) as build_clients:
+        decision = router.route("hello", [])
+        assert decision == {"call": "no", "tool": "", "args": {}}
+        build_clients.assert_called_once()
+        # Second call reuses the cached client
+        router.route("hello again", [])
+        build_clients.assert_called_once()
+
+        # rebuild_clients() resets lazily without eagerly rebuilding
+        router.rebuild_clients()
+        assert router.client is None
+        build_clients.assert_called_once()
+
+        # Next route() rebuilds once
+        router.route("after rebuild", [])
+        assert build_clients.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # B1. Main DB backup pruning avoids re-running integrity_check on old backups
 # ---------------------------------------------------------------------------

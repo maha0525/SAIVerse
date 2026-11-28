@@ -212,7 +212,6 @@ class RuntimeService(
         self._register_with_sds = manager._register_with_sds
         self._update_cities_from_sds = manager._update_cities_from_sds
         self._load_cities_from_db = manager._load_cities_from_db
-        self.conversation_managers = manager.conversation_managers
         self.occupancy_manager = manager.occupancy_manager
         self._gateway_memory_transfers = manager._gateway_memory_transfers
         self._gateway_memory_active_persona = manager._gateway_memory_active_persona
@@ -1448,28 +1447,6 @@ class RuntimeService(
             except Exception:
                 logging.exception("preview_context failed for persona %s", persona.persona_id)
         return results
-
-    def start_autonomous_conversations(self) -> None:
-        if self.state.autonomous_conversation_running:
-            logging.warning("Autonomous conversations are already running.")
-            return
-
-        logging.info("Starting all autonomous conversation managers...")
-        for manager in self.conversation_managers.values():
-            manager.start()
-        self.state.autonomous_conversation_running = True
-        logging.info("All autonomous conversation managers have been started.")
-
-    def stop_autonomous_conversations(self) -> None:
-        if not self.state.autonomous_conversation_running:
-            logging.warning("Autonomous conversations are not running.")
-            return
-
-        logging.info("Stopping all autonomous conversation managers...")
-        for manager in self.conversation_managers.values():
-            manager.stop()
-        self.state.autonomous_conversation_running = False
-        logging.info("All autonomous conversation managers have been stopped.")
 
     def execute_tool(
         self, tool_id: int, persona_id: str, arguments: Dict[str, Any]

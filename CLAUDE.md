@@ -97,7 +97,7 @@ Full workflow, parameter rules, and dev tooltip usage: `docs/developer-guide/loc
 
 **OccupancyManager** (`saiverse/occupancy_manager.py`) — handles *all* entity movement and capacity limits. Do not call PersonaCore methods directly to move anything.
 
-**ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op** since the 2026-05-01 cognitive-model migration. Its v1 successors are gone too: `SubLineScheduler` was deleted 2026-07-06 and the `track_autonomous` playbook retired 2026-07-10. Current autonomous driving is the **time-table + judgment points** in `saiverse/autonomy_wiring.py`; `AutonomyManager` now runs a watchdog-only tick. Removing the `ConversationManager` class itself is still pending (landscape §9).
+**Autonomous driving** — time-table + judgment points in `saiverse/autonomy_wiring.py`; `AutonomyManager` runs a watchdog-only tick. Legacy `ConversationManager` (`saiverse/conversation_manager.py`), `SubLineScheduler`, and `track_autonomous` have all been removed.
 
 **RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`) — **frozen**. `/inter-city/*` and `/persona-proxy/{id}/think` return 503.
 
