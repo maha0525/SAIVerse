@@ -884,3 +884,54 @@ def test_bounded_zlib_decompression_caps_peak_memory_and_rejects_trailing_garbag
     truncated_path = tmp_path / "zeros_truncated.z"
     truncated_path.write_bytes(z_path.read_bytes()[:-8])
     assert snapshot._verify_existing_object(truncated_path, "zlib", expected_sha, total_size) is False
+
+
+def test_persona_memory_restore_rolls_back_when_head_cache_clear_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex PR #531 round-3 finding: If saiverse.db is locked (BEGIN IMMEDIATE)
+    so session_head_snapshot cannot be cleared, restore_simple_backup must fail
+    and roll back memory.db to its pre-restore contents."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+    monkeypatch.setattr(mem_backup, "_HEAD_SNAPSHOT_CLEAR_TIMEOUT_SECONDS", 0.1)
+
+    mem_db = home / "personas" / "mira" / "memory.db"
+    main_db = home / "user_data" / "database" / "saiverse.db"
+    _create_sqlite(mem_db, "memory-v1")
+    main_db.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(main_db)) as conn:
+        conn.execute(
+            "CREATE TABLE session_head_snapshot ("
+            "PERSONA_ID TEXT, MODEL_KEY TEXT, SECTIONS_JSON TEXT)"
+        )
+        conn.execute("INSERT INTO session_head_snapshot VALUES ('mira', 'm1', '{\"old\": true}')")
+        conn.commit()
+
+    b1 = mem_backup.run_simple_backup(persona_id="mira", db_path=mem_db, skip_if_unchanged=False)
+    assert b1 is not None
+
+    _create_sqlite(mem_db, "memory-v2-live")
+
+    # Hold a write lock on saiverse.db so DELETE FROM session_head_snapshot fails
+    locker = sqlite3.connect(main_db, isolation_level=None)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+        with patch("saiverse.runtime_marker.marker_status", return_value=("stopped", "test")):
+            with pytest.raises(mem_backup.BackupError, match="session_head_snapshot"):
+                mem_backup.restore_simple_backup(
+                    persona_id="mira",
+                    filename=b1.name,
+                    db_path=mem_db,
+                    saiverse_db_path=main_db,
+                    require_stopped=True,
+                )
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+
+    # Original live memory.db MUST be intact (rolled back) and head cache untouched
+    assert _read_sqlite(mem_db) == "memory-v2-live"
+    with closing(sqlite3.connect(main_db)) as conn:
+        rows = conn.execute("SELECT PERSONA_ID FROM session_head_snapshot").fetchall()
+    assert rows == [("mira",)]

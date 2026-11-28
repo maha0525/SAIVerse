@@ -727,13 +727,23 @@ def _create_pre_restore_backup(
         raise
 
 
+_HEAD_SNAPSHOT_CLEAR_TIMEOUT_SECONDS = 5.0
+
+
 def _clear_persona_head_snapshots(saiverse_db_path: Path, persona_id: str) -> int:
     """Remove cached head snapshots for ``persona_id`` so the next turn rebuilds
-    Memopedia / Core Memory sections from the restored ``memory.db``."""
+    Memopedia / Core Memory sections from the restored ``memory.db``.
+
+    Raises :class:`BackupError` if ``saiverse.db`` cannot be updated (e.g.
+    locked or unreadable), so the caller rolls back the ``memory.db`` swap
+    instead of leaving stale head cache rows behind.
+    """
     if not saiverse_db_path.is_file():
         return 0
     try:
-        with closing(sqlite3.connect(saiverse_db_path)) as conn:
+        with closing(
+            sqlite3.connect(saiverse_db_path, timeout=_HEAD_SNAPSHOT_CLEAR_TIMEOUT_SECONDS)
+        ) as conn:
             table_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_head_snapshot'"
             ).fetchone()
@@ -746,13 +756,9 @@ def _clear_persona_head_snapshots(saiverse_db_path: Path, persona_id: str) -> in
             conn.commit()
             return cur.rowcount or 0
     except sqlite3.Error as exc:
-        LOGGER.warning(
-            "Could not clear session_head_snapshot for %s in %s: %s",
-            persona_id,
-            saiverse_db_path,
-            exc,
-        )
-        return 0
+        raise BackupError(
+            f"Could not clear session_head_snapshot for {persona_id} in {saiverse_db_path}: {exc}"
+        ) from exc
 
 
 def restore_simple_backup(
@@ -810,6 +816,8 @@ def restore_simple_backup(
     ]
     moved_sidecars: list[tuple[Path, Path]] = []
     moved_main = False
+    swapped_new = False
+    cleared_heads = 0
 
     try:
         wal = backup_path.with_name(backup_path.name + "-wal")
@@ -856,6 +864,12 @@ def restore_simple_backup(
                 moved_sidecars.append((sidecar, destination))
 
         os.replace(staged, db_path)
+        swapped_new = True
+
+        # Clearing head cache is mandatory: if saiverse.db is locked or fails,
+        # roll back memory.db so restored memory and cached head never diverge.
+        if saiverse_db_path is not None:
+            cleared_heads = _clear_persona_head_snapshots(saiverse_db_path, safe_persona)
 
         if rollback.exists():
             with contextlib.suppress(OSError):
@@ -870,14 +884,13 @@ def restore_simple_backup(
             with contextlib.suppress(OSError):
                 db_path.unlink(missing_ok=True)
             os.replace(rollback, db_path)
+        elif swapped_new:
+            with contextlib.suppress(OSError):
+                db_path.unlink(missing_ok=True)
         for original, moved in reversed(moved_sidecars):
             if moved.exists():
                 os.replace(moved, original)
         raise
-
-    cleared_heads = 0
-    if saiverse_db_path is not None:
-        cleared_heads = _clear_persona_head_snapshots(saiverse_db_path, safe_persona)
 
     LOGGER.info(
         "Restored persona %s memory.db from %s (pre_restore=%s, cleared_head_snapshots=%d)",
