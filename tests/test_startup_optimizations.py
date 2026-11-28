@@ -12,51 +12,18 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# A. Lazy EmotionControlModule on PersonaCore
+# A. PersonaCore.__init__ must not eagerly construct Gemini SDK clients
 # ---------------------------------------------------------------------------
 
 
-def test_persona_core_emotion_module_is_lazy_and_cached(tmp_path: Path) -> None:
-    from persona.core import PersonaCore
-
-    persona = PersonaCore.__new__(PersonaCore)
-    persona._emotion_module = None
-    persona._emotion_module_lock = threading.Lock()
-
-    fake_module = MagicMock(name="EmotionControlModuleInstance")
-    with patch("persona.core.EmotionControlModule", return_value=fake_module) as cls:
-        # Not instantiated until accessed
-        cls.assert_not_called()
-        first = persona.emotion_module
-        second = persona.emotion_module
-
-    assert first is fake_module
-    assert second is fake_module
-    cls.assert_called_once_with()
-
-
-def test_persona_core_emotion_module_setter_does_not_trigger_init() -> None:
-    from persona.core import PersonaCore
-
-    persona = PersonaCore.__new__(PersonaCore)
-    persona._emotion_module = None
-    persona._emotion_module_lock = threading.Lock()
-
-    injected = MagicMock(name="InjectedEmotionModule")
-    with patch("persona.core.EmotionControlModule") as cls:
-        persona.emotion_module = injected
-        assert persona.emotion_module is injected
-    cls.assert_not_called()
-
-
-def test_persona_core_init_does_not_eagerly_build_emotion_module(tmp_path: Path) -> None:
+def test_persona_core_init_does_not_build_gemini_clients(tmp_path: Path) -> None:
     from persona.core import PersonaCore
 
     common_prompt = tmp_path / "common.txt"
     common_prompt.write_text("common", encoding="utf-8")
 
     with (
-        patch("persona.core.EmotionControlModule") as emotion_cls,
+        patch("saiverse.gemini_clients.build_gemini_clients") as build_clients,
         patch("persona.core.load_session_data", side_effect=lambda p: setattr(p, "messages", [])),
         patch("persona.core.initialise_memory_adapter", return_value=None),
         patch("persona.core.initialise_pulse_state"),
@@ -75,9 +42,8 @@ def test_persona_core_init_does_not_eagerly_build_emotion_module(tmp_path: Path)
             session_factory=MagicMock(),
             is_visitor=True,
         )
-        emotion_cls.assert_not_called()
-        _ = persona.emotion_module
-        emotion_cls.assert_called_once_with()
+        assert not hasattr(persona, "emotion_module")
+        build_clients.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

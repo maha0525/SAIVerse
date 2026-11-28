@@ -1,5 +1,4 @@
 import logging
-import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -13,7 +12,6 @@ from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client
 from saiverse.model_configs import model_supports_images
 from persona.history_manager import HistoryManager
-from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
 from persona.bootstrap import (
     initialise_memory_adapter,
@@ -28,7 +26,6 @@ from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
     PersonaMovementMixin,
-    PersonaEmotionMixin,
 )
 
 load_dotenv()
@@ -38,7 +35,6 @@ class PersonaCore(
     PersonaGenerationMixin,
     PersonaHistoryMixin,
     PersonaMovementMixin,
-    PersonaEmotionMixin,
 ):
     # 特殊ペルソナの役割 (AI.PERSONA_ROLE 由来)。None=通常ペルソナ、'ruler'=Region RPG の GM。
     # 構築後に manager 側 (manager/persona.py) が設定する。設計: temp/region_rpg_intent.md §B
@@ -165,12 +161,6 @@ class PersonaCore(
         # head_pipeline 側 (LineHeadSnapshot + VisualContextSection) に統合済み。
         # persona 属性としては保持しない。詳細: docs/intent/cached_head_architecture.md
 
-        # EmotionControlModule is created lazily on first access (see property
-        # below). Its constructor builds two google-genai HTTP/SSL clients
-        # (~1 s on Windows), so instantiating it eagerly for every persona at
-        # boot dominated startup time.
-        self._emotion_module: Optional[EmotionControlModule] = None
-        self._emotion_module_lock = threading.Lock()
         tz_label = (timezone_name or "UTC").strip() or "UTC"
         if isinstance(timezone_info, str):
             candidate = timezone_info.strip() or tz_label
@@ -322,30 +312,6 @@ class PersonaCore(
             self._lightweight_llm_client = value
             self._lightweight_llm_client_initialized = True
             self._lightweight_llm_client_error = None
-
-    @property
-    def emotion_module(self) -> EmotionControlModule:
-        """Lazily create EmotionControlModule on first access."""
-        module = getattr(self, "_emotion_module", None)
-        if module is not None:
-            return module
-        lock = getattr(self, "_emotion_module_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._emotion_module_lock = lock
-        with lock:
-            if getattr(self, "_emotion_module", None) is None:
-                self._emotion_module = EmotionControlModule()
-            return self._emotion_module
-
-    @emotion_module.setter
-    def emotion_module(self, value: Optional[EmotionControlModule]) -> None:
-        lock = getattr(self, "_emotion_module_lock", None)
-        if lock is None:
-            self._emotion_module = value
-            return
-        with lock:
-            self._emotion_module = value
 
     @property
     def common_prompt(self) -> str:
