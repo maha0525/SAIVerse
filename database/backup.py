@@ -77,49 +77,89 @@ def relocate_legacy_db_backups(db_path: Path) -> int:
     target_dir.mkdir(parents=True, exist_ok=True)
     moved = 0
     db_name = db_path.name
+    failed_bases: set[str] = set()
 
-    # Pass 1: move base .bak files (and matching .bak.json / non-empty WAL).
+    # Pass 1: move base .bak files together with their .bak.json and any non-empty WAL.
+    # If moving a non-empty .bak-wal fails after the base .bak was moved, roll back the
+    # base .bak move and record the base in ``failed_bases`` so Pass 2 never deletes the
+    # WAL as orphaned.
     for item in list(source_dir.iterdir()):
         if not item.is_file() or not _is_db_backup_artifact(item.name, db_name):
             continue
         if item.name.endswith((".bak-wal", ".bak-shm", ".bak.json")):
             continue
         dest = target_dir / item.name
+        wal = item.with_name(item.name + "-wal")
+        shm = item.with_name(item.name + "-shm")
+        meta = item.with_name(item.name + ".json")
+        moved_base = False
+        moved_wal = False
         try:
+            has_nonempty_wal = wal.is_file() and wal.stat().st_size > 0
             if not dest.exists():
                 shutil.move(str(item), str(dest))
-                moved += 1
-            meta = item.with_name(item.name + ".json")
-            if meta.is_file():
-                meta_dest = target_dir / meta.name
-                if not meta_dest.exists():
-                    shutil.move(str(meta), str(meta_dest))
-            wal = item.with_name(item.name + "-wal")
-            shm = item.with_name(item.name + "-shm")
-            if wal.is_file() and wal.stat().st_size > 0:
+                moved_base = True
+            if has_nonempty_wal:
                 wal_dest = target_dir / wal.name
                 if not wal_dest.exists():
                     shutil.move(str(wal), str(wal_dest))
+                    moved_wal = True
                 if shm.is_file():
                     shm_dest = target_dir / shm.name
                     if not shm_dest.exists():
                         shutil.move(str(shm), str(shm_dest))
             else:
                 _remove_sqlite_sidecars(item)
+            if meta.is_file():
+                meta_dest = target_dir / meta.name
+                if not meta_dest.exists():
+                    shutil.move(str(meta), str(meta_dest))
+            if moved_base:
+                moved += 1
         except OSError as exc:
+            failed_bases.add(item.name)
             LOGGER.warning("Could not relocate legacy DB backup %s: %s", item.name, exc)
+            if moved_wal and (target_dir / wal.name).is_file() and not wal.exists():
+                try:
+                    shutil.move(str(target_dir / wal.name), str(wal))
+                except OSError:
+                    LOGGER.warning("Could not roll back WAL move for %s", item.name, exc_info=True)
+            if moved_base and dest.is_file() and not item.exists():
+                try:
+                    shutil.move(str(dest), str(item))
+                except OSError:
+                    LOGGER.warning("Could not roll back base backup move for %s", item.name, exc_info=True)
 
     # Pass 2: remove orphaned .bak-wal / .bak-shm sidecars left by older prunes.
+    # Never delete sidecars belonging to a failed relocation, and never delete a
+    # non-empty .bak-wal whose base .bak exists in either source_dir or target_dir.
     for item in list(source_dir.iterdir()):
         if not item.is_file() or not _is_db_backup_artifact(item.name, db_name):
             continue
         if item.name.endswith((".bak-wal", ".bak-shm")):
             base_name = item.name[:-4]
-            if not (source_dir / base_name).exists():
-                try:
-                    item.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            if base_name in failed_bases:
+                continue
+            if (source_dir / base_name).exists():
+                continue
+            if (target_dir / base_name).exists():
+                if item.name.endswith(".bak-wal"):
+                    try:
+                        if item.stat().st_size > 0:
+                            continue
+                    except OSError:
+                        continue
+                else:
+                    matching_wal = source_dir / (base_name + "-wal")
+                    try:
+                        if matching_wal.is_file() and matching_wal.stat().st_size > 0:
+                            continue
+                    except OSError:
+                        continue
+            try:
+                item.unlink(missing_ok=True)
+            except OSError:
+                pass
     if moved:
         LOGGER.info("Relocated %d legacy DB backup(s) to %s", moved, target_dir)
     return moved

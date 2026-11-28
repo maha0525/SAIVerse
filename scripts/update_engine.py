@@ -1551,21 +1551,23 @@ def _cleanup_partial_snapshot_files(name: str, child_pid: int | None = None) -> 
 
     manifests_dir = snaps / "manifests"
     if manifests_dir.is_dir():
+        manifest_tmp_re = re.compile(rf"^{re.escape(name)}\.json\.tmp\.\d+$")
         try:
-            for candidate in list(manifests_dir.glob(f"{name}.json.tmp*")):
-                _remove_partial_snapshot_archive(candidate)
+            for candidate in list(manifests_dir.iterdir()):
+                if candidate.is_file() and manifest_tmp_re.match(candidate.name):
+                    _remove_partial_snapshot_archive(candidate)
         except OSError as exc:
             LOGGER.warning("Could not scan partial snapshot manifests in %s: %s", manifests_dir, exc)
 
     if child_pid is not None:
         objects_dir = snaps / ".store" / "objects"
         if objects_dir.is_dir():
-            marker = f".tmp.{child_pid}"
+            obj_tmp_re = re.compile(rf"\.(?:raw|z)\.tmp\.{child_pid}(?:\.\d+)?$")
             try:
                 for root, _dirs, files in os.walk(objects_dir):
                     root_path = Path(root)
                     for fname in files:
-                        if marker in fname:
+                        if obj_tmp_re.search(fname):
                             _remove_partial_snapshot_archive(root_path / fname)
             except OSError as exc:
                 LOGGER.warning("Could not scan partial CAS objects in %s: %s", objects_dir, exc)

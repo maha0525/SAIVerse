@@ -541,3 +541,95 @@ def test_export_snapshot_to_zip_sets_file_size_and_force_zip64(
     # Exported ZIP64 archive still validates and extracts cleanly.
     meta = snapshot.validate_and_extract_snapshot(out_zip, tmp_path / "extract_z64")
     assert meta["file_count"] == 3
+
+
+# ---- Codex review round-2 regression tests (PR #525) ----
+
+
+def test_snapshot_name_containing_json_tmp_survives_list_gc_and_restore(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-2 Finding 1: Valid snapshot names containing '.json.tmp' must not be
+    treated as temp files by list_snapshots, GC, or leftover cleanup."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="tricky-v1", mem_val="tricky-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    tricky_names = ["world.json.tmp_old", "world.json.tmp.12345"]
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        for sname in tricky_names:
+            snapshot.save_snapshot(sname)
+
+        # Saving 'world' must not delete 'world.json.tmp_old.json' or 'world.json.tmp.12345.json'
+        snapshot.save_snapshot("world")
+
+        listed_names = {item["name"] for item in snapshot.list_snapshots()}
+        assert {"world", *tricky_names}.issubset(listed_names)
+
+        # GC must keep all objects referenced by those manifests
+        gc_res = snapshot.gc_store()
+        assert gc_res["removed_objects"] == 0
+
+        # Mutate world and restore from 'world.json.tmp_old'
+        _create_sqlite(home / "user_data" / "database" / "saiverse.db", "changed")
+        rc = snapshot.cmd_restore(
+            argparse.Namespace(name="world.json.tmp_old", yes=True, no_auto_snapshot=True)
+        )
+        assert rc == 0
+        assert _read_sqlite(home / "user_data" / "database" / "saiverse.db") == "tricky-v1"
+
+
+def test_save_snapshot_emits_mid_file_byte_progress_before_file_completes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-2 Finding 2: Workers emit byte-level progress mid-file before a
+    single large file finishes hashing/compressing."""
+    home = tmp_path / "home"
+    big = home / "user_data" / "database" / "saiverse.db"
+    _create_sqlite(big, "single-file-progress")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+    monkeypatch.setattr(snapshot, "STREAM_CHUNK_SIZE", 1024)
+    monkeypatch.setattr(snapshot, "PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    lines: list[str] = []
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("midfile", workers=1, progress_callback=lines.append)
+
+    # Progress must have been emitted while done_files was still 0 (mid-file)
+    assert any("0/1 files" in line and "processed:" in line for line in lines)
+
+
+def test_relocate_legacy_db_backups_preserves_wal_when_wal_move_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-2 Finding 3: If moving a non-empty .bak-wal fails after moving its
+    base .bak, the base move is rolled back and Pass 2 never deletes the WAL."""
+    import shutil
+    from database.backup import relocate_legacy_db_backups
+
+    home = tmp_path / "home"
+    db_path = home / "user_data" / "database" / "saiverse.db"
+    _create_sqlite(db_path, "live")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    legacy_bak = db_path.parent / "saiverse.db_20260101_000000.bak"
+    legacy_wal = db_path.parent / "saiverse.db_20260101_000000.bak-wal"
+    legacy_bak.write_bytes(b"backup-base")
+    legacy_wal.write_bytes(b"uncheckpointed-wal-data")
+
+    real_move = shutil.move
+
+    def _fail_on_wal(src, dst, *args, **kwargs):
+        if str(src).endswith(".bak-wal"):
+            raise OSError("simulated WAL I/O failure")
+        return real_move(src, dst, *args, **kwargs)
+
+    with patch("database.backup.shutil.move", side_effect=_fail_on_wal):
+        moved = relocate_legacy_db_backups(db_path)
+
+    assert moved == 0
+    # Base .bak was rolled back and non-empty .bak-wal was NOT deleted as orphaned
+    assert legacy_bak.is_file()
+    assert legacy_wal.is_file()
+    assert legacy_wal.read_bytes() == b"uncheckpointed-wal-data"
+    assert not (home / "backups" / "saiverse_db" / legacy_bak.name).exists()

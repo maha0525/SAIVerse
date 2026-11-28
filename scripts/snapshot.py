@@ -20,6 +20,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sqlite3
@@ -424,13 +425,20 @@ def build_metadata(
     }
 
 
-def _sha256_and_size(path: Path) -> Tuple[str, int]:
+def _sha256_and_size(
+    path: Path,
+    *,
+    on_bytes: Optional[Callable[[int], None]] = None,
+) -> Tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(STREAM_CHUNK_SIZE), b""):
             digest.update(chunk)
-            size += len(chunk)
+            chunk_len = len(chunk)
+            size += chunk_len
+            if on_bytes is not None:
+                on_bytes(chunk_len)
     return digest.hexdigest(), size
 
 
@@ -501,6 +509,8 @@ def _write_object_atomically(
     sha256: str,
     expected_size: int,
     encoding: str,
+    *,
+    on_bytes: Optional[Callable[[int], None]] = None,
 ) -> Path:
     raw_path, z_path = _object_paths(sha256)
     target = raw_path if encoding == "raw" else z_path
@@ -513,16 +523,22 @@ def _write_object_atomically(
             if encoding == "raw":
                 for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
                     digest.update(chunk)
-                    actual_size += len(chunk)
+                    chunk_len = len(chunk)
+                    actual_size += chunk_len
                     dst.write(chunk)
+                    if on_bytes is not None:
+                        on_bytes(chunk_len)
             else:
                 compressor = zlib.compressobj(level=ZLIB_COMPRESS_LEVEL)
                 for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
                     digest.update(chunk)
-                    actual_size += len(chunk)
+                    chunk_len = len(chunk)
+                    actual_size += chunk_len
                     compressed = compressor.compress(chunk)
                     if compressed:
                         dst.write(compressed)
+                    if on_bytes is not None:
+                        on_bytes(chunk_len)
                 tail = compressor.flush()
                 if tail:
                     dst.write(tail)
@@ -543,13 +559,14 @@ def _process_entry_for_cas(
     *,
     hash_locks: Dict[str, threading.Lock],
     locks_guard: threading.Lock,
+    on_bytes: Optional[Callable[[int], None]] = None,
 ) -> Tuple[str, str, int, str, bool]:
     """1 ファイルをハッシュ計算し、未保存なら CAS 倉庫へ書き込む。
 
     Returns:
         (archive_path, sha256, size, encoding, was_new)
     """
-    sha256, size = _sha256_and_size(entry.abs_path)
+    sha256, size = _sha256_and_size(entry.abs_path, on_bytes=on_bytes)
     existing = _find_existing_object(sha256, size)
     if existing is not None:
         _, encoding = existing
@@ -564,7 +581,7 @@ def _process_entry_for_cas(
             _, encoding = existing
             return entry.archive_path, sha256, size, encoding, False
         encoding = _preferred_encoding(entry.abs_path)
-        _write_object_atomically(entry.abs_path, sha256, size, encoding)
+        _write_object_atomically(entry.abs_path, sha256, size, encoding, on_bytes=on_bytes)
         return entry.archive_path, sha256, size, encoding, True
 
 
@@ -591,13 +608,41 @@ def resolve_snapshot(name: str) -> Tuple[str, Path]:
     raise FileNotFoundError(f"Snapshot '{name}' not found")
 
 
+_MANIFEST_TEMP_RE = re.compile(r"\.json\.tmp\.(\d+)$")
+_OBJECT_TEMP_RE = re.compile(r"\.(?:raw|z)\.tmp\.(\d+)(?:\.\d+)?$")
+
+
+def _is_manifest_temp_file(filename: str) -> bool:
+    """``<name>.json.tmp.<pid>`` 形式の一時マニフェストかどうか。
+
+    確定済みマニフェストは必ず ``.json`` で終わるため、名前に ``.json.tmp`` を
+    含む正当なスナップショット (例: ``world.json.tmp_old.json``) とは衝突しない。
+    """
+    return _MANIFEST_TEMP_RE.search(filename) is not None
+
+
+def _is_object_temp_file(filename: str) -> bool:
+    """``<sha256>.(raw|z).tmp.<pid>.<tid>`` 形式の一時オブジェクトかどうか。"""
+    return _OBJECT_TEMP_RE.search(filename) is not None
+
+
+def _temp_file_pid(filename: str) -> Optional[int]:
+    match = _MANIFEST_TEMP_RE.search(filename) or _OBJECT_TEMP_RE.search(filename)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def list_snapshots() -> List[Dict[str, Any]]:
     """全スナップショット (CAS + 旧 ZIP) の一覧を返す (新しい順)。"""
     items: List[Dict[str, Any]] = []
     mdir = manifests_dir()
     if mdir.is_dir():
         for path in sorted(mdir.glob("*.json")):
-            if ".json.tmp" in path.name or not path.is_file():
+            if not path.is_file():
                 continue
             meta = read_snapshot_metadata(path)
             items.append({
@@ -648,7 +693,7 @@ def _collect_live_object_hashes() -> Tuple[set[str], List[str]]:
         return referenced, corrupted
 
     for path in sorted(mdir.glob("*.json")):
-        if ".json.tmp" in path.name or not path.is_file():
+        if not path.is_file():
             continue
         meta = read_snapshot_metadata(path)
         if not meta or meta.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
@@ -684,15 +729,10 @@ def _parse_object_filename(filename: str) -> Optional[str]:
 
 
 def _is_temp_file_stale(filename: str) -> bool:
-    """``*.tmp.<pid>.*`` / ``*.tmp.<pid>`` の持ち主プロセスが既に終了しているか。"""
-    if ".tmp." not in filename:
+    """一時ファイルの持ち主プロセスが既に終了しているか。"""
+    pid = _temp_file_pid(filename)
+    if pid is None:
         return False
-    tail = filename.split(".tmp.", 1)[1]
-    pid_str = tail.split(".", 1)[0]
-    try:
-        pid = int(pid_str)
-    except ValueError:
-        return True
     if pid == os.getpid():
         return False
     try:
@@ -723,7 +763,7 @@ def get_store_stats() -> Dict[str, Any]:
                     size = fpath.stat().st_size
                 except OSError:
                     continue
-                if ".tmp." in fname:
+                if _is_object_temp_file(fname):
                     temp_file_count += 1
                     temp_bytes += size
                     continue
@@ -883,7 +923,7 @@ def _gc_store_locked(*, dry_run: bool = False) -> Dict[str, Any]:
                     size = fpath.stat().st_size
                 except OSError:
                     continue
-                if ".tmp." in fname:
+                if _is_object_temp_file(fname):
                     if _is_temp_file_stale(fname):
                         if not dry_run:
                             try:
@@ -925,7 +965,7 @@ def _gc_store_locked(*, dry_run: bool = False) -> Dict[str, Any]:
     mdir = manifests_dir()
     if mdir.is_dir():
         for path in list(mdir.iterdir()):
-            if path.is_file() and ".tmp." in path.name and _is_temp_file_stale(path.name):
+            if path.is_file() and _is_manifest_temp_file(path.name) and _is_temp_file_stale(path.name):
                 try:
                     size = path.stat().st_size
                 except OSError:
@@ -953,14 +993,22 @@ def _gc_store_locked(*, dry_run: bool = False) -> Dict[str, Any]:
 def cleanup_temp_files_for_pid(pid: int) -> int:
     """強制終了された子プロセス (``pid``) が残した一時ファイルを掃除する。"""
     removed = 0
-    marker = f".tmp.{pid}"
-    for base in (manifests_dir(), objects_dir()):
-        if not base.is_dir():
-            continue
-        for root, _dirs, files in os.walk(base):
+    mdir = manifests_dir()
+    if mdir.is_dir():
+        for path in list(mdir.iterdir()):
+            if path.is_file() and _is_manifest_temp_file(path.name) and _temp_file_pid(path.name) == pid:
+                try:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+                except OSError as exc:
+                    LOGGER.warning("Could not remove leftover temp %s: %s", path, exc)
+
+    odir = objects_dir()
+    if odir.is_dir():
+        for root, _dirs, files in os.walk(odir):
             root_path = Path(root)
             for fname in files:
-                if marker in fname:
+                if _is_object_temp_file(fname) and _temp_file_pid(fname) == pid:
                     try:
                         (root_path / fname).unlink(missing_ok=True)
                         removed += 1
@@ -1540,12 +1588,14 @@ def _save_snapshot_locked(
     if not home.exists():
         raise FileNotFoundError(f"SAIVerse home not found: {home}")
 
-    # 前回の中断で残った同名の未確定ファイルを片付ける
-    for leftover in list(mdir.glob(f"{name}.json.tmp*")):
-        try:
-            leftover.unlink(missing_ok=True)
-        except OSError as exc:
-            LOGGER.warning("Could not remove leftover %s: %s", leftover, exc)
+    # 前回の中断で残った同名の未確定ファイルだけを片付ける (確定済み *.json は触らない)
+    leftover_manifest_re = re.compile(rf"^{re.escape(name)}\.json\.tmp\.\d+$")
+    for leftover in list(mdir.iterdir()):
+        if leftover.is_file() and leftover_manifest_re.match(leftover.name):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove leftover %s: %s", leftover, exc)
     legacy_tmp = snapshots_dir() / f"{name}.zip.tmp"
     if legacy_tmp.exists():
         try:
@@ -1568,12 +1618,31 @@ def _save_snapshot_locked(
     hash_locks: Dict[str, threading.Lock] = {}
     locks_guard = threading.Lock()
 
+    progress_lock = threading.Lock()
     done_files = 0
     done_bytes = 0
+    processed_io_bytes = 0
     new_objects = 0
     reused_objects = 0
     last_report = time.monotonic()
     worker_count = max(1, min(workers, len(entries) or 1))
+
+    def _on_worker_bytes(chunk_bytes: int) -> None:
+        nonlocal processed_io_bytes, last_report
+        msg: Optional[str] = None
+        with progress_lock:
+            processed_io_bytes += chunk_bytes
+            now = time.monotonic()
+            if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                last_report = now
+                msg = (
+                    f"[snapshot] {done_files}/{len(entries)} files "
+                    f"(done: {done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB, "
+                    f"processed: {processed_io_bytes / (1024 * 1024):.1f} MB, "
+                    f"new: {new_objects}, reused: {reused_objects})"
+                )
+        if msg is not None:
+            _emit_progress(msg, progress_callback)
 
     if entries:
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
@@ -1583,6 +1652,7 @@ def _save_snapshot_locked(
                     entry,
                     hash_locks=hash_locks,
                     locks_guard=locks_guard,
+                    on_bytes=_on_worker_bytes,
                 ): entry
                 for entry in entries
             }
@@ -1595,26 +1665,32 @@ def _save_snapshot_locked(
                         "size": size,
                         "encoding": encoding,
                     }
-                    done_files += 1
-                    done_bytes += size
-                    if was_new:
-                        new_objects += 1
-                    else:
-                        reused_objects += 1
+                    with progress_lock:
+                        done_files += 1
+                        done_bytes += size
+                        if was_new:
+                            new_objects += 1
+                        else:
+                            reused_objects += 1
                 except Exception as exc:
                     LOGGER.warning("Failed to snapshot %s: %s", entry.abs_path, exc, exc_info=True)
                     failed.append((entry.abs_path, str(exc)))
-                    done_files += 1
+                    with progress_lock:
+                        done_files += 1
 
-                now = time.monotonic()
-                if now - last_report >= PROGRESS_INTERVAL_SECONDS:
-                    last_report = now
-                    _emit_progress(
-                        f"[snapshot] {done_files}/{len(entries)} files "
-                        f"({done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB, "
-                        f"new: {new_objects}, reused: {reused_objects})",
-                        progress_callback,
-                    )
+                msg_after: Optional[str] = None
+                with progress_lock:
+                    now = time.monotonic()
+                    if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                        last_report = now
+                        msg_after = (
+                            f"[snapshot] {done_files}/{len(entries)} files "
+                            f"(done: {done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB, "
+                            f"processed: {processed_io_bytes / (1024 * 1024):.1f} MB, "
+                            f"new: {new_objects}, reused: {reused_objects})"
+                        )
+                if msg_after is not None:
+                    _emit_progress(msg_after, progress_callback)
 
     if failed:
         sample = "; ".join(f"{p}: {r}" for p, r in failed[:5])
