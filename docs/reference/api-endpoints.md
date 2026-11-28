@@ -76,7 +76,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/admin/backfill-item-descriptions` | Batch-generate descriptions for picture items with placeholder text. |
 | GET | `/api/admin/env` | Get environment variables from .env file. |
 | POST | `/api/admin/env` | Update environment variables in .env file and runtime os.environ. |
-| POST | `/api/admin/restart` | Restart the server process. |
+| POST | `/api/admin/restart` | Cleanly stop the backend via the detached lifecycle worker, then start it again. |
+| POST | `/api/admin/shutdown` | Cleanly stop Backend, Frontend, and SearXNG via the detached lifecycle worker. |
 
 ## auth
 

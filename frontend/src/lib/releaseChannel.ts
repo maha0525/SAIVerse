@@ -35,6 +35,14 @@ export function announceUpdateStarted(version: string, label?: string): void {
     window.dispatchEvent(new CustomEvent(UPDATE_STARTED_EVENT, { detail: { version, label: label || '' } }));
 }
 
+/** 全サーバー停止 (Backend / Frontend / SearXNG) が始まったことの知らせ。
+ *  再起動はしないので、トップ画面は再接続待ちではなく停止中バナーを表示する。 */
+export const SHUTDOWN_STARTED_EVENT = 'saiverse-shutdown-started';
+
+export function announceServerShuttingDown(): void {
+    window.dispatchEvent(new CustomEvent(SHUTDOWN_STARTED_EVENT));
+}
+
 /**
  * アーリーアクセス版の手元で、いちばん新しい版が正式版 (= 正式版が EA を追い越した)
  * かどうか。そのときは通常の更新ではなく「安定版に戻る」を案内する (intent §3-4)。

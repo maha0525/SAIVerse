@@ -26,7 +26,7 @@ import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
 import { fetchAllTableRows } from '@/lib/dbTable';
-import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
+import { SHUTDOWN_STARTED_EVENT, UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
 import RoomView from '@/components/RoomView';
 import { useBuildingDetails } from '@/lib/useBuildingDetails';
@@ -48,7 +48,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2, Image as ImageIcon, MessagesSquare } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, Power, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2, Image as ImageIcon, MessagesSquare } from 'lucide-react';
 import { shouldShowMovementMessage } from '@/lib/movementNotices';
 import { useMovementNoticeSettings } from '@/hooks/useMovementNoticeSettings';
 import { useMovementNoticeAutoScroll } from '@/hooks/useMovementNoticeAutoScroll';
@@ -877,6 +877,7 @@ export default function Home() {
         }
         return '';
     });
+    const [isShuttingDown, setIsShuttingDown] = useState(false);
     const updatingTargetVersion = useRef<string>('');
 
     // Announcements unread badge
@@ -1923,6 +1924,7 @@ export default function Home() {
     // During update: poll regardless of connection status (detect shutdown + restart)
     // Otherwise: only poll when disconnected
     useEffect(() => {
+        if (isShuttingDown) return;
         if (!isUpdating && backendConnected) return;
 
         const reconnectInterval = setInterval(async () => {
@@ -1993,10 +1995,10 @@ export default function Home() {
                     setBackendConnected(false);
                 }
             }
-        }, isUpdating ? 5000 : 10000); // Poll faster during update
+        }, isUpdating ? 2000 : 10000); // Poll faster during update/restart
 
         return () => clearInterval(reconnectInterval);
-    }, [backendConnected, isUpdating]);
+    }, [backendConnected, isUpdating, isShuttingDown]);
 
     // 更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
     useEffect(() => {
@@ -2028,7 +2030,19 @@ export default function Home() {
             setUpdateAvailable(null);
         };
         window.addEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
-        return () => window.removeEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+        const onShutdownStarted = () => {
+            setIsShuttingDown(true);
+            setIsUpdating(false);
+            setUpdatingLabel('');
+            sessionStorage.removeItem('saiverse_updating');
+            sessionStorage.removeItem('saiverse_updating_label');
+            setUpdateAvailable(null);
+        };
+        window.addEventListener(SHUTDOWN_STARTED_EVENT, onShutdownStarted);
+        return () => {
+            window.removeEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+            window.removeEventListener(SHUTDOWN_STARTED_EVENT, onShutdownStarted);
+        };
     }, []);
 
     // --- Reembed handlers ---
@@ -4052,7 +4066,17 @@ export default function Home() {
                     </div>
                 </header>
 
-                {isUpdating && (
+                {isShuttingDown && (
+                    <div className={styles.updatingBanner}>
+                        <Power size={16} />
+                        <div className={styles.updatingContent}>
+                            <div>{uiText("app.page.shutdownBannerTitle")}</div>
+                            <div>{uiText("app.page.shutdownBannerSubtitle")}</div>
+                        </div>
+                    </div>
+                )}
+
+                {isUpdating && !isShuttingDown && (
                     <div className={styles.updatingBanner}>
                         <Loader size={16} className={styles.spinIcon} />
                         <div className={styles.updatingContent}>
@@ -4066,7 +4090,7 @@ export default function Home() {
                     </div>
                 )}
 
-                {!backendConnected && !isUpdating && (
+                {!backendConnected && !isUpdating && !isShuttingDown && (
                     <div className={styles.backendErrorBanner}>
                         <AlertTriangle size={16} />
                         <div className={styles.backendErrorContent}>
@@ -4076,7 +4100,7 @@ export default function Home() {
                     </div>
                 )}
 
-                {updateAvailable && updateAvailable.returnToStable && !isUpdating && (
+                {updateAvailable && updateAvailable.returnToStable && !isUpdating && !isShuttingDown && (
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>
@@ -4090,7 +4114,7 @@ export default function Home() {
                     </div>
                 )}
 
-                {updateAvailable && !updateAvailable.returnToStable && !isUpdating && (
+                {updateAvailable && !updateAvailable.returnToStable && !isUpdating && !isShuttingDown && (
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>

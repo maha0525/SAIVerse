@@ -754,15 +754,78 @@ def _launch_detached_updater(
         if index + 1 < len(sys.argv):
             listen_host = sys.argv[index + 1]
 
-    child_processes = []
+    child_processes: list[dict] = []
+    seen_child_pids: set[int] = set()
     for process in app_state.child_processes:
         try:
             import psutil
 
-            created_at = float(psutil.Process(process.pid).create_time())
+            p = psutil.Process(process.pid)
+            candidates = [p, *p.children(recursive=True)]
+            for cand in candidates:
+                if cand.pid in seen_child_pids:
+                    continue
+                try:
+                    created_at = float(cand.create_time())
+                except Exception:
+                    created_at = None
+                seen_child_pids.add(cand.pid)
+                child_processes.append({"pid": cand.pid, "process_created_at": created_at})
         except Exception:
-            created_at = None
-        child_processes.append({"pid": process.pid, "process_created_at": created_at})
+            if process.pid not in seen_child_pids:
+                seen_child_pids.add(process.pid)
+                child_processes.append({"pid": process.pid, "process_created_at": None})
+
+    backend_windows: list[dict] = []
+    if sys.platform == "win32":
+        try:
+            import psutil
+
+            for parent in psutil.Process(os.getpid()).parents():
+                try:
+                    if (parent.name() or "").lower() != "cmd.exe":
+                        continue
+                    cmdline_str = " ".join(parent.cmdline() or []).lower()
+                    if "title saiverse backend" not in cmdline_str:
+                        continue
+                    backend_windows.append(
+                        {
+                            "pid": parent.pid,
+                            "process_created_at": float(parent.create_time()),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # Snapshot companion server / POSIX launcher state while the backend is
+    # still alive so Linux start.sh/start-dev.sh EXIT traps cannot create a
+    # race where companions vanish before the detached worker starts up.
+    pre_searxng_running = False
+    pre_frontend_mode = None
+    posix_launcher_present = False
+    try:
+        from scripts.update_engine import (
+            _has_posix_launcher_ancestor,
+            find_frontend_servers,
+            find_searxng_servers,
+        )
+
+        try:
+            pre_searxng_running = bool(find_searxng_servers(project_path))
+        except Exception:
+            pass
+        try:
+            pre_frontend_mode = find_frontend_servers(project_path).mode
+        except Exception:
+            pass
+        try:
+            posix_launcher_present = _has_posix_launcher_ancestor(os.getpid(), project_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     # Write an atomic, exact restart contract.
     config = {
@@ -781,6 +844,10 @@ def _launch_detached_updater(
             else None
         ),
         "child_processes": child_processes,
+        "backend_windows": backend_windows,
+        "pre_searxng_running": pre_searxng_running,
+        "pre_frontend_mode": pre_frontend_mode,
+        "posix_launcher_present": posix_launcher_present,
         "venv_python": venv_python,
         **(extra_config or {}),
     }
@@ -826,18 +893,27 @@ def _launch_detached_updater(
     # Use threading.Timer instead of asyncio to guarantee shutdown
     # even if the event loop is blocked by long-running synchronous tasks.
     def _force_exit():
-        LOGGER.info("Shutting down for update...")
-        # Run manager shutdown to save building histories, session metadata, etc.
-        # os._exit() bypasses all Python cleanup, so we must do this explicitly.
-        try:
-            from saiverse.app_state import manager
-            if manager is not None:
-                LOGGER.info("Running manager shutdown before update exit...")
-                manager.shutdown()
-        except Exception as e:
-            LOGGER.error("Failed to run shutdown before update exit: %s", e, exc_info=True)
+        LOGGER.info("Shutting down for detached operation...")
+        # os._exit() bypasses atexit / finally, so run the canonical full
+        # shutdown_everything() handler (settle generations -> MCP ->
+        # llama-server -> API Server -> manager.shutdown) explicitly first.
+        handler = app_state.shutdown_handler
+        if handler is not None:
+            try:
+                LOGGER.info("Running canonical shutdown handler before exit...")
+                handler()
+            except Exception as e:
+                LOGGER.error("Failed to run canonical shutdown handler before exit: %s", e, exc_info=True)
+        else:
+            try:
+                from saiverse.app_state import manager
+                if manager is not None:
+                    LOGGER.info("Running manager shutdown before exit...")
+                    manager.shutdown()
+            except Exception as e:
+                LOGGER.error("Failed to run shutdown before exit: %s", e, exc_info=True)
 
-        # Kill child processes (e.g., api_server) that os._exit won't clean up.
+        # Ensure any tracked child processes (e.g., api_server) are terminated.
         for proc in app_state.child_processes:
             try:
                 if proc.poll() is None:
@@ -849,6 +925,10 @@ def _launch_detached_updater(
                         proc.kill()
             except OSError as e:
                 LOGGER.warning("Failed to terminate child process: %s", e)
+        try:
+            logging.shutdown()
+        except Exception:
+            pass
         os._exit(0)
 
     timer = threading.Timer(3.0, _force_exit)

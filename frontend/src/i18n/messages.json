@@ -2156,12 +2156,28 @@
     "en": "Failed to save."
   },
   "components.GlobalSettingsModal.text005": {
-    "ja": "サーバーを再起動しますか？UIが一時的に切断されます。",
-    "en": "Restart the server? The UI will temporarily disconnect."
+    "ja": "バックエンドを一度停止してから再起動します。UIが一時的に切断されますが、起動後に自動で再接続します。続行しますか？",
+    "en": "Stop and cleanly restart the backend? The UI will briefly disconnect and reconnect automatically once it is back."
   },
   "components.GlobalSettingsModal.text006": {
-    "ja": "サーバーを再起動中です。数秒後にページを再読み込みしてください。",
-    "en": "Restarting the server. Reload the page in a few seconds."
+    "ja": "サーバーを再起動しています…",
+    "en": "Restarting the server..."
+  },
+  "components.GlobalSettingsModal.restartServerFailed": {
+    "ja": "サーバーの再起動開始に失敗しました。",
+    "en": "Failed to start server restart."
+  },
+  "components.GlobalSettingsModal.shutdownAllButton": {
+    "ja": "全サーバー停止",
+    "en": "Stop all servers"
+  },
+  "components.GlobalSettingsModal.shutdownAllConfirm": {
+    "ja": "バックエンド・フロントエンド・SearXNG をすべて停止します。停止後は start.bat（Mac / Linux は start.sh）から起動してください。続行しますか？",
+    "en": "Stop all servers (Backend, Frontend, and SearXNG)? To start SAIVerse again, run start.bat (or start.sh on macOS / Linux). Continue?"
+  },
+  "components.GlobalSettingsModal.shutdownAllFailed": {
+    "ja": "全サーバーの停止開始に失敗しました。",
+    "en": "Failed to start full server shutdown."
   },
   "components.GlobalSettingsModal.text007": {
     "ja": " グローバル設定",
@@ -11322,6 +11338,14 @@
   "app.page.label011": {
     "ja": "Please make sure the &quot;SAIVerse Backend&quot; window is open. This page will reconnect automatically.",
     "en": "Please make sure the &quot;SAIVerse Backend&quot; window is open. This page will reconnect automatically."
+  },
+  "app.page.shutdownBannerTitle": {
+    "ja": "すべてのサーバーを停止しています…",
+    "en": "Stopping all servers..."
+  },
+  "app.page.shutdownBannerSubtitle": {
+    "ja": "停止が完了したらこのタブを閉じてください。再開するときは start.bat（Mac / Linux は start.sh）を実行してください。",
+    "en": "You can close this tab once shutdown completes. Run start.bat (or start.sh on macOS / Linux) to start SAIVerse again."
   },
   "app.page.label012": {
     "ja": "New version available: v",
