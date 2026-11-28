@@ -120,6 +120,15 @@ KNOWN_COLUMN_DROPS = {
     # 2026-09-09: 知覚の二水位の廃止 (docs/intent/presented_context_reduction.md
     # 設計 3)。しきい値は「残す量 / 上限」の一系統だけになった。
     "user_settings": ("PERCEPTION_TARGET_CHARS", "PERCEPTION_HIGH_CHARS"),
+    # 2026-09-11 / 2026-11-28: ペルソナ単位のメディア要約モデル設定の廃止
+    # (docs/issues/persona_media_summary_models_unused.md)。要約モデルは
+    # グローバル設定 (環境変数) だけで決まり、この 4 列は読まれていなかった。
+    "ai": (
+        "LIGHTWEIGHT_VISION_MODEL",
+        "VISION_MODEL",
+        "AUDIO_MODEL",
+        "VIDEO_MODEL",
+    ),
 }
 
 

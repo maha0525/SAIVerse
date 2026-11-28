@@ -133,9 +133,8 @@ def _config_by_find_model_config(value: str) -> Optional[Mapping[str, Any]]:
 #: - memory_weave_model: find_model_config。saiverse/memory_weave_llm.py の
 #:   resolve_memory_weave_config が引く。
 #: - image/audio/video_summary_model: find_model_config。全体設定の値を
-#:   saiverse/media_summary.py が引く。ペルソナ単位の VISION_MODEL / AUDIO_MODEL /
-#:   VIDEO_MODEL は読む箇所が無い (保存されるだけ) ので、ペルソナ単位の検査
-#:   (manager/initialization.py の current_model_setting_warnings) には入れていない。
+#:   saiverse/media_summary.py が引く (ペルソナ単位の要約モデル設定は廃止済み、
+#:   docs/issues/persona_media_summary_models_unused.md)。
 #: - reflex_judgment_model: 設定キーの完全一致。saiverse/reflex_judgment.py の
 #:   resolve_backend が MODEL_CONFIGS を設定キーで引く。
 _ROLE_CONFIG_LOOKUPS: Dict[str, Callable[[str], Optional[Mapping[str, Any]]]] = {

@@ -46,7 +46,7 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 | 対象 | 項目 | 個別経路・ソース | WorldEditor 側の状態 / 判断前の区別 |
 |---|---|---|---|
 | Persona | 言語 `language` (City を継承 / ja / en) | SettingsModal [P-LANGUAGE] | UI なし。`AIUpdate` と更新経路は受理済み。[W-API-P] |
-| Persona | `memory_weave_model`、`vision_model`、`audio_model`、`video_model`、`reflex_judgment_model` | SettingsModal [P-MODELS] | UI と `AIUpdate` に無し。非表示モデルは未送信時に保持する契約が既にある。追加時も壊さない。[W-P-SAVE] |
+| Persona | `memory_weave_model`、`reflex_judgment_model` | SettingsModal [P-MODELS] | UI と `AIUpdate` に無し。非表示モデルは未送信時に保持する契約が既にある。追加時も壊さない。[W-P-SAVE] |
 | Persona | `chronicle_enabled`、`autonomous_chronicle_enabled`、`auto_recall_enabled`、`auto_recall_enhanced`、`memopedia_index_enabled` | SettingsModal [P-MEMORY] | UI なし。`AIUpdate` と更新経路は受理済み。[W-API-P] |
 | Persona | `memory_weave_context`、`core_memory_char_budget`、`chronicle_char_budget` | SettingsModal [P-MEMORY] | UI と `AIUpdate` に無し。個別 PATCH は送信する。[P-SAVE] |
 | Persona | `spell_enabled` | SettingsModal [P-SPELL] | UI なし。`AIUpdate` と更新経路は受理済み。[W-API-P] |

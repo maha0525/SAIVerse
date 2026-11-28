@@ -81,10 +81,6 @@ class AI(Base):
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
-    LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
-    VISION_MODEL = Column(String(255), nullable=True)
-    AUDIO_MODEL = Column(String(255), nullable=True)
-    VIDEO_MODEL = Column(String(255), nullable=True)
     MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
     # 反射判断 (docs/intent/reflex_judgment.md) に答えるモデルの、ペルソナ個別の
     # 上書き。NULL = 世界の既定 (モデルの役割 reflex_judgment_model、env

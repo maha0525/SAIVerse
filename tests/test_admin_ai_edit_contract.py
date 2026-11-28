@@ -116,9 +116,6 @@ class AdminAiEditContractTest(unittest.TestCase):
             system_prompt="you are Air",
             avatar_path="  /icons/air.webp  ",
             autonomy_enabled=False,
-            vision_model="vision-1",
-            audio_model="audio-1",
-            video_model="video-1",
             memory_weave_model="weave-1",
             reflex_judgment_model="reflex-1",
             appearance_image_path="  /appearance/air.png  ",
@@ -147,9 +144,6 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertEqual(details["APPEARANCE_IMAGE_PATH"], "/appearance/air.png")
         self.assertEqual(details["DEFAULT_MODEL"], "gemini-2.0-flash")
         self.assertEqual(details["LIGHTWEIGHT_MODEL"], "gemini-2.0-flash-lite")
-        self.assertEqual(details["VISION_MODEL"], "vision-1")
-        self.assertEqual(details["AUDIO_MODEL"], "audio-1")
-        self.assertEqual(details["VIDEO_MODEL"], "video-1")
         self.assertEqual(details["MEMORY_WEAVE_MODEL"], "weave-1")
         self.assertEqual(details["REFLEX_JUDGMENT_MODEL"], "reflex-1")
         self.assertFalse(details["AUTONOMY_ENABLED"])
@@ -173,15 +167,20 @@ class AdminAiEditContractTest(unittest.TestCase):
     def test_blank_model_selection_clears_the_column(self):
         """「指定なし」を選ぶと空文字が届く。空文字は NULL に倒す (= 既定に従う)。"""
         self._update(
-            vision_model="vision-1", memory_weave_model="weave-1",
+            memory_weave_model="weave-1",
             reflex_judgment_model="reflex-1",
+            appearance_image_path="/appearance/air.png",
         )
+        before = self._row()
+        self.assertIsNotNone(before.DEFAULT_MODEL)
+        self.assertIsNotNone(before.LIGHTWEIGHT_MODEL)
+        self.assertIsNotNone(before.MEMORY_WEAVE_MODEL)
+        self.assertIsNotNone(before.REFLEX_JUDGMENT_MODEL)
+        self.assertIsNotNone(before.APPEARANCE_IMAGE_PATH)
+
         self._update(
             default_model="",
             lightweight_model="",
-            vision_model="",
-            audio_model="",
-            video_model="",
             memory_weave_model="",
             reflex_judgment_model="",
             appearance_image_path="",
@@ -190,9 +189,6 @@ class AdminAiEditContractTest(unittest.TestCase):
         row = self._row()
         self.assertIsNone(row.DEFAULT_MODEL)
         self.assertIsNone(row.LIGHTWEIGHT_MODEL)
-        self.assertIsNone(row.VISION_MODEL)
-        self.assertIsNone(row.AUDIO_MODEL)
-        self.assertIsNone(row.VIDEO_MODEL)
         self.assertIsNone(row.MEMORY_WEAVE_MODEL)
         self.assertIsNone(row.REFLEX_JUDGMENT_MODEL)
         self.assertIsNone(row.APPEARANCE_IMAGE_PATH)
@@ -352,16 +348,12 @@ class AdminAiEditContractTest(unittest.TestCase):
         「触らない」は受け側が錠の中で保証する。
         """
         self._update(
-            vision_model="vision-1", audio_model="vision-1", video_model="vision-1",
             memory_weave_model="weave-1", reflex_judgment_model="reflex-1",
         )
         # モデル欄を一つも送らない保存 (= ワールドエディタの形)。
         self._update()
 
         row = self._row()
-        self.assertEqual(row.VISION_MODEL, "vision-1")
-        self.assertEqual(row.AUDIO_MODEL, "vision-1")
-        self.assertEqual(row.VIDEO_MODEL, "vision-1")
         self.assertEqual(row.MEMORY_WEAVE_MODEL, "weave-1")
         self.assertEqual(row.REFLEX_JUDGMENT_MODEL, "reflex-1")
 
@@ -404,7 +396,6 @@ class AdminAiEditContractTest(unittest.TestCase):
         world_routes.update_ai("ai_city_a", request, manager=_Manager())
 
         for field in (
-            "vision_model", "audio_model", "video_model",
             "memory_weave_model", "reflex_judgment_model",
         ):
             self.assertNotIn(field, captured)
@@ -440,7 +431,7 @@ class AdminAiEditContractTest(unittest.TestCase):
         people_config.update_persona_config("ai_city_a", request, manager=_Manager())
 
         self.assertEqual(captured.get("reflex_judgment_model"), "")
-        for field in ("memory_weave_model", "vision_model", "audio_model", "video_model", "lightweight_model", "default_model"):
+        for field in ("memory_weave_model", "lightweight_model", "default_model"):
             self.assertIs(captured.get(field), UNSET)
 
     def test_persona_mixin_does_not_redefine_the_edit_methods(self):

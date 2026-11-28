@@ -1620,9 +1620,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
-                "VISION_MODEL": ai.VISION_MODEL,
-                "AUDIO_MODEL": ai.AUDIO_MODEL,
-                "VIDEO_MODEL": ai.VIDEO_MODEL,
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
                 "REFLEX_JUDGMENT_MODEL": ai.REFLEX_JUDGMENT_MODEL,
                 "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
@@ -1706,9 +1703,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         # docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
         # 入口が現在値を読んで詰め直す形は、読みと書きの間の並行保存を古い値で
         # 巻き戻すので採らない — 印の解決は下の錠と refresh の後で行う。
-        vision_model: Any = UNSET,
-        audio_model: Any = UNSET,
-        video_model: Any = UNSET,
         memory_weave_model: Any = UNSET,
         reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
@@ -1831,12 +1825,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     default_model = ai.DEFAULT_MODEL
                 if lightweight_model is UNSET:
                     lightweight_model = ai.LIGHTWEIGHT_MODEL
-                if vision_model is UNSET:
-                    vision_model = ai.VISION_MODEL
-                if audio_model is UNSET:
-                    audio_model = ai.AUDIO_MODEL
-                if video_model is UNSET:
-                    video_model = ai.VIDEO_MODEL
                 if memory_weave_model is UNSET:
                     memory_weave_model = ai.MEMORY_WEAVE_MODEL
                 if reflex_judgment_model is UNSET:
@@ -1869,9 +1857,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 ai.HOME_CITYID = home_city_id
                 ai.DEFAULT_MODEL = default_model or None
                 ai.LIGHTWEIGHT_MODEL = lightweight_model or None
-                ai.VISION_MODEL = vision_model or None
-                ai.AUDIO_MODEL = audio_model or None
-                ai.VIDEO_MODEL = video_model or None
                 ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
                 ai.REFLEX_JUDGMENT_MODEL = reflex_judgment_model or None
                 ai.AVATAR_IMAGE = avatar_value
@@ -1966,9 +1951,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     persona.autonomy_enabled = autonomy_now
                     if language is not None:
                         persona.language = ai.LANGUAGE
-                    persona.vision_model = vision_model
-                    persona.audio_model = audio_model
-                    persona.video_model = video_model
 
                     # 話す標準モデル・軽量モデル・Memory Weave モデルは、いま保存した
                     # DB 行から決め方の一か所で決め直して当てはめる (値の書き換えと

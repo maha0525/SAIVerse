@@ -446,18 +446,6 @@ def test_persona_defined_unset_and_empty_values_do_not_warn(world, columns):
     assert svc.current_model_setting_warnings() == []
 
 
-def test_persona_media_summary_models_are_not_checked(world):
-    """ペルソナ単位の画像/音声/動画要約モデルは保存されるだけで、読む箇所が無い。"""
-    world.add_persona(
-        VISION_MODEL="gone-vision",
-        AUDIO_MODEL="gone-audio",
-        VIDEO_MODEL="gone-video",
-    )
-    svc = world.start()
-
-    assert svc.current_model_setting_warnings() == []
-
-
 def test_persona_lookup_follows_each_consumer(world):
     """API モデル名は、Memory Weave (find_model_config) なら引けるが、
     標準・軽量モデル (設定キーの完全一致) では引けない。"""
