@@ -147,6 +147,8 @@ def remove_world_snapshot(name: str):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except snapshot.SnapshotStoreBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             LOGGER.exception("Failed to delete snapshot %s", name)
             raise HTTPException(status_code=500, detail=str(exc)) from exc

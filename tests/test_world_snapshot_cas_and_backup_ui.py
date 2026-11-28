@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 from unittest.mock import patch
 import zipfile
@@ -411,3 +412,132 @@ def test_backup_api_routes_snapshots_and_personas(tmp_path: Path, monkeypatch) -
     res_pdel = client.delete(f"/api/backups/personas/mira/{created_name}")
     assert res_pdel.status_code == 200
     assert res_pdel.json()["backups"] == []
+
+
+# ---- Codex review regression tests (PR #525) ----
+
+
+def test_cross_process_store_lock_blocks_gc_during_inflight_save(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Finding 1: A separate process running GC cannot delete in-flight objects
+    while save_snapshot holds the cross-process store lock."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="v1", mem_val="m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    # Plant an unreferenced object simulating an in-flight save before manifest publish.
+    fake_sha = "a" * 64
+    obj_path = home / "snapshots" / ".store" / "objects" / "aa" / f"{fake_sha}.raw"
+    obj_path.parent.mkdir(parents=True, exist_ok=True)
+    obj_path.write_bytes(b"inflight-object")
+
+    import os
+
+    env = {**os.environ, "SAIVERSE_HOME": str(home)}
+    child_code = (
+        "import sys; sys.path.insert(0, '.'); "
+        "from scripts import snapshot; "
+        "snapshot.gc_store(lock_timeout=0.3)"
+    )
+
+    with snapshot.snapshot_store_lock():
+        # Re-entrant within the same thread must not deadlock.
+        with snapshot.snapshot_store_lock():
+            proc = subprocess.run(
+                [sys.executable, "-c", child_code],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+    assert proc.returncode != 0
+    assert "SnapshotStoreBusyError" in proc.stderr
+    assert obj_path.is_file()  # in-flight object was NOT deleted by concurrent GC
+
+    # Once the lock is released, GC succeeds cleanly.
+    res = snapshot.gc_store()
+    assert res["removed_objects"] == 1
+    assert not obj_path.exists()
+
+
+def test_restore_paths_emit_real_progress_output(tmp_path: Path, monkeypatch) -> None:
+    """Finding 2: CAS restore, legacy ZIP restore, and persona memory.db restore
+    all emit real staging/extraction and SQLite verification progress lines."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="prog-v1", mem_val="prog-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+    monkeypatch.setattr(snapshot, "PROGRESS_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(mem_backup, "_RESTORE_PROGRESS_INTERVAL_SECONDS", 0.0)
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("prog_cas")
+        zip_path = home / "snapshots" / "prog_zip.zip"
+        snapshot.export_snapshot_to_zip("prog_cas", zip_path)
+
+    cas_lines: list[str] = []
+    snapshot.validate_and_extract_cas_snapshot(
+        home / "snapshots" / "manifests" / "prog_cas.json",
+        tmp_path / "stage_cas",
+        progress_callback=cas_lines.append,
+    )
+    assert any("Staging CAS" in line for line in cas_lines)
+    assert any("Verifying SQLite integrity" in line for line in cas_lines)
+
+    zip_lines: list[str] = []
+    snapshot.validate_and_extract_snapshot(
+        zip_path,
+        tmp_path / "stage_zip",
+        progress_callback=zip_lines.append,
+    )
+    assert any("Extracting ZIP" in line for line in zip_lines)
+    assert any("Verifying SQLite integrity" in line for line in zip_lines)
+
+    mem_db = home / "personas" / "mira" / "memory.db"
+    b1 = mem_backup.run_simple_backup(persona_id="mira", db_path=mem_db, skip_if_unchanged=False)
+    assert b1 is not None
+    mem_lines: list[str] = []
+    with patch("saiverse.runtime_marker.marker_status", return_value=("stopped", "test")):
+        mem_backup.restore_simple_backup(
+            persona_id="mira",
+            filename=b1.name,
+            db_path=mem_db,
+            saiverse_db_path=home / "user_data" / "database" / "saiverse.db",
+            require_stopped=True,
+            progress_callback=mem_lines.append,
+        )
+    assert any("Verifying SQLite integrity" in line for line in mem_lines)
+    assert any("pages" in line for line in mem_lines)
+
+
+def test_export_snapshot_to_zip_sets_file_size_and_force_zip64(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Finding 3: ZIP export allocates ZIP64 headers via info.file_size and force_zip64=True."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="z64", mem_val="m64")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("z64_snap")
+
+    recorded: list[tuple[str, int, bool]] = []
+    orig_open = zipfile.ZipFile.open
+
+    def _spy_open(self, name, mode="r", pwd=None, *, force_zip64=False):
+        if mode == "w" and isinstance(name, zipfile.ZipInfo) and name.filename != "snapshot.json":
+            recorded.append((name.filename, name.file_size, bool(force_zip64)))
+        return orig_open(self, name, mode=mode, pwd=pwd, force_zip64=force_zip64)
+
+    out_zip = tmp_path / "exported.zip"
+    with patch.object(zipfile.ZipFile, "open", _spy_open):
+        snapshot.export_snapshot_to_zip("z64_snap", out_zip)
+
+    assert len(recorded) == 3
+    for fname, fsize, z64 in recorded:
+        assert fsize > 0, f"expected positive file_size for {fname}"
+        assert z64 is True, f"expected force_zip64=True for {fname}"
+
+    # Exported ZIP64 archive still validates and extracts cleanly.
+    meta = snapshot.validate_and_extract_snapshot(out_zip, tmp_path / "extract_z64")
+    assert meta["file_count"] == 3

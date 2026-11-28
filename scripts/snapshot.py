@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -26,10 +27,15 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 import uuid
 import zipfile
 import zlib
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 LOGGER = logging.getLogger("saiverse.snapshot")
 
@@ -752,12 +758,108 @@ def get_store_stats() -> Dict[str, Any]:
     }
 
 
-def gc_store(*, dry_run: bool = False) -> Dict[str, Any]:
+STORE_LOCK_FILE_NAME = ".store.lock"
+DEFAULT_STORE_LOCK_TIMEOUT_SECONDS = 5.0
+
+_STORE_LOCK_THREAD_LOCK = threading.RLock()
+_STORE_LOCK_STATE = threading.local()
+
+
+class SnapshotStoreBusyError(RuntimeError):
+    """Raised when another process or thread holds the snapshot store lock."""
+
+
+@contextlib.contextmanager
+def snapshot_store_lock(timeout: float = DEFAULT_STORE_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Cross-process + re-entrant thread lock protecting the snapshot store.
+
+    Serializes ``save_snapshot`` (from before object writes through manifest
+    publish), ``delete_snapshot``, ``gc_store``, ``export_snapshot_to_zip``,
+    and ``cmd_restore`` so GC/delete in another process can never remove
+    in-flight or referenced CAS objects.
+    """
+    sdir = store_dir()
+    sdir.mkdir(parents=True, exist_ok=True)
+    lock_path = (sdir / STORE_LOCK_FILE_NAME).resolve()
+    lock_key = str(lock_path)
+
+    depths: dict[str, int] = getattr(_STORE_LOCK_STATE, "depths", None)
+    if depths is None:
+        depths = {}
+        _STORE_LOCK_STATE.depths = depths
+
+    if depths.get(lock_key, 0) > 0:
+        depths[lock_key] += 1
+        try:
+            yield
+        finally:
+            depths[lock_key] -= 1
+        return
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    acquired_thread = _STORE_LOCK_THREAD_LOCK.acquire(timeout=max(0.0, timeout))
+    if not acquired_thread:
+        raise SnapshotStoreBusyError(
+            "Another snapshot operation is currently in progress; try again after it finishes."
+        )
+
+    fd: Optional[int] = None
+    locked_os = False
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        if sys.platform == "win32":
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b" ")
+        while True:
+            try:
+                if sys.platform == "win32":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked_os = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise SnapshotStoreBusyError(
+                        "Another snapshot operation is currently in progress; try again after it finishes."
+                    )
+                time.sleep(0.05)
+
+        depths[lock_key] = 1
+        try:
+            yield
+        finally:
+            depths[lock_key] = 0
+    finally:
+        if fd is not None:
+            if locked_os:
+                try:
+                    if sys.platform == "win32":
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        _STORE_LOCK_THREAD_LOCK.release()
+
+
+def gc_store(*, dry_run: bool = False, lock_timeout: float = DEFAULT_STORE_LOCK_TIMEOUT_SECONDS) -> Dict[str, Any]:
     """参照されていない CAS オブジェクトと死んだプロセスの一時ファイルを回収する。
 
     Fail-closed: 1 枚でも壊れて読めないマニフェストがある場合は、生きている世代の
     オブジェクトを誤削除しないよう一切削除せず RuntimeError を送出する。
     """
+    with snapshot_store_lock(timeout=lock_timeout):
+        return _gc_store_locked(dry_run=dry_run)
+
+
+def _gc_store_locked(*, dry_run: bool = False) -> Dict[str, Any]:
     referenced, corrupted = _collect_live_object_hashes()
     if corrupted:
         raise RuntimeError(
@@ -867,41 +969,47 @@ def cleanup_temp_files_for_pid(pid: int) -> int:
     return removed
 
 
-def delete_snapshot(name: str, *, run_gc: bool = True) -> Dict[str, Any]:
+def delete_snapshot(
+    name: str,
+    *,
+    run_gc: bool = True,
+    lock_timeout: float = DEFAULT_STORE_LOCK_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
     """指定スナップショットを削除する。CAS の場合は続けて fail-closed GC を実行する。"""
-    fmt, path = resolve_snapshot(name)
-    size_removed = 0
-    if fmt == "zip":
-        try:
-            size_removed = path.stat().st_size
-        except OSError:
-            size_removed = 0
+    with snapshot_store_lock(timeout=lock_timeout):
+        fmt, path = resolve_snapshot(name)
+        size_removed = 0
+        if fmt == "zip":
+            try:
+                size_removed = path.stat().st_size
+            except OSError:
+                size_removed = 0
+            path.unlink()
+            return {
+                "name": name,
+                "format": "zip",
+                "reclaimed_bytes": size_removed,
+                "gc": None,
+                "gc_error": None,
+            }
+
         path.unlink()
+        gc_result: Optional[Dict[str, Any]] = None
+        gc_error: Optional[str] = None
+        if run_gc:
+            try:
+                gc_result = _gc_store_locked()
+                size_removed = int(gc_result.get("reclaimed_bytes", 0))
+            except Exception as exc:
+                gc_error = str(exc)
+                LOGGER.warning("Post-delete GC did not run: %s", exc)
         return {
             "name": name,
-            "format": "zip",
+            "format": "cas",
             "reclaimed_bytes": size_removed,
-            "gc": None,
-            "gc_error": None,
+            "gc": gc_result,
+            "gc_error": gc_error,
         }
-
-    path.unlink()
-    gc_result: Optional[Dict[str, Any]] = None
-    gc_error: Optional[str] = None
-    if run_gc:
-        try:
-            gc_result = gc_store()
-            size_removed = int(gc_result.get("reclaimed_bytes", 0))
-        except Exception as exc:
-            gc_error = str(exc)
-            LOGGER.warning("Post-delete GC did not run: %s", exc)
-    return {
-        "name": name,
-        "format": "cas",
-        "reclaimed_bytes": size_removed,
-        "gc": gc_result,
-        "gc_error": gc_error,
-    }
 
 
 # ---- ファイルシステム操作 ----
@@ -940,16 +1048,41 @@ def _safe_archive_member(name: str) -> Path:
     return rel
 
 
-def _validate_sqlite_files(stage: Path) -> None:
+def _validate_sqlite_files(
+    stage: Path,
+    *,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> None:
     main_db = stage / "user_data" / "database" / "saiverse.db"
     if not main_db.is_file():
         raise ValueError("Snapshot is missing user_data/database/saiverse.db")
-    for db_path in stage.rglob("*.db"):
+    db_paths = sorted(stage.rglob("*.db"))
+    total = len(db_paths)
+    for idx, db_path in enumerate(db_paths, start=1):
+        rel_str = db_path.relative_to(stage).as_posix()
+        _emit_progress(
+            f"[snapshot] Verifying SQLite integrity ({idx}/{total}): {rel_str}",
+            progress_callback,
+        )
+        last_report = [time.monotonic()]
+
+        def _sqlite_progress() -> int:
+            now = time.monotonic()
+            if now - last_report[0] >= PROGRESS_INTERVAL_SECONDS:
+                last_report[0] = now
+                _emit_progress(
+                    f"[snapshot] Verifying SQLite integrity ({idx}/{total}): {rel_str} ...",
+                    progress_callback,
+                )
+            return 0
+
         try:
             connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
+                connection.set_progress_handler(_sqlite_progress, 100_000)
                 result = connection.execute("PRAGMA integrity_check").fetchone()
             finally:
+                connection.set_progress_handler(None, 0)
                 connection.close()
         except sqlite3.Error as exc:
             raise ValueError(f"SQLite validation failed for {db_path.relative_to(stage)}") from exc
@@ -957,52 +1090,90 @@ def _validate_sqlite_files(stage: Path) -> None:
             raise ValueError(f"SQLite integrity_check failed for {db_path.relative_to(stage)}")
 
 
-def validate_and_extract_snapshot(snap: Path, stage: Path) -> dict:
-    """Validate a format v2 ZIP archive and extract it into an isolated staging tree."""
-    with zipfile.ZipFile(snap, "r") as zf:
-        if zf.testzip() is not None:
-            raise ValueError("Snapshot CRC validation failed")
-        infos = zf.infolist()
-        names = [info.filename for info in infos]
-        if len(names) != len(set(names)) or names.count("snapshot.json") != 1:
-            raise ValueError("Snapshot contains duplicate members or invalid metadata count")
-        metadata = json.loads(zf.read("snapshot.json").decode("utf-8"))
-        if metadata.get("format_version") != SNAPSHOT_FORMAT_VERSION:
-            raise ValueError(
-                f"Unsupported snapshot format {metadata.get('format_version')!r}; "
-                f"expected {SNAPSHOT_FORMAT_VERSION}"
+def validate_and_extract_snapshot(
+    snap: Path,
+    stage: Path,
+    *,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """Validate a format v2 ZIP archive and extract it into an isolated staging tree.
+
+    CRC-32 is verified by Python's ``zipfile`` stream reader as every member is
+    extracted to EOF alongside SHA-256 verification, avoiding a separate silent
+    ``testzip()`` full-archive pass while emitting periodic progress.
+    """
+    try:
+        with zipfile.ZipFile(snap, "r") as zf:
+            infos = zf.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or names.count("snapshot.json") != 1:
+                raise ValueError("Snapshot contains duplicate members or invalid metadata count")
+            metadata = json.loads(zf.read("snapshot.json").decode("utf-8"))
+            if metadata.get("format_version") != SNAPSHOT_FORMAT_VERSION:
+                raise ValueError(
+                    f"Unsupported snapshot format {metadata.get('format_version')!r}; "
+                    f"expected {SNAPSHOT_FORMAT_VERSION}"
+                )
+            manifest = metadata.get("files")
+            if not isinstance(manifest, dict):
+                raise ValueError("Snapshot file manifest is missing")
+            payload_names = {
+                name for name in names if name != "snapshot.json" and not name.endswith("/")
+            }
+            if payload_names != set(manifest) or metadata.get("file_count") != len(payload_names):
+                raise ValueError("Snapshot manifest does not match archive members")
+
+            total_files = len(payload_names)
+            total_bytes = sum(
+                info.file_size
+                for info in infos
+                if info.filename != "snapshot.json" and not info.is_dir()
             )
-        manifest = metadata.get("files")
-        if not isinstance(manifest, dict):
-            raise ValueError("Snapshot file manifest is missing")
-        payload_names = {name for name in names if name != "snapshot.json" and not name.endswith("/")}
-        if payload_names != set(manifest) or metadata.get("file_count") != len(payload_names):
-            raise ValueError("Snapshot manifest does not match archive members")
+            total_mb = total_bytes / (1024 * 1024)
+            done_files = 0
+            done_bytes = 0
+            last_report = time.monotonic()
 
-        for info in infos:
-            if info.filename == "snapshot.json" or info.is_dir():
-                continue
-            if ((info.external_attr >> 16) & 0o170000) == 0o120000:
-                raise ValueError(f"Snapshot contains a symbolic link: {info.filename}")
-            rel = _safe_archive_member(info.filename)
-            target = (stage / rel).resolve()
-            if not target.is_relative_to(stage.resolve()):
-                raise ValueError(f"Snapshot member escapes staging: {info.filename}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            digest = hashlib.sha256()
-            size = 0
-            with zf.open(info, "r") as source, target.open("xb") as destination:
-                for chunk in iter(lambda: source.read(STREAM_CHUNK_SIZE), b""):
-                    digest.update(chunk)
-                    size += len(chunk)
-                    destination.write(chunk)
-            expected = manifest[info.filename]
-            if not isinstance(expected, dict):
-                raise ValueError(f"Invalid manifest entry for {info.filename}")
-            if expected.get("sha256") != digest.hexdigest() or expected.get("size") != size:
-                raise ValueError(f"Hash or size mismatch for {info.filename}")
+            for info in infos:
+                if info.filename == "snapshot.json" or info.is_dir():
+                    continue
+                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise ValueError(f"Snapshot contains a symbolic link: {info.filename}")
+                rel = _safe_archive_member(info.filename)
+                target = (stage / rel).resolve()
+                if not target.is_relative_to(stage.resolve()):
+                    raise ValueError(f"Snapshot member escapes staging: {info.filename}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                size = 0
+                with zf.open(info, "r") as source, target.open("xb") as destination:
+                    for chunk in iter(lambda: source.read(STREAM_CHUNK_SIZE), b""):
+                        digest.update(chunk)
+                        size += len(chunk)
+                        done_bytes += len(chunk)
+                        destination.write(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                            last_report = now
+                            _emit_progress(
+                                f"[snapshot] Extracting ZIP: {done_files}/{total_files} files "
+                                f"({done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB)",
+                                progress_callback,
+                            )
+                expected = manifest[info.filename]
+                if not isinstance(expected, dict):
+                    raise ValueError(f"Invalid manifest entry for {info.filename}")
+                if expected.get("sha256") != digest.hexdigest() or expected.get("size") != size:
+                    raise ValueError(f"Hash or size mismatch for {info.filename}")
+                done_files += 1
+    except (zipfile.BadZipFile, zlib.error) as exc:
+        raise ValueError(f"Snapshot CRC validation failed: {exc}") from exc
 
-    _validate_sqlite_files(stage)
+    _emit_progress(
+        f"[snapshot] Extracted {done_files}/{total_files} files ({done_bytes / (1024 * 1024):.1f} MB)",
+        progress_callback,
+    )
+    _validate_sqlite_files(stage, progress_callback=progress_callback)
     return metadata
 
 
@@ -1019,7 +1190,12 @@ def _resolve_object_for_restore(sha256: str, encoding: object) -> Tuple[Path, st
     raise ValueError(f"Missing CAS object for sha256 {sha256}")
 
 
-def validate_and_extract_cas_snapshot(manifest_path: Path, stage: Path) -> dict:
+def validate_and_extract_cas_snapshot(
+    manifest_path: Path,
+    stage: Path,
+    *,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> dict:
     """Validate a format v3 CAS manifest + objects and extract into an isolated staging tree."""
     metadata = read_snapshot_metadata(manifest_path)
     if metadata is None:
@@ -1034,6 +1210,17 @@ def validate_and_extract_cas_snapshot(manifest_path: Path, stage: Path) -> dict:
         raise ValueError("Snapshot manifest file table is missing or count mismatched")
 
     stage_resolved = stage.resolve()
+    total_files = len(manifest)
+    total_bytes = sum(
+        int(entry.get("size", 0))
+        for entry in manifest.values()
+        if isinstance(entry, dict) and isinstance(entry.get("size"), int)
+    )
+    total_mb = total_bytes / (1024 * 1024)
+    done_files = 0
+    done_bytes = 0
+    last_report = time.monotonic()
+
     for archive_path, expected in manifest.items():
         if not isinstance(expected, dict):
             raise ValueError(f"Invalid manifest entry for {archive_path}")
@@ -1056,7 +1243,16 @@ def validate_and_extract_cas_snapshot(manifest_path: Path, stage: Path) -> dict:
                 for chunk in iter(lambda: source.read(STREAM_CHUNK_SIZE), b""):
                     digest.update(chunk)
                     size += len(chunk)
+                    done_bytes += len(chunk)
                     destination.write(chunk)
+                    now = time.monotonic()
+                    if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                        last_report = now
+                        _emit_progress(
+                            f"[snapshot] Staging CAS: {done_files}/{total_files} files "
+                            f"({done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB)",
+                            progress_callback,
+                        )
             else:
                 decompressor = zlib.decompressobj()
                 try:
@@ -1065,11 +1261,21 @@ def validate_and_extract_cas_snapshot(manifest_path: Path, stage: Path) -> dict:
                         if plain:
                             digest.update(plain)
                             size += len(plain)
+                            done_bytes += len(plain)
                             destination.write(plain)
+                        now = time.monotonic()
+                        if now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                            last_report = now
+                            _emit_progress(
+                                f"[snapshot] Staging CAS: {done_files}/{total_files} files "
+                                f"({done_bytes / (1024 * 1024):.1f} / {total_mb:.1f} MB)",
+                                progress_callback,
+                            )
                     tail = decompressor.flush()
                     if tail:
                         digest.update(tail)
                         size += len(tail)
+                        done_bytes += len(tail)
                         destination.write(tail)
                     if not decompressor.eof or decompressor.unused_data:
                         raise ValueError(f"Corrupted zlib stream for {archive_path}")
@@ -1078,82 +1284,100 @@ def validate_and_extract_cas_snapshot(manifest_path: Path, stage: Path) -> dict:
 
         if digest.hexdigest() != expected_sha or size != expected_size:
             raise ValueError(f"Hash or size mismatch for {archive_path}")
+        done_files += 1
 
-    _validate_sqlite_files(stage)
+    _emit_progress(
+        f"[snapshot] Staged {done_files}/{total_files} files ({done_bytes / (1024 * 1024):.1f} MB)",
+        progress_callback,
+    )
+    _validate_sqlite_files(stage, progress_callback=progress_callback)
     return metadata
 
 
-def export_snapshot_to_zip(name: str, output_zip: Path) -> Path:
+def export_snapshot_to_zip(
+    name: str,
+    output_zip: Path,
+    *,
+    lock_timeout: float = DEFAULT_STORE_LOCK_TIMEOUT_SECONDS,
+) -> Path:
     """スナップショットを単一の format_version 2 互換 ZIP ファイルへ書き出す。"""
-    fmt, path = resolve_snapshot(name)
     output_zip = output_zip.resolve()
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = output_zip.with_name(f"{output_zip.name}.tmp.{os.getpid()}")
 
     try:
-        if fmt == "zip":
-            shutil.copy2(path, tmp_out)
+        with snapshot_store_lock(timeout=lock_timeout):
+            fmt, path = resolve_snapshot(name)
+            if fmt == "zip":
+                shutil.copy2(path, tmp_out)
+                os.replace(tmp_out, output_zip)
+                return output_zip
+
+            metadata = read_snapshot_metadata(path)
+            if metadata is None or metadata.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
+                raise ValueError(f"Snapshot '{name}' manifest is invalid")
+            files = metadata.get("files")
+            if not isinstance(files, dict):
+                raise ValueError(f"Snapshot '{name}' has no file manifest")
+
+            v2_files: Dict[str, Dict[str, object]] = {}
+            with zipfile.ZipFile(
+                tmp_out,
+                "w",
+                zipfile.ZIP_DEFLATED,
+                allowZip64=True,
+                compresslevel=ZLIB_COMPRESS_LEVEL,
+            ) as zf:
+                for archive_path, entry in sorted(files.items()):
+                    expected_sha = entry["sha256"]
+                    expected_size = int(entry["size"])
+                    obj_path, encoding = _resolve_object_for_restore(expected_sha, entry.get("encoding"))
+                    compress_type = (
+                        zipfile.ZIP_STORED
+                        if Path(archive_path).suffix.lower() in INCOMPRESSIBLE_EXTENSIONS
+                        else zipfile.ZIP_DEFLATED
+                    )
+                    info = zipfile.ZipInfo(archive_path)
+                    info.compress_type = compress_type
+                    info.file_size = expected_size
+                    digest = hashlib.sha256()
+                    size = 0
+                    with obj_path.open("rb") as src, zf.open(info, "w", force_zip64=True) as dst:
+                        if encoding == "raw":
+                            for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
+                                digest.update(chunk)
+                                size += len(chunk)
+                                dst.write(chunk)
+                        else:
+                            decompressor = zlib.decompressobj()
+                            for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
+                                plain = decompressor.decompress(chunk)
+                                if plain:
+                                    digest.update(plain)
+                                    size += len(plain)
+                                    dst.write(plain)
+                            tail = decompressor.flush()
+                            if tail:
+                                digest.update(tail)
+                                size += len(tail)
+                                dst.write(tail)
+                    if digest.hexdigest() != expected_sha or size != expected_size:
+                        raise ValueError(f"Integrity check failed while exporting {archive_path}")
+                    v2_files[archive_path] = {"sha256": expected_sha, "size": expected_size}
+
+                v2_meta = {
+                    "format_version": SNAPSHOT_FORMAT_VERSION,
+                    "name": metadata.get("name", name),
+                    "created_at": metadata.get("created_at"),
+                    "saiverse_version": metadata.get("saiverse_version", "unknown"),
+                    "note": metadata.get("note", ""),
+                    "file_count": len(v2_files),
+                    "total_bytes_uncompressed": metadata.get("total_bytes_uncompressed", 0),
+                    "files": v2_files,
+                }
+                zf.writestr("snapshot.json", json.dumps(v2_meta, ensure_ascii=False, indent=2))
             os.replace(tmp_out, output_zip)
             return output_zip
-
-        metadata = read_snapshot_metadata(path)
-        if metadata is None or metadata.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
-            raise ValueError(f"Snapshot '{name}' manifest is invalid")
-        files = metadata.get("files")
-        if not isinstance(files, dict):
-            raise ValueError(f"Snapshot '{name}' has no file manifest")
-
-        v2_files: Dict[str, Dict[str, object]] = {}
-        with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED, compresslevel=ZLIB_COMPRESS_LEVEL) as zf:
-            for archive_path, entry in sorted(files.items()):
-                expected_sha = entry["sha256"]
-                expected_size = entry["size"]
-                obj_path, encoding = _resolve_object_for_restore(expected_sha, entry.get("encoding"))
-                compress_type = (
-                    zipfile.ZIP_STORED
-                    if Path(archive_path).suffix.lower() in INCOMPRESSIBLE_EXTENSIONS
-                    else zipfile.ZIP_DEFLATED
-                )
-                info = zipfile.ZipInfo(archive_path)
-                info.compress_type = compress_type
-                digest = hashlib.sha256()
-                size = 0
-                with obj_path.open("rb") as src, zf.open(info, "w") as dst:
-                    if encoding == "raw":
-                        for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
-                            digest.update(chunk)
-                            size += len(chunk)
-                            dst.write(chunk)
-                    else:
-                        decompressor = zlib.decompressobj()
-                        for chunk in iter(lambda: src.read(STREAM_CHUNK_SIZE), b""):
-                            plain = decompressor.decompress(chunk)
-                            if plain:
-                                digest.update(plain)
-                                size += len(plain)
-                                dst.write(plain)
-                        tail = decompressor.flush()
-                        if tail:
-                            digest.update(tail)
-                            size += len(tail)
-                            dst.write(tail)
-                if digest.hexdigest() != expected_sha or size != expected_size:
-                    raise ValueError(f"Integrity check failed while exporting {archive_path}")
-                v2_files[archive_path] = {"sha256": expected_sha, "size": expected_size}
-
-            v2_meta = {
-                "format_version": SNAPSHOT_FORMAT_VERSION,
-                "name": metadata.get("name", name),
-                "created_at": metadata.get("created_at"),
-                "saiverse_version": metadata.get("saiverse_version", "unknown"),
-                "note": metadata.get("note", ""),
-                "file_count": len(v2_files),
-                "total_bytes_uncompressed": metadata.get("total_bytes_uncompressed", 0),
-                "files": v2_files,
-            }
-            zf.writestr("snapshot.json", json.dumps(v2_meta, ensure_ascii=False, indent=2))
-        os.replace(tmp_out, output_zip)
-        return output_zip
     except Exception:
         try:
             tmp_out.unlink(missing_ok=True)
@@ -1271,10 +1495,30 @@ def save_snapshot(
     force: bool = False,
     workers: int = DEFAULT_SAVE_WORKERS,
     progress_callback: Optional[Callable[[str], None]] = None,
+    lock_timeout: float = DEFAULT_STORE_LOCK_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     """CAS (format_version 3) スナップショットを作成する本体関数。"""
     if not _is_valid_snapshot_name(name):
         raise ValueError(f"Invalid snapshot name '{name}' (use letters/digits/_-./).")
+
+    with snapshot_store_lock(timeout=lock_timeout):
+        return _save_snapshot_locked(
+            name,
+            note=note,
+            force=force,
+            workers=workers,
+            progress_callback=progress_callback,
+        )
+
+
+def _save_snapshot_locked(
+    name: str,
+    *,
+    note: str = "",
+    force: bool = False,
+    workers: int = DEFAULT_SAVE_WORKERS,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
 
     mdir = manifests_dir()
     mdir.mkdir(parents=True, exist_ok=True)
@@ -1566,7 +1810,7 @@ def cmd_restore(args: argparse.Namespace) -> int:
     home = saiverse_home()
     home.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(
+    with snapshot_store_lock(), tempfile.TemporaryDirectory(
         prefix=f".{home.name}.restore-stage-",
         dir=home.parent,
     ) as stage_raw:

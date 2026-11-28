@@ -21,7 +21,7 @@ import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 LOGGER = logging.getLogger(__name__)
@@ -613,15 +613,75 @@ def delete_simple_backup(
     return size_bytes
 
 
-def _check_sqlite_integrity(path: Path) -> bool:
+_RESTORE_PROGRESS_INTERVAL_SECONDS = 2.0
+
+
+def _emit_restore_progress(
+    message: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def _check_sqlite_integrity(
+    path: Path,
+    *,
+    label: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> bool:
     wal = path.with_name(path.name + "-wal")
-    uri = f"file:{path}?mode=ro" if (wal.is_file() and wal.stat().st_size > 0) else f"file:{path}?mode=ro&immutable=1"
+    uri = (
+        f"file:{path}?mode=ro"
+        if (wal.is_file() and wal.stat().st_size > 0)
+        else f"file:{path}?mode=ro&immutable=1"
+    )
+    tag = label or path.name
+    _emit_restore_progress(f"[memory-restore] Verifying SQLite integrity: {tag}", progress_callback)
+    last_report = [time.monotonic()]
+
+    def _sqlite_progress() -> int:
+        now = time.monotonic()
+        if now - last_report[0] >= _RESTORE_PROGRESS_INTERVAL_SECONDS:
+            last_report[0] = now
+            _emit_restore_progress(
+                f"[memory-restore] Verifying SQLite integrity: {tag} ...",
+                progress_callback,
+            )
+        return 0
+
     try:
         with closing(sqlite3.connect(uri, uri=True)) as conn:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
+            conn.set_progress_handler(_sqlite_progress, 100_000)
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                conn.set_progress_handler(None, 0)
         return bool(row and row[0] == "ok")
     except sqlite3.Error:
         return False
+
+
+def _sqlite_backup_with_progress(
+    src: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    *,
+    label: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> None:
+    last_report = [time.monotonic()]
+
+    def _on_pages(_status: int, remaining: int, total: int) -> None:
+        now = time.monotonic()
+        if remaining == 0 or now - last_report[0] >= _RESTORE_PROGRESS_INTERVAL_SECONDS:
+            last_report[0] = now
+            done = max(0, total - remaining)
+            _emit_restore_progress(
+                f"[memory-restore] {label}: {done}/{total} pages",
+                progress_callback,
+            )
+
+    src.backup(dst, pages=2000, progress=_on_pages)
 
 
 def _create_pre_restore_backup(
@@ -629,6 +689,7 @@ def _create_pre_restore_backup(
     db_path: Path,
     *,
     output_root: Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> Path | None:
     if not db_path.is_file():
         return None
@@ -636,14 +697,27 @@ def _create_pre_restore_backup(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:19]
     backup_path = backup_dir / f"memory.db_backup_pre_restore_{timestamp}.bak"
     tmp_path = backup_path.with_name(f".{backup_path.name}.{uuid4().hex}.tmp")
+    _emit_restore_progress(
+        f"[memory-restore] Creating pre-restore backup for {persona_id} ...",
+        progress_callback,
+    )
     try:
         with closing(sqlite3.connect(db_path)) as src:
             with closing(sqlite3.connect(tmp_path)) as dst:
-                src.backup(dst)
+                _sqlite_backup_with_progress(
+                    src,
+                    dst,
+                    label=f"Pre-restore backup ({persona_id})",
+                    progress_callback=progress_callback,
+                )
                 dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 dst.execute("PRAGMA journal_mode=DELETE")
         gc.collect()
-        if not _check_sqlite_integrity(tmp_path):
+        if not _check_sqlite_integrity(
+            tmp_path,
+            label=backup_path.name,
+            progress_callback=progress_callback,
+        ):
             raise BackupError("Pre-restore safety backup failed PRAGMA integrity_check")
         os.replace(tmp_path, backup_path)
         return backup_path
@@ -689,6 +763,7 @@ def restore_simple_backup(
     saiverse_db_path: Path | None = None,
     output_root: Path | None = None,
     require_stopped: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Restore one persona's ``memory.db`` from a validated simple backup while stopped.
 
@@ -710,12 +785,21 @@ def restore_simple_backup(
     backup_path = _resolve_simple_backup_path(safe_persona, filename, output_root=output_root)
     if not backup_path.is_file():
         raise FileNotFoundError(f"Backup not found: {safe_persona}/{filename}")
-    if not _check_sqlite_integrity(backup_path):
+    if not _check_sqlite_integrity(
+        backup_path,
+        label=backup_path.name,
+        progress_callback=progress_callback,
+    ):
         raise BackupError(f"Backup failed PRAGMA integrity_check: {backup_path.name}")
 
     db_path = db_path.resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    safety_backup = _create_pre_restore_backup(safe_persona, db_path, output_root=output_root)
+    safety_backup = _create_pre_restore_backup(
+        safe_persona,
+        db_path,
+        output_root=output_root,
+        progress_callback=progress_callback,
+    )
 
     restore_id = uuid4().hex
     staged = db_path.with_name(f".{db_path.name}.restore-{restore_id}.tmp")
@@ -734,15 +818,33 @@ def restore_simple_backup(
             if (wal.is_file() and wal.stat().st_size > 0)
             else f"file:{backup_path}?mode=ro&immutable=1"
         )
+        _emit_restore_progress(
+            f"[memory-restore] Staging {backup_path.name} into {db_path.name} ...",
+            progress_callback,
+        )
         with closing(sqlite3.connect(src_uri, uri=True)) as src:
             with closing(sqlite3.connect(staged)) as dst:
-                src.backup(dst)
+                _sqlite_backup_with_progress(
+                    src,
+                    dst,
+                    label=f"Staging restore ({safe_persona})",
+                    progress_callback=progress_callback,
+                )
                 dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 dst.execute("PRAGMA journal_mode=DELETE")
         gc.collect()
 
-        if not _check_sqlite_integrity(staged):
+        if not _check_sqlite_integrity(
+            staged,
+            label=f"staged {db_path.name}",
+            progress_callback=progress_callback,
+        ):
             raise BackupError("Staged restored memory.db failed PRAGMA integrity_check")
+
+        _emit_restore_progress(
+            f"[memory-restore] Swapping restored memory.db for {safe_persona} ...",
+            progress_callback,
+        )
 
         if db_path.exists():
             os.replace(db_path, rollback)
@@ -816,6 +918,7 @@ def main(argv: list[str] | None = None) -> int:
                 db_path=db_path,
                 saiverse_db_path=saiverse_db,
                 require_stopped=True,
+                progress_callback=lambda msg: print(msg, flush=True),
             )
         except Exception as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
