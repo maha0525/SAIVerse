@@ -14043,9 +14043,17 @@
     "ja": "ディスク使用量:",
     "en": "Disk usage:"
   },
+  "components.BackupManagementPanel.statCasStore": {
+    "ja": "CAS 倉庫:",
+    "en": "CAS store:"
+  },
   "components.BackupManagementPanel.statLegacyZip": {
     "ja": "旧 ZIP:",
     "en": "Legacy ZIP:"
+  },
+  "components.BackupManagementPanel.statLatestUncompressed": {
+    "ja": "最新世代の元データ:",
+    "en": "Latest uncompressed:"
   },
   "components.BackupManagementPanel.gcButton": {
     "ja": "不要データを掃除 ({p1})",
@@ -14074,6 +14082,14 @@
   "components.BackupManagementPanel.fileCount": {
     "ja": "{p1} ファイル",
     "en": "{p1} files"
+  },
+  "components.BackupManagementPanel.reclaimOnDelete": {
+    "ja": "削除で解放: {p1}",
+    "en": "Frees on delete: {p1}"
+  },
+  "components.BackupManagementPanel.reclaimUnavailableGcPaused": {
+    "ja": "削除で解放: 計算不可 (GC停止中)",
+    "en": "Frees on delete: unavailable (GC paused)"
   },
   "components.BackupManagementPanel.restoreButton": {
     "ja": "復元",

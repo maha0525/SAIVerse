@@ -704,3 +704,79 @@ def test_export_snapshot_rejects_ambiguous_collision_with_existing_cas_manifest(
     ok_zip = tmp_path / "third.zip"
     snapshot.export_snapshot_to_zip("third", ok_zip)
     assert ok_zip.is_file()
+
+
+def test_list_snapshots_with_stats_computes_exact_unique_bytes_and_handles_corruption(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Per-generation unique_bytes matches exact reclaimable on-disk bytes on delete,
+    counts intra-snapshot duplicate hashes once, and turns None when GC is paused."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="u-v1", mem_val="u-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("gen1")
+
+        # Mutate memory.db AND add two identical files unique to gen2 to verify
+        # intra-generation duplicate hashes are counted with refcount == 1.
+        _create_sqlite(home / "personas" / "mira" / "memory.db", "u-m2")
+        dup_payload = b"\x89PNG\r\n\x1a\n" + b"unique-gen2-dup-" * 40
+        (home / "image" / "dup_a.png").write_bytes(dup_payload)
+        (home / "image" / "dup_b.png").write_bytes(dup_payload)
+        snapshot.save_snapshot("gen2")
+
+        # Also plant a legacy ZIP snapshot
+        exported_zip = home / "snapshots" / "legacy_gen.zip"
+        snapshot.export_snapshot_to_zip("gen1", exported_zip)
+        zip_size = exported_zip.stat().st_size
+
+        items, stats = snapshot.list_snapshots_with_stats()
+        by_name = {item["name"]: item for item in items}
+
+        assert stats["cas_snapshot_count"] == 2
+        assert stats["legacy_zip_count"] == 1
+        assert by_name["legacy_gen"]["unique_bytes"] == zip_size
+
+        # gen1 and gen2 share saiverse.db and photo.png -> both have unique_bytes < cas_store_bytes
+        gen1_unique = by_name["gen1"]["unique_bytes"]
+        gen2_unique = by_name["gen2"]["unique_bytes"]
+        assert gen1_unique is not None and 0 < gen1_unique < stats["cas_store_bytes"]
+        assert gen2_unique is not None and 0 < gen2_unique < stats["cas_store_bytes"]
+        # gen2's unique bytes include the single stored copy of dup_payload + mem2's .z object
+        assert gen2_unique >= len(dup_payload)
+        assert gen2_unique < len(dup_payload) * 2
+
+        # Verify GET /api/backups/snapshots exposes unique_bytes & cas_snapshot_count
+        app = FastAPI()
+        app.include_router(backups_route.router, prefix="/api/backups")
+        client = TestClient(app)
+        api_body = client.get("/api/backups/snapshots").json()
+        api_by_name = {item["name"]: item for item in api_body["snapshots"]}
+        assert api_body["stats"]["cas_snapshot_count"] == 2
+        assert api_by_name["gen2"]["unique_bytes"] == gen2_unique
+        assert api_by_name["legacy_gen"]["unique_bytes"] == zip_size
+
+        # Corrupted manifest pauses fail-closed GC -> CAS unique_bytes becomes None,
+        # while legacy ZIP remains unaffected.
+        corrupt = home / "snapshots" / "manifests" / "broken_meta.json"
+        corrupt.write_text("{corrupted", encoding="utf-8")
+        items_corrupt, stats_corrupt = snapshot.list_snapshots_with_stats()
+        corrupt_by_name = {item["name"]: item for item in items_corrupt}
+        assert stats_corrupt["corrupted_manifests"] == ["broken_meta.json"]
+        assert corrupt_by_name["gen1"]["unique_bytes"] is None
+        assert corrupt_by_name["gen2"]["unique_bytes"] is None
+        assert corrupt_by_name["broken_meta"]["unique_bytes"] is None
+        assert corrupt_by_name["broken_meta"]["readable"] is False
+        assert corrupt_by_name["legacy_gen"]["unique_bytes"] == zip_size
+        corrupt.unlink()
+
+        # Deleting gen2 must reclaim EXACTLY gen2_unique bytes!
+        deleted = snapshot.delete_snapshot("gen2", run_gc=True)
+        assert deleted["reclaimed_bytes"] == gen2_unique
+
+        # With only gen1 remaining, deleting gen1 would free the entire CAS store
+        items_after, stats_after = snapshot.list_snapshots_with_stats()
+        after_by_name = {item["name"]: item for item in items_after}
+        assert stats_after["cas_snapshot_count"] == 1
+        assert after_by_name["gen1"]["unique_bytes"] == stats_after["cas_store_bytes"]

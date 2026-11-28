@@ -11,6 +11,7 @@ SAIVerse 起動状態では DB ロックが取れないため、起動中検出�
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import contextlib
 from dataclasses import dataclass
@@ -707,85 +708,56 @@ def _temp_file_pid(filename: str) -> Optional[int]:
         return None
 
 
-def list_snapshots() -> List[Dict[str, Any]]:
-    """全スナップショット (CAS + 旧 ZIP) の一覧を返す (新しい順)。"""
-    items: List[Dict[str, Any]] = []
-    mdir = manifests_dir()
-    if mdir.is_dir():
-        for path in sorted(mdir.glob("*.json")):
-            if not path.is_file():
-                continue
-            meta = read_snapshot_metadata(path)
-            items.append({
-                "name": path.stem,
-                "format": "cas",
-                "path": str(path),
-                "created_at": meta.get("created_at") if meta else None,
-                "saiverse_version": meta.get("saiverse_version") if meta else None,
-                "note": (meta.get("note") or "") if meta else "",
-                "file_count": meta.get("file_count") if meta else None,
-                "total_bytes_uncompressed": meta.get("total_bytes_uncompressed") if meta else None,
-                "archive_size_bytes": None,
-                "readable": meta is not None,
-            })
-
-    sdir = snapshots_dir()
-    for path in sorted(sdir.glob("*.zip")):
-        if not path.is_file():
-            continue
-        meta = read_snapshot_metadata(path)
-        try:
-            archive_size = path.stat().st_size
-        except OSError:
-            archive_size = None
-        items.append({
-            "name": path.stem,
-            "format": "zip",
-            "path": str(path),
-            "created_at": meta.get("created_at") if meta else None,
-            "saiverse_version": meta.get("saiverse_version") if meta else None,
-            "note": (meta.get("note") or "") if meta else "",
-            "file_count": meta.get("file_count") if meta else None,
-            "total_bytes_uncompressed": meta.get("total_bytes_uncompressed") if meta else None,
-            "archive_size_bytes": archive_size,
-            "readable": meta is not None,
-        })
-
-    items.sort(key=lambda x: (x.get("created_at") or "", x["name"]), reverse=True)
-    return items
+def _extract_manifest_hashes(meta: Optional[dict]) -> Optional[set[str]]:
+    """CAS マニフェストの整合性を検証し、参照している一意な SHA-256 集合を返す。"""
+    if not meta or meta.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
+        return None
+    files = meta.get("files")
+    if not isinstance(files, dict):
+        return None
+    manifest_hashes: set[str] = set()
+    for entry in files.values():
+        if not isinstance(entry, dict) or not _is_valid_sha256(entry.get("sha256")):
+            return None
+        manifest_hashes.add(entry["sha256"])
+    return manifest_hashes
 
 
-def _collect_live_object_hashes() -> Tuple[set[str], List[str]]:
-    """全 CAS マニフェストから参照されている SHA-256 集合と、読めないマニフェスト一覧を返す。"""
-    referenced: set[str] = set()
+def _scan_cas_manifests() -> Tuple[
+    List[Tuple[Path, Optional[dict], Optional[set[str]]]],
+    Counter[str],
+    List[str],
+]:
+    """全 CAS マニフェストを 1 パスで走査し、世代情報・参照カウント・破損一覧を返す。
+
+    1 世代内の複数ファイルが同じ SHA-256 を参照していても、参照カウントは世代単位で
+    1 だけ加算する (その世代を削除したときに解放されるかを正確に求めるため)。
+    """
+    entries: List[Tuple[Path, Optional[dict], Optional[set[str]]]] = []
+    refcount: Counter[str] = Counter()
     corrupted: List[str] = []
     mdir = manifests_dir()
     if not mdir.is_dir():
-        return referenced, corrupted
+        return entries, refcount, corrupted
 
     for path in sorted(mdir.glob("*.json")):
         if not path.is_file():
             continue
         meta = read_snapshot_metadata(path)
-        if not meta or meta.get("format_version") != CAS_SNAPSHOT_FORMAT_VERSION:
+        manifest_hashes = _extract_manifest_hashes(meta)
+        entries.append((path, meta, manifest_hashes))
+        if manifest_hashes is None:
             corrupted.append(path.name)
             continue
-        files = meta.get("files")
-        if not isinstance(files, dict):
-            corrupted.append(path.name)
-            continue
-        valid_manifest = True
-        manifest_hashes: set[str] = set()
-        for entry in files.values():
-            if not isinstance(entry, dict) or not _is_valid_sha256(entry.get("sha256")):
-                valid_manifest = False
-                break
-            manifest_hashes.add(entry["sha256"])
-        if not valid_manifest:
-            corrupted.append(path.name)
-            continue
-        referenced.update(manifest_hashes)
-    return referenced, corrupted
+        for sha in manifest_hashes:
+            refcount[sha] += 1
+    return entries, refcount, corrupted
+
+
+def _collect_live_object_hashes() -> Tuple[set[str], List[str]]:
+    """全 CAS マニフェストから参照されている SHA-256 集合と、読めないマニフェスト一覧を返す。"""
+    _entries, refcount, corrupted = _scan_cas_manifests()
+    return set(refcount.keys()), corrupted
 
 
 def _parse_object_filename(filename: str) -> Optional[str]:
@@ -814,9 +786,12 @@ def _is_temp_file_stale(filename: str) -> bool:
         return False
 
 
-def get_store_stats() -> Dict[str, Any]:
-    """スナップショット倉庫全体の容量・孤立オブジェクト統計を返す。"""
-    referenced, corrupted = _collect_live_object_hashes()
+def _scan_cas_objects(
+    refcount: Counter[str],
+    corrupted: List[str],
+) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """``.store/objects/`` を 1 パスで走査し、SHA-256 別の実ディスク容量と集計値を返す。"""
+    object_bytes_by_sha: Dict[str, int] = {}
     cas_store_bytes = 0
     cas_object_count = 0
     orphan_object_count = 0
@@ -841,9 +816,107 @@ def get_store_stats() -> Dict[str, Any]:
                 sha = _parse_object_filename(fname)
                 cas_store_bytes += size
                 cas_object_count += 1
-                if sha is not None and not corrupted and sha not in referenced:
-                    orphan_object_count += 1
-                    orphan_bytes += size
+                if sha is not None:
+                    object_bytes_by_sha[sha] = object_bytes_by_sha.get(sha, 0) + size
+                    if not corrupted and refcount[sha] == 0:
+                        orphan_object_count += 1
+                        orphan_bytes += size
+
+    return object_bytes_by_sha, {
+        "cas_store_bytes": cas_store_bytes,
+        "cas_object_count": cas_object_count,
+        "orphan_object_count": orphan_object_count,
+        "orphan_bytes": orphan_bytes,
+        "temp_file_count": temp_file_count,
+        "temp_bytes": temp_bytes,
+    }
+
+
+def list_snapshots_with_stats() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """全スナップショット一覧 (各世代の削除時解放容量 ``unique_bytes`` 付き) と倉庫統計を 1 パスで返す。"""
+    cas_entries, refcount, corrupted = _scan_cas_manifests()
+    object_bytes_by_sha, obj_stats = _scan_cas_objects(refcount, corrupted)
+
+    items: List[Dict[str, Any]] = []
+    for path, meta, manifest_hashes in cas_entries:
+        if corrupted or manifest_hashes is None:
+            unique_bytes: Optional[int] = None
+        else:
+            unique_bytes = sum(
+                object_bytes_by_sha.get(sha, 0)
+                for sha in manifest_hashes
+                if refcount[sha] == 1
+            )
+        items.append({
+            "name": path.stem,
+            "format": "cas",
+            "path": str(path),
+            "created_at": meta.get("created_at") if meta else None,
+            "saiverse_version": meta.get("saiverse_version") if meta else None,
+            "note": (meta.get("note") or "") if meta else "",
+            "file_count": meta.get("file_count") if meta else None,
+            "total_bytes_uncompressed": meta.get("total_bytes_uncompressed") if meta else None,
+            "archive_size_bytes": None,
+            "unique_bytes": unique_bytes,
+            "readable": manifest_hashes is not None,
+        })
+
+    legacy_zip_bytes = 0
+    legacy_zip_count = 0
+    sdir = snapshots_dir()
+    for path in sorted(sdir.glob("*.zip")):
+        if not path.is_file():
+            continue
+        legacy_zip_count += 1
+        meta = read_snapshot_metadata(path)
+        try:
+            archive_size: Optional[int] = path.stat().st_size
+        except OSError:
+            archive_size = None
+        if archive_size is not None:
+            legacy_zip_bytes += archive_size
+        items.append({
+            "name": path.stem,
+            "format": "zip",
+            "path": str(path),
+            "created_at": meta.get("created_at") if meta else None,
+            "saiverse_version": meta.get("saiverse_version") if meta else None,
+            "note": (meta.get("note") or "") if meta else "",
+            "file_count": meta.get("file_count") if meta else None,
+            "total_bytes_uncompressed": meta.get("total_bytes_uncompressed") if meta else None,
+            "archive_size_bytes": archive_size,
+            "unique_bytes": archive_size,
+            "readable": meta is not None,
+        })
+
+    items.sort(key=lambda x: (x.get("created_at") or "", x["name"]), reverse=True)
+
+    stats: Dict[str, Any] = {
+        "cas_store_bytes": obj_stats["cas_store_bytes"],
+        "cas_object_count": obj_stats["cas_object_count"],
+        "cas_snapshot_count": len(cas_entries),
+        "legacy_zip_bytes": legacy_zip_bytes,
+        "legacy_zip_count": legacy_zip_count,
+        "total_disk_bytes": obj_stats["cas_store_bytes"] + legacy_zip_bytes + obj_stats["temp_bytes"],
+        "orphan_object_count": obj_stats["orphan_object_count"],
+        "orphan_bytes": obj_stats["orphan_bytes"],
+        "temp_file_count": obj_stats["temp_file_count"],
+        "temp_bytes": obj_stats["temp_bytes"],
+        "corrupted_manifests": corrupted,
+    }
+    return items, stats
+
+
+def list_snapshots() -> List[Dict[str, Any]]:
+    """全スナップショット (CAS + 旧 ZIP) の一覧を返す (新しい順)。"""
+    items, _stats = list_snapshots_with_stats()
+    return items
+
+
+def get_store_stats() -> Dict[str, Any]:
+    """スナップショット倉庫全体の容量・孤立オブジェクト統計を返す。"""
+    cas_entries, refcount, corrupted = _scan_cas_manifests()
+    _object_bytes_by_sha, obj_stats = _scan_cas_objects(refcount, corrupted)
 
     legacy_zip_bytes = 0
     legacy_zip_count = 0
@@ -856,15 +929,16 @@ def get_store_stats() -> Dict[str, Any]:
                 pass
 
     return {
-        "cas_store_bytes": cas_store_bytes,
-        "cas_object_count": cas_object_count,
+        "cas_store_bytes": obj_stats["cas_store_bytes"],
+        "cas_object_count": obj_stats["cas_object_count"],
+        "cas_snapshot_count": len(cas_entries),
         "legacy_zip_bytes": legacy_zip_bytes,
         "legacy_zip_count": legacy_zip_count,
-        "total_disk_bytes": cas_store_bytes + legacy_zip_bytes + temp_bytes,
-        "orphan_object_count": orphan_object_count,
-        "orphan_bytes": orphan_bytes,
-        "temp_file_count": temp_file_count,
-        "temp_bytes": temp_bytes,
+        "total_disk_bytes": obj_stats["cas_store_bytes"] + legacy_zip_bytes + obj_stats["temp_bytes"],
+        "orphan_object_count": obj_stats["orphan_object_count"],
+        "orphan_bytes": obj_stats["orphan_bytes"],
+        "temp_file_count": obj_stats["temp_file_count"],
+        "temp_bytes": obj_stats["temp_bytes"],
         "corrupted_manifests": corrupted,
     }
 
@@ -1867,27 +1941,27 @@ def cmd_save(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    items = list_snapshots()
+    items, stats = list_snapshots_with_stats()
     if not items:
         print("No snapshots found in", snapshots_dir())
         return 0
 
-    print(f"{'Name':<38} {'Fmt':<4} {'Created':<20} {'Version':<10} {'Size':>10}")
+    print(f"{'Name':<38} {'Fmt':<4} {'Created':<20} {'Version':<10} {'Reclaim':>10}")
     print("-" * 88)
     for item in items:
         created = (item.get("created_at") or "?")[:19]
         version = item.get("saiverse_version") or "?"
-        size_bytes = item.get("archive_size_bytes")
-        if size_bytes is None:
-            size_bytes = item.get("total_bytes_uncompressed") or 0
-        size_mb = size_bytes / (1024 * 1024)
-        print(f"{item['name']:<38} {item['format']:<4} {created:<20} {version:<10} {size_mb:>7.1f} MB")
+        unique_bytes = item.get("unique_bytes")
+        if unique_bytes is None:
+            size_str = f"{'n/a':>10}"
+        else:
+            size_str = f"{unique_bytes / (1024 * 1024):>7.1f} MB"
+        print(f"{item['name']:<38} {item['format']:<4} {created:<20} {version:<10} {size_str}")
 
-    stats = get_store_stats()
     print("-" * 88)
     print(
         f"Disk usage: CAS store {stats['cas_store_bytes'] / (1024 * 1024):.1f} MB "
-        f"({stats['cas_object_count']} objects), "
+        f"({stats['cas_snapshot_count']} snapshots, {stats['cas_object_count']} objects), "
         f"Legacy ZIPs {stats['legacy_zip_bytes'] / (1024 * 1024):.1f} MB "
         f"({stats['legacy_zip_count']} files)"
     )
