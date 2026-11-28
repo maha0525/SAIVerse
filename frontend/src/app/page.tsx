@@ -2000,24 +2000,32 @@ export default function Home() {
         return () => clearInterval(reconnectInterval);
     }, [backendConnected, isUpdating, isShuttingDown]);
 
-    // 更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
+    // 再起動・更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
     useEffect(() => {
         if (sessionStorage.getItem('saiverse_update_finished') !== 'true') return;
         sessionStorage.removeItem('saiverse_update_finished');
+        const doneLabel = sessionStorage.getItem('saiverse_updating_done_label') || '';
+        sessionStorage.removeItem('saiverse_updating_done_label');
         const toastId = `update-complete-${Date.now()}`;
-        setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
+        setToasts(prev => [
+            ...prev,
+            { id: toastId, content: doneLabel || uiText('app.page.updateCompleteToast') },
+        ]);
         // 片付けの関数は返さない: 開発モードの二重実行で掃除だけが走ると、
         // 旗はもう消えているので知らせが画面に残り続ける。
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
     }, []);
 
-    // 設定画面からチャンネルを切り替えたときやオフラインのバックアップ/復元も、
+    // 設定画面からチャンネルを切り替えたとき・再起動・オフラインのバックアップ/復元も、
     // 更新ボタンと同じ「再起動待ち」に乗せる。
     useEffect(() => {
         const onUpdateStarted = (event: Event) => {
-            const detail = (event as CustomEvent<{ version?: string; label?: string }>).detail;
+            const detail = (
+                event as CustomEvent<{ version?: string; label?: string; completedLabel?: string }>
+            ).detail;
             const version = detail?.version || '';
             const label = detail?.label || '';
+            const completedLabel = detail?.completedLabel || '';
             updatingTargetVersion.current = version;
             setUpdatingLabel(label);
             setIsUpdating(true);
@@ -2026,6 +2034,11 @@ export default function Home() {
                 sessionStorage.setItem('saiverse_updating_label', label);
             } else {
                 sessionStorage.removeItem('saiverse_updating_label');
+            }
+            if (completedLabel) {
+                sessionStorage.setItem('saiverse_updating_done_label', completedLabel);
+            } else {
+                sessionStorage.removeItem('saiverse_updating_done_label');
             }
             setUpdateAvailable(null);
         };
@@ -2036,6 +2049,7 @@ export default function Home() {
             setUpdatingLabel('');
             sessionStorage.removeItem('saiverse_updating');
             sessionStorage.removeItem('saiverse_updating_label');
+            sessionStorage.removeItem('saiverse_updating_done_label');
             setUpdateAvailable(null);
         };
         window.addEventListener(SHUTDOWN_STARTED_EVENT, onShutdownStarted);
@@ -2102,8 +2116,11 @@ export default function Home() {
             const res = await apiFetch('/api/system/update', { method: 'POST' });
             if (res.ok) {
                 updatingTargetVersion.current = updateAvailable.version;
+                setUpdatingLabel('');
                 setIsUpdating(true);
                 sessionStorage.setItem('saiverse_updating', 'true');
+                sessionStorage.removeItem('saiverse_updating_label');
+                sessionStorage.removeItem('saiverse_updating_done_label');
                 setUpdateAvailable(null);
             } else {
                 // Surface the server's reason (e.g. the list of locally modified
@@ -2137,8 +2154,11 @@ export default function Home() {
         const result = await requestChannelSwitch('stable', false);
         if (result.ok) {
             updatingTargetVersion.current = target;
+            setUpdatingLabel('');
             setIsUpdating(true);
             sessionStorage.setItem('saiverse_updating', 'true');
+            sessionStorage.removeItem('saiverse_updating_label');
+            sessionStorage.removeItem('saiverse_updating_done_label');
             setUpdateAvailable(null);
             return;
         }

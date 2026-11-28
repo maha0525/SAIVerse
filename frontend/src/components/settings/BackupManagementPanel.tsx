@@ -296,7 +296,11 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
             if (!res.ok) {
                 throw new Error(await readErrorDetail(res, uiText('components.BackupManagementPanel.createSnapshotFailed')));
             }
-            announceUpdateStarted('', uiText('components.BackupManagementPanel.bannerCreatingSnapshot'));
+            announceUpdateStarted(
+                '',
+                uiText('components.BackupManagementPanel.bannerCreatingSnapshot'),
+                uiText('components.BackupManagementPanel.toastSnapshotCreated'),
+            );
             onOperationStarted?.();
         } catch (err) {
             setSnapError(err instanceof Error ? err.message : uiText('components.BackupManagementPanel.createSnapshotFailed'));
@@ -380,7 +384,11 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
             }
             setRestoreTarget(null);
             setRestoreChecked(false);
-            announceUpdateStarted('', uiText('components.BackupManagementPanel.bannerRestoringSnapshot'));
+            announceUpdateStarted(
+                '',
+                uiText('components.BackupManagementPanel.bannerRestoringSnapshot'),
+                uiText('components.BackupManagementPanel.toastSnapshotRestored'),
+            );
             onOperationStarted?.();
         } catch (err) {
             setSnapError(err instanceof Error ? err.message : uiText('components.BackupManagementPanel.restoreSnapshotFailed'));
@@ -491,7 +499,10 @@ export default function BackupManagementPanel({ onOperationStarted }: BackupMana
                 '',
                 uiText('components.BackupManagementPanel.bannerRestoringPersona', {
                     p1: displayName,
-                })
+                }),
+                uiText('components.BackupManagementPanel.toastPersonaRestored', {
+                    p1: displayName,
+                }),
             );
             onOperationStarted?.();
         } catch (err) {
