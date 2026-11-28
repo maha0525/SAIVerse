@@ -5,19 +5,24 @@ try:
 except ImportError:
     fcntl = None
 
+import argparse
 import contextlib
 import gc
 import hashlib
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
+from uuid import uuid4
 
 LOGGER = logging.getLogger(__name__)
 
@@ -289,10 +294,19 @@ def _simple_backup_dir(persona_id: str, root: Path | None = None) -> Path:
 
 
 def _prune_simple_backups(backup_dir: Path, keep_count: int = SIMPLE_BACKUP_KEEP) -> None:
-    """Remove old simple backups, keeping only the most recent N backups."""
+    """Remove old simple backups, keeping only the most recent N backups.
+
+    ``memory.db_backup_pre_restore_*.bak`` safety backups created right before
+    a restore are preserved separately so routine startup backups cannot wipe
+    the safety net of a recent restore.
+    """
     pattern = "memory.db_backup_*.bak"
     backups = sorted(
-        [p for p in backup_dir.glob(pattern) if p.is_file()],
+        [
+            p
+            for p in backup_dir.glob(pattern)
+            if p.is_file() and not p.name.startswith("memory.db_backup_pre_restore_")
+        ],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -307,10 +321,14 @@ def _prune_simple_backups(backup_dir: Path, keep_count: int = SIMPLE_BACKUP_KEEP
 
 
 def _get_latest_simple_backup(backup_dir: Path) -> Path | None:
-    """Get the most recent backup file in the directory."""
+    """Get the most recent routine backup file in the directory."""
     pattern = "memory.db_backup_*.bak"
     backups = sorted(
-        [p for p in backup_dir.glob(pattern) if p.is_file()],
+        [
+            p
+            for p in backup_dir.glob(pattern)
+            if p.is_file() and not p.name.startswith("memory.db_backup_pre_restore_")
+        ],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -467,3 +485,452 @@ def run_backup_auto(
         rdiff_path=rdiff_path,
         force_full=force_full,
     )
+
+
+# ---------------------------------------------------------------------------
+# Simple backup inspection, deletion, and safe offline restore
+# ---------------------------------------------------------------------------
+
+_SIMPLE_BACKUP_NAME_RE = re.compile(
+    r"^memory\.db_backup_(?:(?P<kind>pre_restore)_)?(?P<ts>\d{8}_\d{6}(?:_\d+)?)\.bak$"
+)
+
+
+def _validate_persona_id(persona_id: str) -> str:
+    if (
+        not persona_id
+        or persona_id in (".", "..")
+        or "/" in persona_id
+        or "\\" in persona_id
+        or ":" in persona_id
+        or ".." in persona_id
+    ):
+        raise ValueError(f"Invalid persona_id: {persona_id!r}")
+    return persona_id
+
+
+def _validate_simple_backup_filename(filename: str) -> str:
+    if (
+        not filename
+        or "/" in filename
+        or "\\" in filename
+        or ":" in filename
+        or ".." in filename
+        or not _SIMPLE_BACKUP_NAME_RE.match(filename)
+    ):
+        raise ValueError(f"Invalid persona backup filename: {filename!r}")
+    return filename
+
+
+def _parse_simple_backup_timestamp(filename: str, path: Path) -> str:
+    match = _SIMPLE_BACKUP_NAME_RE.match(filename)
+    if match:
+        raw_ts = match.group("ts")
+        base_ts = raw_ts[:15]  # YYYYMMDD_HHMMSS
+        try:
+            dt = datetime.strptime(base_ts, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            return dt.astimezone().isoformat()
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()
+    except OSError:
+        return ""
+
+
+def _resolve_simple_backup_path(
+    persona_id: str,
+    filename: str,
+    *,
+    output_root: Path | None = None,
+) -> Path:
+    safe_persona = _validate_persona_id(persona_id)
+    safe_name = _validate_simple_backup_filename(filename)
+    base = (Path(output_root) if output_root else get_simple_backup_root()).resolve()
+    persona_dir = (base / safe_persona).resolve()
+    if not persona_dir.is_relative_to(base):
+        raise ValueError(f"Invalid persona_id path escape: {persona_id!r}")
+    target = (persona_dir / safe_name).resolve()
+    if not target.is_relative_to(persona_dir):
+        raise ValueError(f"Invalid backup filename path escape: {filename!r}")
+    return target
+
+
+def list_simple_backups(
+    persona_id: str,
+    *,
+    output_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """List simple SQLite backups for one persona, newest first."""
+    safe_persona = _validate_persona_id(persona_id)
+    base = Path(output_root) if output_root else get_simple_backup_root()
+    persona_dir = base / safe_persona
+    if not persona_dir.is_dir():
+        return []
+
+    items: list[dict[str, Any]] = []
+    for path in persona_dir.glob("memory.db_backup_*.bak"):
+        if not path.is_file():
+            continue
+        match = _SIMPLE_BACKUP_NAME_RE.match(path.name)
+        if not match:
+            continue
+        try:
+            stat_result = path.stat()
+        except OSError:
+            continue
+        items.append({
+            "filename": path.name,
+            "kind": match.group("kind") or "backup",
+            "size_bytes": stat_result.st_size,
+            "created_at": _parse_simple_backup_timestamp(path.name, path),
+            "mtime": stat_result.st_mtime,
+            "path": str(path),
+        })
+
+    items.sort(key=lambda item: (item["created_at"], item["mtime"], item["filename"]), reverse=True)
+    for item in items:
+        item.pop("mtime", None)
+    return items
+
+
+def delete_simple_backup(
+    persona_id: str,
+    filename: str,
+    *,
+    output_root: Path | None = None,
+) -> int:
+    """Delete one simple backup file for a persona and return reclaimed bytes."""
+    target = _resolve_simple_backup_path(persona_id, filename, output_root=output_root)
+    if not target.is_file():
+        raise FileNotFoundError(f"Backup not found: {persona_id}/{filename}")
+    size_bytes = target.stat().st_size
+    target.unlink()
+    for ext in ("-wal", "-shm"):
+        sidecar = target.with_name(target.name + ext)
+        with contextlib.suppress(OSError):
+            sidecar.unlink(missing_ok=True)
+    return size_bytes
+
+
+_RESTORE_PROGRESS_INTERVAL_SECONDS = 2.0
+
+
+def _emit_restore_progress(
+    message: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def _check_sqlite_integrity(
+    path: Path,
+    *,
+    label: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> bool:
+    wal = path.with_name(path.name + "-wal")
+    uri = (
+        f"file:{path}?mode=ro"
+        if (wal.is_file() and wal.stat().st_size > 0)
+        else f"file:{path}?mode=ro&immutable=1"
+    )
+    tag = label or path.name
+    _emit_restore_progress(f"[memory-restore] Verifying SQLite integrity: {tag}", progress_callback)
+    last_report = [time.monotonic()]
+
+    def _sqlite_progress() -> int:
+        now = time.monotonic()
+        if now - last_report[0] >= _RESTORE_PROGRESS_INTERVAL_SECONDS:
+            last_report[0] = now
+            _emit_restore_progress(
+                f"[memory-restore] Verifying SQLite integrity: {tag} ...",
+                progress_callback,
+            )
+        return 0
+
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.set_progress_handler(_sqlite_progress, 100_000)
+            try:
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                conn.set_progress_handler(None, 0)
+        return bool(row and row[0] == "ok")
+    except sqlite3.Error:
+        return False
+
+
+def _sqlite_backup_with_progress(
+    src: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    *,
+    label: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> None:
+    last_report = [time.monotonic()]
+
+    def _on_pages(_status: int, remaining: int, total: int) -> None:
+        now = time.monotonic()
+        if remaining == 0 or now - last_report[0] >= _RESTORE_PROGRESS_INTERVAL_SECONDS:
+            last_report[0] = now
+            done = max(0, total - remaining)
+            _emit_restore_progress(
+                f"[memory-restore] {label}: {done}/{total} pages",
+                progress_callback,
+            )
+
+    src.backup(dst, pages=2000, progress=_on_pages)
+
+
+def _create_pre_restore_backup(
+    persona_id: str,
+    db_path: Path,
+    *,
+    output_root: Path | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> Path | None:
+    if not db_path.is_file():
+        return None
+    backup_dir = _simple_backup_dir(persona_id, output_root)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:19]
+    backup_path = backup_dir / f"memory.db_backup_pre_restore_{timestamp}.bak"
+    tmp_path = backup_path.with_name(f".{backup_path.name}.{uuid4().hex}.tmp")
+    _emit_restore_progress(
+        f"[memory-restore] Creating pre-restore backup for {persona_id} ...",
+        progress_callback,
+    )
+    try:
+        with closing(sqlite3.connect(db_path)) as src:
+            with closing(sqlite3.connect(tmp_path)) as dst:
+                _sqlite_backup_with_progress(
+                    src,
+                    dst,
+                    label=f"Pre-restore backup ({persona_id})",
+                    progress_callback=progress_callback,
+                )
+                dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                dst.execute("PRAGMA journal_mode=DELETE")
+        gc.collect()
+        if not _check_sqlite_integrity(
+            tmp_path,
+            label=backup_path.name,
+            progress_callback=progress_callback,
+        ):
+            raise BackupError("Pre-restore safety backup failed PRAGMA integrity_check")
+        os.replace(tmp_path, backup_path)
+        return backup_path
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _clear_persona_head_snapshots(saiverse_db_path: Path, persona_id: str) -> int:
+    """Remove cached head snapshots for ``persona_id`` so the next turn rebuilds
+    Memopedia / Core Memory sections from the restored ``memory.db``."""
+    if not saiverse_db_path.is_file():
+        return 0
+    try:
+        with closing(sqlite3.connect(saiverse_db_path)) as conn:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_head_snapshot'"
+            ).fetchone()
+            if not table_exists:
+                return 0
+            cur = conn.execute(
+                "DELETE FROM session_head_snapshot WHERE PERSONA_ID = ?",
+                (persona_id,),
+            )
+            conn.commit()
+            return cur.rowcount or 0
+    except sqlite3.Error as exc:
+        LOGGER.warning(
+            "Could not clear session_head_snapshot for %s in %s: %s",
+            persona_id,
+            saiverse_db_path,
+            exc,
+        )
+        return 0
+
+
+def restore_simple_backup(
+    *,
+    persona_id: str,
+    filename: str,
+    db_path: Path,
+    saiverse_db_path: Path | None = None,
+    output_root: Path | None = None,
+    require_stopped: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Restore one persona's ``memory.db`` from a validated simple backup while stopped.
+
+    1. Verifies SAIVerse is stopped (when ``require_stopped=True``).
+    2. Runs ``PRAGMA integrity_check`` on the backup before touching live files.
+    3. Takes an automatic ``memory.db_backup_pre_restore_*.bak`` safety backup.
+    4. Stages the restored DB via SQLite Backup API, checks integrity, and swaps
+       atomically with rollback on failure (clearing stale ``-wal`` / ``-shm``).
+    5. Clears ``session_head_snapshot`` rows for ``persona_id`` in ``saiverse.db``.
+    """
+    safe_persona = _validate_persona_id(persona_id)
+    if require_stopped:
+        from saiverse.runtime_marker import marker_status
+
+        state, reason = marker_status()
+        if state != "stopped":
+            raise BackupError(f"Persona memory restore requires stopped SAIVerse: {reason}")
+
+    backup_path = _resolve_simple_backup_path(safe_persona, filename, output_root=output_root)
+    if not backup_path.is_file():
+        raise FileNotFoundError(f"Backup not found: {safe_persona}/{filename}")
+    if not _check_sqlite_integrity(
+        backup_path,
+        label=backup_path.name,
+        progress_callback=progress_callback,
+    ):
+        raise BackupError(f"Backup failed PRAGMA integrity_check: {backup_path.name}")
+
+    db_path = db_path.resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    safety_backup = _create_pre_restore_backup(
+        safe_persona,
+        db_path,
+        output_root=output_root,
+        progress_callback=progress_callback,
+    )
+
+    restore_id = uuid4().hex
+    staged = db_path.with_name(f".{db_path.name}.restore-{restore_id}.tmp")
+    rollback = db_path.with_name(f".{db_path.name}.restore-{restore_id}.rollback")
+    sidecars = [
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    ]
+    moved_sidecars: list[tuple[Path, Path]] = []
+    moved_main = False
+
+    try:
+        wal = backup_path.with_name(backup_path.name + "-wal")
+        src_uri = (
+            f"file:{backup_path}?mode=ro"
+            if (wal.is_file() and wal.stat().st_size > 0)
+            else f"file:{backup_path}?mode=ro&immutable=1"
+        )
+        _emit_restore_progress(
+            f"[memory-restore] Staging {backup_path.name} into {db_path.name} ...",
+            progress_callback,
+        )
+        with closing(sqlite3.connect(src_uri, uri=True)) as src:
+            with closing(sqlite3.connect(staged)) as dst:
+                _sqlite_backup_with_progress(
+                    src,
+                    dst,
+                    label=f"Staging restore ({safe_persona})",
+                    progress_callback=progress_callback,
+                )
+                dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                dst.execute("PRAGMA journal_mode=DELETE")
+        gc.collect()
+
+        if not _check_sqlite_integrity(
+            staged,
+            label=f"staged {db_path.name}",
+            progress_callback=progress_callback,
+        ):
+            raise BackupError("Staged restored memory.db failed PRAGMA integrity_check")
+
+        _emit_restore_progress(
+            f"[memory-restore] Swapping restored memory.db for {safe_persona} ...",
+            progress_callback,
+        )
+
+        if db_path.exists():
+            os.replace(db_path, rollback)
+            moved_main = True
+        for sidecar in sidecars:
+            if sidecar.exists():
+                destination = sidecar.with_name(f".{sidecar.name}.{restore_id}.rollback")
+                os.replace(sidecar, destination)
+                moved_sidecars.append((sidecar, destination))
+
+        os.replace(staged, db_path)
+
+        if rollback.exists():
+            with contextlib.suppress(OSError):
+                rollback.unlink(missing_ok=True)
+        for _orig, moved in moved_sidecars:
+            with contextlib.suppress(OSError):
+                moved.unlink(missing_ok=True)
+    except Exception:
+        with contextlib.suppress(OSError):
+            staged.unlink(missing_ok=True)
+        if moved_main and rollback.exists():
+            with contextlib.suppress(OSError):
+                db_path.unlink(missing_ok=True)
+            os.replace(rollback, db_path)
+        for original, moved in reversed(moved_sidecars):
+            if moved.exists():
+                os.replace(moved, original)
+        raise
+
+    cleared_heads = 0
+    if saiverse_db_path is not None:
+        cleared_heads = _clear_persona_head_snapshots(saiverse_db_path, safe_persona)
+
+    LOGGER.info(
+        "Restored persona %s memory.db from %s (pre_restore=%s, cleared_head_snapshots=%d)",
+        safe_persona,
+        backup_path.name,
+        safety_backup.name if safety_backup else None,
+        cleared_heads,
+    )
+    return {
+        "persona_id": safe_persona,
+        "restored_from": backup_path.name,
+        "pre_restore_backup": safety_backup.name if safety_backup else None,
+        "cleared_head_snapshots": cleared_heads,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Manage SAIMemory simple backups")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_restore = sub.add_parser("restore", help="Restore one persona's memory.db while SAIVerse is stopped")
+    p_restore.add_argument("--persona", required=True, help="Persona ID")
+    p_restore.add_argument("--file", required=True, help="Backup filename under saimemory_simple/<persona>")
+    p_restore.add_argument("--db", type=Path, help="Explicit path to target memory.db")
+    p_restore.add_argument("--saiverse-db", type=Path, help="Path to saiverse.db for head snapshot cleanup")
+
+    args = parser.parse_args(argv)
+    if args.cmd == "restore":
+        from saiverse.data_paths import get_saiverse_home
+
+        home = get_saiverse_home()
+        db_path = args.db or (home / "personas" / args.persona / "memory.db")
+        saiverse_db = args.saiverse_db or (home / "user_data" / "database" / "saiverse.db")
+        try:
+            result = restore_simple_backup(
+                persona_id=args.persona,
+                filename=args.file,
+                db_path=db_path,
+                saiverse_db_path=saiverse_db,
+                require_stopped=True,
+                progress_callback=lambda msg: print(msg, flush=True),
+            )
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"OK: Restored {result['persona_id']} memory.db from {result['restored_from']} "
+            f"(pre-restore backup: {result['pre_restore_backup'] or 'none'})",
+            flush=True,
+        )
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

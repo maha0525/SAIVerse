@@ -141,6 +141,8 @@ class UpgradeHandler:
 
 ### スナップショット / 復元機能
 
+> **正典の移管 (2026-11-28)**: スナップショットの現行設計 (CAS ストア format_version 3・進捗監視タイムアウト・DB 自動バックアップ分離・グローバル設定「バックアップ」タブ UI) は専用 Intent Document [world_snapshot.md](world_snapshot.md) に集約した。以下はフェーズ 0 導入時の背景記録として残す。
+
 SAIVerse 停止状態で動く独立スクリプト + bat/sh ラッパー。
 
 #### スナップショット対象

@@ -69,6 +69,8 @@ self_update.log
 # (update_engine.SEARXNG_RESTART_FAILURE_RECORD), plus their temporary files.
 # The backend shows them in the alert banner. Ignored for the same reason.
 .searxng_*_failed.json*
+# Offline backup/restore operation failure record (shown in startup_alerts).
+.backup_operation_failed.json*
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1

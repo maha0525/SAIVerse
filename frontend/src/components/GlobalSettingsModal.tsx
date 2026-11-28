@@ -5,7 +5,7 @@ import { resolveI18nText } from '@/i18n/resolve';
 import LocaleControls from '@/i18n/LocaleControls';
 import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName, getWatermarkPresetLabel } from '@/i18n/modelRoles';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch, HardDrive } from 'lucide-react';
 import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import { fetchModelList, type PickerModel } from '@/lib/modelList';
 import { useFavoriteModels } from '@/lib/favoriteModels';
@@ -15,6 +15,7 @@ import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
 import FeedManagementPanel from './settings/FeedManagementPanel';
+import BackupManagementPanel from './settings/BackupManagementPanel';
 import MovementNoticeSetting from './settings/MovementNoticeSetting';
 import SystemNoticeReviewEntry from './SystemNoticeReviewEntry';
 import ModalOverlay from './common/ModalOverlay';
@@ -69,7 +70,7 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 'about' | 'utilities';
+type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 'backup' | 'about' | 'utilities';
 type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
@@ -1063,6 +1064,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('playbooks')}
                         >
                             <Layers size={18} />{uiText("components.GlobalSettingsModal.text013")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.backupTab"
+                            className={`${styles.navItem} ${activeTab === 'backup' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('backup')}
+                        >
+                            <HardDrive size={18} />{uiText("components.GlobalSettingsModal.backupTab")}</div>
                         <div data-i18n="components.GlobalSettingsModal.text014"
                             className={`${styles.navItem} ${activeTab === 'about' ? styles.active : ''}`}
                             onClick={() => setActiveTab('about')}
@@ -1730,6 +1736,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         )}
 
                         {activeTab === 'feeds' && <FeedManagementPanel />}
+                        {activeTab === 'backup' && <BackupManagementPanel onOperationStarted={onClose} />}
 
                         {activeTab === 'playbooks' && (
                             <div className={styles.envContainer}>
