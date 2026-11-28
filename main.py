@@ -238,7 +238,33 @@ api_server_process: Optional[subprocess.Popen] = None
 manager: Optional[SAIVerseManager] = None
 
 
+def _re_enable_windows_ctrl_c() -> None:
+    """Restore CTRL+C handling on Windows if an ancestor had CREATE_NEW_PROCESS_GROUP.
+
+    Detached launchers (including older ``update_engine.py`` revisions) spawned
+    with ``CREATE_NEW_PROCESS_GROUP`` inherit ``SetConsoleCtrlHandler(NULL, TRUE)``
+    into child console windows. Clearing it at startup guarantees Ctrl+C stops
+    the backend cleanly even across mixed-version updates.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+        if not kernel32.SetConsoleCtrlHandler(None, 0):
+            logging.debug(
+                "SetConsoleCtrlHandler(None, False) returned 0 (winerr=%s)",
+                ctypes.get_last_error(),
+            )
+    except Exception:
+        logging.debug("Could not re-enable Windows Ctrl+C handler", exc_info=True)
+
+
 def main():
+    _re_enable_windows_ctrl_c()
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
     parser.add_argument(

@@ -2908,6 +2908,33 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _re_enable_windows_ctrl_c() -> None:
+    """Clear the inherited CTRL+C ignore attribute before spawning visible consoles.
+
+    ``api/routes/system.py`` spawns the detached updater on Windows with
+    ``CREATE_NEW_PROCESS_GROUP``, which implicitly calls
+    ``SetConsoleCtrlHandler(NULL, TRUE)`` (ignore ``CTRL_C_EVENT``) on this
+    process. Windows inherits that attribute into child processes even when
+    spawned with ``CREATE_NEW_CONSOLE``, leaving restarted Backend, Frontend,
+    and SearXNG windows deaf to Ctrl+C unless cleared first.
+    """
+    if not _is_windows():
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+        if not kernel32.SetConsoleCtrlHandler(None, 0):
+            LOGGER.debug(
+                "SetConsoleCtrlHandler(None, False) returned 0 (winerr=%s)",
+                ctypes.get_last_error(),
+            )
+    except Exception:
+        LOGGER.debug("Could not re-enable Windows Ctrl+C handler", exc_info=True)
+
+
 def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
     project_dir = Path(config["project_dir"]).resolve()
     python = str(config["venv_python"])
@@ -2923,8 +2950,9 @@ def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
     if _is_windows():
         # A visible console window of its own, like the "SAIVerse Backend"
         # window start.bat opens, so the user can see the backend and stop it
-        # by closing the window. It used to be DETACHED_PROCESS: no window, and
-        # no way to stop it short of the task manager.
+        # by closing the window or pressing Ctrl+C. It used to be
+        # DETACHED_PROCESS: no window, and no way to stop it short of the task
+        # manager.
         #
         # python is started directly, not wrapped in ``cmd /k``: the health
         # check (``process.poll()``) and ``_terminate_spawned`` act on this
@@ -2936,6 +2964,7 @@ def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
         # lets the child inherit handles, so the child writes to its own new
         # console and holds nothing of this updater's. Redirecting them to
         # pipes or DEVNULL would blank the window the change exists to show.
+        _re_enable_windows_ctrl_c()
         kwargs["creationflags"] = _CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
@@ -3384,6 +3413,7 @@ def start_frontend(project_dir: Path, mode: str) -> subprocess.Popen[Any]:
         "env": _env_with_npm_on_path(npm),
     }
     if _is_windows():
+        _re_enable_windows_ctrl_c()
         shell = os.environ.get("COMSPEC") or "cmd.exe"
         title = _FRONTEND_WINDOW_TITLES[mode]
         command = [shell, "/k", f"title {title} && npm {' '.join(script)}"]
@@ -3552,6 +3582,7 @@ def start_searxng(project_dir: Path) -> subprocess.Popen[Any]:
     """
     kwargs: dict[str, Any] = {"cwd": str(project_dir), "close_fds": True}
     if _is_windows():
+        _re_enable_windows_ctrl_c()
         shell = os.environ.get("COMSPEC") or "cmd.exe"
         command = [shell, "/k", SEARXNG_WINDOW_COMMAND]
         kwargs["creationflags"] = _CREATE_NEW_CONSOLE
