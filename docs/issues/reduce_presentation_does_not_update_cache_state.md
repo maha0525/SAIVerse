@@ -23,10 +23,10 @@ PR #474 で「プロンプト内容を書き換える経路は、同じ書き込
 
 上記の 3・4 の経路は、**返答直前に走る Pulse 内の処理**で、直前に履歴の復元（`maybe_run_window_refill`）が実行されている可能性がある。
 
-ここで無条件に `cache_broken_stamp()`（`UPDATED_AT` を過去時刻にして期限切れ扱いにする）を書き込むと、直後のコンテキスト構築で `resolve_metabolism_anchor` が「キャッシュ期限切れ」と判定し、アンカーの自動前進（§14-2）によって復元したばかりの会話範囲を同じ Pulse の中で圧縮し直してしまうリスクがある（`_refold_raw_view_folds` に `keep_temperature=True` が必要なのと同じ構造）。
+ここで無条件に `cache_broken_stamp()`（`UPDATED_AT` を過去時刻にして期限切れ扱いにする）を書き込むと、直後のコンテキスト構築で `resolve_metabolism_anchor` が「キャッシュ期限切れ」と判定し、アンカーの自動前進（§14-2）によって復元したばかりの会話範囲を同じ Pulse の中で圧縮し直してしまうリスクがある（`_refold_raw_view_folds` に `preserve_active_window=True` が必要なのと同じ構造）。
 
 ## 対応方針の候補（未決）
 
 - 実際に `head` 再生成または知覚短縮が発生した回（変更なし・スキップを除く）にだけ `SessionAnchor` を更新する。
-- Pulse 外（返答後・手動実行・定期監視ワーカー）からの呼び出しは `cache_broken_stamp()` で失効扱いにし、返答直前（`maybe_run_emergency_compaction` 経由）は `TTL_SECONDS = None` のみ落として `UPDATED_AT` を維持する（`_refold_raw_view_folds` と同じ扱い）か、呼び出し元の文脈を引数で明示する。
+- Pulse 外（返答後・手動実行・定期監視ワーカー）からの呼び出しは `cache_broken_stamp()` で失効扱いにし、返答直前（`maybe_run_emergency_compaction` 経由）は有効期限内の行なら `cache_fresh_stamp()` で現行設定の TTL と現在時刻へ更新する（`_refold_raw_view_folds` と同じ扱い）。
 - 併せて、復元直後の緊急圧縮経路で自動前進と衝突しないことをテストで固定する。

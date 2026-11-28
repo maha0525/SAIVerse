@@ -21,8 +21,10 @@ SessionAnchor 行の (TTL_SECONDS, UPDATED_AT) は「現在の提示コンテキ
   ``run_tail_rewind``) はキャッシュ無効化を書き込み、LLM 呼び出し無しでキャッシュ有効
   と誤表示しない。
 - 古い会話の圧縮・欠損圧縮区間の掃除・Chronicle 削除時の連動削除の後は、行が
-  キャッシュ期限切れになる。要約表示への再圧縮 (``_refold_raw_view_folds``) は
-  TTL_SECONDS のみクリアし、UPDATED_AT は維持する (理由は各テストの docstring)。
+  キャッシュ期限切れになる。返答直前の要約表示への再圧縮 (``_refold_raw_view_folds``)
+  は、行が有効期限内なら現行設定の TTL と現在時刻で有効状態を維持し (1 時間→5 分へ
+  設定変更した直後でも同じ Pulse 内で失効させない)、既に期限切れの行は失効扱いのまま
+  にする (返答後・手動整理の経路では常に失効扱い)。
 """
 from __future__ import annotations
 
@@ -285,18 +287,17 @@ class TestBreakingTheWindowIsDeclared:
     def test_refold_drops_the_lifetime_claim_and_keeps_a_cold_row_cold(
         self, session_factory,
     ):
-        """§15-3 の要約表示への再圧縮 (_refold_raw_view_folds) は TTL_SECONDS のみクリアし、UPDATED_AT は維持する。
+        """期限切れ行での再圧縮は TTL_SECONDS をクリアして期限切れのまま維持する。
 
-        UPDATED_AT を維持するのは、再圧縮が返答直前の緊急圧縮で走り、圧縮し直した窓が
-        そのまま返答でキャッシュされるため。ここで過去時刻に戻すと直後の resolve で
-        §14-2 のアンカー自動前進が走り、直前の履歴復元で開いた窓を同じ Pulse 内で閉じてしまう
-        (arasuji_levels.md §15-2)。期限切れ行は UPDATED_AT を据え置いても期限切れのままなので、
-        バックグラウンド保守経路のキャッシュ状態を誤って有効化しない。
+        5 分キャッシュが期限切れ (10 分経過) になった後で現行設定を 1 時間 (3600 秒) に
+        広げたケースでも、cache_broken_stamp() で過去時刻を書くため誤って有効化されない。
         """
         lc = _make_lifecycle(session_factory)
         persona = _persona()
-        _row(lc, age_seconds=int(timedelta(days=105).total_seconds()), ttl_seconds=3600)
-        before = _entry(lc)["updated_at"]
+        # 5 分キャッシュで 10 分経過 (期限切れ) + 現行設定は 1 時間 (3600 秒)
+        lc.get_anchor_validity_seconds = lambda mk, pid=None: 3600
+        _row(lc, age_seconds=600, ttl_seconds=300)
+        assert not _is_hot(lc)
 
         raw = [_msg(f"m{i}", 100 + i, 5_000) for i in range(4)]
         folds = [
@@ -318,15 +319,20 @@ class TestBreakingTheWindowIsDeclared:
 
         entry = _entry(lc)
         assert "ttl_seconds" not in entry       # TTL_SECONDS はクリアされる
-        assert entry["updated_at"] == before    # UPDATED_AT は維持
-        assert not _is_hot(lc)                  # 期限切れ行は期限切れのまま
+        assert not _is_hot(lc)                  # 1 時間設定へ広がっていても期限切れのまま
 
     def test_refold_keeps_the_temperature_of_a_live_window(self, session_factory):
-        """同じ Pulse の履歴復元が設定した有効状態 (UPDATED_AT) を、再圧縮が消さない。"""
+        """返答直前の再圧縮は有効な窓のキャッシュ有効状態を現行設定で維持する。
+
+        1 時間キャッシュで 10 分経過した行に対して現行設定を 5 分 (300 秒) へ変更して
+        再圧縮しても、TTL_SECONDS=300・UPDATED_AT=now に更新されるため、古い 1 時間 TTL
+        を残さずに直後の resolve まで有効状態を維持できる。
+        """
         lc = _make_lifecycle(session_factory)
         persona = _persona()
-        _row(lc, ttl_seconds=3600)
-        before = _entry(lc)["updated_at"]
+        lc.get_anchor_validity_seconds = lambda mk, pid=None: 300
+        _row(lc, age_seconds=600, ttl_seconds=3600)
+        assert _is_hot(lc)
 
         raw = [_msg(f"m{i}", 100 + i, 5_000) for i in range(4)]
         folds = [
@@ -343,8 +349,34 @@ class TestBreakingTheWindowIsDeclared:
             )
 
         entry = _entry(lc)
-        assert entry["updated_at"] == before
+        assert entry["ttl_seconds"] == 300
         assert _is_hot(lc)
+
+    def test_refold_outside_pre_reply_marks_active_row_expired(self, session_factory):
+        """返答後・手動整理など直後に LLM 応答が走らない再圧縮は失効扱いにする。"""
+        lc = _make_lifecycle(session_factory)
+        persona = _persona()
+        _row(lc, ttl_seconds=3600)
+        assert _is_hot(lc)
+
+        raw = [_msg(f"m{i}", 100 + i, 5_000) for i in range(4)]
+        folds = [
+            FoldedRange(message_ids=["m0"], chronicle_entry_ids=["e1"],
+                        presented_raw=True),
+        ]
+        window = SessionWindow(anchor_id="m0", raw=raw, presented=raw, folds=folds)
+        from sea.session_window import apply_folds
+        with patch.object(lc, "_present_with_folds",
+                          side_effect=lambda p, msgs, fs: apply_folds(
+                              msgs, fs, lambda f: "d" * 1_200)):
+            lc._refold_raw_view_folds(
+                persona, MODEL, window, Watermarks(target=17_000, high=19_000),
+                preserve_active_window=False,
+            )
+
+        entry = _entry(lc)
+        assert "ttl_seconds" not in entry
+        assert not _is_hot(lc)
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +492,7 @@ class TestColdDeclarationVersusFrontierAdvance:
         (_refold_raw_view_folds) で UPDATED_AT を過去時刻に戻すと、直後の resolve が
         未要約の先頭位置まで自動前進してしまい、復元した窓が同じ Pulse 内で閉じる
         (arasuji_levels.md §15-2)。前半でその危険を確認し、後半で実装
-        (keep_updated_at=True) がそれを防ぐことを固定する。
+        (preserve_active_window=True) がそれを防ぐことを固定する。
         """
         from sea.session_window import apply_folds, deserialize_folds
 
@@ -483,25 +515,35 @@ class TestColdDeclarationVersusFrontierAdvance:
             _entry(lc).get("folded_ranges"),
         ) == []  # 復元した範囲ごと閉じられ、窓が m6 の 1 件に縮む
 
-        # (2) 実装どおりの順序 (履歴復元で UPDATED_AT=now → 再圧縮で UPDATED_AT 維持) なら
-        #     同じ Pulse の resolve は窓をそのまま返す。
-        _row(lc, anchor_id="m1", ttl_seconds=3600)
-        fold = FoldedRange(message_ids=["m1", "m2", "m3", "m4", "m5"],
-                           chronicle_entry_ids=["e1"], presented_raw=True)
-        lc.save_folded_ranges(PERSONA_ID, MODEL, [fold])
-        _row(lc, anchor_id="m1", ttl_seconds=3600)  # _write_refill による新規設定相当
+        # (2) 実装どおりの順序 (1 時間キャッシュで 10 分経過 → 現行設定を 5 分へ変更して
+        #     返答直前に再圧縮) でも、cache_fresh_stamp (300 秒 + now) が書かれるため、
+        #     同じ Pulse の resolve が自動前進せず残すべき区間を維持する。
+        lc.get_anchor_validity_seconds = lambda mk, pid=None: 300
+        fold_old = FoldedRange(message_ids=["m1", "m2"], chronicle_entry_ids=["e1"],
+                               presented_raw=True)
+        fold_keep = FoldedRange(message_ids=["m3", "m4", "m5"], chronicle_entry_ids=["e2"],
+                                presented_raw=True)
+        _row(lc, anchor_id="m1", age_seconds=600, ttl_seconds=3600)
+        lc.save_folded_ranges(PERSONA_ID, MODEL, [fold_old, fold_keep])
+        _row(lc, anchor_id="m1", age_seconds=600, ttl_seconds=3600)
         raw = [_msg(f"m{i}", 1000 + i, 5_000) for i in range(1, 7)]
-        window = SessionWindow(anchor_id="m1", raw=raw, presented=raw, folds=[fold])
+        window = SessionWindow(
+            anchor_id="m1", raw=raw, presented=raw, folds=[fold_old, fold_keep],
+        )
         with patch.object(lc, "_present_with_folds",
                           side_effect=lambda p, msgs, fs: apply_folds(
                               msgs, fs, lambda f: "d" * 1_200)):
             assert lc._refold_raw_view_folds(
-                persona, MODEL, window, Watermarks(target=17_000, high=19_000),
+                persona, MODEL, window, Watermarks(target=22_000, high=24_000),
             ) is not None
 
         assert _is_hot(lc)
+        assert _entry(lc)["ttl_seconds"] == 300
         assert lc.resolve_metabolism_anchor(persona) == ("m1", "self")
-        assert len(deserialize_folds(_entry(lc).get("folded_ranges"))) == 1
+        saved = deserialize_folds(_entry(lc).get("folded_ranges"))
+        assert len(saved) == 2
+        assert saved[0].presented_raw is False
+        assert saved[1].presented_raw is True
         conn.close()
 
 

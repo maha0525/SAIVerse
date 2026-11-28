@@ -625,7 +625,7 @@ class SessionLifecycle:
         model_key: Optional[str],
         folds: List["FoldedRange"],
         *,
-        keep_updated_at: bool = False,
+        preserve_active_window: bool = False,
     ) -> None:
         """圧縮区間を session_anchor 行へ保存する。ANCHOR_MESSAGE_ID は変更しない。
 
@@ -633,14 +633,16 @@ class SessionLifecycle:
         ヒットしなくなるため、既定では同じコミットでキャッシュ無効化
         (:meth:`cache_broken_stamp`) を書き込む。
 
-        ``keep_updated_at=True`` は UPDATED_AT を据え置き、TTL_SECONDS のみ None に
-        クリアする。§15-3 の要約表示への再圧縮 (:meth:`_refold_raw_view_folds`) 専用:
-        再圧縮は返答直前に走り、直後の LLM 呼び出しでそのままキャッシュされるため、
-        UPDATED_AT は直前の履歴復元が書いた現在時刻を維持する。ここで過去時刻へ
-        戻すと、直後の resolve で §14-2 のアンカー自動前進が走り、同じ Pulse 内で
-        復元した窓がすぐ閉じてしまう (arasuji_levels.md §15-2)。期限切れの行は
-        UPDATED_AT を据え置いても期限切れのままなので、バックグラウンド保守経路
-        (期限切れ時の事前圧縮 / 手動整理) のキャッシュ状態を誤って有効化しない。
+        ``preserve_active_window=True`` は返答直前の要約表示への再圧縮
+        (:meth:`_refold_raw_view_folds`) 専用:
+        - 保存時点でその行がキャッシュ有効期限内であれば、:meth:`cache_fresh_stamp`
+          (現行設定の TTL + 現在時刻) を書き込む。これにより、旧 1 時間キャッシュ
+          (経過 10 分) の状態で現行設定を 5 分へ下げて再圧縮しても、TTL クリアによる
+          フォールバック失効で直後の resolve が §14-2 のアンカー自動前進を発火させ、
+          残すべき会話範囲を同じ Pulse 内で閉じてしまう不具合を防げる (かつ古い 1 時間
+          TTL も現行設定へ置き換わる)。
+        - 保存時点で既に期限切れであれば、:meth:`cache_broken_stamp` を書き込む
+          (5 分キャッシュ失効後に 1 時間へ設定変更された場合でも、誤って有効化しない)。
         """
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
             return
@@ -665,10 +667,14 @@ class SessionLifecycle:
                     )
                 return
             row.FOLDED_RANGES_JSON = payload
-            ttl, updated_at = self.cache_broken_stamp()
+            if preserve_active_window and self._anchor_entry_is_hot(
+                self._row_to_entry(row), str(model_key), persona_id,
+            ):
+                ttl, updated_at = self.cache_fresh_stamp(model_key, persona_id)
+            else:
+                ttl, updated_at = self.cache_broken_stamp()
             row.TTL_SECONDS = ttl
-            if not keep_updated_at:
-                row.UPDATED_AT = updated_at
+            row.UPDATED_AT = updated_at
             db.commit()
         except Exception as exc:
             LOGGER.warning(
@@ -2732,6 +2738,7 @@ class SessionLifecycle:
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
         close_undersized_tail: bool = False,
+        before_reply: bool = False,
     ) -> str:
         """Execute history metabolism: Chronicle generation + anchor update.
 
@@ -2795,6 +2802,7 @@ class SessionLifecycle:
                 stop_when_disabled=stop_when_disabled,
                 cancellation_token=cancellation_token,
                 close_undersized_tail=close_undersized_tail,
+                before_reply=before_reply,
             )
 
     def run_manual_compaction(
@@ -3314,6 +3322,7 @@ class SessionLifecycle:
             persona, building_id, window, watermarks, event_callback,
             model_key=model_key, chronicle_force=True,
             close_undersized_tail=True,
+            before_reply=True,
         )
 
     # ------------------------------------------------------------------
@@ -4604,6 +4613,8 @@ class SessionLifecycle:
     def _refold_raw_view_folds(
         self, persona, model_key: Optional[str], window: "SessionWindow",
         watermarks: Watermarks,
+        *,
+        preserve_active_window: bool = True,
     ) -> Optional["SessionWindow"]:
         """§15-3 印戻し — 生に開いた圧縮区間を digest 提示へ戻す (LLM なしの畳み)。
 
@@ -4620,13 +4631,15 @@ class SessionLifecycle:
             return None
         current_presented, flipped = plan
         persona_id = getattr(persona, "persona_id", None)
-        # UPDATED_AT は据え置き、TTL_SECONDS のみクリアする。要約表示への再圧縮は
-        # 返答直前に走り、圧縮し直した窓はその返答でそのままキャッシュされる。ここで
-        # 過去時刻にして期限切れ扱いにすると、直後のコンテキスト構築の resolve で
-        # §14-2 のアンカー自動前進が走り、履歴復元で開いた窓を同じ Pulse 内で
-        # 閉じてしまう (§15-2)。
+        # 返答直前の再圧縮 (preserve_active_window=True) で行がキャッシュ有効期限内
+        # なら、現行設定の TTL + 現在時刻で有効状態を維持する。TTL だけクリアして
+        # UPDATED_AT を据え置くと、1 時間キャッシュ (10 分経過) → 5 分設定変更のケースで
+        # 期限切れに反転し、直後の resolve で §14-2 のアンカー自動前進が走って残すべき
+        # 会話範囲まで同じ Pulse 内で閉じてしまう (§15-2)。返答後・手動整理など直後に
+        # LLM 応答が走らない経路 (preserve_active_window=False) は失効扱いにする。
         self.save_folded_ranges(
-            persona_id, model_key, window.folds, keep_updated_at=True,
+            persona_id, model_key, window.folds,
+            preserve_active_window=preserve_active_window,
         )
         LOGGER.info(
             "[metabolism] refolded %d raw-view range(s) back to digest "
@@ -5148,6 +5161,7 @@ class SessionLifecycle:
         stop_when_disabled: bool = False,
         cancellation_token: Optional[CancellationToken] = None,
         close_undersized_tail: bool = False,
+        before_reply: bool = False,
     ) -> str:
         """:meth:`run_metabolism` の本体 (Beat ロック保持下で実行される)。
 
@@ -5218,7 +5232,10 @@ class SessionLifecycle:
         # §15-3 印戻し: 読み戻しで生に開いた圧縮区間は、退場計画より先に digest
         # 提示へ戻す (既存あらすじの再利用 = 編纂ゼロの畳み)。印戻しだけで残す量に
         # 収まればこの Metabolism は編纂なしで完了する。
-        refolded = self._refold_raw_view_folds(persona, model_key, window, watermarks)
+        refolded = self._refold_raw_view_folds(
+            persona, model_key, window, watermarks,
+            preserve_active_window=before_reply,
+        )
         if refolded is not None:
             window = refolded
             current_messages = window.presented
