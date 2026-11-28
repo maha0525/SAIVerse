@@ -935,3 +935,36 @@ def test_persona_memory_restore_rolls_back_when_head_cache_clear_fails(
     with closing(sqlite3.connect(main_db)) as conn:
         rows = conn.execute("SELECT PERSONA_ID FROM session_head_snapshot").fetchall()
     assert rows == [("mira",)]
+
+
+def test_gc_aborts_fail_closed_when_manifests_dir_cannot_be_enumerated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex PR #531 round-4 finding: If manifests/ cannot be scanned (e.g.
+    PermissionError), _scan_cas_manifests must propagate the error instead of
+    silently returning [] like Path.glob(), so gc_store() aborts without
+    deleting any CAS objects."""
+    home = tmp_path / "home"
+    _seed_world(home, main_val="perm-v1", mem_val="perm-m1")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")):
+        snapshot.save_snapshot("gen1")
+
+    initial_count = snapshot.get_store_stats()["cas_object_count"]
+    assert initial_count == 3
+
+    manifests_path = snapshot.manifests_dir()
+    real_scandir = snapshot.os.scandir
+
+    def denied_scandir(path):
+        if Path(path) == manifests_path:
+            raise PermissionError(f"Permission denied: {path}")
+        return real_scandir(path)
+
+    with patch.object(snapshot.os, "scandir", side_effect=denied_scandir):
+        with pytest.raises(RuntimeError, match="fail-closed"):
+            snapshot.gc_store()
+
+    # All CAS objects must still be intact
+    assert snapshot.get_store_stats()["cas_object_count"] == initial_count

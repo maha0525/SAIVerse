@@ -793,16 +793,32 @@ def _scan_cas_manifests() -> Tuple[
 
     1 世代内の複数ファイルが同じ SHA-256 を参照していても、参照カウントは世代単位で
     1 だけ加算する (その世代を削除したときに解放されるかを正確に求めるため)。
+
+    ``Path.glob()`` はディレクトリ走査時の ``PermissionError`` を握りつぶして空配列を
+    返すため使わず、``os.scandir()`` で ``FileNotFoundError`` 以外のエラーを必ず伝播させ、
+    GC が未参照誤認で全オブジェクトを削除するのを防ぐ。
     """
     entries: List[Tuple[Path, Optional[dict], Optional[set[str]]]] = []
     refcount: Counter[str] = Counter()
     corrupted: List[str] = []
     mdir = manifests_dir()
-    if not mdir.is_dir():
+    try:
+        with os.scandir(mdir) as it:
+            manifest_paths = sorted(
+                (Path(entry.path) for entry in it if entry.name.endswith(".json")),
+                key=lambda p: p.name,
+            )
+    except FileNotFoundError:
         return entries, refcount, corrupted
 
-    for path in sorted(mdir.glob("*.json")):
-        if not path.is_file():
+    for path in manifest_paths:
+        try:
+            is_file = path.is_file()
+        except OSError:
+            entries.append((path, None, None))
+            corrupted.append(path.name)
+            continue
+        if not is_file:
             continue
         meta = read_snapshot_metadata(path)
         manifest_hashes = _extract_manifest_hashes(meta)
@@ -1106,7 +1122,12 @@ def gc_store(*, dry_run: bool = False, lock_timeout: float = DEFAULT_STORE_LOCK_
 
 
 def _gc_store_locked(*, dry_run: bool = False) -> Dict[str, Any]:
-    referenced, corrupted = _collect_live_object_hashes()
+    try:
+        referenced, corrupted = _collect_live_object_hashes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"GC aborted (fail-closed): could not enumerate manifests directory: {exc}"
+        ) from exc
     if corrupted:
         raise RuntimeError(
             "GC aborted (fail-closed): unreadable or invalid manifest(s) detected: "
