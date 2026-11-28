@@ -1590,4 +1590,29 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.34 -> 0.3.35 (no world-data changes in the chain).",
     ),
+    # ---- v0.3.36 ----
+    # 世界スナップショットの CAS (format v3) 重複排除高速化・無進捗タイムアウト・DB 自動バックアップの
+    # backups/saiverse_db/ への分離、グローバル設定「バックアップ」タブの新設 (世界スナップショットと
+    # ペルソナ memory.db 個別復元、世代別の削除時解放容量表示・ライトテーマ修正)、Windows で再起動後の
+    # コンソール窓に Ctrl+C が届かない不具合の修正、グローバル設定のサーバー再起動のクリーン detached 化と
+    # 「全サーバー停止」ボタン追加、再起動後トーストの操作別出し分けと Windows Terminal の終了コード 0 クローズ。
+    # DB スキーマ変更は無く、世界のデータを書き換える処理も無いため、このバージョンの辺は空。
+    # (旧形式の v2 .zip スナップショットはそのまま読め、user_data/database/*.bak* の backups/saiverse_db/ への
+    # 退避は次回の自動バックアップ時に冪等で実行される。)
+    UpgradeHandler(
+        name="city_noop_v0_3_36",
+        scope="city",
+        from_version="0.3.35",
+        to_version="0.3.36",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.35 -> 0.3.36 (no schema or world-data changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_36",
+        scope="ai",
+        from_version="0.3.35",
+        to_version="0.3.36",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.35 -> 0.3.36 (no schema or world-data changes).",
+    ),
 ]
