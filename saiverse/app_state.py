@@ -8,7 +8,7 @@ and accessed by API endpoints via dependency injection.
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from .saiverse_manager import SAIVerseManager
@@ -25,6 +25,9 @@ project_dir: str = ""
 
 # --- Child process tracking (for clean shutdown) ---
 child_processes: List[subprocess.Popen] = []
+
+# --- Canonical graceful shutdown hook registered by main.py ---
+shutdown_handler: Optional[Callable[[], None]] = None
 
 
 def bind_manager(instance: "SAIVerseManager") -> None:
@@ -61,3 +64,9 @@ def set_project_dir(value: str) -> None:
     """Set the project root directory path."""
     global project_dir
     project_dir = value
+
+
+def set_shutdown_handler(handler: Optional[Callable[[], None]]) -> None:
+    """Register the application-level graceful shutdown callback."""
+    global shutdown_handler
+    shutdown_handler = handler

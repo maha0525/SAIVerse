@@ -323,10 +323,18 @@ def migrate_database_in_place(db_path: str):
     # 列名一致コピーのデータ移行で旧列のデータが失われる
     apply_known_column_renames(db_path)
 
-    db_dir = os.path.dirname(db_path)
     db_name = os.path.basename(db_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = os.path.join(db_dir, f"{db_name}_{timestamp}.bak")
+    try:
+        from pathlib import Path
+        from database.backup import resolve_backup_dir
+
+        backup_dir_path = resolve_backup_dir(Path(db_path))
+        backup_dir_path.mkdir(parents=True, exist_ok=True)
+        backup_dir = str(backup_dir_path)
+    except Exception:
+        backup_dir = os.path.dirname(db_path)
+    backup_path = os.path.join(backup_dir, f"{db_name}_{timestamp}.bak")
     
     logging.info(f"マイグレーションを開始します: {db_path}")
 

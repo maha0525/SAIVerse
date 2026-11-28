@@ -316,3 +316,99 @@ def test_health_check_rejects_wrong_city_without_waiting_for_timeout() -> None:
     with patch.object(update_engine, "urlopen", return_value=response):
         with pytest.raises(update_engine.UpdateError, match="wrong City"):
             update_engine.wait_for_healthy_restart(process, config, timeout=1)
+
+
+def test_windows_restarts_re_enable_ctrl_c_before_spawning_consoles(tmp_path: Path) -> None:
+    """Backend, frontend, and SearXNG restarts must clear the inherited
+    CREATE_NEW_PROCESS_GROUP Ctrl+C ignore attribute before Popen on Windows."""
+    config = {
+        "project_dir": str(tmp_path),
+        "venv_python": "python",
+        "main_args": ["city_a"],
+    }
+    events: list[str] = []
+
+    def fake_enable() -> None:
+        events.append("enable")
+
+    def fake_popen(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        events.append("popen")
+        return MagicMock(pid=1)
+
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_re_enable_windows_ctrl_c", side_effect=fake_enable
+    ), patch.object(update_engine.subprocess, "Popen", side_effect=fake_popen), patch.object(
+        update_engine, "_find_npm", return_value="npm"
+    ):
+        update_engine.restart_application(config)
+        update_engine.start_frontend(tmp_path, update_engine.FRONTEND_MODE_START)
+        update_engine.start_searxng(tmp_path)
+
+    assert events == ["enable", "popen", "enable", "popen", "enable", "popen"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console Ctrl+C inheritance check")
+def test_windows_re_enable_ctrl_c_restores_sigint_across_detached_process_group(
+    tmp_path: Path,
+) -> None:
+    """End-to-end Windows check: a child spawned with CREATE_NEW_CONSOLE from a
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP updater receives CTRL_C_EVENT
+    once _re_enable_windows_ctrl_c() is called."""
+    import json
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parent.parent
+    helper = tmp_path / "ctrlc_probe.py"
+    helper.write_text(
+        "\n".join(
+            [
+                "import ctypes, json, signal, subprocess, sys, time",
+                f"sys.path.insert(0, {str(repo_root)!r})",
+                "mode = sys.argv[1]",
+                "if mode == 'child':",
+                "    got = {'sigint': False}",
+                "    signal.signal(signal.SIGINT, lambda *_: got.__setitem__('sigint', True))",
+                "    ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, 0)",
+                "    time.sleep(0.3)",
+                "    with open(sys.argv[2], 'w', encoding='utf-8') as fh:",
+                "        json.dump(got, fh)",
+                "elif mode == 'middle':",
+                "    call_reset = sys.argv[2] == 'reset'",
+                "    out_path = sys.argv[3]",
+                "    if call_reset:",
+                "        from scripts import update_engine",
+                "        update_engine._re_enable_windows_ctrl_c()",
+                "    si = subprocess.STARTUPINFO()",
+                "    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW",
+                "    si.wShowWindow = 0",
+                "    proc = subprocess.Popen(",
+                "        [sys.executable, __file__, 'child', out_path],",
+                "        creationflags=subprocess.CREATE_NEW_CONSOLE,",
+                "        startupinfo=si,",
+                "        close_fds=True,",
+                "    )",
+                "    proc.wait(timeout=10)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    detached_group_flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+    out_without = tmp_path / "without.json"
+    p_without = subprocess.Popen(
+        [sys.executable, str(helper), "middle", "keep", str(out_without)],
+        creationflags=detached_group_flags,
+        close_fds=True,
+    )
+    assert p_without.wait(timeout=15) == 0
+    assert json.loads(out_without.read_text(encoding="utf-8"))["sigint"] is False
+
+    out_with = tmp_path / "with.json"
+    p_with = subprocess.Popen(
+        [sys.executable, str(helper), "middle", "reset", str(out_with)],
+        creationflags=detached_group_flags,
+        close_fds=True,
+    )
+    assert p_with.wait(timeout=15) == 0
+    assert json.loads(out_with.read_text(encoding="utf-8"))["sigint"] is True

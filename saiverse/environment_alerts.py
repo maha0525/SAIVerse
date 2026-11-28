@@ -374,6 +374,55 @@ def python_series_alerts(version_info: Any = None) -> List[Dict[str, Any]]:
     }]
 
 
+BACKUP_OP_FAILURE_ALERT_ID = "backup_operation_failed"
+
+_BACKUP_OP_LABELS = {
+    "snapshot_save": "世界スナップショットの作成",
+    "snapshot_restore": "世界スナップショットからの復元",
+    "persona_memory_restore": "ペルソナの記憶 (memory.db) の復元",
+}
+
+
+def backup_operation_failure_alerts(project_dir: Path) -> List[Dict[str, Any]]:
+    """オフラインのバックアップ・復元操作が失敗していた場合、1 回限りの警告を返す。"""
+    try:
+        from scripts.update_engine import consume_backup_operation_failure
+
+        failure = consume_backup_operation_failure(project_dir)
+    except Exception:
+        LOGGER.warning("バックアップ操作の失敗記録を読めませんでした", exc_info=True)
+        return []
+    if failure is None:
+        return []
+
+    op_key = str(failure.get("operation") or "")
+    op_label = _BACKUP_OP_LABELS.get(op_key, "バックアップ / 復元操作")
+    target = str(failure.get("target") or "")
+    error = str(failure.get("error") or "")
+    details: Dict[str, Any] = {"operation": op_key}
+    if target:
+        details["target"] = target
+    if error:
+        details["error"] = error
+    LOGGER.warning(
+        "オフラインのバックアップ操作が失敗しました (%s / %s): %s",
+        op_label,
+        target or "対象不明",
+        error or "詳細なし",
+    )
+    target_suffix = f" ({target})" if target else ""
+    return [{
+        "id": BACKUP_OP_FAILURE_ALERT_ID,
+        "level": "warning",
+        "title": f"{op_label}に失敗しました",
+        "message": (
+            f"前回の「{op_label}{target_suffix}」が途中で失敗したため、元のデータのまま"
+            " SAIVerse を再起動しました。ディスクの空き容量や self_update.log を確認してください。"
+        ),
+        "details": details,
+    }]
+
+
 def environment_alerts(project_dir: Path) -> List[Dict[str, Any]]:
     """起動時に startup_alerts へ積む、環境の失敗の警告を全部返す。"""
     alerts: List[Dict[str, Any]] = []
@@ -383,6 +432,7 @@ def environment_alerts(project_dir: Path) -> List[Dict[str, Any]]:
         lambda: setup_stopped_alerts(project_dir),
         lambda: searxng_setup_alerts(project_dir),
         lambda: searxng_restart_alerts(project_dir),
+        lambda: backup_operation_failure_alerts(project_dir),
         python_series_alerts,
     ):
         try:

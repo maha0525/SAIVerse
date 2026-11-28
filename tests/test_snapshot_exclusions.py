@@ -277,60 +277,71 @@ def test_clear_for_restore_keeps_the_preserved_paths(tmp_path: Path) -> None:
     assert not (home / "user_data" / "addon_data").exists()
 
 
-# ---- 中断で残る書きかけアーカイブ ----
+# ---- 中断で残る書きかけアーカイブ / マニフェスト ----
 
 def test_cmd_save_removes_leftover_tmp_before_writing(tmp_path: Path, monkeypatch) -> None:
-    """前回の中断で残った同名の .zip.tmp を、ZIP を開く前に消していること。"""
+    """前回の中断で残った同名の .zip.tmp / .json.tmp を、保存開始前に消していること。"""
     home = tmp_path / "home"
     _write(home / "user_data" / "database" / "saiverse.db", "world db")
-    (home / "snapshots").mkdir(parents=True)
-    leftover = home / "snapshots" / "world.zip.tmp"
-    leftover.write_bytes(b"partially written archive from an interrupted run")
+    (home / "snapshots" / "manifests").mkdir(parents=True)
+    leftover_zip = home / "snapshots" / "world.zip.tmp"
+    leftover_zip.write_bytes(b"partially written archive from an interrupted run")
+    leftover_manifest = home / "snapshots" / "manifests" / "world.json.tmp.99999"
+    leftover_manifest.write_text("{", encoding="utf-8")
 
     monkeypatch.setenv("SAIVERSE_HOME", str(home))
 
-    existed_when_writing_started: list[bool] = []
+    existed_when_writing_started: list[tuple[bool, bool]] = []
 
     def _record_then_fail(*args, **kwargs):
-        existed_when_writing_started.append(leftover.exists())
+        existed_when_writing_started.append((leftover_zip.exists(), leftover_manifest.exists()))
         raise RuntimeError("stop before writing")
 
     with patch.object(snapshot, "is_saiverse_running", return_value=(False, "")), patch.object(
-        snapshot.zipfile, "ZipFile", side_effect=_record_then_fail
+        snapshot, "collect_files_to_snapshot", side_effect=_record_then_fail
     ):
         rc = snapshot.cmd_save(argparse.Namespace(name="world", note="", force=False))
 
     assert rc == 1
-    assert existed_when_writing_started == [False]
-    assert not leftover.exists()
+    assert existed_when_writing_started == [(False, False)]
+    assert not leftover_zip.exists()
+    assert not leftover_manifest.exists()
 
 
 def test_pre_update_snapshot_failure_removes_partial_archive(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """子プロセスが失敗（タイムアウト kill 含む）したら書きかけ .zip.tmp を消すこと。
+    """子プロセスが失敗（タイムアウト kill 含む）したら書きかけ一時ファイルを消すこと。
 
     kill された子の except 節は走らないので、掃除できるのは親のこちらだけ。
     """
     home = tmp_path / "home"
-    (home / "snapshots").mkdir(parents=True)
+    (home / "snapshots" / "manifests").mkdir(parents=True)
+    (home / "snapshots" / ".store" / "objects" / "ab").mkdir(parents=True)
     monkeypatch.setenv("SAIVERSE_HOME", str(home))
 
     written: list[Path] = []
 
-    def _fake_run(command, *, cwd, label, timeout=900):
+    def _fake_run(command, *, cwd, label, stall_timeout=300, on_pid=None, env=None):
         name = command[3]
-        partial = home / "snapshots" / f"{name}.zip.tmp"
-        partial.write_bytes(b"20GB of half-written archive, in spirit")
-        written.append(partial)
-        raise update_engine.UpdateError(f"{label} failed with exit 1: timed out")
+        if on_pid is not None:
+            on_pid(424242)
+        partial_zip = home / "snapshots" / f"{name}.zip.tmp"
+        partial_zip.write_bytes(b"20GB of half-written archive, in spirit")
+        partial_manifest = home / "snapshots" / "manifests" / f"{name}.json.tmp.424242"
+        partial_manifest.write_text("{", encoding="utf-8")
+        partial_obj = home / "snapshots" / ".store" / "objects" / "ab" / "abcd.z.tmp.424242.1"
+        partial_obj.write_bytes(b"half")
+        written.extend([partial_zip, partial_manifest, partial_obj])
+        raise update_engine.UpdateError(f"{label} stalled with no progress")
 
-    with patch.object(update_engine, "_run", side_effect=_fake_run):
+    with patch.object(update_engine, "_run_with_stall_timeout", side_effect=_fake_run):
         with pytest.raises(update_engine.UpdateError):
             update_engine.create_pre_update_snapshot(tmp_path / "repo", "python")
 
-    assert len(written) == 1
-    assert not written[0].exists()
+    assert len(written) == 3
+    for p in written:
+        assert not p.exists()
 
 
 def test_pre_update_snapshot_cleanup_failure_does_not_hide_the_real_error(
@@ -341,40 +352,33 @@ def test_pre_update_snapshot_cleanup_failure_does_not_hide_the_real_error(
     (home / "snapshots").mkdir(parents=True)
     monkeypatch.setenv("SAIVERSE_HOME", str(home))
 
-    def _fake_run(command, *, cwd, label, timeout=900):
-        raise update_engine.UpdateError("snapshot phase failed with exit 1: timed out")
+    def _fake_run(command, *, cwd, label, stall_timeout=300, on_pid=None, env=None):
+        raise update_engine.UpdateError("snapshot phase stalled with no progress")
 
-    with patch.object(update_engine, "_run", side_effect=_fake_run), patch.object(
+    with patch.object(update_engine, "_run_with_stall_timeout", side_effect=_fake_run), patch.object(
         update_engine.Path, "unlink", side_effect=OSError("locked by another process")
     ):
-        with pytest.raises(update_engine.UpdateError, match="timed out"):
+        with pytest.raises(update_engine.UpdateError, match="stalled"):
             update_engine.create_pre_update_snapshot(tmp_path / "repo", "python")
 
 
-def test_pre_update_snapshot_gets_more_time_than_the_other_phases(
+def test_pre_update_snapshot_uses_stall_timeout_runner(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """スナップショットだけは長い制限時間で呼ばれること。
-
-    この処理だけが世界の大きさに比例して伸びる。実測 24GB の世界が既定の 900 秒に
-    収まらず start.bat が起動不能になった (2026-09-02)。値そのものより「他フェーズ
-    より長く取る」という意図を固定したいので、pip/npm の既定 900 秒との大小で見る。
-
-    固定値である以上いつか再び追い越される。恒久策は
-    docs/issues/snapshot_timeout_is_fixed_while_world_grows.md。
-    """
+    """スナップショットは固定の総時間上限ではなく、無進捗タイムアウトで呼ばれること。"""
     home = tmp_path / "home"
     (home / "snapshots").mkdir(parents=True)
     monkeypatch.setenv("SAIVERSE_HOME", str(home))
 
     seen: dict[str, object] = {}
 
-    def _fake_run(command, *, cwd, label, timeout=900):
-        seen["timeout"] = timeout
-        return None
+    def _fake_run(command, *, cwd, label, stall_timeout=300, on_pid=None, env=None):
+        seen["stall_timeout"] = stall_timeout
+        seen["command"] = command
+        return ""
 
-    with patch.object(update_engine, "_run", side_effect=_fake_run):
+    with patch.object(update_engine, "_run_with_stall_timeout", side_effect=_fake_run):
         update_engine.create_pre_update_snapshot(tmp_path / "repo", "python")
 
-    assert seen["timeout"] == update_engine.SNAPSHOT_TIMEOUT_SECONDS
-    assert seen["timeout"] > 900
+    assert seen["stall_timeout"] == update_engine.SNAPSHOT_STALL_TIMEOUT_SECONDS
+    assert seen["stall_timeout"] > 0

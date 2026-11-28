@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,32 @@ DEPENDENCIES_RECORD = ".update_dependencies_complete"
 # (``saiverse/update_dependencies_alert.py``); the next fully successful
 # ``--install-dependencies`` run removes it.
 DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
+
+# Written when an offline backup/restore operation (snapshot save/restore or
+# persona memory.db restore launched from the Backup UI tab) fails while the
+# backend is stopped. The backend reads and deletes it on the next startup to
+# surface a one-shot alert banner.
+BACKUP_OPERATION_FAILURE_RECORD = ".backup_operation_failed.json"
+
+OPERATION_UPDATE = "update"
+OPERATION_SNAPSHOT_SAVE = "snapshot_save"
+OPERATION_SNAPSHOT_RESTORE = "snapshot_restore"
+OPERATION_PERSONA_MEMORY_RESTORE = "persona_memory_restore"
+OPERATION_RESTART_BACKEND = "restart_backend"
+OPERATION_SHUTDOWN_ALL = "shutdown_all"
+OFFLINE_BACKUP_OPERATIONS = frozenset(
+    {
+        OPERATION_SNAPSHOT_SAVE,
+        OPERATION_SNAPSHOT_RESTORE,
+        OPERATION_PERSONA_MEMORY_RESTORE,
+    }
+)
+LIFECYCLE_OPERATIONS = frozenset(
+    {
+        OPERATION_RESTART_BACKEND,
+        OPERATION_SHUTDOWN_ALL,
+    }
+)
 
 # Steps of ``update_dependencies`` whose failure does not stop the update. They
 # are reported back as ``DependencyStepFailure`` and written to
@@ -403,6 +430,45 @@ def write_dependencies_failure(
 
 def clear_dependencies_failure(project_dir: Path) -> None:
     _remove_file(dependencies_failure_path(project_dir), purpose="a resolved package install failure")
+
+
+def backup_operation_failure_path(project_dir: Path) -> Path:
+    return project_dir / BACKUP_OPERATION_FAILURE_RECORD
+
+
+def write_backup_operation_failure(
+    project_dir: Path,
+    *,
+    operation: str,
+    target: str,
+    error: str,
+) -> None:
+    """Record a failed offline backup/restore operation for startup_alerts."""
+    document = {
+        "operation": operation,
+        "target": target,
+        "error": error.strip()[-2000:],
+        "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    target_path = backup_operation_failure_path(project_dir)
+    try:
+        _write_json_atomically(target_path, document)
+    except OSError:
+        LOGGER.error(
+            "Could not write %s, so the SAIVerse screen will not show this backup failure",
+            target_path,
+            exc_info=True,
+        )
+
+
+def consume_backup_operation_failure(project_dir: Path) -> dict[str, Any] | None:
+    """Read and remove a one-shot offline backup/restore failure record."""
+    target_path = backup_operation_failure_path(project_dir)
+    record = _read_json_object(target_path)
+    if record is None:
+        return None
+    _remove_file(target_path, purpose="consumed offline backup operation failure alert")
+    return record
 
 
 def invalidate_completion_marker(project_dir: Path) -> None:
@@ -1288,6 +1354,221 @@ def wait_for_owned_process_exit(
         raise UpdateError(f"Verified main process PID {pid} could not be stopped: {exc}") from exc
 
 
+def _stop_verified_recorded_processes(
+    records: Any,
+    label: str,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Terminate still-running recorded processes whose PID + create_time match.
+
+    Used after the backend has exited to reap lingering backend child processes
+    (such as ``database.api_server`` behind a Windows venv stub) and close the
+    dedicated ``start.bat`` backend ``cmd /k`` window without ever signalling an
+    unverified or recycled PID.
+    """
+    if not isinstance(records, list) or not records:
+        return
+    try:
+        psutil = _import_psutil()
+    except Exception:
+        LOGGER.debug("Skipping %s cleanup because psutil is unavailable", label)
+        return
+
+    targets: list[Any] = []
+    seen_pids: set[int] = set()
+    for entry in records:
+        if not isinstance(entry, dict):
+            continue
+        raw_pid = entry.get("pid")
+        created_at = entry.get("process_created_at")
+        if not isinstance(raw_pid, int) or raw_pid <= 0 or raw_pid in seen_pids:
+            continue
+        if created_at is None:
+            continue
+        try:
+            expected_ts = float(created_at)
+        except (TypeError, ValueError):
+            continue
+        if not _identity_matches(raw_pid, expected_ts):
+            continue
+        try:
+            proc = psutil.Process(raw_pid)
+            if proc.is_running():
+                seen_pids.add(raw_pid)
+                targets.append(proc)
+        except (psutil.Error, OSError):
+            continue
+
+    if not targets:
+        return
+    LOGGER.info("Stopping remaining %s: %s", label, _describe_processes(targets))
+    survivors = _terminate_processes(targets, psutil, timeout)
+    if survivors:
+        LOGGER.warning("Some %s survived termination: %s", label, _describe_processes(survivors))
+
+
+def _cleanup_after_backend_exit(config: dict[str, Any]) -> None:
+    """Reap verified lingering child processes and backend launcher windows."""
+    _stop_verified_recorded_processes(
+        config.get("child_processes"),
+        "backend child process(es)",
+    )
+    _stop_verified_recorded_processes(
+        config.get("backend_windows"),
+        "backend launcher window(s)",
+    )
+
+
+_POSIX_LAUNCHER_SCRIPTS = frozenset({"start.sh", "start-dev.sh"})
+
+
+def _has_posix_launcher_ancestor(pid: int, project_dir: Path) -> bool:
+    """Return whether ``pid`` was started under this checkout's ``start.sh`` / ``start-dev.sh``.
+
+    On Linux, those scripts wait with ``wait -n`` and run ``cleanup()`` on EXIT,
+    which sends SIGTERM to companion background jobs (SearXNG, Frontend) as soon
+    as the backend exits. Knowing this before exit lets detached restarts cleanly
+    settle and recover those companions without racing the script's trap.
+    """
+    if _is_windows():
+        return False
+    try:
+        psutil = _import_psutil()
+        launcher_targets = {
+            (project_dir / name).resolve() for name in _POSIX_LAUNCHER_SCRIPTS
+        }
+        proc = psutil.Process(pid)
+        for parent in proc.parents():
+            try:
+                cmdline = list(parent.cmdline() or [])
+            except (psutil.Error, OSError):
+                continue
+            try:
+                cwd = parent.cwd()
+            except (psutil.Error, OSError):
+                cwd = None
+            for arg in cmdline:
+                if os.path.basename(arg) not in _POSIX_LAUNCHER_SCRIPTS:
+                    continue
+                candidate = Path(arg)
+                if not candidate.is_absolute():
+                    if not cwd:
+                        continue
+                    candidate = Path(cwd) / candidate
+                try:
+                    if candidate.resolve() in launcher_targets:
+                        return True
+                except OSError:
+                    continue
+    except Exception:
+        LOGGER.debug("Could not inspect POSIX launcher ancestors for PID %s", pid, exc_info=True)
+    return False
+
+
+def _capture_pre_exit_companion_state(
+    config: dict[str, Any],
+    project_dir: Path,
+) -> tuple[bool, str | None, bool]:
+    """Capture SearXNG / Frontend / start.sh state before the backend exits.
+
+    Prefers values recorded in ``config`` while the backend was still running
+    (closing any race where ``start.sh`` already killed companions before the
+    detached worker finished starting), falling back to live inspection when
+    the config omits those keys.
+    """
+    if "pre_searxng_running" in config:
+        pre_searxng_running = bool(config.get("pre_searxng_running"))
+    else:
+        try:
+            pre_searxng_running = bool(find_searxng_servers(project_dir))
+        except Exception:
+            LOGGER.debug("Could not probe SearXNG state before backend exit", exc_info=True)
+            pre_searxng_running = False
+
+    if "pre_frontend_mode" in config:
+        raw_mode = config.get("pre_frontend_mode")
+        pre_frontend_mode = (
+            str(raw_mode) if raw_mode in _FRONTEND_WINDOW_TITLES else None
+        )
+    else:
+        try:
+            pre_frontend_mode = find_frontend_servers(project_dir).mode
+        except Exception:
+            LOGGER.debug("Could not probe frontend state before backend exit", exc_info=True)
+            pre_frontend_mode = None
+
+    if "posix_launcher_present" in config:
+        posix_launcher_present = bool(config.get("posix_launcher_present"))
+    else:
+        raw_pid = config.get("main_pid")
+        posix_launcher_present = (
+            _has_posix_launcher_ancestor(int(raw_pid), project_dir)
+            if isinstance(raw_pid, int) and raw_pid > 0
+            else False
+        )
+
+    return pre_searxng_running, pre_frontend_mode, posix_launcher_present
+
+
+def _settle_companions_for_posix_launcher(
+    project_dir: Path,
+    *,
+    pre_searxng_running: bool,
+    pre_frontend_mode: str | None,
+) -> None:
+    """Finish stopping companions being torn down by ``start.sh`` / ``start-dev.sh``.
+
+    Calling ``stop_*`` before restarting ensures any process already receiving
+    SIGTERM from ``start.sh``'s ``cleanup()`` trap has fully exited and released
+    its port before we bring it back in an independent session.
+    """
+    if pre_searxng_running:
+        try:
+            stop_searxng_servers(project_dir)
+        except Exception:
+            LOGGER.warning(
+                "Could not cleanly settle SearXNG after POSIX launcher exit; continuing restart",
+                exc_info=True,
+            )
+    if pre_frontend_mode is not None:
+        try:
+            stop_frontend_servers(project_dir)
+        except Exception:
+            LOGGER.warning(
+                "Could not cleanly settle Frontend after POSIX launcher exit; continuing restart",
+                exc_info=True,
+            )
+
+
+def _recover_searxng_if_stopped(project_dir: Path, pre_searxng_running: bool) -> None:
+    """Restart SearXNG if it was running before backend exit and is now stopped."""
+    if not pre_searxng_running:
+        return
+    try:
+        if find_searxng_servers(project_dir):
+            return
+    except Exception:
+        LOGGER.warning("Could not verify SearXNG status during restart; skipping recovery", exc_info=True)
+        return
+    LOGGER.info("SearXNG stopped alongside the backend; starting it again")
+    _restart_searxng(project_dir, True)
+
+
+def _recover_frontend_if_stopped(project_dir: Path, pre_frontend_mode: str | None) -> None:
+    """Restart Frontend if it was running before backend exit and is now stopped."""
+    if pre_frontend_mode is None:
+        return
+    try:
+        if find_frontend_servers(project_dir).processes:
+            return
+    except Exception:
+        LOGGER.warning("Could not verify Frontend status during restart; skipping recovery", exc_info=True)
+        return
+    LOGGER.info("Frontend stopped alongside the backend; starting it again (mode=%s)", pre_frontend_mode)
+    _restart_frontend(project_dir, pre_frontend_mode)
+
+
 def _ensure_portable_git_on_path(project_dir: Path) -> None:
     """Make a setup-installed PortableGit visible to this (separate) session.
 
@@ -1481,16 +1762,147 @@ def _remove_partial_snapshot_archive(tmp_archive: Path) -> None:
     LOGGER.warning("Removed the partial snapshot archive left behind: %s", tmp_archive)
 
 
-# pre-update スナップショットに許す時間。他フェーズ（pip / npm の既定 900 秒、
-# git pull の 300 秒）より長いのは、この処理だけが世界の大きさに比例して伸びる
-# ため。2026-09-02、実測 24GB の世界が 900 秒に収まらず start.bat が起動不能に
-# なった。llama_cache を除外して対象は 8.9GB に落ちたが、世界は今後も育つので
-# 余裕を取る。
-#
-# ⚠ これは暫定値であって解ではない。固定値である限り、世界が育てばいつか再び
-# 追い越される。恒久策（進捗を見て「生きている限り待つ」形へ）は
-# docs/issues/snapshot_timeout_is_fixed_while_world_grows.md。
-SNAPSHOT_TIMEOUT_SECONDS = 3600
+def _cleanup_partial_snapshot_files(name: str, child_pid: int | None = None) -> None:
+    """中断・タイムアウトした snapshot.py save の一時ファイルを掃除する。
+
+    旧 ZIP 形式の ``<name>.zip.tmp`` に加え、CAS 形式の ``manifests/<name>.json.tmp*``
+    と子プロセス (``child_pid``) が残した ``.store/objects/**/.tmp.<pid>*`` を片付ける。
+    掃除の失敗で本来のエラーを隠さないよう、例外はすべてログに留める。
+    """
+    snaps = _saiverse_home() / "snapshots"
+    _remove_partial_snapshot_archive(snaps / f"{name}.zip.tmp")
+
+    manifests_dir = snaps / "manifests"
+    if manifests_dir.is_dir():
+        manifest_tmp_re = re.compile(rf"^{re.escape(name)}\.json\.tmp\.\d+$")
+        try:
+            for candidate in list(manifests_dir.iterdir()):
+                if candidate.is_file() and manifest_tmp_re.match(candidate.name):
+                    _remove_partial_snapshot_archive(candidate)
+        except OSError as exc:
+            LOGGER.warning("Could not scan partial snapshot manifests in %s: %s", manifests_dir, exc)
+
+    if child_pid is not None:
+        objects_dir = snaps / ".store" / "objects"
+        if objects_dir.is_dir():
+            obj_tmp_re = re.compile(rf"\.(?:raw|z)\.tmp\.{child_pid}(?:\.\d+)?$")
+            try:
+                for root, _dirs, files in os.walk(objects_dir):
+                    root_path = Path(root)
+                    for fname in files:
+                        if obj_tmp_re.search(fname):
+                            _remove_partial_snapshot_archive(root_path / fname)
+            except OSError as exc:
+                LOGGER.warning("Could not scan partial CAS objects in %s: %s", objects_dir, exc)
+
+
+# 進捗出力が完全に途絶えたときにハングとみなす秒数 (無進捗タイムアウト)。
+# 以前は固定 3600 秒の上限だったが、世界が育てば必ず追い越される構造だったため、
+# snapshot.py が進捗を出し続ける限り待ち続け、5 分間完全に無出力になった場合だけ
+# 停止する方式へ移行した (docs/intent/world_snapshot.md §3.2)。
+SNAPSHOT_STALL_TIMEOUT_SECONDS = 300
+
+
+def _run_with_stall_timeout(
+    command: list[str],
+    *,
+    cwd: Path,
+    label: str,
+    stall_timeout: float = SNAPSHOT_STALL_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
+    on_pid: Any | None = None,
+) -> str:
+    """Run a long-running command while streaming output and enforcing an inactivity timeout.
+
+    Unlike ``_run(..., timeout=...)`` which caps total wall time, this allows the
+    command to run as long as it continues emitting progress lines, and kills the
+    entire process tree if output goes silent for more than ``stall_timeout`` seconds.
+    """
+    LOGGER.info("Phase: %s", label)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise UpdateError(
+            f"{label} could not run: {exc}",
+            ui_key="api.systemUpdate.commandCouldNotRun",
+            ui_params={"label": label, "error": str(exc)},
+        ) from exc
+
+    if on_pid is not None:
+        try:
+            on_pid(process.pid)
+        except Exception:
+            pass
+
+    activity_lock = threading.Lock()
+    last_activity = [time.monotonic()]
+    recent_lines: list[str] = []
+
+    def _drain_output() -> None:
+        assert process.stdout is not None
+        try:
+            for line in iter(process.stdout.readline, ""):
+                now = time.monotonic()
+                stripped = line.rstrip("\r\n")
+                with activity_lock:
+                    last_activity[0] = now
+                    if stripped:
+                        recent_lines.append(stripped)
+                        if len(recent_lines) > 200:
+                            del recent_lines[:50]
+                if stripped:
+                    LOGGER.info("[%s] %s", label, stripped)
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=_drain_output, name=f"stream-{label}", daemon=True)
+    reader.start()
+
+    stalled = False
+    while process.poll() is None:
+        reader.join(timeout=0.2)
+        with activity_lock:
+            idle_seconds = time.monotonic() - last_activity[0]
+        if idle_seconds > stall_timeout and process.poll() is None:
+            stalled = True
+            left = _stop_process_tree(process)
+            if process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+            reader.join(timeout=5)
+            extra = (
+                f"; {len(left)} child process(es) did not exit: "
+                + ", ".join(str(pid) for pid in left)
+                if left
+                else ""
+            )
+            raise UpdateError(
+                f"{label} stalled with no progress for {stall_timeout:.0f}s{extra}"
+            )
+
+    reader.join(timeout=5)
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+
+    if not stalled and process.returncode != 0:
+        tail = "\n".join(recent_lines[-20:])
+        raise UpdateError(f"{label} failed with exit {process.returncode}: {tail[-1000:]}")
+    return "\n".join(recent_lines)
 
 
 def create_pre_update_snapshot(
@@ -1499,6 +1911,7 @@ def create_pre_update_snapshot(
     *,
     prefix: str = "auto_before_update",
     note: str = "Automatic restore point before code update",
+    name: str | None = None,
 ) -> str:
     """Save and validate a whole-world snapshot before any code moves.
 
@@ -1506,30 +1919,31 @@ def create_pre_update_snapshot(
     (``ea_optin_*`` / ``ea_return_*``) so it can be told apart from a routine
     update's later.
     """
-    name = datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
-    # snapshot.py は書き上がった ZIP を .zip.tmp から os.replace で publish する。
-    # ここでタイムアウトすると _run が子プロセスを kill するので snapshot.py 側の
-    # except 節は走らず、書きかけの .zip.tmp が数十 GB のまま残る。子を殺した
-    # 側であるこちらが後始末する。パスの規則は snapshot.py と同じ。
-    tmp_archive = _saiverse_home() / "snapshots" / f"{name}.zip.tmp"
+    snapshot_name = name or datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
+    child_pid_holder: list[int | None] = [None]
+
+    def _record_pid(pid: int) -> None:
+        child_pid_holder[0] = pid
+
     try:
-        _run(
+        _run_with_stall_timeout(
             [
                 python,
                 str(project_dir / "scripts" / "snapshot.py"),
                 "save",
-                name,
+                snapshot_name,
                 "--note",
                 note,
             ],
             cwd=project_dir,
             label="create and validate pre-update world snapshot",
-            timeout=SNAPSHOT_TIMEOUT_SECONDS,
+            stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            on_pid=_record_pid,
         )
     except Exception:
-        _remove_partial_snapshot_archive(tmp_archive)
+        _cleanup_partial_snapshot_files(snapshot_name, child_pid=child_pid_holder[0])
         raise
-    return name
+    return snapshot_name
 
 
 def update_code(project_dir: Path) -> None:
@@ -2717,6 +3131,33 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _re_enable_windows_ctrl_c() -> None:
+    """Clear the inherited CTRL+C ignore attribute before spawning visible consoles.
+
+    ``api/routes/system.py`` spawns the detached updater on Windows with
+    ``CREATE_NEW_PROCESS_GROUP``, which implicitly calls
+    ``SetConsoleCtrlHandler(NULL, TRUE)`` (ignore ``CTRL_C_EVENT``) on this
+    process. Windows inherits that attribute into child processes even when
+    spawned with ``CREATE_NEW_CONSOLE``, leaving restarted Backend, Frontend,
+    and SearXNG windows deaf to Ctrl+C unless cleared first.
+    """
+    if not _is_windows():
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+        if not kernel32.SetConsoleCtrlHandler(None, 0):
+            LOGGER.debug(
+                "SetConsoleCtrlHandler(None, False) returned 0 (winerr=%s)",
+                ctypes.get_last_error(),
+            )
+    except Exception:
+        LOGGER.debug("Could not re-enable Windows Ctrl+C handler", exc_info=True)
+
+
 def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
     project_dir = Path(config["project_dir"]).resolve()
     python = str(config["venv_python"])
@@ -2732,8 +3173,9 @@ def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
     if _is_windows():
         # A visible console window of its own, like the "SAIVerse Backend"
         # window start.bat opens, so the user can see the backend and stop it
-        # by closing the window. It used to be DETACHED_PROCESS: no window, and
-        # no way to stop it short of the task manager.
+        # by closing the window or pressing Ctrl+C. It used to be
+        # DETACHED_PROCESS: no window, and no way to stop it short of the task
+        # manager.
         #
         # python is started directly, not wrapped in ``cmd /k``: the health
         # check (``process.poll()``) and ``_terminate_spawned`` act on this
@@ -2745,6 +3187,7 @@ def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
         # lets the child inherit handles, so the child writes to its own new
         # console and holds nothing of this updater's. Redirecting them to
         # pipes or DEVNULL would blank the window the change exists to show.
+        _re_enable_windows_ctrl_c()
         kwargs["creationflags"] = _CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
@@ -3032,22 +3475,127 @@ def _describe_processes(processes: list[Any]) -> str:
     return ", ".join(parts)
 
 
+def _is_window_shell_process(process: Any) -> bool:
+    try:
+        return (process.name() or "").lower() in _WINDOW_SHELL_NAMES
+    except Exception:
+        return False
+
+
+def _terminate_windows_process_zero(process: Any, psutil: Any) -> bool:
+    """Terminate a verified Windows process with exit code 0.
+
+    ``psutil.Process.terminate()`` on Windows calls ``TerminateProcess(h, 15)``
+    (``SIGTERM``). Windows Terminal's default ``closeOnExit: "graceful"`` only
+    auto-closes tabs that exit with code 0, so code 15 leaves behind scary
+    "[process exited with code 15 (0x0000000f)]" tabs for every stopped
+    ``cmd /k`` window. Using ``TerminateProcess(h, 0)`` after verifying the
+    handle's ``GetProcessTimes`` creation timestamp closes them cleanly without
+    any PID-reuse window.
+
+    Returns ``True`` if handled (terminated, already gone, or PID recycled),
+    or ``False`` if the caller should fall back to ``process.terminate()``.
+    """
+    if not _is_windows():
+        return False
+    real_process_cls = getattr(psutil, "Process", None)
+    if not isinstance(real_process_cls, type) or not isinstance(process, real_process_cls):
+        return False
+    try:
+        expected_create_time = float(process.create_time())
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        access = 0x0001 | 0x1000  # PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel32.OpenProcess(access, False, int(process.pid))
+        if not handle:
+            return not process.is_running()
+        try:
+            creation = wintypes.FILETIME()
+            exit_ft = wintypes.FILETIME()
+            kernel_ft = wintypes.FILETIME()
+            user_ft = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_ft),
+                ctypes.byref(kernel_ft),
+                ctypes.byref(user_ft),
+            ):
+                return False
+            raw_100ns = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            handle_create_time = (raw_100ns - 116444736000000000) / 10_000_000.0
+            if abs(handle_create_time - expected_create_time) > 0.01:
+                LOGGER.warning(
+                    "Refusing to terminate PID %s: handle creation time mismatch (PID reused)",
+                    process.pid,
+                )
+                return True
+            if kernel32.TerminateProcess(handle, 0):
+                return True
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value != 259:
+                return True
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        LOGGER.debug(
+            "Win32 exit-code-0 terminate failed for PID %s; falling back to psutil",
+            getattr(process, "pid", "?"),
+            exc_info=True,
+        )
+        return False
+
+
 def _terminate_processes(processes: list[Any], psutil: Any, timeout: float) -> list[Any]:
     """terminate, wait, kill what is left, wait again. Returns the survivors."""
-    for process in processes:
+    ordered = (
+        [p for p in processes if not _is_window_shell_process(p)]
+        + [p for p in processes if _is_window_shell_process(p)]
+        if _is_windows()
+        else list(processes)
+    )
+    for process in ordered:
         try:
-            process.terminate()
+            if not _terminate_windows_process_zero(process, psutil):
+                process.terminate()
         except psutil.NoSuchProcess:
             continue
         except (psutil.Error, OSError) as exc:
             LOGGER.warning("Could not ask PID %s to stop: %s", getattr(process, "pid", "?"), exc)
-    _, alive = psutil.wait_procs(processes, timeout=timeout)
+    _, alive = psutil.wait_procs(ordered, timeout=timeout)
     if not alive:
         return []
     LOGGER.warning("Process(es) did not stop in time; killing: %s", _describe_processes(alive))
     for process in alive:
         try:
-            process.kill()
+            if not _terminate_windows_process_zero(process, psutil):
+                process.kill()
         except psutil.NoSuchProcess:
             continue
         except (psutil.Error, OSError) as exc:
@@ -3193,6 +3741,7 @@ def start_frontend(project_dir: Path, mode: str) -> subprocess.Popen[Any]:
         "env": _env_with_npm_on_path(npm),
     }
     if _is_windows():
+        _re_enable_windows_ctrl_c()
         shell = os.environ.get("COMSPEC") or "cmd.exe"
         title = _FRONTEND_WINDOW_TITLES[mode]
         command = [shell, "/k", f"title {title} && npm {' '.join(script)}"]
@@ -3361,6 +3910,7 @@ def start_searxng(project_dir: Path) -> subprocess.Popen[Any]:
     """
     kwargs: dict[str, Any] = {"cwd": str(project_dir), "close_fds": True}
     if _is_windows():
+        _re_enable_windows_ctrl_c()
         shell = os.environ.get("COMSPEC") or "cmd.exe"
         command = [shell, "/k", SEARXNG_WINDOW_COMMAND]
         kwargs["creationflags"] = _CREATE_NEW_CONSOLE
@@ -3654,6 +4204,7 @@ def _run_detached_update(
         int(config["main_pid"]),
         config.get("main_process_created_at"),
     )
+    _cleanup_after_backend_exit(config)
     progress = _UpdateProgress()
     stopped_frontend_mode: str | None = None
     searxng_was_running = False
@@ -3711,6 +4262,207 @@ def _run_detached_update(
     # After the backend is healthy, so the screen comes back to a backend that
     # answers.
     _restart_frontend(project_dir, stopped_frontend_mode)
+
+
+def _run_detached_backup_operation(
+    config: dict[str, Any],
+    project_dir: Path,
+    python: str,
+) -> None:
+    """Run an offline backup/restore operation requested from the Backup UI tab.
+
+    Waits for the running backend to exit, executes the requested offline
+    snapshot/restore command, records any failure to
+    ``BACKUP_OPERATION_FAILURE_RECORD`` (for the startup alert banner), and
+    always restarts the backend afterwards.
+    """
+    operation = str(config.get("operation") or "")
+    if operation not in OFFLINE_BACKUP_OPERATIONS:
+        raise UpdateError(f"Unknown offline backup operation: {operation!r}")
+
+    pre_searxng_running, pre_frontend_mode, posix_launcher_present = (
+        _capture_pre_exit_companion_state(config, project_dir)
+    )
+
+    wait_for_owned_process_exit(
+        int(config["main_pid"]),
+        config.get("main_process_created_at"),
+    )
+    _cleanup_after_backend_exit(config)
+    if posix_launcher_present and not _is_windows():
+        _settle_companions_for_posix_launcher(
+            project_dir,
+            pre_searxng_running=pre_searxng_running,
+            pre_frontend_mode=pre_frontend_mode,
+        )
+    _remove_file(
+        backup_operation_failure_path(project_dir),
+        purpose="before starting an offline backup operation",
+    )
+
+    target_label = ""
+    op_error: Exception | None = None
+    try:
+        if operation == OPERATION_SNAPSHOT_SAVE:
+            note = str(config.get("snapshot_note") or "Manual snapshot from Backup settings")
+            requested_name = config.get("snapshot_name")
+            target_label = str(requested_name or "manual snapshot")
+            saved_name = create_pre_update_snapshot(
+                project_dir,
+                python,
+                prefix="manual",
+                note=note,
+                name=str(requested_name) if requested_name else None,
+            )
+            LOGGER.info("Offline manual snapshot complete: %s", saved_name)
+        elif operation == OPERATION_SNAPSHOT_RESTORE:
+            snapshot_name = str(config.get("snapshot_name") or "").strip()
+            if not snapshot_name:
+                raise UpdateError("snapshot_name is missing from backup operation config")
+            target_label = snapshot_name
+            _run_with_stall_timeout(
+                [
+                    python,
+                    str(project_dir / "scripts" / "snapshot.py"),
+                    "restore",
+                    snapshot_name,
+                    "--yes",
+                ],
+                cwd=project_dir,
+                label=f"restore world snapshot {snapshot_name}",
+                stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            )
+            LOGGER.info("Offline world snapshot restore complete: %s", snapshot_name)
+        elif operation == OPERATION_PERSONA_MEMORY_RESTORE:
+            persona_id = str(config.get("persona_id") or "").strip()
+            backup_file = str(config.get("backup_file") or "").strip()
+            if not persona_id or not backup_file:
+                raise UpdateError("persona_id or backup_file is missing from backup operation config")
+            target_label = f"{persona_id} ({backup_file})"
+            cmd = [
+                python,
+                "-m",
+                "sai_memory.backup",
+                "restore",
+                "--persona",
+                persona_id,
+                "--file",
+                backup_file,
+            ]
+            resolved_db = config.get("resolved_db_path")
+            if resolved_db:
+                cmd.extend(["--saiverse-db", str(resolved_db)])
+            _run_with_stall_timeout(
+                cmd,
+                cwd=project_dir,
+                label=f"restore persona memory {persona_id}",
+                stall_timeout=SNAPSHOT_STALL_TIMEOUT_SECONDS,
+            )
+            LOGGER.info("Offline persona memory restore complete: %s (%s)", persona_id, backup_file)
+    except Exception as exc:
+        op_error = exc
+        LOGGER.exception("Offline backup operation %s failed for %s", operation, target_label)
+        write_backup_operation_failure(
+            project_dir,
+            operation=operation,
+            target=target_label,
+            error=str(exc),
+        )
+
+    _recover_searxng_if_stopped(project_dir, pre_searxng_running)
+    process = restart_application(config)
+    payload = wait_for_healthy_restart(process, config)
+    LOGGER.info(
+        "Backend restarted after offline operation %s: City=%s version=%s PID=%s",
+        operation,
+        payload.get("city_name"),
+        payload.get("version"),
+        process.pid,
+    )
+    _recover_frontend_if_stopped(project_dir, pre_frontend_mode)
+    if op_error is not None:
+        if isinstance(op_error, UpdateError):
+            raise op_error
+        raise UpdateError(str(op_error)) from op_error
+
+
+def _run_detached_lifecycle_operation(
+    config: dict[str, Any],
+    project_dir: Path,
+) -> None:
+    """Run a clean backend restart or full-stack shutdown requested from Settings.
+
+    - ``restart_backend``: wait for the current backend to finish shutting down
+      and exit, clean up verified launcher/child remnants, then start a fresh
+      backend process and wait for its health check.
+    - ``shutdown_all``: wait for the current backend to finish shutting down
+      and exit, clean up verified launcher/child remnants, then stop this
+      checkout's Frontend and SearXNG servers too without restarting anything.
+    """
+    operation = str(config.get("operation") or "")
+    if operation not in LIFECYCLE_OPERATIONS:
+        raise UpdateError(f"Unknown lifecycle operation: {operation!r}")
+
+    pre_searxng_running = False
+    pre_frontend_mode: str | None = None
+    posix_launcher_present = False
+    if operation == OPERATION_RESTART_BACKEND:
+        pre_searxng_running, pre_frontend_mode, posix_launcher_present = (
+            _capture_pre_exit_companion_state(config, project_dir)
+        )
+
+    wait_for_owned_process_exit(
+        int(config["main_pid"]),
+        config.get("main_process_created_at"),
+    )
+    _cleanup_after_backend_exit(config)
+
+    if operation == OPERATION_RESTART_BACKEND:
+        if posix_launcher_present and not _is_windows():
+            _settle_companions_for_posix_launcher(
+                project_dir,
+                pre_searxng_running=pre_searxng_running,
+                pre_frontend_mode=pre_frontend_mode,
+            )
+        _recover_searxng_if_stopped(project_dir, pre_searxng_running)
+        process = restart_application(config)
+        payload = wait_for_healthy_restart(process, config)
+        LOGGER.info(
+            "Clean backend restart complete: City=%s version=%s PID=%s",
+            payload.get("city_name"),
+            payload.get("version"),
+            process.pid,
+        )
+        _recover_frontend_if_stopped(project_dir, pre_frontend_mode)
+        return
+
+    # OPERATION_SHUTDOWN_ALL: attempt to stop both Frontend and SearXNG even if
+    # one of them fails, so a failure in one does not leave the other running.
+    errors: list[str] = []
+    for label, stopper in (
+        ("frontend", stop_frontend_servers),
+        ("SearXNG", stop_searxng_servers),
+    ):
+        try:
+            stopper(project_dir)
+        except Exception as exc:
+            LOGGER.exception("Failed to stop %s during shutdown_all", label)
+            errors.append(f"{label}: {exc}")
+    if errors:
+        raise UpdateError(
+            "Backend stopped, but some companion servers could not be stopped: "
+            + "; ".join(errors)
+        )
+    LOGGER.info("Full SAIVerse shutdown complete (Backend, Frontend, SearXNG)")
+
+
+def _config_operation(config: dict[str, Any] | None) -> str:
+    if not config:
+        return OPERATION_UPDATE
+    op = config.get("operation")
+    if not op:
+        return OPERATION_UPDATE
+    return str(op)
 
 
 def _load_config(config_path: Path) -> dict[str, Any]:
@@ -3896,8 +4648,17 @@ def main(argv: list[str] | None = None) -> int:
                 "channel through the update config"
             )
         config = None if args.manual else _load_config(config_path)
-        switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
-        run_update(config, project_dir, switch_channel=switch_channel)
+        operation = _config_operation(config)
+        if operation in OFFLINE_BACKUP_OPERATIONS:
+            assert config is not None
+            python = str(config.get("venv_python", sys.executable))
+            _run_detached_backup_operation(config, project_dir, python)
+        elif operation in LIFECYCLE_OPERATIONS:
+            assert config is not None
+            _run_detached_lifecycle_operation(config, project_dir)
+        else:
+            switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
+            run_update(config, project_dir, switch_channel=switch_channel)
     except UpdateError as exc:
         LOGGER.error("Update aborted: %s", exc)
         return 1

@@ -26,7 +26,7 @@ import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
 import { fetchAllTableRows } from '@/lib/dbTable';
-import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
+import { SHUTDOWN_STARTED_EVENT, UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
 import RoomView from '@/components/RoomView';
 import { useBuildingDetails } from '@/lib/useBuildingDetails';
@@ -48,7 +48,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2, Image as ImageIcon, MessagesSquare } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, Power, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2, Image as ImageIcon, MessagesSquare } from 'lucide-react';
 import { shouldShowMovementMessage } from '@/lib/movementNotices';
 import { useMovementNoticeSettings } from '@/hooks/useMovementNoticeSettings';
 import { useMovementNoticeAutoScroll } from '@/hooks/useMovementNoticeAutoScroll';
@@ -871,6 +871,13 @@ export default function Home() {
         }
         return false;
     });
+    const [updatingLabel, setUpdatingLabel] = useState(() => {
+        if (typeof window !== 'undefined') {
+            return sessionStorage.getItem('saiverse_updating_label') || '';
+        }
+        return '';
+    });
+    const [isShuttingDown, setIsShuttingDown] = useState(false);
     const updatingTargetVersion = useRef<string>('');
 
     // Announcements unread badge
@@ -1917,6 +1924,7 @@ export default function Home() {
     // During update: poll regardless of connection status (detect shutdown + restart)
     // Otherwise: only poll when disconnected
     useEffect(() => {
+        if (isShuttingDown) return;
         if (!isUpdating && backendConnected) return;
 
         const reconnectInterval = setInterval(async () => {
@@ -1964,7 +1972,9 @@ export default function Home() {
                         // The completion toast is shown after the reload.
                         if (isUpdating) {
                             setIsUpdating(false);
+                            setUpdatingLabel('');
                             sessionStorage.removeItem('saiverse_updating');
+                            sessionStorage.removeItem('saiverse_updating_label');
                             sessionStorage.setItem('saiverse_update_finished', 'true');
                             window.location.reload();
                             return;
@@ -1985,33 +1995,68 @@ export default function Home() {
                     setBackendConnected(false);
                 }
             }
-        }, isUpdating ? 5000 : 10000); // Poll faster during update
+        }, isUpdating ? 2000 : 10000); // Poll faster during update/restart
 
         return () => clearInterval(reconnectInterval);
-    }, [backendConnected, isUpdating]);
+    }, [backendConnected, isUpdating, isShuttingDown]);
 
-    // 更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
+    // 再起動・更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
     useEffect(() => {
         if (sessionStorage.getItem('saiverse_update_finished') !== 'true') return;
         sessionStorage.removeItem('saiverse_update_finished');
+        const doneLabel = sessionStorage.getItem('saiverse_updating_done_label') || '';
+        sessionStorage.removeItem('saiverse_updating_done_label');
         const toastId = `update-complete-${Date.now()}`;
-        setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
+        setToasts(prev => [
+            ...prev,
+            { id: toastId, content: doneLabel || uiText('app.page.updateCompleteToast') },
+        ]);
         // 片付けの関数は返さない: 開発モードの二重実行で掃除だけが走ると、
         // 旗はもう消えているので知らせが画面に残り続ける。
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
     }, []);
 
-    // 設定画面からチャンネルを切り替えたときも、更新ボタンと同じ「再起動待ち」に乗せる。
+    // 設定画面からチャンネルを切り替えたとき・再起動・オフラインのバックアップ/復元も、
+    // 更新ボタンと同じ「再起動待ち」に乗せる。
     useEffect(() => {
         const onUpdateStarted = (event: Event) => {
-            const version = (event as CustomEvent<{ version?: string }>).detail?.version || '';
+            const detail = (
+                event as CustomEvent<{ version?: string; label?: string; completedLabel?: string }>
+            ).detail;
+            const version = detail?.version || '';
+            const label = detail?.label || '';
+            const completedLabel = detail?.completedLabel || '';
             updatingTargetVersion.current = version;
+            setUpdatingLabel(label);
             setIsUpdating(true);
             sessionStorage.setItem('saiverse_updating', 'true');
+            if (label) {
+                sessionStorage.setItem('saiverse_updating_label', label);
+            } else {
+                sessionStorage.removeItem('saiverse_updating_label');
+            }
+            if (completedLabel) {
+                sessionStorage.setItem('saiverse_updating_done_label', completedLabel);
+            } else {
+                sessionStorage.removeItem('saiverse_updating_done_label');
+            }
             setUpdateAvailable(null);
         };
         window.addEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
-        return () => window.removeEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+        const onShutdownStarted = () => {
+            setIsShuttingDown(true);
+            setIsUpdating(false);
+            setUpdatingLabel('');
+            sessionStorage.removeItem('saiverse_updating');
+            sessionStorage.removeItem('saiverse_updating_label');
+            sessionStorage.removeItem('saiverse_updating_done_label');
+            setUpdateAvailable(null);
+        };
+        window.addEventListener(SHUTDOWN_STARTED_EVENT, onShutdownStarted);
+        return () => {
+            window.removeEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+            window.removeEventListener(SHUTDOWN_STARTED_EVENT, onShutdownStarted);
+        };
     }, []);
 
     // --- Reembed handlers ---
@@ -2071,8 +2116,11 @@ export default function Home() {
             const res = await apiFetch('/api/system/update', { method: 'POST' });
             if (res.ok) {
                 updatingTargetVersion.current = updateAvailable.version;
+                setUpdatingLabel('');
                 setIsUpdating(true);
                 sessionStorage.setItem('saiverse_updating', 'true');
+                sessionStorage.removeItem('saiverse_updating_label');
+                sessionStorage.removeItem('saiverse_updating_done_label');
                 setUpdateAvailable(null);
             } else {
                 // Surface the server's reason (e.g. the list of locally modified
@@ -2106,8 +2154,11 @@ export default function Home() {
         const result = await requestChannelSwitch('stable', false);
         if (result.ok) {
             updatingTargetVersion.current = target;
+            setUpdatingLabel('');
             setIsUpdating(true);
             sessionStorage.setItem('saiverse_updating', 'true');
+            sessionStorage.removeItem('saiverse_updating_label');
+            sessionStorage.removeItem('saiverse_updating_done_label');
             setUpdateAvailable(null);
             return;
         }
@@ -4035,17 +4086,31 @@ export default function Home() {
                     </div>
                 </header>
 
-                {isUpdating && (
+                {isShuttingDown && (
+                    <div className={styles.updatingBanner}>
+                        <Power size={16} />
+                        <div className={styles.updatingContent}>
+                            <div>{uiText("app.page.shutdownBannerTitle")}</div>
+                            <div>{uiText("app.page.shutdownBannerSubtitle")}</div>
+                        </div>
+                    </div>
+                )}
+
+                {isUpdating && !isShuttingDown && (
                     <div className={styles.updatingBanner}>
                         <Loader size={16} className={styles.spinIcon} />
                         <div className={styles.updatingContent}>
-                            <div>{uiText("app.page.label007")}{updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}{uiText("app.page.label008")}</div>
+                            <div>
+                                {updatingLabel
+                                    ? updatingLabel
+                                    : `${uiText("app.page.label007")}${updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}${uiText("app.page.label008")}`}
+                            </div>
                             <div>{uiText("app.page.label009")}</div>
                         </div>
                     </div>
                 )}
 
-                {!backendConnected && !isUpdating && (
+                {!backendConnected && !isUpdating && !isShuttingDown && (
                     <div className={styles.backendErrorBanner}>
                         <AlertTriangle size={16} />
                         <div className={styles.backendErrorContent}>
@@ -4055,7 +4120,7 @@ export default function Home() {
                     </div>
                 )}
 
-                {updateAvailable && updateAvailable.returnToStable && !isUpdating && (
+                {updateAvailable && updateAvailable.returnToStable && !isUpdating && !isShuttingDown && (
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>
@@ -4069,7 +4134,7 @@ export default function Home() {
                     </div>
                 )}
 
-                {updateAvailable && !updateAvailable.returnToStable && !isUpdating && (
+                {updateAvailable && !updateAvailable.returnToStable && !isUpdating && !isShuttingDown && (
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>

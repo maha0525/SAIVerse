@@ -117,7 +117,16 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
     margin-bottom: 2rem;
+}
+
+.serverControlActions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 
 .restartBtn {
@@ -125,8 +134,29 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 1rem;
+    background: #451a03;
+    /* Amber 950 */
+    color: #fcd34d;
+    /* Amber 300 */
+    border: 1px solid #92400e;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.restartBtn:hover:not(:disabled) {
+    background: #78350f;
+    color: white;
+}
+
+.shutdownBtn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
     background: #450a0a;
-    /* Red 900 */
+    /* Red 950 */
     color: #fca5a5;
     /* Red 300 */
     border: 1px solid #7f1d1d;
@@ -136,9 +166,15 @@
     transition: all 0.2s;
 }
 
-.restartBtn:hover {
+.shutdownBtn:hover:not(:disabled) {
     background: #7f1d1d;
     color: white;
+}
+
+.restartBtn:disabled,
+.shutdownBtn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .envList {
@@ -604,12 +640,23 @@
 }
 
 :global([data-theme="light"]) .restartBtn {
+    background: #fffbeb;
+    color: #b45309;
+    border-color: #fde68a;
+}
+
+:global([data-theme="light"]) .restartBtn:hover:not(:disabled) {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+:global([data-theme="light"]) .shutdownBtn {
     background: #fef2f2;
     color: #dc2626;
     border-color: #fecaca;
 }
 
-:global([data-theme="light"]) .restartBtn:hover {
+:global([data-theme="light"]) .shutdownBtn:hover:not(:disabled) {
     background: #fee2e2;
     color: #b91c1c;
 }

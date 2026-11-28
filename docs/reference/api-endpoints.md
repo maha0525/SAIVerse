@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 407（tag グループ: 26）
+**エンドポイント数**: 418（tag グループ: 27）
 
 ## addon
 
@@ -76,7 +76,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/admin/backfill-item-descriptions` | Batch-generate descriptions for picture items with placeholder text. |
 | GET | `/api/admin/env` | Get environment variables from .env file. |
 | POST | `/api/admin/env` | Update environment variables in .env file and runtime os.environ. |
-| POST | `/api/admin/restart` | Restart the server process. |
+| POST | `/api/admin/restart` | Cleanly stop the backend via the detached lifecycle worker, then start it again. |
+| POST | `/api/admin/shutdown` | Cleanly stop Backend, Frontend, and SearXNG via the detached lifecycle worker. |
 
 ## auth
 
@@ -84,6 +85,21 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/auth/login` |  |
 | POST | `/api/auth/login` |  |
+
+## backups
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/backups/personas` | List personas with their live ``memory.db`` size and backup counts. |
+| GET | `/api/backups/personas/{persona_id}` | List ``memory.db`` simple backups for one persona. |
+| POST | `/api/backups/personas/{persona_id}` | Create an immediate simple backup of one persona's ``memory.db`` (live-safe). |
+| POST | `/api/backups/personas/{persona_id}/restore` | Restore one persona's ``memory.db`` via the detached offline worker. |
+| DELETE | `/api/backups/personas/{persona_id}/{filename}` | Delete one simple backup file for a persona. |
+| GET | `/api/backups/snapshots` | Return all world snapshots (CAS v3 + legacy ZIP v2) and disk stats. |
+| POST | `/api/backups/snapshots` | Create a manual whole-world snapshot via the detached offline worker. |
+| POST | `/api/backups/snapshots/gc` | Reclaim unreferenced CAS objects and stale temporary files (fail-closed). |
+| DELETE | `/api/backups/snapshots/{name}` | Delete one world snapshot and automatically reclaim unreferenced CAS objects. |
+| POST | `/api/backups/snapshots/{name}/restore` | Restore the whole world from ``name`` via the detached offline worker. |
 
 ## chat
 

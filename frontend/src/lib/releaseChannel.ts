@@ -25,12 +25,35 @@ export interface VersionInfo {
     can_return_to_stable?: boolean | null;
 }
 
-/** 更新 (またはチャンネルの切り替え) が始まり、バックエンドが再起動に入ったことの知らせ。
- *  detail.version は行き先の版 (分からなければ空文字)。 */
+/** 更新 (またはチャンネルの切り替え・再起動・オフラインのバックアップ/復元) が始まり、
+ *  バックエンドが再起動に入ったことの知らせ。
+ *  detail.version は行き先の版 (分からなければ空文字)。
+ *  detail.label があるときは再起動待ちバナーにその作業名を表示する。
+ *  detail.completedLabel があるときは再起動後の完了トーストにその文言を表示する。 */
 export const UPDATE_STARTED_EVENT = 'saiverse-update-started';
 
-export function announceUpdateStarted(version: string): void {
-    window.dispatchEvent(new CustomEvent(UPDATE_STARTED_EVENT, { detail: { version } }));
+export function announceUpdateStarted(
+    version: string,
+    label?: string,
+    completedLabel?: string,
+): void {
+    window.dispatchEvent(
+        new CustomEvent(UPDATE_STARTED_EVENT, {
+            detail: {
+                version,
+                label: label || '',
+                completedLabel: completedLabel || '',
+            },
+        })
+    );
+}
+
+/** 全サーバー停止 (Backend / Frontend / SearXNG) が始まったことの知らせ。
+ *  再起動はしないので、トップ画面は再接続待ちではなく停止中バナーを表示する。 */
+export const SHUTDOWN_STARTED_EVENT = 'saiverse-shutdown-started';
+
+export function announceServerShuttingDown(): void {
+    window.dispatchEvent(new CustomEvent(SHUTDOWN_STARTED_EVENT));
 }
 
 /**
