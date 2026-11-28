@@ -1,10 +1,16 @@
 from dataclasses import dataclass, field
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from api.deps import get_manager
+from api.routes.system import (
+    _claim_updater_launch,
+    _launch_detached_updater,
+    _refuse_without_updater_psutil,
+    _release_updater_launch,
+    _resolve_updater,
+)
 import os
-import sys
 import re
 from pathlib import Path
 import logging
@@ -282,31 +288,60 @@ def update_env_vars(req: EnvUpdateRequest):
         LOGGER.error(f"Failed to update .env: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class ShutdownRequest(BaseModel):
+    confirm: bool = False
+
+
+def _launch_lifecycle_op(operation: str) -> None:
+    project_path, updater_script, venv_python = _resolve_updater()
+    _refuse_without_updater_psutil(venv_python)
+    _claim_updater_launch()
+    try:
+        _launch_detached_updater(
+            project_path,
+            updater_script,
+            venv_python,
+            extra_config={"operation": operation},
+        )
+    except Exception:
+        _release_updater_launch()
+        raise
+
+
 @router.post("/restart")
-def restart_server(background_tasks: BackgroundTasks):
-    """Restart the server process."""
-    def _restart():
-        import time
-        time.sleep(1)  # Give time for response to be sent
+def restart_server():
+    """Cleanly stop the backend via the detached lifecycle worker, then start it again."""
+    from scripts.update_engine import OPERATION_RESTART_BACKEND
 
-        # os.execv() replaces the process immediately without running
-        # any Python cleanup (atexit, finally, shutdown hooks).
-        # We must explicitly run shutdown() to save building histories,
-        # stop background threads, persist session metadata, etc.
-        try:
-            from saiverse.app_state import manager
-            if manager is not None:
-                LOGGER.info("Running manager shutdown before restart...")
-                manager.shutdown()
-        except Exception as e:
-            LOGGER.error("Failed to run shutdown before restart: %s", e, exc_info=True)
+    LOGGER.warning("Clean backend restart requested via API")
+    _launch_lifecycle_op(OPERATION_RESTART_BACKEND)
+    return {
+        "success": True,
+        "status": "restarting",
+        "operation": OPERATION_RESTART_BACKEND,
+        "message": "Server restarting...",
+    }
 
-        LOGGER.warning("Restarting server via API request...")
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
 
-    background_tasks.add_task(_restart)
-    return {"success": True, "message": "Server restarting..."}
+@router.post("/shutdown")
+def shutdown_all_servers(req: ShutdownRequest):
+    """Cleanly stop Backend, Frontend, and SearXNG via the detached lifecycle worker."""
+    from scripts.update_engine import OPERATION_SHUTDOWN_ALL
+
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit confirmation is required to stop all servers.",
+        )
+
+    LOGGER.warning("Full SAIVerse shutdown requested via API")
+    _launch_lifecycle_op(OPERATION_SHUTDOWN_ALL)
+    return {
+        "success": True,
+        "status": "shutting_down",
+        "operation": OPERATION_SHUTDOWN_ALL,
+        "message": "Stopping all servers...",
+    }
 
 
 class BackfillRequest(BaseModel):

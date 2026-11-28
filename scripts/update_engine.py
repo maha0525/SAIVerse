@@ -75,11 +75,19 @@ OPERATION_UPDATE = "update"
 OPERATION_SNAPSHOT_SAVE = "snapshot_save"
 OPERATION_SNAPSHOT_RESTORE = "snapshot_restore"
 OPERATION_PERSONA_MEMORY_RESTORE = "persona_memory_restore"
+OPERATION_RESTART_BACKEND = "restart_backend"
+OPERATION_SHUTDOWN_ALL = "shutdown_all"
 OFFLINE_BACKUP_OPERATIONS = frozenset(
     {
         OPERATION_SNAPSHOT_SAVE,
         OPERATION_SNAPSHOT_RESTORE,
         OPERATION_PERSONA_MEMORY_RESTORE,
+    }
+)
+LIFECYCLE_OPERATIONS = frozenset(
+    {
+        OPERATION_RESTART_BACKEND,
+        OPERATION_SHUTDOWN_ALL,
     }
 )
 
@@ -1344,6 +1352,72 @@ def wait_for_owned_process_exit(
         process.wait(timeout=10)
     except Exception as exc:
         raise UpdateError(f"Verified main process PID {pid} could not be stopped: {exc}") from exc
+
+
+def _stop_verified_recorded_processes(
+    records: Any,
+    label: str,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Terminate still-running recorded processes whose PID + create_time match.
+
+    Used after the backend has exited to reap lingering backend child processes
+    (such as ``database.api_server`` behind a Windows venv stub) and close the
+    dedicated ``start.bat`` backend ``cmd /k`` window without ever signalling an
+    unverified or recycled PID.
+    """
+    if not isinstance(records, list) or not records:
+        return
+    try:
+        psutil = _import_psutil()
+    except Exception:
+        LOGGER.debug("Skipping %s cleanup because psutil is unavailable", label)
+        return
+
+    targets: list[Any] = []
+    seen_pids: set[int] = set()
+    for entry in records:
+        if not isinstance(entry, dict):
+            continue
+        raw_pid = entry.get("pid")
+        created_at = entry.get("process_created_at")
+        if not isinstance(raw_pid, int) or raw_pid <= 0 or raw_pid in seen_pids:
+            continue
+        if created_at is None:
+            continue
+        try:
+            expected_ts = float(created_at)
+        except (TypeError, ValueError):
+            continue
+        if not _identity_matches(raw_pid, expected_ts):
+            continue
+        try:
+            proc = psutil.Process(raw_pid)
+            if proc.is_running():
+                seen_pids.add(raw_pid)
+                targets.append(proc)
+        except (psutil.Error, OSError):
+            continue
+
+    if not targets:
+        return
+    LOGGER.info("Stopping remaining %s: %s", label, _describe_processes(targets))
+    survivors = _terminate_processes(targets, psutil, timeout)
+    if survivors:
+        LOGGER.warning("Some %s survived termination: %s", label, _describe_processes(survivors))
+
+
+def _cleanup_after_backend_exit(config: dict[str, Any]) -> None:
+    """Reap verified lingering child processes and backend launcher windows."""
+    _stop_verified_recorded_processes(
+        config.get("child_processes"),
+        "backend child process(es)",
+    )
+    _stop_verified_recorded_processes(
+        config.get("backend_windows"),
+        "backend launcher window(s)",
+    )
 
 
 def _ensure_portable_git_on_path(project_dir: Path) -> None:
@@ -3876,6 +3950,7 @@ def _run_detached_update(
         int(config["main_pid"]),
         config.get("main_process_created_at"),
     )
+    _cleanup_after_backend_exit(config)
     progress = _UpdateProgress()
     stopped_frontend_mode: str | None = None
     searxng_was_running = False
@@ -3955,6 +4030,7 @@ def _run_detached_backup_operation(
         int(config["main_pid"]),
         config.get("main_process_created_at"),
     )
+    _cleanup_after_backend_exit(config)
     _remove_file(
         backup_operation_failure_path(project_dir),
         purpose="before starting an offline backup operation",
@@ -4042,6 +4118,60 @@ def _run_detached_backup_operation(
         if isinstance(op_error, UpdateError):
             raise op_error
         raise UpdateError(str(op_error)) from op_error
+
+
+def _run_detached_lifecycle_operation(
+    config: dict[str, Any],
+    project_dir: Path,
+) -> None:
+    """Run a clean backend restart or full-stack shutdown requested from Settings.
+
+    - ``restart_backend``: wait for the current backend to finish shutting down
+      and exit, clean up verified launcher/child remnants, then start a fresh
+      backend process and wait for its health check.
+    - ``shutdown_all``: wait for the current backend to finish shutting down
+      and exit, clean up verified launcher/child remnants, then stop this
+      checkout's Frontend and SearXNG servers too without restarting anything.
+    """
+    operation = str(config.get("operation") or "")
+    if operation not in LIFECYCLE_OPERATIONS:
+        raise UpdateError(f"Unknown lifecycle operation: {operation!r}")
+
+    wait_for_owned_process_exit(
+        int(config["main_pid"]),
+        config.get("main_process_created_at"),
+    )
+    _cleanup_after_backend_exit(config)
+
+    if operation == OPERATION_RESTART_BACKEND:
+        process = restart_application(config)
+        payload = wait_for_healthy_restart(process, config)
+        LOGGER.info(
+            "Clean backend restart complete: City=%s version=%s PID=%s",
+            payload.get("city_name"),
+            payload.get("version"),
+            process.pid,
+        )
+        return
+
+    # OPERATION_SHUTDOWN_ALL: attempt to stop both Frontend and SearXNG even if
+    # one of them fails, so a failure in one does not leave the other running.
+    errors: list[str] = []
+    for label, stopper in (
+        ("frontend", stop_frontend_servers),
+        ("SearXNG", stop_searxng_servers),
+    ):
+        try:
+            stopper(project_dir)
+        except Exception as exc:
+            LOGGER.exception("Failed to stop %s during shutdown_all", label)
+            errors.append(f"{label}: {exc}")
+    if errors:
+        raise UpdateError(
+            "Backend stopped, but some companion servers could not be stopped: "
+            + "; ".join(errors)
+        )
+    LOGGER.info("Full SAIVerse shutdown complete (Backend, Frontend, SearXNG)")
 
 
 def _config_operation(config: dict[str, Any] | None) -> str:
@@ -4241,6 +4371,9 @@ def main(argv: list[str] | None = None) -> int:
             assert config is not None
             python = str(config.get("venv_python", sys.executable))
             _run_detached_backup_operation(config, project_dir, python)
+        elif operation in LIFECYCLE_OPERATIONS:
+            assert config is not None
+            _run_detached_lifecycle_operation(config, project_dir)
         else:
             switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
             run_update(config, project_dir, switch_channel=switch_channel)

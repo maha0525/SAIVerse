@@ -599,6 +599,7 @@ def main():
 
     signal.signal(signal.SIGTERM, handle_sigterm)
     atexit.register(shutdown_everything)
+    app_state.set_shutdown_handler(shutdown_everything)
 
     # --- FastAPI Server Setup ---
     from contextlib import asynccontextmanager
